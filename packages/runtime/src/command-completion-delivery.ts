@@ -220,18 +220,26 @@ export function appendToPlainTextToolOutput(output: unknown, text: string): unkn
 }
 
 /**
- * The tool's own output for audit views: without whichever of `appended` it
- * ends with (that text is then removed from the set), otherwise unchanged.
+ * The tool's own output for audit views: without every text of `appended` it
+ * ends with, however many were appended in turn (each is then removed from
+ * the set), otherwise unchanged.
  */
 export function withoutAppendedCommandCompletions(output: unknown, appended: Set<string>): unknown {
-  for (const text of appended) {
-    const own = withoutAppendedText(output, text);
-    if (own !== output) {
-      appended.delete(text);
-      return own;
+  let current = output;
+  let stripped = true;
+  while (stripped) {
+    stripped = false;
+    for (const text of appended) {
+      const own = withoutAppendedText(current, text);
+      if (own !== current) {
+        appended.delete(text);
+        current = own;
+        stripped = true;
+        break;
+      }
     }
   }
-  return output;
+  return current;
 }
 
 /** The tool's own output without exactly `appended`, for audit views; otherwise unchanged. */

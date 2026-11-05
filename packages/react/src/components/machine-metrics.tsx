@@ -123,6 +123,10 @@ function StatTriple({
  * present. Renders the M2 `machine_metrics_latest` sample. When `metrics` is
  * null the panel shows a quiet "no samples yet" placeholder (offline / just
  * enrolled). GPU rows only render when `gpuUtilPct` is non-null.
+ *
+ * The compact card keeps to memory, disk and CPU, which anyone can read. Load
+ * average and run queue are an operator's numbers: only the full density shows
+ * them, and the machine detail charts load over time.
  */
 export function MachineMetrics({ metrics, density = "compact", className }: MachineMetricsProps) {
   const t = useOpenGeniText();
@@ -185,12 +189,14 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
       </div>
 
       {/* Activity — load average as labeled mini-stats (no fake bar) + run queue. */}
-      <StatTriple
-        load1={metrics.load1}
-        load5={metrics.load5}
-        load15={metrics.load15}
-        runQueue={metrics.runQueue}
-      />
+      {density === "full" ? (
+        <StatTriple
+          load1={metrics.load1}
+          load5={metrics.load5}
+          load15={metrics.load15}
+          runQueue={metrics.runQueue}
+        />
+      ) : null}
     </div>
   );
 }

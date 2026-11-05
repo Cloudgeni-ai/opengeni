@@ -1115,13 +1115,16 @@ export function recordSessionRecoveryBacklogGauges(
   }
 }
 
+/** How often the control worker re-reads the durable recovery aggregate. */
+export const SESSION_RECOVERY_MONITOR_INTERVAL_MS = 60_000;
+
 export function startSessionRecoveryMonitor(input: {
   observability: Observability;
   read: () => Promise<SessionRecoveryBacklog>;
   intervalMs?: number;
   now?: () => number;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 60_000;
+  const intervalMs = input.intervalMs ?? SESSION_RECOVERY_MONITOR_INTERVAL_MS;
   const now = input.now ?? Date.now;
   const startedAt = now();
   let lastSuccessAt: number | null = null;
@@ -1873,6 +1876,88 @@ export function recordExpiredDrainingSandboxLeaseGauges(
       value,
     });
   }
+}
+
+/** Consecutive settled drain snapshot failures one lease epoch has reached. */
+export const SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS = [1, 2, 3, 5, 8, 13, 21];
+
+function safeSandboxBackend(backend: string): string {
+  return SandboxBackend.safeParse(backend).success ? backend : "unknown";
+}
+
+/** Drain metrics are diagnostics: a sink that lacks a method or throws must
+ * never change a drain's outcome. */
+function bestEffortDrainMetric(record: () => void): void {
+  try {
+    record();
+  } catch {
+    // Ignored: the drain's own result never depends on a metric.
+  }
+}
+
+/** One settled drain snapshot failure, observed with the lease epoch's new
+ * consecutive failure count so alerts can tell one flaky attempt from a box
+ * that keeps failing without a per-lease label. */
+export function recordSandboxDrainCaptureFailure(
+  observability: Observability,
+  input: { backend: string; consecutiveFailures: number },
+): void {
+  const backend = safeSandboxBackend(input.backend);
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_failures_total",
+      help: "Settled workspace snapshot failures while draining an idle sandbox.",
+      labels: { backend },
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_drain_capture_consecutive_failures",
+      help: "Consecutive settled drain snapshot failures of one sandbox lease epoch, observed at each failure.",
+      buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
+      labels: { backend },
+      value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
+}
+
+const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
+  1e6, 1e7, 1e8, 5e8, 1e9, 2e9, 5e9, 1e10, 2e10, 5e10,
+];
+const SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS = [1e3, 1e4, 5e4, 1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6];
+
+/** Size of /workspace when a drain snapshot settled: from the archive itself
+ * when it carries a tree fingerprint, otherwise from a bounded probe taken
+ * only after a failed snapshot. */
+export function recordSandboxWorkspaceSnapshotSize(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "captured" | "failed";
+    fileCount: number;
+    totalFileBytes: number;
+  },
+): void {
+  if (!Number.isFinite(input.fileCount) || !Number.isFinite(input.totalFileBytes)) return;
+  const labels = { backend: safeSandboxBackend(input.backend), outcome: input.outcome };
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_bytes",
+      help: "Total regular-file bytes under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS,
+      labels,
+      value: Math.max(0, input.totalFileBytes),
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_files",
+      help: "Regular files under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS,
+      labels,
+      value: Math.max(0, input.fileCount),
+    }),
+  );
 }
 
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
@@ -3275,7 +3360,11 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *     A reported cached-token zero records a real 0%; absent/null telemetry remains
  *     unknown and must not fabricate a low-cache signal.
  *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
- *     availability observation per authoritative call (`reported` or `missing`).
+ *     availability observation per authoritative call: `reported`, `missing` (the
+ *     call reported token usage but left out the cached-token field) or
+ *     `no_usage` (the call reported no token usage at all, for example a
+ *     terminal response without a usage object, which the SDK turns into zeros).
+ *     A call without any usage says nothing about the provider's cache fields.
  * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
  * with no prompt tokens has no ratio (skipped).
  */
@@ -3286,16 +3375,25 @@ export function recordModelCacheTokens(
     cachedTokens: number | null | undefined;
     cacheWriteTokens?: number | null | undefined;
     promptTokens: number | null | undefined;
+    /**
+     * False when the call reported no token usage at all (no counts, nothing
+     * rejected). Counted as `no_usage`, never as a missing cache field.
+     */
+    usageReported?: boolean;
   },
 ): void {
   const cached = modelUsageTokenCountOrNull(input.cachedTokens);
   const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
   const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  const noUsage = cached === null && input.usageReported === false;
   incrementBoundedModelCacheCounter(observability, {
     name: "opengeni_model_cache_read_telemetry_total",
-    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    help: "Authoritative model calls with reported, missing or no-usage cache-read telemetry, by provider.",
     provider,
-    labels: { provider, status: cached === null ? "missing" : "reported" },
+    labels: {
+      provider,
+      status: noUsage ? "no_usage" : cached === null ? "missing" : "reported",
+    },
     amount: 1,
   });
   if (cached !== null && cached > 0) {

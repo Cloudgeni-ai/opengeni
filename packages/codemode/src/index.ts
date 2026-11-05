@@ -38,6 +38,7 @@ import {
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
+import { CodemodeConnectionError, describeCodemodeConnectionFailure } from "./connection-failure";
 
 import { siteHostWorkspacePath } from "@opengeni/contracts/site-session-http";
 import { materializeCodemodeImages } from "./images";
@@ -260,7 +261,9 @@ export class CodemodeClient {
       method: "GET",
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    const catalog = parseVerifiedAttemptToolCatalog(await response.json());
+    const catalog = parseVerifiedAttemptToolCatalog(
+      await responseJson(response, this.baseUrl, options.signal),
+    );
     this.catalogSnapshot = catalog;
     return catalog;
   }
@@ -371,7 +374,11 @@ export class CodemodeClient {
           } catch (recoveryError) {
             if (options.signal?.aborted) throw recoveryError;
             throw new CodemodeTransportError(
-              `Codemode operation ${operationId} could not be reconciled after its submission response failed`,
+              `Codemode operation ${operationId} could not be reconciled after its submission response failed${
+                recoveryError instanceof CodemodeConnectionError
+                  ? `. ${recoveryError.message} ${submittedCallHint(operationId)}`
+                  : ""
+              }`,
               null,
               {
                 code: "codemode_operation_recovery_unavailable",
@@ -390,7 +397,18 @@ export class CodemodeClient {
           operation = recovered;
         }
       } else {
-        operation = await this.read(operationId, options.signal);
+        try {
+          operation = await this.read(operationId, options.signal);
+        } catch (error) {
+          // The call is already submitted: say so, with its handle, so the
+          // reader checks it instead of calling again with a new operation.
+          if (!(error instanceof CodemodeConnectionError)) throw error;
+          throw new CodemodeConnectionError(
+            `${error.message} ${submittedCallHint(operationId)}`,
+            error.networkCode,
+            { cause: error.cause },
+          );
+        }
       }
       if (operation.state === "waiting_for_approval") {
         throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
@@ -481,7 +499,8 @@ export class CodemodeClient {
           durableApproval: true,
         }),
       });
-      return CodemodeCallSubmission.parse(await response.json()).operation;
+      return CodemodeCallSubmission.parse(await responseJson(response, this.baseUrl, signal))
+        .operation;
     });
   }
 
@@ -530,7 +549,7 @@ export class CodemodeClient {
         method: "GET",
         ...(signal ? { signal } : {}),
       });
-      return CodemodeOperation.parse(await response.json());
+      return CodemodeOperation.parse(await responseJson(response, this.baseUrl, signal));
     });
   }
 
@@ -561,14 +580,27 @@ export class CodemodeClient {
         ...(refused.details ? { details: refused.details } : {}),
       });
     }
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...Object.fromEntries(new Headers(init.headers).entries()),
-        authorization: `Bearer ${token}`,
-        "x-opengeni-codemode-capabilities": "durable-approval-v1",
-      },
-    });
+    const url = `${this.baseUrl}${path}`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        ...init,
+        headers: {
+          ...Object.fromEntries(new Headers(init.headers).entries()),
+          authorization: `Bearer ${token}`,
+          "x-opengeni-codemode-capabilities": "durable-approval-v1",
+        },
+      });
+    } catch (error) {
+      // A caller's abort keeps its own reason, whatever code it carries.
+      if (init.signal?.aborted) throw error;
+      // "fetch failed" hides why the box cannot reach Opengeni; name the
+      // reason (DNS, clock, refused connection) and keep the original as
+      // the cause. Unknown reasons keep the transport's own error.
+      const failure = describeCodemodeConnectionFailure(error, url);
+      if (!failure) throw error;
+      throw new CodemodeConnectionError(failure.message, failure.networkCode, { cause: error });
+    }
     if (!response.ok && throwOnError) {
       let message = `Codemode request failed with HTTP ${response.status}`;
       let errorOptions: {
@@ -973,6 +1005,28 @@ function parseCodemodeApiError(input: unknown): {
     : null;
 }
 
+/** Where to look before calling again once a call may already have run. */
+function submittedCallHint(operationId: string): string {
+  return `The call may have run; check it with \`ogtool read ${operationId}\` before calling again.`;
+}
+
+/** Read a JSON body; a connection lost mid-body names its cause like a failed request. */
+async function responseJson(
+  response: Response,
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (error) {
+    // A caller's abort keeps its own reason, whatever code it carries.
+    if (signal?.aborted) throw error;
+    const failure = describeCodemodeConnectionFailure(error, response.url || baseUrl);
+    if (!failure) throw error;
+    throw new CodemodeConnectionError(failure.message, failure.networkCode, { cause: error });
+  }
+}
+
 const CODEMODE_TRANSIENT_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 
 /** A server-declared transient failure whose outcome is known: nothing was applied. */
@@ -1024,6 +1078,7 @@ async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<vo
 }
 
 export * from "./environment";
+export * from "./connection-failure";
 export * from "./interaction";
 export * from "./images";
 export * from "./artifacts";

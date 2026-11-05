@@ -240,6 +240,21 @@ describe("session content blobs in PostgreSQL", () => {
     expect(stored!.snapshot.providerRequest?.body).toBeNull();
   });
 
+  test("a string that is itself JSON round-trips as the same text", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    // A body short enough to be one chunk is a whole JSON document; it must
+    // come back as the text that was sent, not as the object it spells.
+    const body = JSON.stringify({ model: "claude", system: [{ type: "text", text: "hi" }] });
+    expect(chunkTextByContent(body)).toEqual([body]);
+    const snapshot = { ...snapshotFixture(1, body), instructions: '{"looks":"like json"}' };
+    await persistModelContextSnapshot(client.db, { ...scope, snapshot });
+    const read = (await getLatestSessionModelContext(client.db, scope)).snapshot;
+    expect(read?.providerRequest?.body).toBe(body);
+    expect(read?.instructions).toBe('{"looks":"like json"}');
+    expect(read).toEqual(snapshot);
+  });
+
   test("legacy inline snapshots remain readable", async () => {
     if (!available) return;
     const scope = await fixture();

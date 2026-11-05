@@ -63,8 +63,8 @@ export const CODEX_REALTIME_CALL_TIMEOUT_MS = 15_000;
 export const CODEX_REALTIME_CONFIG_TIMEOUT_MS = 5_000;
 export const CODEX_REALTIME_CONFIG_ID = "3566525122";
 // Subscription voice calls are created on the WHAM base, beside the remote
-// config, as the official Codex desktop app does. The older /codex path
-// answers 404 for the current remotely configured model.
+// config, as the official Codex desktop app does. Either path answers 404
+// for an account whose plan has no voice.
 export const CODEX_REALTIME_CALLS_URL = `${CODEX_WHAM_BASE}/wham/realtime/calls`;
 // The official Codex desktop app's default on 2026-11-04. Used only when the
 // authenticated remote config is transiently unavailable or malformed; it is

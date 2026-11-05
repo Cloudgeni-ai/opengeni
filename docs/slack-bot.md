@@ -476,6 +476,7 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 - `slack_agent_update_settings.announcement_channel_id` is the channel new agents are introduced in by default (migration 1235).
 - `slack_agent_intro_posts` records, per agent and channel, that its intro was posted there, so the intro page marks those channels (home tenancy, migration 1235).
 - `slack_agent_suggestions` holds a chat's suggestion of another agent, one per answered turn: the agent, the interaction and turn, the Slack message it answered and its sender, channel and thread (home tenancy, migration 1235).
+- Slack agents are being merged with bot templates into [agents](agents.md): every Slack agent is mirrored into `agents`, `agent_revisions` and `agent_slack_installs` (migration 1243), and `sessions.agent_id` links its chats.
 - `slack_agent_user_states` holds the one-time "next time" hint, the one-time open-agent notice (`open_notice_interaction_id`) and first use per person and agent.
 - `slack_bot_user_links.updates_muted_at` is the per-person mute for update messages.
 - `slack_agent_proposals` holds agents proposed from Slack (see [Creating agents from Slack](#creating-agents-from-slack)): the proposed name, description, avatar, instructions and target workspace, the card's channel, thread and message, and the status (`pending`, `creating`, `created`, `cancelled`) with who decided. Home tenancy, like `slack_agents`.

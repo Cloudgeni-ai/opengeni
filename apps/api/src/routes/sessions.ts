@@ -2018,6 +2018,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               settings,
               { accountId: grant.accountId, workspaceId, sessionId },
               deps.codexFetch,
+              {
+                onConnectionRefused: (refusal) =>
+                  deps.observability?.warn(
+                    "Realtime WebRTC connection refused; trying the next connected subscription",
+                    codexRealtimeFailureLogAttributes(refusal),
+                  ),
+              },
             );
       try {
         const answer = await broker({

@@ -5552,6 +5552,8 @@ export const englishMessages = {
   "timeline.projection.details": "Details",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
+  "timeline.projection.restoredFromOlderSave":
+    "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":

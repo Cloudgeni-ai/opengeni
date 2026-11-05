@@ -26406,6 +26406,10 @@
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
         "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
+        "$.firstPartyMcpPermissions": "array?",
+        "$.firstPartyMcpPermissions[]": "ref(Permission)",
+        "$.firstPartyMcpTools": "array?",
+        "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -37232,12 +37236,14 @@
       "OfficeAddinManifestOptions": "type",
       "OfficeContextItem": "type",
       "OfficeHost": "type",
+      "OfficeRunFile": "type",
       "officeTheme": "value",
       "OfficeWorkbookInfo": "type",
       "OfficeWorkbookTicket": "type",
       "openOfficeDialog": "value",
       "rangePart": "value",
       "readSelection": "value",
+      "readWorkbookFile": "value",
       "runOfficeCode": "value",
       "RunResult": "type",
       "SAMPLE_COLUMNS": "value",
@@ -37250,9 +37256,15 @@
       "watchSelection": "value",
       "websocketUrl": "value",
       "workbookContextItem": "value",
+      "workbookCopyFilename": "value",
+      "WorkbookFiles": "type",
       "WorkbookLink": "value",
       "WorkbookLinkOptions": "type",
-      "WorkbookLinkState": "type"
+      "WorkbookLinkState": "type",
+      "WorkbookRunFile": "type",
+      "WorkbookRunRequest": "type",
+      "WorkbookRunResult": "type",
+      "XLSX_CONTENT_TYPE": "value"
     },
     "@opengeni/sdk/organization-integration-policy": {
       "getOrganizationIntegrationCatalog": "value",
@@ -43894,6 +43906,7 @@
       "toResponse"
     ],
     "WorkbookLink": [
+      "execute",
       "refresh",
       "start",
       "stop"
@@ -57295,6 +57308,9 @@
       ]
     },
     "@opengeni/sdk/office:WorkbookLink": {
+      "execute": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkbookRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkbookRunResult\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "refresh": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],

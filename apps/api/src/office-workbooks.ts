@@ -19,6 +19,7 @@
 //   workbooks in a workspace by publishing one query and collecting every
 //   instance's answer for a short window.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { RetainedArtifactReference } from "@opengeni/contracts";
 import type { EventBus, OpStreamConnection } from "@opengeni/events";
 import type {
   ApiWebSocketConnection,
@@ -62,8 +63,30 @@ export type OfficeRunError = {
   statement: string | null;
 };
 
+/** A chat file handed to the run's code (`files[i]`); the add-in downloads it as the person. */
+export type OfficeRunFile = { name: string; artifact: RetainedArtifactReference };
+
+/** What a run does besides the code. */
+export type OfficeRunExtras = {
+  files?: OfficeRunFile[];
+  /**
+   * After the code ran, the add-in uploads a copy of the workbook under this
+   * name, as the person, visible to the chat's audience (`scope`).
+   */
+  saveCopy?: { filename: string; scope: "personal" | "workspace" } | null;
+};
+
+/** The add-in's copy of the workbook: an uploaded file of the person's, or why it failed. */
+export type OfficeWorkbookCopy = { fileId: string; filename: string } | { error: string };
+
 export type OfficeRunOutcome =
-  | { kind: "ok"; value: unknown; logs: string[]; durationMs: number }
+  | {
+      kind: "ok";
+      value: unknown;
+      logs: string[];
+      durationMs: number;
+      copy?: OfficeWorkbookCopy;
+    }
   | { kind: "error"; error: OfficeRunError; logs: string[]; durationMs: number }
   /** No add-in holds this workbook any more. */
   | { kind: "disconnected" }
@@ -147,7 +170,12 @@ const presenceSubject = (owner: OfficeWorkbookOwner) =>
 // Relay: this instance's sockets plus cross-instance routing.
 // ---------------------------------------------------------------------------
 
-type RunRequest = { owner: OfficeWorkbookOwner; code: string; timeoutMs: number };
+type RunRequest = {
+  owner: OfficeWorkbookOwner;
+  code: string;
+  timeoutMs: number;
+  extras?: OfficeRunExtras;
+};
 
 export class OfficeWorkbookRelay {
   private readonly local = new Map<string, OfficeWorkbookConnection>();
@@ -197,14 +225,15 @@ export class OfficeWorkbookRelay {
     workbookId: string,
     code: string,
     timeoutMs: number,
+    extras: OfficeRunExtras = {},
   ): Promise<OfficeRunOutcome> {
     const local = this.local.get(workbookId);
     if (local) {
       return local.owner && sameOwner(local.owner, owner)
-        ? await local.run(code, timeoutMs)
+        ? await local.run(code, timeoutMs, extras)
         : { kind: "disconnected" };
     }
-    const request: RunRequest = { owner, code, timeoutMs };
+    const request: RunRequest = { owner, code, timeoutMs, extras };
     try {
       const reply = await this.bus.request(
         runSubject(workbookId),
@@ -239,6 +268,7 @@ export class OfficeWorkbookRelay {
             ? await connection.run(
                 String(request.code),
                 clampTimeout(Number(request.timeoutMs) || OFFICE_RUN_DEFAULT_TIMEOUT_MS),
+                request.extras ?? {},
               )
             : { kind: "disconnected" };
         return TEXT.encode(JSON.stringify(outcome));
@@ -338,7 +368,8 @@ export function officeWorkbookRelay(bus: EventBus, ticketSecret: string): Office
 // ---------------------------------------------------------------------------
 // The socket. JSON text frames:
 //   add-in -> API: hello {ticket, workbook}, workbook {workbook}, result {...}, ping
-//   API -> add-in: ready {connectionId}, run {id, code, timeoutMs}, pong
+//   API -> add-in: ready {connectionId}, run {id, code, timeoutMs, files?, saveCopy?}, pong
+// A result for a run with saveCopy carries copy {fileId, filename} or {error}.
 // ---------------------------------------------------------------------------
 
 type PendingRun = {
@@ -422,7 +453,7 @@ export class OfficeWorkbookConnection implements ApiWebSocketConnection {
     }
   }
 
-  run(code: string, timeoutMs: number): Promise<OfficeRunOutcome> {
+  run(code: string, timeoutMs: number, extras: OfficeRunExtras = {}): Promise<OfficeRunOutcome> {
     if (this.closed || !this.socket) return Promise.resolve({ kind: "disconnected" });
     const id = randomBytes(8).toString("hex");
     return new Promise<OfficeRunOutcome>((resolve) => {
@@ -434,7 +465,10 @@ export class OfficeWorkbookConnection implements ApiWebSocketConnection {
         });
       }, timeoutMs);
       this.pending.set(id, { resolve, timer });
-      if (!this.send({ type: "run", id, code, timeoutMs })) {
+      const frame: Record<string, unknown> = { type: "run", id, code, timeoutMs };
+      if (extras.files?.length) frame["files"] = extras.files;
+      if (extras.saveCopy) frame["saveCopy"] = extras.saveCopy;
+      if (!this.send(frame)) {
         clearTimeout(timer);
         this.pending.delete(id);
         resolve({ kind: "disconnected" });
@@ -497,7 +531,10 @@ function runOutcome(frame: Record<string, unknown>): OfficeRunOutcome {
     ? frame["logs"].filter((each): each is string => typeof each === "string").slice(0, 200)
     : [];
   const durationMs = Number.isFinite(frame["durationMs"]) ? Number(frame["durationMs"]) : 0;
-  if (frame["ok"] === true) return { kind: "ok", value: frame["value"], logs, durationMs };
+  if (frame["ok"] === true) {
+    const copy = workbookCopy(frame["copy"]);
+    return { kind: "ok", value: frame["value"], logs, durationMs, ...(copy ? { copy } : {}) };
+  }
   const error =
     typeof frame["error"] === "object" && frame["error"] !== null
       ? (frame["error"] as Record<string, unknown>)
@@ -514,6 +551,15 @@ function runOutcome(frame: Record<string, unknown>): OfficeRunOutcome {
     logs,
     durationMs,
   };
+}
+
+function workbookCopy(value: unknown): OfficeWorkbookCopy | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const fileId = text(record["fileId"], 64);
+  const filename = text(record["filename"], 255);
+  if (fileId && filename) return { fileId, filename };
+  return { error: text(record["error"], 1000) ?? "The add-in couldn't save a copy." };
 }
 
 // ---------------------------------------------------------------------------

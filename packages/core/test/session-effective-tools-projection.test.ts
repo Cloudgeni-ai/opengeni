@@ -893,7 +893,8 @@ describe("server effectiveTools environment projection", () => {
     for (const capabilities of ["none", "all"] as const) {
       const detached = projected(session(capabilities, { sandboxBackend: "none" }));
       const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
-      expect(detachedNames).toContain("opengeni__wait_for_input");
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detachedNames.includes("opengeni__wait_for_input")).toBe(capabilities === "all");
       expect(detachedNames).not.toContain("opengeni__command_read");
       expect(detachedNames).not.toContain("opengeni__command_wait");
 

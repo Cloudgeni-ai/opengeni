@@ -641,9 +641,10 @@ describe("effective tools projection", () => {
       const attached = resolveAgentToolFamilies(config, { sandboxAttached: true });
       expect(detached.firstPartyTools(selection)).not.toContain("command_read");
       expect(detached.firstPartyTools(selection)).not.toContain("command_wait");
-      expect(detached.firstPartyTools(selection)).toContain("wait_for_input");
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detached.firstPartyTools(selection).includes("wait_for_input")).toBe(config !== none);
       expect(detached.allowsFirstPartyTool("command_wait")).toBe(false);
-      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(true);
+      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(config !== none);
       expect(attached.firstPartyTools(selection)).toContain("command_read");
       expect(attached.firstPartyTools(selection)).toContain("command_wait");
       expect(attached.allowsFirstPartyTool("command_read")).toBe(true);
@@ -654,9 +655,9 @@ describe("effective tools projection", () => {
       "command_read",
       "command_wait",
     ]);
-    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual([
-      "wait_for_input",
-    ]);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual(
+      [],
+    );
     const projection = projectAgentEffectiveTools({
       config: none,
       firstPartyMcpTools: ["wait_for_input", "command_read", "command_wait"],
@@ -664,7 +665,7 @@ describe("effective tools projection", () => {
       productServerIds: new Set(),
       environment: { sandboxAttached: false },
     });
-    expect(projection.tools.map((tool) => tool.name)).toEqual(["opengeni__wait_for_input"]);
+    expect(projection.tools.map((tool) => tool.name)).toEqual([]);
     const withSandbox = projectAgentEffectiveTools({
       config: none,
       firstPartyMcpTools: ["wait_for_input", "command_read"],

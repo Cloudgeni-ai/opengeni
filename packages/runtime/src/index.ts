@@ -15,6 +15,11 @@ import {
   installCommandCompletionDelivery,
   type CommandCompletionDelivery,
 } from "./command-completion-delivery";
+import {
+  installSandboxSetupNoticeDelivery,
+  queueSandboxSetupNotice,
+  takeSandboxSetupNotices,
+} from "./sandbox-setup-notices";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -2744,6 +2749,11 @@ export type BuildAgentOptions = {
    * settings.experimentCutPolling is on.
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
+  /**
+   * Receives each sandbox setup notice appended to a tool result
+   * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
+   */
+  onSandboxSetupNoticeDelivered?: (appended: string) => void;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3849,6 +3859,11 @@ export function buildOpenGeniAgent(
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
+    installSandboxSetupNoticeDelivery(agent, {
+      ...(options.onSandboxSetupNoticeDelivered
+        ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+        : {}),
+    });
     return agent;
   }
 
@@ -4001,6 +4016,11 @@ export function buildOpenGeniAgent(
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
+  installSandboxSetupNoticeDelivery(agent, {
+    ...(options.onSandboxSetupNoticeDelivered
+      ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+      : {}),
+  });
   return agent;
 }
 
@@ -11017,6 +11037,7 @@ async function runAgentStreamInternal(
         ? { codemodeClientDownload: ownedCodemodeClientDownload }
         : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+      onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
@@ -11124,6 +11145,7 @@ async function runAgentStreamInternal(
                 "sandbox_session_manifest_inventory",
                 (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
               );
+              deliverHeldSandboxSetupNotices(agent, prepared);
               return runScopedRunner(settings, agent, inputWaitYield).run(
                 agent,
                 prepared.input,
@@ -11206,6 +11228,7 @@ async function runAgentStreamInternal(
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
+          onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
         },
       )
     : undefined;
@@ -11297,6 +11320,7 @@ async function runAgentStreamInternal(
               "sandbox_agent_manifest_inventory",
               (agent as { defaultManifest?: Manifest }).defaultManifest,
             );
+            deliverHeldSandboxSetupNotices(agent, prepared);
             return runScopedRunner(settings, agent, inputWaitYield).run(
               agent,
               prepared.input,
@@ -11314,24 +11338,50 @@ function appendSandboxFileDownloadFailureNote(
   input: PreparedAgentInput,
   failures: SandboxFileDownloadFailure[],
 ): void {
-  const note = sandboxFileDownloadFailureNote(failures);
-  if (!note) {
-    return;
-  }
-  appendPreparedInputNote(input, note);
+  appendPreparedInputNote(input, sandboxFileDownloadFailureNote(failures));
 }
 
-/** Append a platform note to this turn's model input, after the person's message. */
-function appendPreparedInputNote(input: PreparedAgentInput, note: string): void {
+/**
+ * Append a platform note to this turn's model input, after the person's
+ * message. False when that input cannot take one.
+ */
+function appendPreparedInputNote(input: PreparedAgentInput, note: string): boolean {
+  if (!note) {
+    return true;
+  }
   if (typeof input.input === "string") {
     input.input = [input.input, "", note].join("\n");
-    return;
+    return true;
   }
   if (Array.isArray(input.input)) {
     input.input = [
       ...input.input,
       { type: "message", role: "user", content: note } as AgentInputItem,
     ];
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Route a setup notice: into the turn's input while the model has not started,
+ * otherwise held for the next tool result.
+ */
+function sandboxSetupNoticeSink(
+  agent: Agent<any, any>,
+  preparedInput: PreparedAgentInput | undefined,
+): (notice: string) => void {
+  return (notice) => {
+    if (preparedInput && appendPreparedInputNote(preparedInput, notice)) return;
+    queueSandboxSetupNotice(agent, notice);
+  };
+}
+
+/** Notices held by setup that finished before this run starts join its input. */
+function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: PreparedAgentInput) {
+  const held = takeSandboxSetupNotices(agent);
+  if (held && !appendPreparedInputNote(prepared, held)) {
+    queueSandboxSetupNotice(agent, held);
   }
 }
 
@@ -11893,6 +11943,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    onSetupNotice: sandboxSetupNoticeSink(agent, opts.preparedInput),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -12753,6 +12804,12 @@ export type SandboxLifecycleHookContext = {
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
   commandRunner?: SandboxLifecycleCommandRunner;
+  /**
+   * Model-facing text a hook needs the agent to read, such as where a
+   * repository folder was moved aside. Delivered with the turn's input when
+   * setup runs before the model, otherwise with the next tool result.
+   */
+  onSetupNotice?: (notice: string) => void;
 };
 
 /**
@@ -14644,6 +14701,107 @@ export async function refreshGitCredentialBindingTokenFiles(
 const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
 
 /**
+ * The clone script's report of a folder it moved aside instead of deleting:
+ * this prefix, the run's token in brackets, a colon, then the target, the new
+ * path and a reason code, tab-separated.
+ */
+const RECOVERED_REPOSITORY_PREFIX = "Notice: moved repository folder aside";
+const RECOVERED_REPOSITORY_NAME = /^\.opengeni-recovered-\d{8}T\d{6}Z(?:-\d+)?$/u;
+const RECOVERED_REPOSITORY_REASONS: Record<string, string> = {
+  unreadable: "it was not a readable Git work tree",
+  "remote-commits": "the remote now has commits",
+};
+
+/** A fresh token for one clone run's move-aside reports. */
+export function repositoryRecoveryNoticeToken(): string {
+  return randomUUID().replaceAll("-", "");
+}
+
+/** One repository folder the clone hook moved aside before cloning fresh. */
+export type RecoveredRepositoryFolder = {
+  /** Absolute path of the repository folder, as the sandbox sees it. */
+  target: string;
+  /** Absolute path the earlier copy now has. */
+  movedTo: string;
+  /** Workspace-relative mount path of the repository. */
+  path: string;
+  /** Workspace-relative path of the earlier copy. */
+  movedToPath: string;
+  reason: string;
+};
+
+/**
+ * The folders the clone script reported moving aside. Only whole lines carrying
+ * this run's token count, for this hook's own repository targets moved to
+ * their own recovery sibling, with a known reason code: no other output (a
+ * remote's fetch messages) can add an entry or choose its text.
+ */
+export function recoveredRepositoryFolders(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  token: string,
+): RecoveredRepositoryFolder[] {
+  if (!/^[0-9a-f]{32}$/u.test(token)) return [];
+  const linePrefix = `${RECOVERED_REPOSITORY_PREFIX} [${token}]: `;
+  // The longest matching mount path, so `app` never claims `repos/acme/app`.
+  const repositories = resources
+    .map((resource) => ({ resource, mountPath: resourceMountPath(resource) }))
+    .sort((left, right) => right.mountPath.length - left.mountPath.length);
+  const recovered: RecoveredRepositoryFolder[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    if (!line.startsWith(linePrefix)) continue;
+    const fields = line.slice(linePrefix.length).split("\t");
+    if (fields.length !== 3) continue;
+    const [target = "", movedTo = "", code = ""] = fields;
+    const repository = repositories.find(({ mountPath }) => target.endsWith(`/${mountPath}`));
+    if (!repository) continue;
+    const recoveredName = movedTo.slice(target.length);
+    if (!movedTo.startsWith(target) || !RECOVERED_REPOSITORY_NAME.test(recoveredName)) continue;
+    const pinned = repository.resource.expectedCommitSha;
+    const reason =
+      code === "pin"
+        ? pinned
+          ? `its checked-out commit is not the pinned commit ${pinned}`
+          : undefined
+        : RECOVERED_REPOSITORY_REASONS[code];
+    if (!reason) continue;
+    if (recovered.some((entry) => entry.movedTo === movedTo)) continue;
+    recovered.push({
+      target,
+      movedTo,
+      path: repository.mountPath,
+      movedToPath: `${repository.mountPath}${recoveredName}`,
+      reason,
+    });
+  }
+  return recovered;
+}
+
+/** The clone event's workspace-relative record of folders moved aside. */
+function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
+  return folders.length > 0
+    ? {
+        recoveredRepositories: folders.map((folder) => ({
+          path: folder.path,
+          movedTo: folder.movedToPath,
+        })),
+      }
+    : {};
+}
+
+/** Model text for repository folders the clone hook moved aside. */
+export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
+  if (folders.length === 0) return "";
+  return [
+    "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+    ...folders.map(
+      (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
+    ),
+    "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+  ].join("\n");
+}
+
+/**
  * Wall-clock bound for one automatically attached (optional) repository clone,
  * and the share of the repository-clone lifecycle command all optional clones
  * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
@@ -14698,33 +14856,135 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
+  // not a broken repository: Git only refuses to read it. Trust exactly that
+  // path (and its resolved form) in the global Git config and keep the work
+  // tree as it is. The message is matched in the C locale, in both wordings.
+  "  repository_trust_owner() {",
+  '    trust_output="$(export LC_ALL=C; repository_git -C "$target" rev-parse --is-inside-work-tree 2>&1 >/dev/null)" && return 0',
+  '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
+  '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
+  '    for trust_path in "$target" "$trust_resolved"; do',
+  '      if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$trust_path"; then continue; fi',
+  "      trust_attempt=0",
+  // Parallel clones share one global config file; retry its lock briefly.
+  '      until command git config --global --add safe.directory "$trust_path" 2>/dev/null; do',
+  "        trust_attempt=$((trust_attempt + 1))",
+  '        if [ "$trust_attempt" -ge 5 ]; then break; fi',
+  "        sleep 1",
+  "      done",
+  "    done",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
+  "    else",
+  '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
+  "    fi",
+  "  }",
+  // Whether a readable work tree still serves the pinned commit. The clone
+  // records the commit it materialized, so the agent's own commits, branches
+  // and rebases keep the folder while the pin is unchanged, and a changed pin
+  // (in either direction) does not. Folders cloned before the record existed
+  // count when HEAD is the pin or built on it, and get the record.
+  "  repository_pin_kept() {",
+  '    if [ -z "$expected_commit" ]; then return 0; fi',
+  '    pin_recorded="$(repository_git -C "$target" config --get opengeni.materializedCommit 2>/dev/null || true)"',
+  '    if [ -n "$pin_recorded" ]; then',
+  '      if [ "$pin_recorded" = "$expected_commit" ]; then return 0; fi',
+  "      return 1",
+  "    fi",
+  '    pin_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '    if [ -z "$pin_head" ]; then return 1; fi',
+  '    if [ "$pin_head" != "$expected_commit" ] && ! repository_git -C "$target" merge-base --is-ancestor "$expected_commit" "$pin_head" >/dev/null 2>&1; then return 1; fi',
+  '    repository_git -C "$target" config opengeni.materializedCommit "$expected_commit" >/dev/null 2>&1 || true',
+  "    return 0",
+  "  }",
+  // Never delete a folder that may hold work. Rename it to a sibling (a mount
+  // point cannot be renamed, so its entries are moved, which copies them across
+  // the mount), report where it went, and let the caller clone fresh into the
+  // empty target. The argument is the reason code the hook turns into text.
+  "  repository_move_aside() {",
+  '    move_base="${target}.opengeni-recovered-$(date -u +%Y%m%dT%H%M%SZ)"',
+  '    move_path="$move_base"',
+  "    move_index=1",
+  '    while [ -e "$move_path" ] || [ -L "$move_path" ]; do',
+  "      move_index=$((move_index + 1))",
+  '      move_path="${move_base}-${move_index}"',
+  "    done",
+  '    if ! mv "$target" "$move_path" 2>/dev/null; then',
+  // A concurrent setup already moved it.
+  '      if [ ! -e "$target" ] && [ ! -L "$target" ]; then return 0; fi',
+  "      move_failed=1",
+  '      if [ -d "$target" ] && [ ! -L "$target" ] && mkdir "$move_path" 2>/dev/null; then',
+  '        find "$target" -mindepth 1 -maxdepth 1 -exec mv -- {} "$move_path/" \\; 2>/dev/null || true',
+  '        if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "          move_failed=0",
+  "        else",
+  // Keep the folder whole: put back what was moved.
+  '          find "$move_path" -mindepth 1 -maxdepth 1 -exec mv -- {} "$target/" \\; 2>/dev/null || true',
+  '          rmdir "$move_path" 2>/dev/null || true',
+  "        fi",
+  "      fi",
+  '      if [ "$move_failed" -ne 0 ]; then',
+  '        if [ -e "$move_path" ]; then',
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted; some entries are in $move_path." >&2',
+  "        else",
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted." >&2',
+  "        fi",
+  "        exit 1",
+  "      fi",
+  "    fi",
+  // One write per line, tagged with this run's token so no other output
+  // (a remote's fetch messages) can pass for it.
+  `    printf '%s [%s]: %s\\t%s\\t%s\\n' ${shellQuote(RECOVERED_REPOSITORY_PREFIX)} "\${OPENGENI_REPOSITORY_NOTICE_TOKEN:-}" "$target" "$move_path" "$1" >&2`,
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
   // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
   // this check forever. A full-repo target must actually BE a work tree to be
-  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-  // the mount path before the repo exists). Subpath extracts are not git repos —
-  // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  // skipped; anything else is moved aside, never deleted, and rebuilt. Subpath
+  // extracts are not git repos: for those the plain non-empty check stands (no
+  // stronger signal is available, pinned or not).
+  '    if [ -n "$subpath" ]; then',
+  '      echo "Repository resource already present at $target"',
+  "      return 0",
+  "    fi",
+  "    repository_trust_owner",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      present_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '      if [ -n "$expected_commit" ]; then',
+  "        if repository_pin_kept; then",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "        repository_move_aside pin",
   // An empty remote materializes as an unborn branch (below). If the remote now
   // has that branch and the mount still holds nothing but `.git` (no agent work,
   // committed or not), clone it properly instead of keeping the stub. Commits
   // on any other branch keep the stub: re-fetching the requested ref would fail.
-  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
-  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  '      elif [ -z "$present_head" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '        echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  // The stub Opengeni created holds no work while it has no refs and nothing
+  // staged, as Git itself confirms; anything more is moved aside like any
+  // other work.
+  '        if stub_refs="$(repository_git -C "$target" for-each-ref 2>/dev/null)" && [ -z "$stub_refs" ] && stub_files="$(repository_git -C "$target" ls-files 2>/dev/null)" && [ -z "$stub_files" ]; then',
+  '          rm -rf "$target/.git"',
   "        else",
-  '          echo "Repository resource already present at $target"',
-  "          return 0",
+  "          repository_move_aside remote-commits",
   "        fi",
   "      else",
-  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
   "      fi",
+  // Only Opengeni's own temporary clones, nested by a lost install race.
+  '    elif [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name "${target##*/}.tmp.*" -print -quit 2>/dev/null)" ]; then',
+  '      echo "Re-materializing partial repository resource at $target" >&2',
+  '      find "$target" -mindepth 1 -maxdepth 1 -name "${target##*/}.tmp.*" -exec rm -rf {} +',
   "    else",
   '      echo "Re-materializing partial repository resource at $target" >&2',
+  "      repository_move_aside unreadable",
   "    fi",
-  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
@@ -14797,6 +15057,9 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    rm -rf "$tmp"',
   "    exit 1",
   "  fi",
+  '  if [ -n "$expected_commit" ] && [ -z "$subpath" ]; then',
+  '    repository_git -C "$tmp" config opengeni.materializedCommit "$expected_commit"',
+  "  fi",
   '  if [ -n "$subpath" ]; then',
   '    if [ ! -e "$tmp/$subpath" ]; then',
   '      echo "Repository subpath not found: $subpath" >&2',
@@ -14816,14 +15079,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // Two concurrent turn holders can race this install: without the existence
   // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
   // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-  // accept it; a non-empty non-repo survivor here is a mount point the manifest
-  // re-filled — install into it by content copy instead of rename.
+  // accept it. Anything else that appeared there is moved aside, never
+  // overwritten; an empty survivor is a mount point, so install into it by
+  // content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-  '        rm -rf "$tmp"',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  "        if repository_pin_kept; then",
+  '          rm -rf "$tmp"',
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "        repository_move_aside pin",
+  '      elif [ -f "$target" ] || [ -L "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "        repository_move_aside unreadable",
   "      fi",
+  "    fi",
+  '    if [ -e "$target" ]; then',
   '      cp -a "$tmp/." "$target/"',
   '      rm -rf "$tmp"',
   "    else",
@@ -15669,6 +15940,7 @@ export async function runRepositoryCloneHook(
   let stagedCloneScript: string | null = null;
   // A successful program has moved every staged broker seed into its token file.
   let brokerSeedsConsumed = false;
+  let recoveredFolders: RecoveredRepositoryFolder[] = [];
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -15684,9 +15956,12 @@ export async function runRepositoryCloneHook(
       gitCredentialBindings,
       context.runAs,
     );
+    // Per run, inline with the seeds, so the staged program stays reusable.
+    const noticeToken = repositoryRecoveryNoticeToken();
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+      `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -15784,6 +16059,20 @@ export async function runRepositoryCloneHook(
         }
       }
     }
+    // A folder moved aside stays moved even when a later clone fails, so the
+    // model hears where it is either way.
+    recoveredFolders = recoveredRepositoryFolders(
+      sandboxCommandOutput(result),
+      resources,
+      noticeToken,
+    );
+    if (recoveredFolders.length > 0) {
+      console.warn("[sandbox] repository folders were moved aside before a fresh clone", {
+        movedCount: recoveredFolders.length,
+        repositoryCount: resources.length,
+      });
+      context.onSetupNotice?.(recoveredRepositoryFoldersNote(recoveredFolders));
+    }
     assertSandboxCommandSucceeded(result, "Repository clone hook");
     brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
@@ -15801,6 +16090,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
   } catch (error) {
@@ -15809,6 +16099,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         error: errorMessage(error),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
     throw error;

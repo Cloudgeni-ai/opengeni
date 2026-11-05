@@ -66,7 +66,7 @@ import {
   isConnectedMachineAbsolutePath,
   resolveConnectedMachinePath,
 } from "../selfhosted/workspace-path";
-import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
+import { renderSelfhostedFault, selfhostedFaultContext } from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
   isExecSessionLostBanner,
@@ -2503,7 +2503,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    */
   private renderSelfhostedFaultOrThrow(error: unknown, backendKind?: string): string {
     if (error instanceof SelfhostedControlError && !error.fenced) {
-      return renderSelfhostedFault(error, { connectedMachine: backendKind === "selfhosted" });
+      return renderSelfhostedFault(error, selfhostedFaultContext(backendKind));
     }
     throw error;
   }

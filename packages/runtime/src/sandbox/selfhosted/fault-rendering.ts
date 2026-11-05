@@ -16,6 +16,7 @@
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
 import {
+  COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
   drainingPresentation,
   SelfhostedControlError,
   START_CONFIRMED_DETAIL_KEY,
@@ -86,7 +87,21 @@ export interface SelfhostedFaultContext {
   /** The command ran on a Connected Machine (the person's own computer), not
    *  a compute box. Only then can the copy point at the Opengeni app there. */
   connectedMachine?: boolean;
+  /** The command ran on the chat's own cloud computer (a compute box), which
+   *  speaks the same agent protocol but restarts on its own. Its faults are
+   *  named for it instead of for a Connected Machine. */
+  cloudComputer?: boolean;
 }
+
+/** The context of a routed backend kind: `selfhosted` is a Connected Machine,
+ *  `compute` is the chat's cloud computer; anything else (or unknown) is
+ *  neither and keeps the generic copy. */
+export function selfhostedFaultContext(kind: string | undefined): SelfhostedFaultContext {
+  return { connectedMachine: kind === "selfhosted", cloudComputer: kind === "compute" };
+}
+
+const CONNECTED_MACHINE_PREFIX = "[connected machine] ";
+const CLOUD_COMPUTER_PREFIX = "[cloud computer] ";
 
 /** What the person is told when their machine went offline mid-command. The
  *  code cannot know what stopped the agent (a command, sleep, a lost
@@ -106,7 +121,7 @@ export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
 function assemble(error: SelfhostedControlError, f: FaultFields): string {
   const code = errorCodeToJSON(error.code);
   return [
-    `[connected machine] ${f.headline}`,
+    `${CONNECTED_MACHINE_PREFIX}${f.headline}`,
     `${FAULT_FIELD_WHAT_HAPPENED} ${f.happened} (control code ${code}).`,
     `${FAULT_FIELD_WHICH_LAYER} ${f.layer}`,
     `${FAULT_FIELD_WHAT_PRESERVED} ${f.preserved}`,
@@ -136,6 +151,55 @@ function assemble(error: SelfhostedControlError, f: FaultFields): string {
 export function renderSelfhostedFault(
   error: SelfhostedControlError,
   context: SelfhostedFaultContext = {},
+): string {
+  if (!context.cloudComputer) return renderConnectedMachineFault(error, context);
+  if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
+    // The box did not come back while waking, before anything was sent.
+    const wakeSeconds = error.detail[COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY];
+    if (wakeSeconds) {
+      return onCloudComputer(
+        assemble(error, {
+          headline: "the cloud computer this chat runs on did not come back",
+          happened: `the cloud computer this chat runs on did not answer within ${wakeSeconds}s of being woken`,
+          layer: "the cloud computer itself, not your command",
+          preserved: "nothing ran; the command was never sent.",
+          tryNext:
+            "retry once; if it still does not answer, stop and tell the person the cloud computer is not starting.",
+        }),
+      );
+    }
+    // A cloud computer that stops answering is most likely restarting (its
+    // agent or the whole box) and comes back on its own within seconds; it is
+    // not "offline" the way a person's own computer can be.
+    return onCloudComputer(
+      assemble(error, {
+        headline:
+          "the cloud computer this chat runs on stopped answering; it is most likely restarting",
+        happened:
+          "the cloud computer this chat runs on did not answer, most likely because it is restarting",
+        layer: "the cloud computer itself, not your command",
+        preserved: error.neverSent
+          ? "nothing ran; the command never reached the cloud computer."
+          : "unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
+        tryNext: error.neverSent
+          ? "retry the command; the cloud computer is usually back within seconds."
+          : "once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+      }),
+    );
+  }
+  return onCloudComputer(renderConnectedMachineFault(error, {}));
+}
+
+/** The same four fields, named for the chat's cloud computer. */
+function onCloudComputer(rendered: string): string {
+  return rendered.startsWith(CONNECTED_MACHINE_PREFIX)
+    ? `${CLOUD_COMPUTER_PREFIX}${rendered.slice(CONNECTED_MACHINE_PREFIX.length)}`
+    : rendered;
+}
+
+function renderConnectedMachineFault(
+  error: SelfhostedControlError,
+  context: SelfhostedFaultContext,
 ): string {
   const detail = error.detail;
 

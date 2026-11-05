@@ -36,7 +36,7 @@ import { CASES, DEFAULT_SCOPE } from "./catalogue";
 import { gradeCase, ownIntegration, type Verification } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts } from "./receipts";
-import type { EvalCase, Grade, RunRecord } from "./types";
+import type { ApprovalAttempt, EvalCase, Grade, RunRecord } from "./types";
 import { verify } from "./verify";
 
 type Cell = { model: string; effort: string };
@@ -203,6 +203,34 @@ export function latestRecords(records: readonly RunRecord[]): RunRecord[] {
   return [...latest.values()];
 }
 
+/**
+ * A workspace key for owner-only rows (`OPENGENI_EVAL_WORKSPACE_API_KEY`):
+ * its approve on a personal connection's write must be refused. Personal
+ * connections only run for chats their owner started, so the main key must
+ * be the owner's own (a personal key, or signing in as them).
+ */
+let workspaceApprovalKey: OpengeniApi | undefined;
+
+async function initApprovalKeys(baseUrl: string): Promise<void> {
+  if (process.env.OPENGENI_EVAL_WORKSPACE_API_KEY)
+    workspaceApprovalKey = await new OpengeniApi(baseUrl, {
+      apiKey: process.env.OPENGENI_EVAL_WORKSPACE_API_KEY,
+    }).init();
+}
+
+/** The structured reason code of an API error body (`error.details.code`), if any. */
+export function errorCode(body: string): { code?: string } {
+  try {
+    const parsed = JSON.parse(body) as { error?: { details?: { code?: unknown } } };
+    const code = parsed.error?.details?.code;
+    return typeof code === "string" ? { code } : {};
+  } catch {
+    return {};
+  }
+}
+
+const httpStatus = (error: unknown): number => (error instanceof HttpFailure ? error.status : -1);
+
 function runMarker(): string {
   return Math.random().toString(36).slice(2, 8);
 }
@@ -213,8 +241,16 @@ async function driveSession(
   workspaceId: string,
   sessionId: string,
   testCase: EvalCase,
-): Promise<{ events: SessionEvent[]; timedOut: boolean; complete: boolean }> {
+): Promise<{
+  events: SessionEvent[];
+  timedOut: boolean;
+  complete: boolean;
+  attempts: ApprovalAttempt[];
+}> {
   const decision = testCase.decision ?? "approve";
+  const attempts: ApprovalAttempt[] = [];
+  const workspaceTried = new Set<string>();
+  let mainKeyRefused = false;
   let complete = true;
   const events: SessionEvent[] = [];
   const decided = new Set<string>();
@@ -236,16 +272,81 @@ async function driveSession(
       // Only the row's own integration gets the row's decision. Anything else
       // (another service, an unattributed tool) is rejected, so a run never
       // writes outside the configured test fixtures; the grader reports it.
-      const choice = ownIntegration(testCase, approval.integration) ? decision : "reject";
+      // On rows that name the approved tool, a different tool (for example the
+      // workspace bot instead of a personal account) is rejected too.
+      const ownTool =
+        ownIntegration(testCase, approval.integration) &&
+        (!testCase.approvedTool || testCase.approvedTool.test(approval.name));
+      const choice = ownTool ? decision : "reject";
+      const recorded = new Set(
+        attempts
+          .filter((attempt) => attempt.approvalId === approval.approvalId)
+          .map((attempt) => `${attempt.key}:${attempt.status}`),
+      );
+      const record = (key: ApprovalAttempt["key"], error?: unknown) => {
+        const status = error === undefined ? 200 : httpStatus(error);
+        // A failure that repeats on every poll is recorded once.
+        if (recorded.has(`${key}:${status}`)) return;
+        recorded.add(`${key}:${status}`);
+        attempts.push({
+          approvalId: approval.approvalId,
+          tool: approval.name,
+          key,
+          decision: choice,
+          status,
+          ...(error instanceof HttpFailure
+            ? { detail: error.body.slice(0, 300), ...errorCode(error.body) }
+            : {}),
+        });
+      };
+      // Owner-only rows: a workspace key tries first and must be refused.
+      if (
+        testCase.ownerOnlyApproval &&
+        choice === "approve" &&
+        !workspaceTried.has(approval.approvalId)
+      ) {
+        workspaceTried.add(approval.approvalId);
+        if (!workspaceApprovalKey)
+          attempts.push({
+            approvalId: approval.approvalId,
+            tool: approval.name,
+            key: "workspace",
+            decision: choice,
+            status: 0,
+          });
+        else {
+          try {
+            await workspaceApprovalKey.decideApproval(
+              workspaceId,
+              sessionId,
+              approval.approvalId,
+              choice,
+            );
+            record("workspace");
+            decided.add(approval.approvalId);
+            continue;
+          } catch (error) {
+            record("workspace", error);
+          }
+        }
+      }
       try {
         await api.decideApproval(workspaceId, sessionId, approval.approvalId, choice);
+        record("main");
         decided.add(approval.approvalId);
       } catch (error) {
-        // Already decided (409) counts as done; anything else retries next poll.
-        if (error instanceof HttpFailure && error.status === 409) decided.add(approval.approvalId);
+        record("main", error);
+        const status = httpStatus(error);
+        // Already decided (409) counts as done. A 403 won't change on retry:
+        // the main key may not decide this approval (for a personal
+        // connection's write, it isn't the owner's); the grader reports it.
+        if (status === 409 || status === 403) decided.add(approval.approvalId);
         else console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
+        if (status === 403) mainKeyRefused = true;
       }
     }
+    // Nobody else will answer that approval: stop now rather than at the deadline.
+    if (mainKeyRefused) break;
 
     const snapshot = await api.session(workspaceId, sessionId);
     // The model provider has no capacity (for example a subscription quota):
@@ -288,7 +389,7 @@ async function driveSession(
       !["running", "queued", "requires_action"].includes(snapshot.status);
     if (ended && resting && page.events.length === 0) {
       stableIdlePolls += 1;
-      if (stableIdlePolls >= 2) return { events, timedOut: false, complete };
+      if (stableIdlePolls >= 2) return { events, timedOut: false, complete, attempts };
     } else stableIdlePolls = 0;
   }
   // Stop the chat so it can't keep spending or write after the service check.
@@ -297,7 +398,7 @@ async function driveSession(
   } catch (error) {
     console.warn(`cancel ${sessionId} failed: ${String(error)}`);
   }
-  return { events, timedOut: true, complete };
+  return { events, timedOut: true, complete, attempts };
 }
 
 /** The harness stopped this chat at the run deadline (its cancel left a reason in the events). */
@@ -324,34 +425,50 @@ type GradedFields = Pick<
 >;
 
 /** Grades one finished chat from its events; shared by `run` and `regrade`. */
-function gradeEvents(
+export function gradeEvents(
   testCase: EvalCase,
   events: SessionEvent[],
   timedOut: boolean,
   verification: Verification | null,
   receiptsFile: string,
   complete = true,
+  attempts: readonly ApprovalAttempt[] = [],
 ): GradedFields {
   mkdirSync(join(receiptsFile, ".."), { recursive: true });
   const receipts = parseReceipts(events);
   writeFileSync(receiptsFile, JSON.stringify(receipts, null, 2));
   // A run still going at the deadline is the agent's verdict (looping or
   // stalled), not the harness's; an event history cut short is the harness's.
+  // The main key couldn't decide an approval (the harness stopped the chat):
+  // a setup problem, not the agent's verdict.
+  const refused = attempts.find((attempt) => attempt.key === "main" && attempt.status === 403);
   let grade: Grade = !complete
     ? {
         pass: false,
         category: "harness_error",
         reasons: ["session events were cut short or trimmed"],
       }
-    : timedOut && stalledOnCapacity(events)
+    : refused
       ? {
           pass: false,
           category: "harness_error",
-          reasons: ["no model capacity (provider quota or capacity); not a product verdict"],
+          reasons: [
+            `the main key may not decide approvals here (403${refused.detail ? `: ${refused.detail.slice(0, 120)}` : ""}); for a personal connection it must be the owner's key`,
+          ],
         }
-      : timedOut
-        ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
-        : gradeCase(testCase, receipts, verification);
+      : timedOut && stalledOnCapacity(events)
+        ? {
+            pass: false,
+            category: "harness_error",
+            reasons: ["no model capacity (provider quota or capacity); not a product verdict"],
+          }
+        : timedOut
+          ? {
+              pass: false,
+              category: "timeout",
+              reasons: ["agent still active at the run deadline"],
+            }
+          : gradeCase(testCase, receipts, verification, attempts);
   if (
     !timedOut &&
     receipts.tools.length === 0 &&
@@ -430,7 +547,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
     });
     base.sessionId = session.id;
     base.chatUrl = `${appUrl}/workspaces/${workspaceId}/sessions/${session.id}`;
-    const { events, timedOut, complete } = await driveSession(
+    const { events, timedOut, complete, attempts } = await driveSession(
       api,
       workspaceId,
       session.id,
@@ -444,6 +561,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
       verification,
       join(outDir, "receipts", `${marker}.json`),
       complete,
+      attempts,
     );
     const finished = Date.now();
     return {
@@ -453,6 +571,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
       verification,
       ...graded,
       error: null,
+      approvalAttempts: attempts,
     };
   } catch (error) {
     const finished = Date.now();
@@ -479,6 +598,7 @@ async function runAll(flags: Map<string, string>) {
   mkdirSync(outDir, { recursive: true });
   const resultsFile = join(outDir, "results.jsonl");
   const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
+  await initApprovalKeys(env("OPENGENI_EVAL_API_URL"));
   const skip = (flags.get("skip-integrations") ?? "").split(",").filter(Boolean);
 
   let jobs: Job[];
@@ -647,6 +767,7 @@ async function regradeAll(flags: Map<string, string>) {
         record.verification,
         join(outDir, "receipts", `${record.runId}.json`),
         complete,
+        record.approvalAttempts ?? [],
       );
       if (graded.grade.pass !== record.grade.pass) changed += 1;
       updated.push({ ...record, ...graded, error: graded.grade.pass ? null : record.error });
