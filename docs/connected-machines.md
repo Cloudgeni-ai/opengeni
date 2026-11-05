@@ -1036,13 +1036,15 @@ commands sends it `SIGTERM` or `SIGINT`. It tells a command from other senders
 by the sending process: a descendant of the agent, or a process in the process
 group, session or operation cgroup of one of its commands. A short-lived sender
 (`/bin/kill`, `sh -c 'kill …'`) has often exited before the agent can look it
-up; while a command runs, or within 5 seconds after one ended, such a sender
-counts as that command. Nothing is blocked: the command still receives every
+up; while a command runs (an open Opengeni terminal or a background command
+counts as running), or within 5 seconds after one ended, such a sender counts as
+that command. Nothing is blocked: the command still receives every
 signal, and a stop signal from anywhere else (the service manager, the desktop
 app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
 commands) stops the agent as before. Because of that rule, a `/bin/kill` or
 `pkill` from outside, sent while a command runs, may be ignored; the ways just
-listed always work. Everything started in an Opengeni terminal counts as a
+listed always work. A foreground agent's keeper also starts the agent again
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in an Opengeni terminal counts as a
 command, including a `kill` typed there by a person.
 
 Other signals still end the agent, and it is started again. A foreground

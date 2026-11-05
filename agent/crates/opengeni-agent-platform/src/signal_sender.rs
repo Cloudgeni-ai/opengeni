@@ -46,24 +46,40 @@ pub enum Sender {
 /// Places the sender of a signal `agent` received.
 #[must_use]
 pub fn place(sender: Option<i32>, agent: i32) -> Sender {
-    place_in(Path::new("/proc"), sender, agent)
+    place_in(Path::new("/proc"), sender, agent, |pid| {
+        // `ESRCH` only for a process that no longer exists; one `/proc` hides
+        // (`hidepid`) still answers, with `EPERM` at most.
+        matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
+    })
 }
 
-fn place_in(proc_root: &Path, sender: Option<i32>, agent: i32) -> Sender {
-    // Without a `/proc` that shows the agent, nothing can be placed: a sender
-    // missing there says nothing.
-    let proc_works = proc_root.join(agent.to_string()).exists();
+/// `gone` tells whether a process no longer exists at all.
+fn place_in(
+    proc_root: &Path,
+    sender: Option<i32>,
+    agent: i32,
+    gone: impl Fn(i32) -> bool,
+) -> Sender {
     match sender {
         Some(pid) if pid > 0 && is_command_of_in(proc_root, pid, agent) => Sender::Command,
-        Some(pid) if pid > 0 && proc_works && !proc_root.join(pid.to_string()).exists() => {
-            Sender::Gone(pid)
-        }
+        // PID 1 never exits; it is init or a container's first process.
+        Some(pid) if pid > 1 && exited(proc_root, pid, &gone) => Sender::Gone(pid),
         other => Sender::Outside(other),
     }
 }
 
+/// Whether `pid` exited: it is gone, or a zombie not reaped yet, whose parents
+/// and groups no longer place it.
+fn exited(proc_root: &Path, pid: i32, gone: &impl Fn(i32) -> bool) -> bool {
+    gone(pid) || stat(proc_root, pid).is_some_and(|stat| stat.zombie)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Stat {
+    zombie: bool,
     parent: i32,
     group: i32,
     session: i32,
@@ -74,8 +90,9 @@ fn stat(proc_root: &Path, pid: i32) -> Option<Stat> {
     // The command name may hold spaces and parentheses; the fields after it
     // start behind the last `)`.
     let mut fields = text.get(text.rfind(')')? + 1..)?.split_whitespace();
-    let _state = fields.next()?;
+    let zombie = fields.next()? == "Z";
     Some(Stat {
+        zombie,
         parent: fields.next()?.parse().ok()?,
         group: fields.next()?.parse().ok()?,
         session: fields.next()?.parse().ok()?,
@@ -264,6 +281,23 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// `kill -1` also ends the command's shell, so its orphaned `/bin/kill`
+    /// may still be an unreaped zombie whose parents and groups say nothing.
+    #[test]
+    fn an_exited_sender_not_yet_reaped_is_gone() {
+        let proc_root = fake_proc(&[
+            (AGENT, KEEPER, KEEPER, 40, "/user.slice/session-1.scope"),
+            (700, 1, 0, 0, "/user.slice/session-1.scope"),
+        ]);
+        let stat = proc_root.path().join("700").join("stat");
+        let text = std::fs::read_to_string(&stat).expect("stat");
+        std::fs::write(&stat, text.replace(") S ", ") Z ")).expect("zombie stat");
+        assert_eq!(
+            place_in(proc_root.path(), Some(700), AGENT, |_| false),
+            Sender::Gone(700)
+        );
+    }
+
     #[test]
     fn a_sender_that_is_gone_is_neither_a_command_nor_outside() {
         let proc_root = fake_proc(&[
@@ -271,17 +305,18 @@ mod tests {
             (AGENT, KEEPER, KEEPER, 40, "/user.slice/session-1.scope"),
             (200, AGENT, 200, 40, "/user.slice/session-1.scope"),
         ]);
-        let place = |sender| place_in(proc_root.path(), sender, AGENT);
+        // 777 no longer exists; 778 exists but `/proc` hides it (`hidepid`).
+        let place = |sender| place_in(proc_root.path(), sender, AGENT, |pid| pid == 777);
         assert_eq!(place(Some(200)), Sender::Command);
         assert_eq!(place(Some(KEEPER)), Sender::Outside(Some(KEEPER)));
         assert_eq!(place(Some(777)), Sender::Gone(777));
-        // The kernel, and a sender in an outer PID namespace.
+        assert_eq!(place(Some(778)), Sender::Outside(Some(778)));
+        // The kernel, a sender in an outer PID namespace, and init.
         assert_eq!(place(None), Sender::Outside(None));
         assert_eq!(place(Some(0)), Sender::Outside(Some(0)));
-        // A `/proc` that does not show the agent places nothing.
         assert_eq!(
-            place_in(proc_root.path(), Some(777), 4242),
-            Sender::Outside(Some(777))
+            place_in(proc_root.path(), Some(1), AGENT, |_| true),
+            Sender::Outside(Some(1))
         );
     }
 }

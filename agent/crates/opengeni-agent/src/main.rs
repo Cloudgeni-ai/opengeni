@@ -1949,11 +1949,15 @@ mod stop_signal_tests {
          i=$((i + 1)); done; \
          kill -TERM \"$AGENT\"";
 
-    /// `kill -1` as a command sends it. The command keeps its own shell
-    /// alive, and ends with a nested shell's `kill -1`, a sender often gone
-    /// before the agent can look it up.
-    const KILL_MINUS_ONE: &str = "trap '' TERM INT; kill -TERM -1; kill -INT -1; \
-         sh -c 'kill -TERM -1; kill -INT -1'";
+    /// `kill -1` as commands send it. The first keeps its own shell alive and
+    /// ends with a nested shell's `kill -1`, a sender often gone before the
+    /// agent can look it up. In the second, `/bin/kill -1` (where it exists)
+    /// also ends the command's shell, so the sender is often an orphaned
+    /// zombie by then.
+    const KILL_MINUS_ONE: [&str; 2] = [
+        "trap '' TERM INT; kill -TERM -1; kill -INT -1; sh -c 'kill -TERM -1; kill -INT -1'",
+        "if [ -x /bin/kill ]; then /bin/kill -TERM -- -1; else kill -TERM -1; fi; sleep 1",
+    ];
 
     fn agent_command(script: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("test binary"));
@@ -2054,26 +2058,28 @@ mod stop_signal_tests {
             eprintln!("skipping: this machine permits no private PID namespace");
             return;
         };
-        // The namespace's first process is immune to `kill -1`, so a shell
-        // takes that place and the agent runs as its child.
-        let inner = agent_command(KILL_MINUS_ONE);
-        let mut command = Command::new("unshare");
-        command
-            .args(namespace)
-            .arg("/bin/sh")
-            .arg("-c")
-            .arg("\"$0\" \"$@\" & wait $!")
-            .arg(inner.get_program())
-            .args(inner.get_args())
-            .env(EXIT_AFTER, "1")
-            .env(SCRIPT, KILL_MINUS_ONE)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let (mut agent, mut lines) = start(command);
-        let verdict = next_line(&mut lines);
-        let status = agent.wait().expect("namespace status");
-        assert_eq!(verdict, "survived", "namespace exit {status:?}");
-        assert!(status.success(), "namespace exit {status:?}");
+        for script in KILL_MINUS_ONE {
+            // The namespace's first process is immune to `kill -1`, so a shell
+            // takes that place and the agent runs as its child.
+            let inner = agent_command(script);
+            let mut command = Command::new("unshare");
+            command
+                .args(namespace)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg("\"$0\" \"$@\" & wait $!")
+                .arg(inner.get_program())
+                .args(inner.get_args())
+                .env(EXIT_AFTER, "1")
+                .env(SCRIPT, script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            let (mut agent, mut lines) = start(command);
+            let verdict = next_line(&mut lines);
+            let status = agent.wait().expect("namespace status");
+            assert_eq!(verdict, "survived", "{script}: namespace exit {status:?}");
+            assert!(status.success(), "{script}: namespace exit {status:?}");
+        }
     }
 }
