@@ -19,9 +19,11 @@ import {
   installSandboxSetupNoticeDelivery,
   queueSandboxSetupNotice,
   takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
 } from "./sandbox-setup-notices";
 export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
 import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
   softFailingSetupHooks,
   softSetupFailureNotice,
   type SoftSetupFailure,
@@ -11397,9 +11399,13 @@ function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: Prepar
   }
 }
 
-/** Drop held setup notices that describe a box this turn no longer uses. */
-export function discardHeldSandboxSetupNotices(agent: object): void {
-  takeSandboxSetupNotices(agent);
+/**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
 }
 
 /**

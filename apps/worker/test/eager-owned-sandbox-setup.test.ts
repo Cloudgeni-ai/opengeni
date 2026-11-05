@@ -186,6 +186,9 @@ describe("a prestarted setup on a full /workspace", () => {
     expect(held).toContain("No space left on the workspace machine's disk");
   });
 
+  const MOVED_ASIDE_NOTICE =
+    "Platform note: the repository folder repo was moved aside to repo.moved-1 before a fresh clone.";
+
   test("a rebound box reports only its own setup, never the earlier box's notice twice", async () => {
     const { agent, deps, rebind } = agentAndDeps({ leaseEpoch: 1, instanceId: "box-a" });
     const gate = deferred();
@@ -196,7 +199,12 @@ describe("a prestarted setup on a full /workspace", () => {
       async (current, options) => {
         runs += 1;
         await realSetup(current, options);
-        if (runs === 1) await gate.promise;
+        if (runs === 1) {
+          // Another setup notice about files that may still exist (a
+          // repository folder moved aside) is held next to it.
+          runtime.queueSandboxSetupNotice?.(current.agent, MOVED_ASIDE_NOTICE);
+          await gate.promise;
+        }
       },
     );
     rebind({ leaseEpoch: 2, instanceId: "box-b" });
@@ -208,9 +216,10 @@ describe("a prestarted setup on a full /workspace", () => {
     });
     expect(runs).toBe(2);
     expect(preparedInput.input.match(/Platform setup notice:/g)).toHaveLength(1);
-    // The earlier box's held notice is dropped, so the run adds nothing more.
+    // The earlier box's setup failure notice is dropped; the moved-aside
+    // notice still reaches the run's input when it starts.
     // Read through the namespace so this file still loads on code without it.
-    expect(runtime.takeSandboxSetupNotices(agent)).toBeNull();
+    expect(runtime.takeSandboxSetupNotices(agent)).toBe(MOVED_ASIDE_NOTICE);
   });
 
   test("run credential files the full disk refused join the same notice", async () => {

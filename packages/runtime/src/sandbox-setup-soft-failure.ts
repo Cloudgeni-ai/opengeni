@@ -302,6 +302,9 @@ function causeText(cause: SoftSetupFailureCause, hookId: string): { reason: stri
   }
 }
 
+/** How every soft setup failure notice starts. */
+export const SOFT_SETUP_FAILURE_NOTICE_PREFIX = "Platform setup notice:";
+
 /** The model-visible notice for this turn's soft setup failures, or "" when none. */
 export function softSetupFailureNotice(failures: readonly SoftSetupFailure[]): string {
   if (failures.length === 0) return "";
@@ -314,7 +317,7 @@ export function softSetupFailureNotice(failures: readonly SoftSetupFailure[]): s
     return `- ${hook.what}. ${reason}. ${fix}; then ${hook.after}.`;
   });
   return [
-    "Platform setup notice: part of this workspace machine's setup failed, and the turn continued without it.",
+    `${SOFT_SETUP_FAILURE_NOTICE_PREFIX} part of this workspace machine's setup failed, and the turn continued without it.`,
     ...lines,
   ].join("\n");
 }

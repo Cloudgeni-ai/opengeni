@@ -1,5 +1,5 @@
 import {
-  discardHeldSandboxSetupNotices,
+  discardHeldSoftSetupFailureNotices,
   runOwnedSandboxSetup,
   withRunCredentialsSession,
   type GitCredentialTokenWriterSession,
@@ -243,8 +243,9 @@ export function createEagerOwnedSandboxSetup(
         // own setup; the prestarted one only covered the earlier box.
         // Its held notices join this stream's input when the run starts.
         if (sandboxIdentity(deps.sandboxState) === startedFor) return;
-        // Its notices describe the earlier box; the new box's setup reports its own.
-        discardHeldSandboxSetupNotices(deps.agent);
+        // Its setup failure notices describe the earlier box; the new box's
+        // setup reports its own.
+        discardHeldSoftSetupFailureNotices(deps.agent);
       }
       await runSetup(deps, options);
     },
