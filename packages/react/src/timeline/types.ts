@@ -438,6 +438,11 @@ export type SessionStatusItem = {
    * is asked of the person, so it reads as stuck, not "waiting on you".
    */
   blocked?: true;
+  /**
+   * The `cancelled` status archiving a chat recorded when it stopped the
+   * chat's work: it reads as archived, never as "cancelled".
+   */
+  archived?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;

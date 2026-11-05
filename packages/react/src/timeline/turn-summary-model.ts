@@ -77,6 +77,24 @@ export type TurnSummaryOptions = Readonly<{
    */
   rolling?: boolean;
   facets?: TurnSummaryFacetConfiguration;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20px); it is decorative, so the row's words still say what
+   * is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
+}>;
+
+/**
+ * The state a live turn row passes to `renderLiveMark`: `working`, `waiting`
+ * (with `waitingOn: "you"` when the wait needs the reader, such as an
+ * approval or a question) or `paused`.
+ */
+export type TurnSummaryLiveMarkState = Readonly<{
+  kind: "working" | "waiting" | "paused";
+  waitingOn?: "you" | undefined;
 }>;
 
 /**
@@ -104,6 +122,16 @@ export type TurnSummaryStatus = Readonly<{
    */
   guidance?: ReactNode;
 }>;
+
+/** The live-mark state of a turn row's status; null once the row settles. */
+export function turnSummaryLiveMarkState(
+  status: Pick<TurnSummaryStatus, "kind" | "waitingOn"> | undefined,
+): TurnSummaryLiveMarkState | null {
+  if (!status || status.kind === "worked") return null;
+  return status.kind === "waiting" && status.waitingOn === "you"
+    ? { kind: "waiting", waitingOn: "you" }
+    : { kind: status.kind };
+}
 
 /** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
 /**

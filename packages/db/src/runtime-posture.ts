@@ -60,8 +60,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * register, claim, device count, busy check and ring (1107), the lock-free
  * read of a known external identity (1172), the list of every
  * organization vault wherever it works (1218), the organization's
- * names-only member list (1211) and the Slack agent update sweeper's
- * ids-only inventory of installations that send updates (1153). Each is
+ * names-only member list (1211), the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153) and the
+ * recording compaction sweep's inventory of meeting tracks not yet kept
+ * compact (1240). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -92,6 +94,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const;
 
 /**
@@ -104,8 +107,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withheld the connected-command re-arm the same way and 1101 granted
- * it. 0988 withholds the queued-turn
- * hold summary; until it is granted, the control worker does not publish it.
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
@@ -126,10 +128,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, the sweeper finds nothing and sends no update messages.
  * 1224 withholds the organization machine and rig list the same way as the
  * vault list.
+ * 1240 withholds the inventory of meeting tracks not yet kept compact; until
+ * it is granted, existing meetings keep their audio as it is and only new
+ * transcripts keep it compact.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "read_external_identity_v1(uuid, text, text)",
@@ -137,6 +141,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -230,6 +235,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
   "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
   "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
+  "list_uncompacted_recording_tracks_v1(integer, text)": [
+    "recordings",
+    "recording_tracks",
+    "recording_chunks",
+    "recording_transcript_versions",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -1950,6 +1961,10 @@ export const FORCE_RLS_TABLES = [
   "billing_auto_top_up_mutations",
   "billing_auto_top_up_operations",
   "billing_auto_top_up_settings",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notification_recipients",
+  "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
@@ -2526,6 +2541,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_trigger_revisions",
   "automation_triggers",
   "automation_webhook_endpoints",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notifications",
   "billing_customers",
   "bot_templates",
   "browser_session_associations",
@@ -2815,6 +2833,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_credit_notification_recipients",
   "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",

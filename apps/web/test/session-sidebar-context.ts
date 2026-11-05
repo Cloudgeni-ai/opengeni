@@ -570,9 +570,33 @@ if (previewParameters.get("scenario") === "paused") {
       pausedWorkDescendants: 2,
     }),
   } as Partial<Session>);
+  // Finished its own work and is not paused; only the workers it started are.
+  const owner = row(5007, "Stale pull request sweep", 3, {
+    pinned: true,
+    pinnedAt: timeBefore(60),
+    treeStats: tree({
+      directChildren: 3,
+      totalDescendants: 3,
+      pausedDescendants: 3,
+      pausedWorkDescendants: 3,
+    }),
+  } as Partial<Session>);
+  const pausedWorker = (number: number, title: string) =>
+    ({
+      ...row(number, title, 3, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "paused"),
+      } as Partial<Session>),
+      parentSessionId: owner.id,
+      rootSessionId: owner.id,
+    }) as Session;
   rows.splice(
     0,
     rows.length,
+    owner,
+    pausedWorker(5008, "Close stale issues"),
+    pausedWorker(5009, "Rebase open pull requests"),
+    pausedWorker(5010, "Triage flaky checks"),
     row(5001, "Ship the pause indicator", 0, { status: "running", activeTurnId: "turn-1" }),
     row(5002, "Migrate the staging database", 1, {
       activeTurnId: "turn-1",

@@ -14,7 +14,7 @@ import type {
 } from "@opengeni/core";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RECORDING_TIMELINE_FILTER } from "./recording-audio";
@@ -99,8 +99,10 @@ async function runSpeakers(
   audio: RecordingTranscriptionAudio,
   args: string[],
   signal: AbortSignal | undefined,
-  files: ReadonlyArray<{ flag: string; name: string; contents: string }> = [],
-): Promise<string> {
+  files: ReadonlyArray<{ flag: string; name: string; contents: string | Uint8Array }> = [],
+  /** A file the executable writes, read back once it succeeds. */
+  output?: { flag: string; name: string },
+): Promise<{ stdout: string; output: Uint8Array | null }> {
   const directory = await mkdtemp(join(config.tempRoot ?? tmpdir(), "opengeni-speakers-"));
   try {
     for (const file of files) {
@@ -108,6 +110,8 @@ async function runSpeakers(
       await writeFile(path, file.contents);
       args = [...args, `--${file.flag}`, path];
     }
+    const outputPath = output ? join(directory, output.name) : null;
+    if (output && outputPath) args = [...args, `--${output.flag}`, outputPath];
     // A file, not a pipe: MP4 audio keeps its index at the end.
     const input = join(directory, `audio.${audio.fileName.split(".").pop() || "bin"}`);
     await writeFile(input, audio.bytes);
@@ -172,7 +176,12 @@ async function runSpeakers(
           `ffmpeg could not decode the audio: ${decoderError.trim().slice(0, 400)}`,
         );
       }
-      if (code === 0) return stdout;
+      if (code === 0) {
+        return {
+          stdout,
+          output: outputPath ? new Uint8Array(await readFile(outputPath)) : null,
+        };
+      }
       let message = speakersError.trim() || decoderError.trim() || `exit ${code}`;
       try {
         message = (JSON.parse(speakersError.trim().split("\n").pop() ?? "") as { error: string })
@@ -268,10 +277,10 @@ export function createLocalAligner(config: RecordingSpeakersConfig): RecordingWo
       if (words.length === 0) {
         return { words: [], anchoredWords: 0, spreadWords: 0, untimedWords: 0 };
       }
-      const json = await runSpeakers(config, audio, ["align"], options.signal, [
+      const { stdout } = await runSpeakers(config, audio, ["align"], options.signal, [
         { flag: "words", name: "words.json", contents: JSON.stringify(words) },
       ]);
-      return parseAlignment(json);
+      return parseAlignment(stdout);
     },
   };
 }
@@ -282,7 +291,7 @@ export function createLocalDiarizer(config: RecordingSpeakersConfig): RecordingD
   return {
     id: "opengeni-cpu",
     async diarize(audio, options) {
-      const json = await runSpeakers(
+      const { stdout } = await runSpeakers(
         config,
         audio,
         [
@@ -299,12 +308,26 @@ export function createLocalDiarizer(config: RecordingSpeakersConfig): RecordingD
               : []),
         ],
         options.signal,
+        // Windows scanned while the meeting was recorded are not scanned again.
+        options.cache ? [{ flag: "cache-in", name: "windows.bin", contents: options.cache }] : [],
       );
       voiceModel ??= embeddingModelId(config.modelsDir).catch((error: unknown) => {
         voiceModel = null;
         throw error;
       });
-      return parseDiarization(json, await voiceModel);
+      return parseDiarization(stdout, await voiceModel);
+    },
+    async scan(audio, options) {
+      const { output } = await runSpeakers(
+        config,
+        audio,
+        ["diarize", "--scan-only", "true"],
+        options.signal,
+        options.cache ? [{ flag: "cache-in", name: "windows.bin", contents: options.cache }] : [],
+        { flag: "cache-out", name: "windows-out.bin" },
+      );
+      if (!output) throw new RecordingSpeakersError("speaker detection kept no windows");
+      return output;
     },
   };
 }

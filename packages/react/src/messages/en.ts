@@ -3386,6 +3386,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -4501,6 +4502,10 @@ export const englishMessages = {
   "sessionAgentsModel.needsYou": "Needs you",
   "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  /** The agents chip's detail: how many helper agents are paused. */
+  "sessionAgentsModel.pausedCount_other": "{count} paused",
+  /** The agents chip's detail: how many helper agents are running. */
+  "sessionAgentsModel.runningCount_other": "{count} running",
   "sessionAgentsModel.stuck": "Stuck",
   "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
@@ -4606,6 +4611,26 @@ export const englishMessages = {
     "Paused by the agent: it is waiting on a human decision before continuing.",
   "sessionChrome.pausedManuallyByAPerson":
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
+  // The goal pill's short pause reasons, shown after "Paused · ". Keep each to a word or two:
+  // the goal panel carries the full explanation.
+  /** The agent paused its own goal to wait for a person's decision. */
+  "sessionChrome.pausedReasonAgent": "agent",
+  /** The deployment's usage allowance ran out. */
+  "sessionChrome.pausedReasonAllowance": "allowance",
+  /** The monthly model spending limit was reached. */
+  "sessionChrome.pausedReasonBudget": "budget",
+  /** The goal reached its cap of automatic continuations; new input resumes it. */
+  "sessionChrome.pausedReasonCap": "cap",
+  /** The workspace ran out of credits. */
+  "sessionChrome.pausedReasonCredits": "credits",
+  /** An admission limit or the application's usage policy paused the goal. */
+  "sessionChrome.pausedReasonLimits": "limits",
+  /** A person (or an API call) paused the goal. */
+  "sessionChrome.pausedReasonManually": "manually",
+  /** The selected model is unavailable. */
+  "sessionChrome.pausedReasonModel": "model",
+  /** A model policy blocks the selected model. */
+  "sessionChrome.pausedReasonPolicy": "policy",
   "sessionChrome.pausedSuffix": "Paused · {suffix}",
   "sessionChrome.placingInQueue": "Placing in queue",
   "sessionChrome.previousWorkStopping": "Previous work stopping",
@@ -4839,6 +4864,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",
@@ -5550,11 +5576,17 @@ export const englishMessages = {
   "timeline.projection.approvalNeededTheTurnIs":
     "Approval needed — the turn is paused until someone decides.",
   "timeline.projection.details": "Details",
+  "timeline.projection.filesChangedAfterCouldNotBeSaved":
+    "Files changed after {time} couldn't be saved before this chat's workspace machine shut down.",
+  "timeline.projection.filesCouldNotBeSaved":
+    "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.savedWithoutRebuildableFolders":
+    "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":
     "Switched to another subscription account.",

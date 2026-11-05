@@ -1,3 +1,4 @@
+export * from "./billing-credit-notifications";
 import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
@@ -764,6 +765,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionNotificationPostedPayload,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -1257,6 +1259,13 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import {
+  CAPACITY_WAIT_NOTICE_KEY,
+  capacityWaitAttention,
+  capacityWaitNoticeWithdrawal,
+  capacityWaitNotificationPayload,
+  withoutCapacityWaitNotice,
+} from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
 import {
   resolveSessionCodeSearchEnabled,
@@ -1331,6 +1340,8 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
     isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
   });
 export * from "./session-model-settings";
+export * from "./capacity-wait-attention";
+export * from "./capacity-wait-release";
 export * from "./session-queue-commands";
 export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
@@ -26969,7 +26980,12 @@ export async function armSubscriptionCoreCapacityWait(
         provider === "codex"
           ? "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait"
           : "session_lifecycle_outbox.arm_subscription_core_capacity_wait",
-      eventTypes: [vocabulary.waitingEventType, "turn.failed", "session.status.changed"],
+      eventTypes: [
+        vocabulary.waitingEventType,
+        "turn.failed",
+        "session.status.changed",
+        "session.notification.posted",
+      ],
       maxAttempts: 3,
     },
     async (scopedDb) =>
@@ -27082,6 +27098,29 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
+        // A long wait is announced once, as it starts: a worker's parent gets
+        // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const attention = stopped
+          ? null
+          : capacityWaitAttention({
+              waitReason: input.waitReason,
+              earliestResetAt: input.earliestResetAt,
+              healthRetryAt: input.healthRetryAt ?? null,
+              now,
+            });
+        const personNotice =
+          attention && !session.parentSessionId
+            ? SessionNotificationPostedPayload.parse(
+                capacityWaitNotificationPayload({
+                  turnId: input.turnId,
+                  provider,
+                  resetsAt: attention.resetsAt,
+                }),
+              )
+            : null;
+        const waitingMetadata = personNotice
+          ? { ...recoveryMetadata, [CAPACITY_WAIT_NOTICE_KEY]: { key: personNotice.key } }
+          : recoveryMetadata;
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27247,6 +27286,23 @@ export async function armSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(personNotice
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: ++sequence,
+                        type: "session.notification.posted",
+                        payload: personNotice,
+                        turnId: input.turnId,
+                        turnGeneration: turn.executionGeneration,
+                        turnAttemptId: input.attemptId,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27258,7 +27314,7 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: recoveryMetadata,
+            metadata: waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27320,12 +27376,13 @@ export async function armSubscriptionCoreCapacityWait(
                 eq(schema.sessionGoals.status, "active"),
               ),
             );
-        } else {
+        } else if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter!.waiterId,
             provider,
             nextCheckAt,
+            resetsAt: attention.resetsAt,
           });
         }
         if (input.leaseFence) {
@@ -27651,6 +27708,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           } as const;
         }
 
+        const noticeWithdrawal = capacityWaitNoticeWithdrawal(blockedTurn.metadata);
         const events = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -27679,6 +27737,21 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(noticeWithdrawal
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: session.lastSequence + 3,
+                        ...noticeWithdrawal,
+                        turnId: blockedTurn.id,
+                        turnGeneration: blockedTurn.executionGeneration,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27701,7 +27774,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
             status: "recovering",
             activeAttemptId: null,
             metadata: {
-              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ...withoutCapacityWaitNotice(
+                metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ),
               [CODEX_CAPACITY_RECOVERY_KEY]: {
                 ...recovery,
                 resumeGeneration: blockedTurn.executionGeneration + 1,
@@ -27731,7 +27806,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           .set({
             status: "recovering",
             activeTurnId: blockedTurn.id,
-            lastSequence: session.lastSequence + 2,
+            lastSequence: session.lastSequence + events.length,
             updatedAt: now,
           })
           .where(
@@ -27834,6 +27909,19 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       turnId: input.blockedTurn.id,
       turnGeneration: input.blockedTurn.executionGeneration,
       turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const noticeWithdrawal = capacityWaitNoticeWithdrawal(input.blockedTurn.metadata);
+  if (noticeWithdrawal) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + eventValues.length + 1,
+      ...noticeWithdrawal,
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
       occurredAt: input.now,
     });
   }
@@ -48588,6 +48676,14 @@ type ProviderLossRecord = {
    * lifetime, or the compute control plane's own answer) the loss may at most
    * restore a checkpoint, never continue on an empty workspace. */
   deathProof?: ProviderDeathProof;
+  /** The drain stopped the box itself after its saves kept failing (it did
+   * not vanish). The people in the chat were told when it stopped, so the
+   * later restore of the save made at `unsavedSince` does not announce the
+   * loss a second time. */
+  captureAbandoned?: true;
+  /** With `captureAbandoned`: the time of the last good save the stop notice
+   * named, or null when there was none. Absent on records that predate it. */
+  unsavedSince?: string | null;
 };
 
 type ProviderDeathProof = {
@@ -49371,6 +49467,21 @@ async function acquireLeaseOnce(
             // Re-armed: whatever group end was requested did not happen.
             await tx.execute(sql`
               update sandbox_leases set group_end_requested_at = null, updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (Number(row.drain_capture_failures ?? 0) > 0) {
+            // Re-armed: the drain ended without a save, so its failures no
+            // longer describe the next one. A later drain starts with a full
+            // snapshot and no backoff, and only failures of that drain can
+            // lead to a reduced save or a stop (sandboxDrainCaptureFallback).
+            await tx.execute(sql`
+              update sandbox_leases set
+                drain_capture_failures = 0,
+                drain_capture_failure_epoch = null,
+                drain_capture_first_failed_at = null,
+                drain_capture_last_failed_at = null,
+                updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -52774,7 +52885,9 @@ export async function commitWarmingToWarm(
         // this commit, when that restore is verified, so a restore that fails,
         // retries or ends on an empty workspace never claims their files came
         // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity.
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
         const restoredFrom =
           automaticVerified &&
           rematerialization !== undefined &&
@@ -52783,7 +52896,7 @@ export async function commitWarmingToWarm(
             ? (automatic as Record<string, unknown>).capturedAt
             : undefined;
         const restoredNotice =
-          typeof restoredFrom === "string"
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
             ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
                 mode: "checkpoint" as const,
@@ -52826,6 +52939,18 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/** The drain's stop notice already told the people in the chat that changes
+ * after exactly this save were not kept. A restore of any other save, or a
+ * loss without that notice, is announced on its own. */
+function stopNoticeNamedSave(
+  loss: ProviderLossRecord | undefined,
+  restoredCapturedAt: string,
+): boolean {
+  if (loss?.captureAbandoned !== true || typeof loss.unsavedSince !== "string") return false;
+  const named = Date.parse(loss.unsavedSince);
+  return Number.isFinite(named) && named === Date.parse(restoredCapturedAt);
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -54812,13 +54937,16 @@ async function linkedLostProviderCommandSessionIdsTx(
 async function lockLostProviderCommandSessionsTx(
   tx: Database,
   input: LostProviderBlockerScope,
+  alsoLockSessionIds: readonly string[] = [],
 ): Promise<Set<string>> {
   const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
-  if (sessionIds.length) {
+  // One call, so every session row is taken in the same sorted order.
+  const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
+  if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
       controlLock: "share",
-      sessionIds,
+      sessionIds: toLock,
     });
   }
   return new Set(sessionIds);
@@ -58435,31 +58563,18 @@ export type QueuedTurnHoldSummary = {
   oldestAgeSeconds: number;
 };
 
-const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
-
 /**
  * Content-free cross-workspace classification of every `status = 'queued'`
  * turn by what holds it (migration 0988). The classes sum to
  * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
  * the rest wait for a running turn, Resume, a new message, or a person.
  *
- * 0988 creates the routine with its runtime EXECUTE withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
- * grants it, this returns null. The grant is checked in a separate statement:
- * EXECUTE is checked when a statement starts.
+ * 0988 created the routine with its runtime EXECUTE withheld; 1274 grants it
+ * and readiness requires it.
  */
 export async function summarizeQueuedTurnsByHold(
   db: Database,
-): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`
-      select has_function_privilege(
-        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
-      ) as granted
-    `,
-  );
-  if (grant?.granted !== true) return null;
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
   const summary = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
@@ -58677,6 +58792,12 @@ export async function reArmDrainingLease(
           liveness = 'warm',
           -- Re-armed: whatever group end was requested did not happen.
           group_end_requested_at = null,
+          -- The drain ended without a save; its failures do not carry over to
+          -- the next drain (see sandboxDrainCaptureFallback).
+          drain_capture_failures = 0,
+          drain_capture_failure_epoch = null,
+          drain_capture_first_failed_at = null,
+          drain_capture_last_failed_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -58736,6 +58857,14 @@ export async function confirmDrainCold(
      * this commit. Only then may a crashed worker's orphaned request on it be
      * settled; a selfhosted machine or backend-less lease is never stopped. */
     providerStopped?: boolean;
+    /** With `providerMissingBeforeCapture`: the drain stopped the box itself
+     * after its saves kept failing. Its failed capture can never publish late. */
+    captureAbandoned?: boolean;
+    /** With `captureAbandoned`: the `sandbox.box.terminated` record telling
+     * the people in the chat which changes were not saved (since the last
+     * good save, `unsavedSince`). Appended in the same commit as the loss, so
+     * a later restore of exactly that save never announces it again. */
+    captureAbandonedNotice?: { unsavedSince: string | null; payload: Record<string, unknown> };
   },
 ): Promise<{
   wentCold: boolean;
@@ -58866,10 +58995,44 @@ export async function confirmDrainCold(
         // lease lock, matching the canonical session -> blocker -> lease lock
         // order used by retained-process settlement. Revalidate the lease after
         // locking the entire exact provider-owned blocker set.
+        // A box the drain stopped itself tells every member session in this
+        // commit (below). Appending locks the workspace and those session rows,
+        // so take them here, before any blocker or the lease, in the canonical
+        // order; the append then finds them already held.
+        const abandonedNoticeSessionIds =
+          input.captureAbandoned === true && input.captureAbandonedNotice
+            ? await withCompleteSandboxGroupScope(tx, async () =>
+                (
+                  await tx
+                    .select({ id: schema.sessions.id })
+                    .from(schema.sessions)
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, input.workspaceId),
+                        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+                      ),
+                    )
+                    .orderBy(asc(schema.sessions.id))
+                ).map((session) => session.id),
+              )
+            : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          lockedCommandSessions =
+            abandonedNoticeSessionIds.length > 0
+              ? await withCompleteSandboxGroupScope(tx, () =>
+                  lockLostProviderCommandSessionsTx(tx, blockerScope, abandonedNoticeSessionIds),
+                )
+              : await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        } else if (abandonedNoticeSessionIds.length > 0) {
+          await withCompleteSandboxGroupScope(tx, () =>
+            lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: abandonedNoticeSessionIds,
+            }),
+          );
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
@@ -58947,6 +59110,7 @@ export async function confirmDrainCold(
           input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
+          input.captureAbandoned !== true &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59045,12 +59209,22 @@ export async function confirmDrainCold(
                 row,
                 recovery,
                 workspaceLost
-                  ? providerLossRecordForLostRow(
-                      row,
-                      "drain_probe",
-                      now,
-                      input.providerMaxRemainingLifetimeMs,
-                    )
+                  ? {
+                      ...providerLossRecordForLostRow(
+                        row,
+                        "drain_probe",
+                        now,
+                        input.providerMaxRemainingLifetimeMs,
+                      ),
+                      ...(input.captureAbandoned === true
+                        ? {
+                            captureAbandoned: true as const,
+                            ...(input.captureAbandonedNotice
+                              ? { unsavedSince: input.captureAbandonedNotice.unsavedSince }
+                              : {}),
+                          }
+                        : {}),
+                    }
                   : undefined,
               ),
             )
@@ -59126,6 +59300,20 @@ export async function confirmDrainCold(
           );
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
+        }
+        if (
+          rows.length > 0 &&
+          workspaceLost &&
+          input.captureAbandoned === true &&
+          input.captureAbandonedNotice
+        ) {
+          const notice = input.captureAbandonedNotice;
+          await withCompleteSandboxGroupScope(tx, () =>
+            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+              type: "sandbox.box.terminated",
+              payload: notice.payload,
+            }),
+          );
         }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
@@ -65098,7 +65286,8 @@ async function foldWorkspaceArchiveOntoLease(
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       -- A published save ends any run of drain snapshot failures: the count
-      -- means failures since this box's last successful save.
+      -- means failures of this drain since this box's last successful save
+      -- (a re-arm to warm resets it too).
       drain_capture_failures = 0,
       drain_capture_failure_epoch = null,
       drain_capture_first_failed_at = null,
@@ -66238,6 +66427,32 @@ export async function readLease(
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+/** The session's sandbox group's latest save when it deliberately left
+ * rebuildable folders out (a drain's reduced save, DC-G3), else null. A later
+ * complete save replaces it, so the answer is current on every turn. */
+export async function readSandboxReducedSave(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ capturedAt: string; omittedPaths: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<LeaseRow>(sql`
+      select lease.* from sandbox_leases lease
+      join sessions session
+        on session.workspace_id = lease.workspace_id
+       and session.sandbox_group_id = lease.sandbox_group_id
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      limit 1
+    `);
+    const current = rows[0] ? recoveryStateFromLeaseRow(rows[0]).archive.current : null;
+    if (current?.version !== 1 || !Array.isArray(current.omittedPaths)) return null;
+    const omittedPaths = current.omittedPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    return omittedPaths.length ? { capturedAt: current.capturedAt, omittedPaths } : null;
   });
 }
 
@@ -89229,6 +89444,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     waiterId: string;
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
+    resetsAt: Date | null;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -89238,6 +89454,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     childTurnId: input.turnId,
     provider: input.provider,
     nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+    resetsAt: input.resetsAt?.toISOString() ?? null,
   };
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childWaitingCapacityDedupeKey({
@@ -95998,6 +96215,7 @@ export * from "./event-source-feeds";
 export * from "./automation-templates";
 export * from "./bot-templates";
 export * from "./organization-model-providers";
+export * from "./organization-compatible-model-endpoints";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
 export * from "./subscription-core-claude-oauth";

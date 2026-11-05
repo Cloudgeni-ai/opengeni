@@ -5347,6 +5347,12 @@ export const sessions = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Who archived the chat; null when the idle archiver did. */
     archiveRequestedBy: text("archive_requested_by"),
+    /**
+     * When someone last asked to restore the chat's stored content (migration
+     * 1261). A stored chat with this set is waiting to be restored; once live
+     * again it marks the restore, which counts as activity for the idle period.
+     */
+    contentRestoreRequestedAt: timestamp("content_restore_requested_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     // Repositories a person removed from the session (migration 1140); see
     // SessionRemovedRepository. Read with parseSessionRemovedRepositories.
@@ -15187,12 +15193,20 @@ export const organizationModelProviderConnections = pgTable(
         | "elevenlabs"
         | "openai"
         | "azure_openai"
+        | "openai_compatible"
       >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
-    /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
+    /**
+     * Non-secret base URL: Azure OpenAI's `https://<resource>.openai.azure.com/openai/v1`,
+     * or an OpenAI-compatible endpoint's public HTTPS base URL; null for every other kind.
+     */
     endpoint: text("endpoint"),
+    /** OpenAI-compatible endpoints only: the API format they follow. */
+    compatibleApi: text("compatible_api").$type<"chat" | "responses">(),
+    /** OpenAI-compatible endpoints only: an optional display name. */
+    label: text("label"),
     /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
     authMethod: text("auth_method")
       .$type<OrganizationModelProviderAuthMethod>()
@@ -15206,9 +15220,13 @@ export const organizationModelProviderConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    accountProvider: uniqueIndex("organization_model_provider_connections_account_provider_uq").on(
+    // One connection per kind, except OpenAI-compatible endpoints (several each).
+    accountProvider: uniqueIndex("organization_model_provider_connections_account_provider_uq")
+      .on(table.accountId, table.providerKind)
+      .where(sql`${table.providerKind} <> 'openai_compatible'`),
+    idAccount: unique("organization_model_provider_connections_id_account_key").on(
+      table.id,
       table.accountId,
-      table.providerKind,
     ),
     operation: uniqueIndex("organization_model_provider_connections_operation_uq").on(
       table.accountId,
@@ -15217,7 +15235,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai', 'openai_compatible')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15237,7 +15255,15 @@ export const organizationModelProviderConnections = pgTable(
     ),
     endpointCheck: check(
       "organization_model_provider_connections_endpoint_chk",
-      sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+      sql`(${table.providerKind} in ('azure_openai', 'openai_compatible')) = (${table.endpoint} is not null) and (${table.endpoint} is null or (${table.providerKind} = 'azure_openai' and ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$') or (${table.providerKind} = 'openai_compatible' and octet_length(${table.endpoint}) between 9 and 2048 and ${table.endpoint} ~ '^https://[!-~]+$'))`,
+    ),
+    compatibleApiCheck: check(
+      "organization_model_provider_connections_compatible_api_chk",
+      sql`(${table.providerKind} = 'openai_compatible') = (${table.compatibleApi} is not null) and (${table.compatibleApi} is null or ${table.compatibleApi} in ('chat', 'responses'))`,
+    ),
+    labelCheck: check(
+      "organization_model_provider_connections_label_chk",
+      sql`${table.label} is null or (${table.providerKind} = 'openai_compatible' and octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
     ),
     authMethodCheck: check(
       "organization_model_provider_connections_auth_method_chk",
@@ -15337,8 +15363,11 @@ export const organizationModelProviderCustomModels = pgTable(
         | "opper"
         | "openai"
         | "azure_openai"
+        | "openai_compatible"
       >()
       .notNull(),
+    /** OpenAI-compatible endpoints only: the endpoint connection serving this model. */
+    connectionId: uuid("connection_id"),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -15353,8 +15382,28 @@ export const organizationModelProviderCustomModels = pgTable(
   },
   (table) => ({
     accountUpstream: uniqueIndex("organization_model_provider_custom_models_active_uq")
-      .on(table.accountId, table.providerKind, table.upstreamModelId)
+      .on(
+        table.accountId,
+        table.providerKind,
+        sql`coalesce(${table.connectionId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        table.upstreamModelId,
+      )
       .where(sql`${table.retiredAt} is null`),
+    connection: index("organization_model_provider_custom_models_connection_idx")
+      .on(table.connectionId)
+      .where(sql`${table.connectionId} is not null`),
+    connectionReference: foreignKey({
+      name: "organization_model_provider_custom_models_connection_fk",
+      columns: [table.connectionId, table.accountId],
+      foreignColumns: [
+        organizationModelProviderConnections.id,
+        organizationModelProviderConnections.accountId,
+      ],
+    }).onDelete("cascade"),
+    connectionCheck: check(
+      "organization_model_provider_custom_models_connection_chk",
+      sql`(${table.providerKind} = 'openai_compatible') = (${table.connectionId} is not null)`,
+    ),
     createOperation: uniqueIndex(
       "organization_model_provider_custom_models_create_operation_uq",
     ).on(table.accountId, table.providerKind, table.createOperationId),
@@ -15363,7 +15412,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai', 'openai_compatible')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

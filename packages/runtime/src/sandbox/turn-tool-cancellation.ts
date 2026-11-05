@@ -62,6 +62,15 @@ import {
   type SecretFilesWriter,
 } from "./secret-delivery";
 
+/**
+ * The shell a wrapper re-executes for a new session. The Opengeni agent sets
+ * `OPENGENI_SYSTEM_SHELL` to the dash or bash it falls back to while the
+ * machine's `/bin/sh` cannot be started, so the command still runs there.
+ */
+const SYSTEM_SHELL_EXPANSION = '"${OPENGENI_SYSTEM_SHELL:-/bin/sh}"';
+/** The macOS fallback for a missing setsid executable, with the same shell. */
+const PYTHON_SESSION_EXEC =
+  'import os,sys; os.setsid(); s=os.environ.get("OPENGENI_SYSTEM_SHELL") or "/bin/sh"; os.execv(s, [s, "-c", sys.argv[1]])';
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
@@ -711,13 +720,13 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} "$${capture.variable}"`,
     "fi",
     `eval "$${capture.variable}"`,
   ].join("\n");
@@ -842,11 +851,11 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c ${singleQuote(groupLeaderCommand)}`,
     "  fi",
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");

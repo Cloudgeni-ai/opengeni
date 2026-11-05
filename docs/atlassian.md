@@ -18,6 +18,12 @@ tool permissions.
 Hosted tools follow the connected user's Atlassian access and provider controls.
 They do not use the former native project's or space's source selection.
 
+Most Atlassian tools require a `cloudId`. Opengeni fills it in from the
+account's sites (`getAccessibleAtlassianResources`) through the generic account
+parameters mechanism (see "Account parameters" in
+[remote-mcp-credentials.md](remote-mcp-credentials.md)). With one site, models
+can leave it out; with several, a call without it lists the sites to choose from.
+
 ## Organization admin: allow the Opengeni domain
 
 Atlassian's Rovo MCP server only accepts OAuth connections from domains the

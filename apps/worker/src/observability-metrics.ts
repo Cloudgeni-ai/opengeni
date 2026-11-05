@@ -796,16 +796,15 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 
 /**
  * Split the durable queued-turn count by what holds each prompt. Only `ready`
- * prompts are waiting for dispatch; an old `ready` prompt is a stranded queue.
- * Every class is always published so an emptied class drops to 0.
+ * prompts are waiting for dispatch. A `ready` prompt older than a few seconds
+ * is waiting somewhere before it runs: in the session's control activities
+ * before any turn-queue task exists, or in the turn-queue backlog. Every class
+ * is always published so an emptied class drops to 0.
  */
 export function recordQueuedTurnHoldGauges(
   observability: Observability,
-  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary>,
 ): void {
-  // Null until a later migration grants 0988's withheld runtime EXECUTE:
-  // publish nothing rather than a misleading all-zero split.
-  if (!summary) return;
   for (const hold of QUEUED_TURN_HOLDS) {
     const entry = summary[hold];
     observability.setGauge({
@@ -1917,6 +1916,27 @@ export function recordSandboxDrainCaptureFailure(
       buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
       labels: { backend },
       value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
+}
+
+/** What a drain did once full snapshots of a lease epoch kept failing:
+ * `reduced_saved` published a save without rebuildable folders,
+ * `reduced_failed` tried one and it failed, `reduced_unavailable` could not
+ * try one (nothing to leave out, or what remains is too large), and
+ * `abandoned` stopped the box without a new save. */
+export function recordSandboxDrainCaptureFallback(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "reduced_saved" | "reduced_failed" | "reduced_unavailable" | "abandoned";
+  },
+): void {
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_fallback_total",
+      help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
+      labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
     }),
   );
 }

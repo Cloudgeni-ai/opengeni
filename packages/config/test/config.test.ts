@@ -422,8 +422,8 @@ describe("browser analytics configuration", () => {
     expect(settings.analyticsReoClientId).toBeUndefined();
   });
 
-  test("child lifecycle notices default off and parse the rollout flag", () => {
-    expect(withEnv({}, () => getSettings()).childLifecycleNoticesEnabled).toBe(false);
+  test("child lifecycle notices default on and parse the rollout flag", () => {
+    expect(withEnv({}, () => getSettings()).childLifecycleNoticesEnabled).toBe(true);
     expect(
       withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
         .childLifecycleNoticesEnabled,

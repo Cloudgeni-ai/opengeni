@@ -290,12 +290,11 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
       "get /me/messages": {
         summary: "List messages",
         description:
-          "List the messages in the signed-in person's mailbox, across folders. Narrow with $filter or $search ($search cannot be combined with $filter or $orderby), choose fields with $select, and page with $top and $skip or the response's @odata.nextLink.",
+          "List messages in the signed-in person's mailbox, across folders. Filter with $filter or $search ($search can't be combined with $filter or $orderby), pick fields with $select, and page with $top and $skip or @odata.nextLink.",
       },
       "post /me/messages": {
         summary: "Create draft message",
-        description:
-          "Create a draft message in the signed-in person's Drafts folder without sending it. Send it later with the send tool for that message.",
+        description: "Create a draft in the signed-in person's Drafts folder without sending it.",
       },
       "get /me/messages/{message-id}": {
         summary: "Get message",
@@ -304,7 +303,7 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
       "patch /me/messages/{message-id}": {
         summary: "Update message",
         description:
-          "Update a message's properties, for example a draft's subject, body or recipients before it is sent.",
+          "Update a message's properties, such as a draft's subject, body or recipients.",
       },
       "delete /me/messages/{message-id}": {
         summary: "Delete message",
@@ -452,7 +451,7 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         searchEntityTypes: SHAREPOINT_SEARCH_ENTITY_TYPES,
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries. Send exactly one entry in requests per call (several entries are rejected); its entityTypes may combine driveItem, listItem and list, but search site in a call of its own. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
+          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries. Send exactly one entry in requests per call; its entityTypes may combine driveItem, listItem and list, but search site in a call of its own. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
       },
       {
         path: "/sites",
@@ -990,7 +989,7 @@ function mergePathItems(
 
 /** Generic guidance for a path parameter expanded as a path. */
 const RESERVED_PATH_PARAMETER_DESCRIPTION =
-  "A path, with segments separated by /. Give it as plain text without quotes; each segment is encoded when the request is sent.";
+  "A /-separated path as plain text, without quotes; segments are encoded for you.";
 
 /**
  * Parameters with reviewed corrections: reserved path parameters are marked

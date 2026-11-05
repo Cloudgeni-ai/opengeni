@@ -14,7 +14,10 @@ import {
 import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
-import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
+import {
+  MINIMUM_STEER_REPETITIONS,
+  NUMERIC_PERFORMANCE_BUDGETS,
+} from "./workbench-acceptance-contract";
 import { isRecord } from "@opengeni/contracts/values";
 
 /** Release acceptance runs this script exactly as committed. Change it here,
@@ -72,7 +75,7 @@ const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
  */
 export const CONTROL_FIXTURE_READY_MS = 45_000;
 /** Default wall-clock budget for every Steer repetition plus the final Pause. */
-export const DEFAULT_CONTROL_BUDGET_MS = 75 * 60_000;
+export const DEFAULT_CONTROL_BUDGET_MS = 25 * 60_000;
 /** How often a long wait reports that it is still waiting. */
 const WAIT_PROGRESS_INTERVAL_MS = 15_000;
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -88,7 +91,10 @@ export type LiveAcceptanceArgs = {
   backend: "modal";
   workspaceId?: string;
   outputDir: string;
+  /** Capture API reads and fresh-browser navigations: no model usage. */
   repetitions: number;
+  /** Real Steer cancellations: each costs two model turns. */
+  steerRepetitions: number;
   sessionTimeoutMs: number;
   coldTimeoutMs: number;
   /** Wall-clock budget for all Steer repetitions and the final Pause. */
@@ -216,6 +222,7 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     "--workspace-id",
     "--output-dir",
     "--repetitions",
+    "--steer-repetitions",
     "--session-timeout-ms",
     "--cold-timeout-ms",
     "--control-budget-ms",
@@ -263,6 +270,11 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     ...(values.get("--workspace-id") ? { workspaceId: values.get("--workspace-id")! } : {}),
     outputDir: resolve(values.get("--output-dir") ?? `.agent/evidence/workbench-${runId}`),
     repetitions,
+    steerRepetitions: integer(
+      values.get("--steer-repetitions") ?? String(MINIMUM_STEER_REPETITIONS),
+      "--steer-repetitions",
+      MINIMUM_STEER_REPETITIONS,
+    ),
     sessionTimeoutMs: integer(
       values.get("--session-timeout-ms") ?? "900000",
       "--session-timeout-ms",
@@ -2887,9 +2899,9 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
     const controlDiagnosticsAfter = controlAudit.cursor;
     const controlPhaseStartedAt = performance.now();
     // Every Steer repetition plus the final Pause.
-    const controlTotal = args.repetitions + 1;
+    const controlTotal = args.steerRepetitions + 1;
     try {
-      for (let iteration = 0; iteration < args.repetitions; iteration += 1) {
+      for (let iteration = 0; iteration < args.steerRepetitions; iteration += 1) {
         const iterationStartedAt = performance.now();
         controlCancellationSamples.push(
           await proveLiveSteerCancellation({
@@ -2911,7 +2923,7 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
           budgetMs: args.controlBudgetMs,
         });
         progress(
-          `Steer ${iteration + 1}/${args.repetitions} passed in ${Math.round((performance.now() - iterationStartedAt) / 1_000)}s (replacement started ${controlCancellationSamples.at(-1)}ms after the Steer); control phase projected ${Math.round(pace.projectedMs / 60_000)} of ${Math.round(args.controlBudgetMs / 60_000)} minutes`,
+          `Steer ${iteration + 1}/${args.steerRepetitions} passed in ${Math.round((performance.now() - iterationStartedAt) / 1_000)}s (replacement started ${controlCancellationSamples.at(-1)}ms after the Steer); control phase projected ${Math.round(pace.projectedMs / 60_000)} of ${Math.round(args.controlBudgetMs / 60_000)} minutes`,
         );
         if (!pace.withinBudget) throw new Error(pace.reason);
       }
@@ -2962,7 +2974,7 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
     pass(
       checks,
       "functional.control-cancellation",
-      `${args.repetitions} real Modal turns with a 4,500-entry workspace were Steered and one hostile terminal turn was Paused without zombie output or late capture commits; the shutdown fence rendered whenever cancellation exceeded the immediate-feedback budget.`,
+      `${args.steerRepetitions} real Modal turns with a 4,500-entry workspace were Steered and one hostile terminal turn was Paused without zombie output or late capture commits; the shutdown fence rendered whenever cancellation exceeded the immediate-feedback budget.`,
     );
     pass(
       checks,

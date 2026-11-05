@@ -44,6 +44,8 @@ mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+#[cfg(unix)]
+mod system_shell;
 pub mod transactional_write;
 mod work_scope;
 
@@ -780,8 +782,11 @@ fn default_git_email_with(
 }
 
 /// A discarded stdio stream: the agent's retained null device on Unix, so a
-/// machine whose `/dev/null` was removed can still run the probe.
-fn discarded_stdio() -> std::process::Stdio {
+/// machine whose `/dev/null` was removed can still start the program. Use it
+/// for every stream a program the agent starts does not need, including stdin
+/// before `Command::output`, which otherwise opens `/dev/null` by path.
+#[must_use]
+pub fn discarded_stdio() -> std::process::Stdio {
     #[cfg(unix)]
     {
         null_device::null_stdio()
@@ -857,7 +862,10 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
 pub(crate) fn default_shell() -> Vec<String> {
     #[cfg(unix)]
     {
-        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
+        // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+        vec![system_shell::environment_shell()
+            .to_string_lossy()
+            .into_owned()]
     }
     #[cfg(windows)]
     {
@@ -890,7 +898,7 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         // A generic POSIX fallback for any other unix-like target.
-        let mut cmd = tokio::process::Command::new("/bin/sh");
+        let mut cmd = tokio::process::Command::new(system_shell::environment_shell());
         cmd.arg("-c").arg(parts.join(" "));
         cmd
     }

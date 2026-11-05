@@ -674,6 +674,11 @@ function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boole
   return grant.coversVoice === true;
 }
 
+/** General app funding, without model-scoped promotions or scoped Free credit. */
+export function generalAvailableCreditMicros(balance: BillingBalance): number {
+  return Math.max(0, appGeneralMicros(balance) - (balance.heldGeneralCreditMicros ?? 0));
+}
+
 export function spendableCreditMicros(
   balance: BillingBalance,
   usage?: CreditUsage,
@@ -681,7 +686,7 @@ export function spendableCreditMicros(
 ): number {
   if (origin === "api") return apiSpendableCreditMicros(balance);
   return (
-    Math.max(0, appGeneralMicros(balance) - (balance.heldGeneralCreditMicros ?? 0)) +
+    generalAvailableCreditMicros(balance) +
     (balance.promotionalCredits ?? []).reduce(
       (sum, grant) => sum + (grantCovers(grant, usage) ? grant.remainingMicros : 0),
       0,

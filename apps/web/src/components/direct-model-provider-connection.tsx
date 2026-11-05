@@ -20,15 +20,31 @@ export const DIRECT_MODEL_PROVIDER_LABELS: Record<DirectModelProvider, string> =
   openai_compatible: "OpenAI-compatible endpoint",
 };
 
+/**
+ * The product model id of a model served by an organization's own
+ * OpenAI-compatible endpoint (the catalog names it this way).
+ */
+export function organizationCompatibleModelId(connectionId: string, model: string): string {
+  return `organization-compatible-${connectionId}/${model}`;
+}
+
+/**
+ * Connect OpenAI or Azure OpenAI for one workspace, or an OpenAI-compatible
+ * endpoint for the organization (`organizationId`), whose workspaces can then
+ * use it like its other model accounts.
+ */
 export function DirectModelProviderForm({
   client,
   workspaceId,
+  organizationId,
   provider,
   onConnected,
   onBusyChange,
 }: {
   client?: OpenGeniBrowserClient;
   workspaceId: string;
+  /** Required for an OpenAI-compatible endpoint, which the organization owns. */
+  organizationId?: string;
   provider: DirectModelProvider;
   onConnected?: (modelId: string) => Promise<void> | void;
   onBusyChange?: (busy: boolean) => void;
@@ -55,7 +71,7 @@ export function DirectModelProviderForm({
   }, []);
   const operation = useRef<{ signature: string; id: string } | null>(null);
   async function connect() {
-    if (!client || busy) return;
+    if (!client || busy || (compatible && !organizationId)) return;
     const config = DirectModelProviderMetadata.safeParse({
       provider,
       model,
@@ -91,28 +107,41 @@ export function DirectModelProviderForm({
     setBusy(true);
     onBusyChange?.(true);
     try {
-      const providerDomain = new URL(directModelBaseUrl(config.data)).hostname;
-      const connection = await client.createConnection(workspaceId, {
-        providerDomain,
-        kind: "api_key",
-        subjectId: null,
-        credential: { apiKey: key },
-        grantedScopes: [],
-        metadata: {
-          credentialRole: `direct_${provider}`,
-          credentialLabel: compatible ? (config.data.label ?? providerDomain) : label,
-          directModelProvider: config.data,
-        },
-        operationId: operation.current!.id,
-        verifyModelAccess: true,
-      });
+      let modelId: string;
+      if (compatible) {
+        const created = await client.createOrganizationCompatibleEndpoint(organizationId!, {
+          operationId: operation.current!.id,
+          baseUrl: directModelBaseUrl(config.data),
+          apiKey: key,
+          model: config.data.model,
+          api,
+          ...(config.data.label ? { label: config.data.label } : {}),
+        });
+        modelId = organizationCompatibleModelId(created.id, config.data.model);
+      } else {
+        const connection = await client.createConnection(workspaceId, {
+          providerDomain: new URL(directModelBaseUrl(config.data)).hostname,
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: key },
+          grantedScopes: [],
+          metadata: {
+            credentialRole: `direct_${provider}`,
+            credentialLabel: label,
+            directModelProvider: config.data,
+          },
+          operationId: operation.current!.id,
+          verifyModelAccess: true,
+        });
+        const spec = directModelConnectionSpec(connection);
+        if (!spec) throw new Error("The provider connection could not be loaded");
+        modelId = spec.modelId;
+      }
       if (!mounted.current) return;
-      const spec = directModelConnectionSpec(connection);
-      if (!spec) throw new Error("The provider connection could not be loaded");
       setApiKey("");
       operation.current = null;
       if (!onConnected) toast.success(`${label} connected`);
-      await onConnected?.(spec.modelId);
+      await onConnected?.(modelId);
     } catch (error) {
       let message = error instanceof Error ? error.message : `Could not connect ${label}`;
       if (error instanceof OpenGeniApiError) {
@@ -135,7 +164,7 @@ export function DirectModelProviderForm({
     <div className="grid gap-3">
       <p className="text-xs leading-5 text-fg-muted">
         {compatible
-          ? "Connect any API that follows OpenAI’s Chat Completions or Responses format. Usage is billed by that provider, and only this workspace can use the connection."
+          ? "Connect any API that follows OpenAI’s Chat Completions or Responses format, such as a model host or your own server. Usage is billed by that provider, and everyone in your organization can use it."
           : `Usage is billed directly to your ${label} account. This connection is available to this workspace.`}
       </p>
       {compatible ? (
@@ -254,7 +283,7 @@ export function DirectModelProviderForm({
               (provider === "azure_openai"
                 ? "In Microsoft Foundry, open Deployments and copy the deployment’s name."
                 : compatible
-                  ? "Copy it exactly as your provider lists it under /models. To use more models, connect each one."
+                  ? "Copy it exactly as your provider lists it under /models. You can add more models later in Models settings."
                   : "Use a model your OpenAI account can access.")}
           </p>
         </div>
@@ -314,7 +343,7 @@ export function DirectModelProviderForm({
           !apiKey.trim() ||
           !model.trim() ||
           (provider === "azure_openai" && !endpoint.trim()) ||
-          (compatible && !baseUrl.trim())
+          (compatible && (!baseUrl.trim() || !organizationId))
         }
         onClick={() => void connect()}
       >

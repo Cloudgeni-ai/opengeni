@@ -75,12 +75,13 @@ export function DirectModelProviderConnections({
           ) : null}
         </div>
       ))}
+      {/* OpenAI-compatible endpoints are connected for the organization, from
+          Connect provider; ones a workspace already has stay listed above. */}
       {canManage
-        ? (["openai", "azure_openai", "openai_compatible"] as const).map((provider) => (
+        ? (["openai", "azure_openai"] as const).map((provider) => (
             <details key={provider} className="py-3">
               <summary className="cursor-pointer text-sm font-medium">
-                Connect {provider === "openai_compatible" ? "an " : ""}
-                {DIRECT_MODEL_PROVIDER_LABELS[provider]}
+                Connect {DIRECT_MODEL_PROVIDER_LABELS[provider]}
               </summary>
               <div className="pb-2 pt-4">
                 <DirectModelProviderForm

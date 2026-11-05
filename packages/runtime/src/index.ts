@@ -1,4 +1,9 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+// Nothing was sent: callers render the message, which names the choices.
+export {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
@@ -19,7 +24,21 @@ import {
   installSandboxSetupNoticeDelivery,
   queueSandboxSetupNotice,
   takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
 } from "./sandbox-setup-notices";
+export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
+import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
+  softFailingSetupHooks,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
+import { SandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
+export {
+  softRunCredentialWriteFailure,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -289,6 +308,17 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+  accountChoicesFromResult,
+  fillAccountParameters,
+  mcpAccountParametersFor,
+  withAccountParameterDefaults,
+  type AccountParameterFill,
+  type McpAccountChoice,
+  type McpAccountParameter,
+} from "./mcp-account-parameters";
 import {
   MCP_INPUT_PENDING_RESULT,
   awaitingMcpInput,
@@ -3384,6 +3414,10 @@ export function mcpToolErrorOutput(error: unknown): {
   structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  // Nothing was sent: the text names the account's values to choose from.
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   // Nothing ran; the output names each failure and, for a missing secret,
@@ -4388,6 +4422,9 @@ export function toolPreflightFailureOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4594,6 +4631,10 @@ function installMcpApprovalPolicy(
         connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
+        accountChoice: (
+          toolName: string,
+          args: unknown,
+        ) => Promise<McpAccountParameterChoiceError | undefined>;
       }
     >();
     for (const server of agent.mcpServers ?? []) {
@@ -4613,6 +4654,7 @@ function installMcpApprovalPolicy(
           inputSchema: descriptor.inputSchema,
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
+          accountChoice: (name, args) => server.accountParameterChoice(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -4705,6 +4747,13 @@ function installMcpApprovalPolicy(
             parsedInput: Parameters<typeof originalNeedsApproval>[1],
             callId: Parameters<typeof originalNeedsApproval>[2],
           ) => {
+            // A call the account's values must first be chosen for is never
+            // sent; containment returns the choice for this call id instead of
+            // asking anyone. Without an id the call itself returns it.
+            const choice = callId
+              ? await identity?.accountChoice(unprefixed, parsedInput)
+              : undefined;
+            if (choice) throw choice;
             if (!connectorActionPolicy) {
               return (
                 recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
@@ -6026,6 +6075,13 @@ class DeferredPreparedMcpServer implements MCPServer {
     return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
   }
 
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -6457,6 +6513,7 @@ export async function prepareAgentTools(
             undefined,
             firstParty,
             eagerToolNames,
+            firstParty || bridge ? [] : mcpAccountParametersFor(config.url),
           ),
           config,
           options,
@@ -8455,7 +8512,29 @@ type McpPublicFailureCode =
   | "mcp_close_failed"
   | "mcp_transport_failed"
   | "mcp_tools_list_failed"
-  | "mcp_tool_call_failed";
+  | "mcp_tool_call_failed"
+  | "mcp_account_parameter_lookup_failed";
+
+/** Bound for looking up a connected account's parameter values; past it the call goes on unfilled. */
+const MCP_ACCOUNT_PARAMETER_LOOKUP_MS = 10_000;
+/** After a lookup that found nothing, calls go on unfilled for this long before it is tried again. */
+const MCP_ACCOUNT_PARAMETER_RETRY_MS = 60_000;
+
+/** A shared promise, abandoned (not cancelled) when this caller's signal aborts. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
+}
 
 function safeMcpServerIdentity(serverId: string): string {
   return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
@@ -9656,6 +9735,13 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly displayTitles = new Map<string, string>();
   /** Unprefixed names of API integration operations; their cards read the request's fields. */
   private readonly apiOperations = new Set<string>();
+  /** Unprefixed tool name -> the account parameters its calls may have filled in. */
+  private readonly accountParameterTools = new Map<string, readonly McpAccountParameter[]>();
+  /** One shared lookup of the account's values per parameter for this attempt. */
+  private readonly accountChoiceLookups = new Map<
+    string,
+    { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number }
+  >();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9711,6 +9797,11 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    /**
+     * Parameters the connected account fixes (mcp-account-parameters.ts).
+     * Applied only by the wrapper around the physical server.
+     */
+    private readonly accountParameters: readonly McpAccountParameter[] = [],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9930,9 +10021,27 @@ export class PrefixedMcpServer implements MCPServer {
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      // Account parameters apply once, around the physical server, and only
+      // when the server lists the tool that looks the account's values up.
+      const listedNames = new Set(tools.map((tool) => tool.name));
+      const accountParameters =
+        this.inner instanceof PrefixedMcpServer
+          ? []
+          : this.accountParameters.filter((parameter) =>
+              listedNames.has(parameter.resolver.toolName),
+            );
+      this.accountParameterTools.clear();
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // A recoverable operation is never filled, so it keeps its own schema.
+          const defaults = configuredMcpOperationRecovery(this, tool.name)
+            ? { inputSchema: tool.inputSchema, filled: [] }
+            : withAccountParameterDefaults(tool.inputSchema, accountParameters);
+          if (defaults.filled.length > 0) {
+            this.accountParameterTools.set(tool.name, defaults.filled);
+            tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
+          }
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
           if (prior !== undefined && prior !== tool.name) {
@@ -10182,6 +10291,14 @@ export class PrefixedMcpServer implements MCPServer {
           : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
+      const accountFill = recordsPhysicalCall
+        ? await this.fillAccountParameters(unprefixed, args ?? {}, options?.signal)
+        : undefined;
+      // Nothing was sent: the model chooses one of the account's values.
+      if (accountFill?.kind === "choose") {
+        throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
+      }
+      const providerArgs = accountFill?.arguments ?? args ?? {};
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
@@ -10217,7 +10334,7 @@ export class PrefixedMcpServer implements MCPServer {
               call: async (callArgs) =>
                 AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
             })
-          : await physicalCall(args ?? {});
+          : await physicalCall(providerArgs);
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -10268,6 +10385,8 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      // Not a provider failure: the choice text is the result, never "unavailable".
+      if (isMcpAccountParameterChoiceError(error)) throw error;
       if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
@@ -10395,6 +10514,99 @@ export class PrefixedMcpServer implements MCPServer {
       return this.inputWaitYield?.beginWait(request);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The choice the model must make before this call can run, or undefined.
+   * Approval hooks ask first, so nobody approves a call that would not be
+   * sent. Never fatal; the lookup is shared with the call itself.
+   */
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    if (this.inner instanceof PrefixedMcpServer)
+      return await this.inner.accountParameterChoice(this.inner.unprefixedToolName(toolName), args);
+    const fill = await this.fillAccountParameters(
+      toolName,
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ).catch(() => undefined);
+    return fill?.kind === "choose"
+      ? new McpAccountParameterChoiceError(fill.parameter, fill.choices)
+      : undefined;
+  }
+
+  /**
+   * Fill this tool's unset account parameters from the connected account.
+   * Any lookup failure sends the call on as the model made it; only the
+   * caller's own abort ends it. A recoverable operation dispatches exactly one
+   * physical call, so it is left as it is.
+   */
+  private async fillAccountParameters(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AccountParameterFill | undefined> {
+    const parameters = this.accountParameterTools.get(toolName);
+    if (!parameters || hasActiveRecoverableMcpOperation()) return undefined;
+    signal?.throwIfAborted();
+    try {
+      return await fillAccountParameters(parameters, args, (parameter) =>
+        abortable(this.accountChoices(parameter), signal),
+      );
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return undefined;
+    }
+  }
+
+  /**
+   * The account's values for a parameter, looked up once per attempt and
+   * shared by concurrent calls. A lookup that found nothing is retried after
+   * a short pause, so a hanging provider delays at most one call per window.
+   */
+  private accountChoices(parameter: McpAccountParameter): Promise<readonly McpAccountChoice[]> {
+    const key = JSON.stringify([parameter.resolver.toolName, parameter.name]);
+    const existing = this.accountChoiceLookups.get(key);
+    if (existing && (existing.retryAfter === undefined || Date.now() < existing.retryAfter))
+      return existing.lookup;
+    const entry: { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number } = {
+      lookup: this.lookUpAccountChoices(parameter),
+    };
+    this.accountChoiceLookups.set(key, entry);
+    void entry.lookup.then((choices) => {
+      if (choices.length === 0) entry.retryAfter = Date.now() + MCP_ACCOUNT_PARAMETER_RETRY_MS;
+    });
+    return entry.lookup;
+  }
+
+  private async lookUpAccountChoices(
+    parameter: McpAccountParameter,
+  ): Promise<readonly McpAccountChoice[]> {
+    const signal = AbortSignal.timeout(MCP_ACCOUNT_PARAMETER_LOOKUP_MS);
+    const { toolName, arguments: resolverArgs } = parameter.resolver;
+    try {
+      const call = async () =>
+        this.inner.callToolResult
+          ? await this.inner.callToolResult(toolName, { ...resolverArgs }, null, { signal })
+          : mcpContentAsResult(
+              await this.inner.callTool(toolName, { ...resolverArgs }, null, { signal }),
+            );
+      const aborted = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      aborted.catch(() => undefined);
+      const result = await Promise.race([call(), aborted]);
+      return accountChoicesFromResult(parameter, unwrapSdkMcpResultProjection(result));
+    } catch (error) {
+      console.warn(
+        "[mcp] account parameter lookup failed; the call goes on as the model made it",
+        mcpErrorFields(error, "mcp_account_parameter_lookup_failed", this.registryId),
+      );
+      return [];
     }
   }
 
@@ -11386,6 +11598,15 @@ function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: Prepar
 }
 
 /**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
+}
+
+/**
  * A per-run `Runner` whose `modelProvider` is built from THIS turn's settings.
  *
  * The standalone `run()` uses a process-global default Runner whose modelProvider
@@ -11878,6 +12099,9 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Setup steps the worker ran first that already failed softly (run
+     * credential files), reported in the same notice as the hooks'. */
+    priorSoftSetupFailures?: readonly SoftSetupFailure[];
     /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
     recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
@@ -11953,8 +12177,11 @@ export async function runOwnedSandboxSetup(
   // (effective backend "selfhosted"): the box is the user's REAL computer — the
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
+  // Setup steps that failed softly this turn, including the worker's own
+  // earlier steps (run credential files), reported in one notice below.
+  const softFailures: SoftSetupFailure[] = [...(opts.priorSoftSetupFailures ?? [])];
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-    // CLOUD COMPUTER SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
     // clock or resolver the agent broke is repaired before anything below needs
     // the network (rig setup, clones, the Codemode client). Never on any other
     // backend, and above all never on a connected machine.
@@ -11992,8 +12219,30 @@ export async function runOwnedSandboxSetup(
         await execute();
       }
     }
-    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
+    // A hook failure the box itself caused (a full /workspace, a blocked
+    // path) must not fail every later turn before the model can fix it: the
+    // turn starts and the model is told what failed (sandbox-setup-soft-failure.ts).
+    await runBeforeAgentStartHooks(
+      setupSession,
+      softFailingSetupHooks(ownedTurnPrivateHooks, softFailures, (failure) => {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "platform setup step failed softly; the turn continues with a notice",
+            event: "sandbox.setup.soft_failure",
+            hookId: failure.hookId,
+            cause: failure.cause.kind,
+            ...(failure.cause.kind === "command_failed"
+              ? { exitCode: failure.cause.exitCode }
+              : {}),
+          }),
+        );
+      }),
+      ownedHookContext,
+    );
   }
+  const softFailureNotice = softSetupFailureNotice(softFailures);
+  if (softFailureNotice) sandboxSetupNoticeSink(agent, opts.preparedInput)(softFailureNotice);
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
   // workspace-relative, integrity-verified, read-only, and atomic; repository,
@@ -12841,14 +13090,14 @@ async function repairOwnedComputeBox(
     );
   } catch (error) {
     if (error instanceof TurnSandboxCommandCancelledError) throw error;
-    console.warn("[sandbox] cloud computer clock and DNS check failed", {
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
       error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
     return null;
   }
   const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
   if (report.clock || report.dns) {
-    console.warn("[sandbox] cloud computer clock or DNS was broken before the turn", report);
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
   }
   return report;
 }
@@ -16153,8 +16402,10 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(
+    throw new SandboxLifecycleCommandExitError(
       `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+      exitCode,
+      output,
     );
   }
   if (exitCode === null) {
