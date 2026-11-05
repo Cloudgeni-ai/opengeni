@@ -207,6 +207,11 @@ export function compactSessionMcpDetail(
     ? boundSessionMcpText(progress.text, 600, progress.originalChars)
     : null;
   const waitReason = monitoring.wait ? boundSessionMcpText(monitoring.wait.reason) : null;
+  // Archived the moment someone archives it (its content moves to long-term
+  // storage a little later): the same rule the app uses for its read-only view.
+  const archive =
+    session.retention?.archive ??
+    (session.archived ? { state: "archiving" as const, archivedAt: null } : null);
   return {
     id: session.id,
     ...(session.channelId ? { projectId: session.channelId } : {}),
@@ -217,11 +222,11 @@ export function compactSessionMcpDetail(
     ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
     lastSequence: session.lastSequence,
     // Archived sessions keep a readable timeline but accept no new work.
-    ...(session.retention?.archive
+    ...(archive
       ? {
           archive: {
-            state: session.retention.archive.state,
-            archivedAt: session.retention.archive.archivedAt,
+            state: archive.state,
+            archivedAt: archive.archivedAt,
             readOnly: true,
           },
         }

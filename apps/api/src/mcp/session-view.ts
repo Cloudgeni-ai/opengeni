@@ -641,6 +641,8 @@ export function boundSessionDetailMcp(
     pinned: session.pinned,
     pinnedAt: session.pinnedAt,
     pinVersion: session.pinVersion,
+    // As in sessions_list full rows: archived chats are read-only.
+    ...(session.archived ? { archived: true } : {}),
     ...(session.retention === undefined ? {} : { retention: session.retention }),
     ...(session.treeStats === undefined ? {} : { treeStats: session.treeStats }),
     createdAt: session.createdAt,

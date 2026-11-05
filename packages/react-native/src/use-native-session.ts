@@ -28,6 +28,7 @@ import {
 import {
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   type SessionDisplayStatus,
 } from "@opengeni/react/timeline-model";
 import {
@@ -87,8 +88,13 @@ export interface OpenGeniNativeSessionController {
    * is asked of the person; Resume rechecks and starts the kept work again.
    */
   admissionBlocked: boolean;
-  /** `sessionStatus` as a person should read it: `blocked` instead of "Waiting on you". */
+  /**
+   * `sessionStatus` as a person should read it: `blocked` instead of "Waiting
+   * on you", and `archived` for an archived chat (never its `cancelled` status).
+   */
   displayStatus: SessionDisplayStatus | null;
+  /** The chat is archived: read-only, continuable in a new chat. */
+  archived: boolean;
   runActive: boolean;
   error: Error | null;
   refresh(): Promise<void>;
@@ -256,6 +262,7 @@ export function useOpenGeniNativeSession(input: {
     ? sessionAdmissionBlocked(detail)
     : sessionStatus === "requires_action" &&
       (latestChange?.blocked === true || (detail !== null && sessionAdmissionBlocked(detail)));
+  const archived = detail !== null && sessionArchived(detail);
 
   return {
     sessionId: input.sessionId,
@@ -268,7 +275,8 @@ export function useOpenGeniNativeSession(input: {
     connectionState: events.connectionState,
     sessionStatus,
     admissionBlocked,
-    displayStatus: admissionBlocked ? "blocked" : sessionStatus,
+    archived,
+    displayStatus: archived ? "archived" : admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
     initialHistoryReady: events.initialHistoryReady,
     hasOlder: events.hasOlder,

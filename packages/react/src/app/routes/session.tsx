@@ -2331,9 +2331,11 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const cancelled = isTerminalSessionStatus(props.session.status);
   // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
+  // Archiving a chat cancels its running work, so an archived chat often has
+  // the `cancelled` status too: it still reads as archived, never cancelled.
+  const cancelled = readOnlyArchive === null && isTerminalSessionStatus(props.session.status);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -3074,10 +3076,10 @@ function SessionChatPane(props: {
       : null;
   });
   chatSendContext.current = {
-    blocked: isTerminalSessionStatus(props.session.status)
-      ? "This chat has ended. Start a new chat to use a repository."
-      : sessionReadOnlyArchive(props.session)
-        ? "This chat is archived. Continue in a new chat to use a repository."
+    blocked: sessionReadOnlyArchive(props.session)
+      ? "This chat is archived. Continue in a new chat to use a repository."
+      : isTerminalSessionStatus(props.session.status)
+        ? "This chat has ended. Start a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -3484,7 +3486,8 @@ function SessionChatPane(props: {
   });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
-    (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
+    readOnlyArchive === null &&
+      (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -4702,7 +4705,8 @@ function SessionChatPane(props: {
                   ) : null
                 }
                 placeholder={chatComposerPlaceholder({
-                  cancelled: props.session.status === "cancelled",
+                  archived: readOnlyArchive !== null,
+                  cancelled,
                   creditStopped:
                     Boolean(props.creditExhausted) &&
                     (props.session.status === "failed" || props.session.status === "idle"),
