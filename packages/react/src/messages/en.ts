@@ -4168,7 +4168,7 @@ export const englishMessages = {
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
-    "Resume audio to hear the existing voice connection.",
+    "Your browser didn't let the replies play. Tap to hear them.",
   "realtime.realtimeControl.resumeVoiceAudio": "Resume voice audio",
   "realtime.realtimeControl.retryConnection": "Retry connection",
   "realtime.realtimeControl.retryVoiceConnection": "Retry voice connection",
@@ -4180,6 +4180,7 @@ export const englishMessages = {
   "realtime.realtimeControl.startVoice": "Start voice",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
   "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
+  "realtime.realtimeControl.tapToHearReplies": "Tap to hear replies",
   "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
   "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
   "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
