@@ -94,6 +94,7 @@ import {
 } from "../queue-presentation-model";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
+import { StoredFileThumbnails } from "./stored-file-thumbnails";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
@@ -1907,6 +1908,12 @@ function QueuePanel({
                 </div>
               ) : null}
             </div>
+            <StoredFileThumbnails
+              className="pl-4"
+              workspaceId={turn.workspaceId}
+              sessionId={turn.sessionId}
+              resources={turn.resources}
+            />
             {confirmingReplace ? (
               <div className="rounded-og-sm border border-og-status-waiting/30 bg-og-status-waiting/10 p-2 text-og-xs text-og-fg">
                 <p>{QUEUE_REPLACE_DRAFT_COPY(t).title}</p>

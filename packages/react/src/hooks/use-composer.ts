@@ -36,6 +36,7 @@ import {
 } from "../lib/transient-retry";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import type { StoredFileClientLike, StoredFileSource } from "../stored-file-preview";
 
 export type ComposerPolicy = {
   model: string;
@@ -640,6 +641,13 @@ export type ComposerState = {
   resolveDraftConflict: (choice: "keep_mine" | "use_remote") => Promise<void>;
   restoredResources: ResourceRef[];
   removeRestoredResource: (index: number) => void;
+  /**
+   * Where this chat's stored files are read from, so files restored into the
+   * composer (a draft from another device or a reload, a queued message taken
+   * back for editing) show as the files they are, images with their picture.
+   * Absent before a chat exists.
+   */
+  fileSource?: StoredFileSource | undefined;
   error: Error | null;
   clearError: () => void;
   /**
@@ -3402,6 +3410,17 @@ export function useComposer(
     resolveDraftConflict,
     restoredResources: identityMatches ? restoredResources : [],
     removeRestoredResource,
+    ...(sessionId
+      ? {
+          fileSource: {
+            // The SDK client reads files; a narrower session proxy without
+            // those reads shows restored files as named chips.
+            client: client as StoredFileClientLike,
+            workspaceId,
+            sessionId,
+          },
+        }
+      : {}),
     error: identityMatches ? (error ?? draftReadError) : null,
     clearError,
     canBuyCredits: options.canBuyCredits ?? true,

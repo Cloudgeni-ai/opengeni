@@ -1,4 +1,4 @@
-import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
+import type { ClientModel, EffectiveSessionControl, FileAsset } from "@opengeni/sdk";
 import {
   AppWindowIcon,
   ArrowUpIcon,
@@ -72,6 +72,7 @@ import { defaultChatComposerMessages, type ChatComposerMessages } from "../compo
 import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
+import { readStoredFilePreviewUrl, useStoredFiles } from "../stored-file-preview";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
@@ -122,7 +123,8 @@ export type ComposerDraftState = Pick<
   | "resolveDraftConflict"
   | "restoredResources"
   | "removeRestoredResource"
->;
+> &
+  Partial<Pick<ComposerState, "fileSource">>;
 
 export type ComposerControlState = Pick<
   ComposerState,
@@ -921,6 +923,7 @@ export function useChatComposerController({
     draftSaving: draft?.draftSaving ?? false,
     restoredResources: draft?.restoredResources ?? [],
     removeRestoredResource: draft?.removeRestoredResource,
+    fileSource: draft?.fileSource,
     resolveDraftConflict: draft?.resolveDraftConflict,
     hasControl: control !== undefined,
     runControl,
@@ -1164,14 +1167,111 @@ export function PausedState() {
 
 export function RestoredResources() {
   const controller = useComposerController();
-  if (controller.restoredResources.length === 0 || !controller.removeRestoredResource) return null;
-  return (
-    <RestoredResourceChips
-      resources={controller.restoredResources}
-      messages={controller.messages}
-      onRemove={controller.removeRestoredResource}
-    />
+  const resources = controller.restoredResources;
+  const onRemove = controller.removeRestoredResource;
+  const fileSource = controller.fileSource;
+  // A file still tracked as this composer's own upload already shows there.
+  const uploadedFileIds = new Set(
+    controller.attachments?.attachments.flatMap((attachment) =>
+      attachment.file ? [attachment.file.id] : [],
+    ) ?? [],
   );
+  const restoredFiles = resources.flatMap((resource, index) =>
+    resource.kind === "file" && !uploadedFileIds.has(resource.fileId)
+      ? [{ fileId: resource.fileId, index }]
+      : [],
+  );
+  const stored = useStoredFiles(
+    fileSource,
+    restoredFiles.map((file) => file.fileId),
+  );
+  const fileIdByIdRef = useRef(new Map<string, string>());
+  const previewClient = fileSource?.client;
+  const previewWorkspaceId = fileSource?.workspaceId;
+  const previewSessionId = fileSource?.sessionId;
+  // Stable across renders: the chips abort an open preview when it changes.
+  const loadPreview = useMemo(
+    () =>
+      previewClient &&
+      previewWorkspaceId !== undefined &&
+      typeof previewClient.createFileDownloadUrl === "function"
+        ? async (id: string) => {
+            const fileId = fileIdByIdRef.current.get(id);
+            return fileId
+              ? await readStoredFilePreviewUrl(
+                  {
+                    client: previewClient,
+                    workspaceId: previewWorkspaceId,
+                    sessionId: previewSessionId,
+                  },
+                  fileId,
+                )
+              : undefined;
+          }
+        : undefined,
+    [previewClient, previewSessionId, previewWorkspaceId],
+  );
+  if (resources.length === 0 || !onRemove) return null;
+  // Restored files show exactly like files attached here: a stored image
+  // loads its picture from the server on every device and after a reload.
+  const fileEntries = stored.ready
+    ? restoredFiles.flatMap(({ fileId, index }) => {
+        const file = stored.files.get(fileId);
+        return file ? [{ index, attachment: restoredFileAttachment(index, file) }] : [];
+      })
+    : [];
+  const shownFileIds = new Set(fileEntries.map((entry) => entry.attachment.file.id));
+  const otherEntries = resources.flatMap((resource, index) =>
+    resource.kind !== "file" ||
+    (stored.ready && !uploadedFileIds.has(resource.fileId) && !shownFileIds.has(resource.fileId))
+      ? [{ resource, index }]
+      : [],
+  );
+  const indexById = new Map(fileEntries.map((entry) => [entry.attachment.id, entry.index]));
+  fileIdByIdRef.current = new Map(
+    fileEntries.map((entry) => [entry.attachment.id, entry.attachment.file.id]),
+  );
+  return (
+    <>
+      {fileEntries.length > 0 ? (
+        <AttachmentChips
+          attachments={fileEntries.map((entry) => entry.attachment)}
+          messages={controller.messages}
+          disabled={controller.disabled}
+          onRemove={(id) => {
+            const index = indexById.get(id);
+            if (index !== undefined) onRemove(index);
+          }}
+          onRetainPreview={noRetainedPreview}
+          onLoadPreview={loadPreview}
+        />
+      ) : null}
+      {otherEntries.length > 0 ? (
+        <RestoredResourceChips
+          entries={otherEntries}
+          messages={controller.messages}
+          onRemove={onRemove}
+        />
+      ) : null}
+    </>
+  );
+}
+
+const noRetainedPreview = () => undefined;
+
+function restoredFileAttachment(
+  index: number,
+  file: FileAsset,
+): UseFileAttachmentsResult["attachments"][number] & { file: FileAsset } {
+  return {
+    id: `restored-resource:${index}:${file.id}`,
+    name: file.filename,
+    contentType: file.contentType,
+    sizeBytes: file.sizeBytes,
+    status: "ready",
+    file,
+    ...(file.appShot ? { appShot: file.appShot } : {}),
+  };
 }
 
 export function Attachments() {
@@ -2058,11 +2158,11 @@ function blockerHref(
 }
 
 function RestoredResourceChips({
-  resources,
+  entries,
   messages,
   onRemove,
 }: {
-  resources: ComposerState["restoredResources"];
+  entries: Array<{ resource: ComposerState["restoredResources"][number]; index: number }>;
   messages: ChatComposerMessages;
   onRemove: (index: number) => void;
 }) {
@@ -2071,7 +2171,7 @@ function RestoredResourceChips({
       className="flex flex-wrap gap-1.5 border-b border-og-border px-3 py-2"
       aria-label={messages.restoredResourcesLabel}
     >
-      {resources.map((resource, index) => (
+      {entries.map(({ resource, index }) => (
         <span
           key={`${resource.kind}-${resource.kind === "file" ? resource.fileId : resource.uri}`}
           className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-og-md border border-og-border bg-og-surface-2 px-2 py-1 text-og-xs text-og-fg-muted"
