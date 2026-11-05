@@ -1,5 +1,6 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { SLACK_AGENT_OPEN_LABEL, SLACK_AGENT_OPEN_NARROWED_NOTICE } from "@opengeni/contracts";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -97,7 +98,7 @@ test("turning Slack on shows the handle people ask it with", async () => {
   expect(container.querySelector("[data-agent-slack-handle]")?.textContent).toBe(
     "@Opengeni +data-team",
   );
-  expect(container.textContent).toContain("Anyone in Slack can use this agent");
+  expect(container.textContent).toContain(SLACK_AGENT_OPEN_LABEL);
   expect(container.textContent).toContain("Introduce in channels");
 });
 
@@ -153,14 +154,31 @@ test("open use needs an organization admin; Only me agents can't be turned on", 
   };
   let introduced = "";
   const container = await render(onAgent, client, (id) => (introduced = id));
-  expect(
-    toggle(container, "Anyone in Slack can use this agent").getAttribute("aria-disabled"),
-  ).toBe("true");
+  expect(toggle(container, SLACK_AGENT_OPEN_LABEL).getAttribute("aria-disabled")).toBe("true");
   const introduce = [...container.querySelectorAll("button")].find(
     (element) => element.textContent?.trim() === "Introduce",
   )!;
   await act(async () => introduce.click());
   expect(introduced).toBe(CONNECTION_ID);
+  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
+  await cleanup?.();
+
+  // An agent open now says open use narrowed to linked organization members.
+  const open = availability({ open: true });
+  const openContainer = await render(makeAgent({ slack: [open] }), {
+    listAgentSlackInstalls: async () => ({
+      installs: [
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: open,
+        },
+      ],
+      routingEnabled: true,
+    }),
+  });
+  expect(openContainer.textContent).toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
   await cleanup?.();
 
   const privateAgent = makeAgent({ visibility: "private" });

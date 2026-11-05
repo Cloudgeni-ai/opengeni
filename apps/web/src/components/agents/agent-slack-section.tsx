@@ -6,6 +6,7 @@
 import { useState } from "react";
 import {
   SLACK_AGENT_OPEN_LABEL,
+  SLACK_AGENT_OPEN_NARROWED_NOTICE,
   slackAgentNameProblemText,
   slackAgentOpenDisclosure,
   type SlackAgentNameProblem,
@@ -185,6 +186,9 @@ function InstallRow({
               />
             }
           />
+          {availability.open ? (
+            <Notice className="my-3">{SLACK_AGENT_OPEN_NARROWED_NOTICE}</Notice>
+          ) : null}
           {canManage ? (
             <SettingRow
               label="Introduce in channels"
