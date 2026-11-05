@@ -201,24 +201,18 @@ impl Pool {
         for completed in message.of("JobCompleted") {
             let result = completed.result.as_deref().unwrap_or("?");
             let job = completed.job_display_name.as_deref().unwrap_or("?");
-            match completed
-                .runner_name
-                .as_deref()
-                .filter(|name| !name.is_empty())
-            {
-                Some(name) => {
-                    tracing::info!(runner = %name, result, job, "a job ended; its sandbox goes");
-                    self.end(name).await;
-                }
-                None => {
-                    self.owed = self.owed.saturating_add(1).min(self.settings.max);
-                    tracing::info!(
-                        result,
-                        job,
-                        owed = self.owed,
-                        "GitHub took back a job no runner took in time; a fresh runner starts for it"
-                    );
-                }
+            let runner = completed.runner_name.as_deref();
+            if let Some(name) = runner.filter(|name| !name.is_empty()) {
+                tracing::info!(runner = %name, result, job, "a job ended; its sandbox goes");
+                self.end(name).await;
+            } else {
+                self.owed = self.owed.saturating_add(1).min(self.settings.max);
+                tracing::info!(
+                    result,
+                    job,
+                    owed = self.owed,
+                    "GitHub took back a job no runner took in time; a fresh runner starts for it"
+                );
             }
         }
         if let Some(statistics) = message.statistics {
