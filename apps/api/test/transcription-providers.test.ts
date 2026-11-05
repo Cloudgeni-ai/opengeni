@@ -4,8 +4,10 @@ import { TranscriptionServiceError } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   createTranscriptionService,
+  hedgedProviderRequest,
   orderedProviders,
   remainingTranscriptionProviderRequestMilliseconds,
+  transcriptionHedgeMilliseconds,
 } from "@opengeni/core/transcription-service";
 
 // These tests use fake databases; the workspace's EU-only setting is off.
@@ -163,6 +165,114 @@ describe("transcription providers", () => {
       }),
     ).rejects.toMatchObject({ code: "timeout", retryable: true });
     expect(providerSignal?.aborted).toBe(true);
+  });
+
+  test("a request stuck at the provider is sent once more, and the first answer is used", async () => {
+    const sent: Array<{ requestId: string | null; signal: AbortSignal | undefined }> = [];
+    const logged: string[] = [];
+    const service = createTranscriptionService({
+      settings: testSettings({ voiceInputProviderOrder: "openai" }),
+      db: {} as never,
+      hedgeAfterMilliseconds: () => 10,
+      log: (message) => logged.push(message),
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        sent.push({
+          requestId: request.headers.get("x-opengeni-request-id"),
+          signal: init?.signal ?? undefined,
+        });
+        if (sent.length === 1) {
+          // Stuck until it is cancelled.
+          await new Promise<never>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        return Response.json({ text: "hello again", language: "en" });
+      },
+    });
+    const result = await service.transcribe({
+      workspaceId: "workspace",
+      accountId: "account",
+      audio,
+      mimeType: "audio/webm",
+      durationSeconds: 3,
+      requestId: "stuck",
+    });
+    expect(result.text).toBe("hello again");
+    expect(sent.map((item) => item.requestId)).toEqual(["stuck", "stuck:again"]);
+    // The stuck one is cancelled once the other answered.
+    expect(sent[0]!.signal?.aborted).toBe(true);
+    expect(logged).toEqual(["Transcription provider is slow; sent the audio again"]);
+  });
+
+  test("a request that answers in time, or fails at once, is sent only once", async () => {
+    let sends = 0;
+    const answer = await hedgedProviderRequest({
+      send: async () => {
+        sends += 1;
+        return "quick";
+      },
+      signal: new AbortController().signal,
+      requestId: "quick",
+      hedgeAfterMilliseconds: 20,
+    });
+    expect(answer).toBe("quick");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(sends).toBe(1);
+    await expect(
+      hedgedProviderRequest({
+        send: async () => {
+          sends += 1;
+          throw new Error("refused");
+        },
+        signal: new AbortController().signal,
+        requestId: "refused",
+        hedgeAfterMilliseconds: 20,
+      }),
+    ).rejects.toThrow("refused");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(sends).toBe(2);
+  });
+
+  test("a slow request that then fails waits for the second one; both failing is a failure", async () => {
+    const sentIds: string[] = [];
+    const answer = await hedgedProviderRequest({
+      send: async (_signal, requestId) => {
+        sentIds.push(requestId);
+        if (sentIds.length === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          throw new Error("first failed late");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return "second";
+      },
+      signal: new AbortController().signal,
+      requestId: "late",
+      hedgeAfterMilliseconds: 10,
+    });
+    expect(answer).toBe("second");
+    expect(sentIds).toEqual(["late", "late:again"]);
+    await expect(
+      hedgedProviderRequest({
+        send: async (_signal, requestId) => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          throw new Error(`failed ${requestId}`);
+        },
+        signal: new AbortController().signal,
+        requestId: "both",
+        hedgeAfterMilliseconds: 10,
+      }),
+    ).rejects.toThrow("failed both");
+  });
+
+  test("a minute of audio waits 20 s before it is sent again", () => {
+    expect(transcriptionHedgeMilliseconds(0)).toBe(5_000);
+    expect(transcriptionHedgeMilliseconds(60)).toBe(20_000);
+    expect(transcriptionHedgeMilliseconds(600)).toBe(155_000);
   });
 
   test("rejects a late provider completion after the server deadline", async () => {

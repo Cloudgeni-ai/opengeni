@@ -59,6 +59,11 @@ export function createTranscriptionService(input: {
   probeCodex?: SpeechToTextDeploymentOptions["probeCodex"];
   /** Test seam for exercising timeout and late-completion behavior quickly. */
   providerRequestTimeoutMilliseconds?: number;
+  /**
+   * How long a provider request may go unanswered before the same audio is
+   * sent once more (null: never); defaults to `transcriptionHedgeMilliseconds`.
+   */
+  hedgeAfterMilliseconds?: (audioSeconds: number) => number | null;
   /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
   now?: () => Date;
   /** Credit admission/settlement for deployment-funded providers. */
@@ -88,6 +93,7 @@ export function createTranscriptionService(input: {
   };
   const providerRequestTimeoutMilliseconds =
     input.providerRequestTimeoutMilliseconds ?? TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS;
+  const hedgeAfter = input.hedgeAfterMilliseconds ?? transcriptionHedgeMilliseconds;
   const now = input.now ?? (() => new Date());
   const log =
     input.log ??
@@ -426,9 +432,8 @@ export function createTranscriptionService(input: {
         });
       }
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
-      let result: RecordingTranscriptionResult;
-      try {
-        result = await provider.provider.transcribe(
+      const send = (signal: AbortSignal, requestId: string) =>
+        provider.provider.transcribe(
           {
             audio: {
               bytes: audio,
@@ -443,16 +448,35 @@ export function createTranscriptionService(input: {
             provider.model.capabilities.keyterms
               ? { keyterms: request.keyterms }
               : {}),
-            signal: deadline.signal,
+            signal,
             scope: {
               accountId: request.accountId,
               workspaceId: request.workspaceId,
               subjectId: request.subjectId,
-              requestId: request.requestId,
+              requestId,
             },
           },
           credentials.credentials,
         );
+      let result: RecordingTranscriptionResult;
+      try {
+        // A provider now and then sits on one request for minutes while the
+        // same audio sent again answers in seconds: one that is far slower
+        // than usual gets a second, identical request, and whichever answers
+        // first is used (and charged once).
+        result = await hedgedProviderRequest({
+          send,
+          signal: deadline.signal,
+          requestId: request.requestId,
+          hedgeAfterMilliseconds: audioSeconds > 0 ? hedgeAfter(audioSeconds) : null,
+          onHedge: (waitedMilliseconds) =>
+            log("Transcription provider is slow; sent the audio again", {
+              providerId: provider.id,
+              model: provider.model.model,
+              audioSeconds: Math.round(audioSeconds * 10) / 10,
+              waitedMilliseconds,
+            }),
+        });
         if (deadline.timedOut && !request.signal?.aborted) {
           throw new TranscriptionServiceError({
             code: "timeout",
@@ -676,6 +700,84 @@ export function remainingTranscriptionProviderRequestMilliseconds(
   now: Date,
 ): number {
   return providerDeadlineAt.getTime() - now.getTime();
+}
+
+/** A provider request unanswered for this long beyond its usual time is sent again. */
+const TRANSCRIPTION_HEDGE_BASE_MILLISECONDS = 5_000;
+
+/**
+ * How long a dictation request may go unanswered before the same audio is
+ * sent once more: five seconds plus a quarter of the audio's length (20 s
+ * for a minute). Providers usually answer a minute of audio in one to four
+ * seconds, so this only catches a request that is stuck.
+ */
+export function transcriptionHedgeMilliseconds(audioSeconds: number): number {
+  return Math.round(TRANSCRIPTION_HEDGE_BASE_MILLISECONDS + audioSeconds * 250);
+}
+
+/**
+ * Send a provider request, and if it hasn't answered after
+ * `hedgeAfterMilliseconds`, send it once more under its own request id. The
+ * first answer wins and the other request is cancelled. A failure waits for
+ * the other request while it is still out; with none out it is the result.
+ */
+export async function hedgedProviderRequest<T>(input: {
+  send: (signal: AbortSignal, requestId: string) => Promise<T>;
+  signal: AbortSignal;
+  requestId: string;
+  hedgeAfterMilliseconds: number | null;
+  onHedge?: (waitedMilliseconds: number) => void;
+}): Promise<T> {
+  if (input.hedgeAfterMilliseconds === null) return await input.send(input.signal, input.requestId);
+  const hedgeAfterMilliseconds = input.hedgeAfterMilliseconds;
+  const controllers: AbortController[] = [];
+  const abortAll = () => {
+    for (const controller of controllers) controller.abort(input.signal.reason);
+  };
+  input.signal.addEventListener("abort", abortAll, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      let out = 0;
+      let settled = false;
+      let firstFailure: { error: unknown } | null = null;
+      const start = (requestId: string) => {
+        const controller = new AbortController();
+        controllers.push(controller);
+        if (input.signal.aborted) controller.abort(input.signal.reason);
+        out += 1;
+        input.send(controller.signal, requestId).then(
+          (value) => {
+            out -= 1;
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          },
+          (error: unknown) => {
+            out -= 1;
+            firstFailure ??= { error };
+            if (settled || out > 0) return;
+            // Failed before a second request was due: that is the answer.
+            settled = true;
+            reject(firstFailure.error);
+          },
+        );
+      };
+      start(input.requestId);
+      timer = setTimeout(() => {
+        if (settled || input.signal.aborted) return;
+        input.onHedge?.(hedgeAfterMilliseconds);
+        start(`${input.requestId}:again`);
+      }, hedgeAfterMilliseconds);
+    });
+  } finally {
+    clearTimeout(timer);
+    input.signal.removeEventListener("abort", abortAll);
+    // The request that lost is no longer wanted.
+    for (const controller of controllers) {
+      controller.abort(new DOMException("Another request answered first", "AbortError"));
+    }
+  }
 }
 
 function createProviderRequestDeadline(
