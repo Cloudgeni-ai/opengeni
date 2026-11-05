@@ -6,17 +6,11 @@
 
 import { createHash } from "node:crypto";
 import type { CreditDebitAttribution } from "@opengeni/db";
-import type { PreparedAudioFormat } from "./recording-audio";
+import { SPEECH_PCM_FORMAT, type PreparedAudioFormat } from "./recording-audio";
 import type { PcmWav } from "./dictation-pieces";
 
 /** A dictation's audio for cutting and hearing: 16 kHz mono 16-bit PCM. */
-export const DICTATION_PCM_FORMAT: PreparedAudioFormat = {
-  extension: "wav",
-  mimeType: "audio/wav",
-  muxer: "wav",
-  codec: "pcm_s16le",
-  encoderArgs: ["-ar", "16000", "-ac", "1"],
-};
+export const DICTATION_PCM_FORMAT: PreparedAudioFormat = SPEECH_PCM_FORMAT;
 
 /** The model and options a dictation is heard with, as the API chose them. */
 export type DictationListeningChoice = {
