@@ -1029,16 +1029,15 @@ The clone hook runs again on every turn and never deletes a repository folder
 that may hold work. A folder that another user owns (Git reports "dubious
 ownership", for example after `chown -R` on the chat's workspace machine) is
 added to that machine's global `safe.directory` and kept as it is. A folder that
-is not a readable work
-tree (a corrupt `.git`, or an interrupted clone), or that was cloned for a
-different `expectedCommitSha` than the repository now has, is renamed to the
-sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>` (with a
-numeric suffix if that name exists) and a fresh clone takes its place. A pinned
-clone records its commit as `opengeni.materializedCommit` in the repository's
-Git config, so the agent's own commits and branches stay in place while the pin
-is unchanged. Folders cloned before that record count while `HEAD` is the pin
-or built on it. The model is told where the
-moved copy is, and the `repository-clone` `sandbox.operation.completed` event
+is not a readable work tree (a corrupt `.git`, or an interrupted clone), or that
+was cloned for a different `expectedCommitSha` than the repository now has, is
+renamed to the sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>`
+(with a numeric suffix if that name exists) and a fresh clone takes its place. A
+pinned clone records its commit as `opengeni.materializedCommit` in the
+repository's Git config, so the agent's own commits and branches stay in place
+while the pin is unchanged. Folders cloned before that record count while `HEAD`
+is the pin or built on it. The model is told where the moved copy is, and the
+`repository-clone` `sandbox.operation.completed` event
 lists each move in `recoveredRepositories` as `{ path, movedTo }`
 (workspace-relative). Only an empty folder, Opengeni's own temporary clone, or an
 untouched empty-remote stub is removed.
