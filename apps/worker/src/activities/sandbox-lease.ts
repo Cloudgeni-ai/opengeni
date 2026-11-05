@@ -81,6 +81,7 @@ import {
   listEndedEpochSandboxSetupUncertainties,
   reconcileCompletedSandboxSetup,
   readLease,
+  releaseSandboxProcessStartReplacementWaiters,
   settleEndedEpochWorkspaceBlockers,
   readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
@@ -486,6 +487,22 @@ export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
 export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = CONNECTED_COMMAND_CLAIM_TTL_MS;
+
+const drainCaptureFailures = new WeakSet<object>();
+
+/** Record that this drain failed because the box's workspace could not be saved. */
+function markSandboxDrainCaptureFailure(error: unknown): void {
+  if (typeof error === "object" && error !== null) drainCaptureFailures.add(error);
+}
+
+/**
+ * Whether a drain failed because the box's workspace could not be saved (the
+ * provider capture rejected or timed out), as opposed to a failure after a
+ * save, such as termination or publication.
+ */
+export function isSandboxDrainCaptureFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && drainCaptureFailures.has(error);
+}
 
 export class SandboxProviderCaptureTimeoutError extends Error {
   readonly name = "SandboxProviderCaptureTimeoutError";
@@ -1098,6 +1115,27 @@ export function createSandboxLeaseActivities(
           );
         } else {
           observability.warn("sandbox reaper: per-sandbox drain failed", details);
+        }
+        // Turns waiting on the replacement of a box that could not start
+        // programs stop with clear copy instead of waiting on saves that keep
+        // failing. Only a failed save (or the backoff after one) releases
+        // them: a failure after the save (termination, publication) is
+        // finished by the next sweep. The box stays draining and fenced; the
+        // drain policy is unchanged.
+        if (
+          isSandboxDrainCaptureFailure(error) ||
+          error instanceof SandboxDrainCaptureBackoffError
+        ) {
+          await releaseSandboxProcessStartReplacementWaiters(db, {
+            workspaceId: row.workspaceId,
+            sandboxGroupId: row.sandboxGroupId,
+            leaseEpoch: row.leaseEpoch,
+          }).catch((releaseError) => {
+            observability.warn("sandbox reaper: replacement waiters not released", {
+              ...details,
+              releaseError: errorMessage(releaseError),
+            });
+          });
         }
         // After a settled snapshot failure, ask Temporal to come back when the
         // backoff ends rather than on its short default schedule. A snapshot
@@ -5546,6 +5584,7 @@ export async function terminateProviderBox(
       observeFailedCaptureSize();
     }
     // NEVER terminate a box whose snapshot we could not capture.
+    markSandboxDrainCaptureFailure(error);
     throw error;
   }
 
