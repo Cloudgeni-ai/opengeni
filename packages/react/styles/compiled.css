@@ -1310,6 +1310,9 @@
 :where(.og-root).mt-12,:where(.og-root) .mt-12 {
     margin-top: calc(var(--spacing) * 12);
   }
+:where(.og-root).mt-\[0\.2em\],:where(.og-root) .mt-\[0\.2em\] {
+    margin-top: 0.2em;
+  }
 :where(.og-root).mt-\[0\.55em\],:where(.og-root) .mt-\[0\.55em\] {
     margin-top: 0.55em;
   }

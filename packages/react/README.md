@@ -224,7 +224,12 @@ someone else's product with zero styling:
   to whom a paused goal or a helper-agent count means nothing, pass
   `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
   `OpenGeniChat`). Queued messages, approvals and the agent's questions still
-  show, and the goal is not read at all.
+  show, and the goal is not read at all. Turn rows then show only their status,
+  and an automation run shows as its one line and its answer.
+- **Automation runs read as what happened**: a run shows one line, the
+  automation's name and what the event that started it says, never its
+  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
+  person) is not drawn at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available

@@ -5,6 +5,7 @@ import type {
   TimelineAnnotationSource,
 } from "@opengeni/sdk";
 import {
+  automationRunOutcomesOnly,
   buildTimeline,
   groupTimeline,
   useTimelinePauses,
@@ -19,12 +20,14 @@ import {
 } from "@opengeni/react/session";
 import {
   agentWorkHumanInputSummary,
+  automationRunLine,
   compactedLandmarkCount,
   durationBetween,
   flattenActivityItems,
   formatClockTime,
   formatRelativeTime,
   isAgentWorkHumanInput,
+  isAutomationRunBatch,
   isPreparingWork,
   timelineTurnsWithOutput,
   noticeDisplayText,
@@ -34,6 +37,7 @@ import {
   recordedWaitSummaryText,
   questionNavTarget,
   readableWorkDefaultOpen,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
   SESSION_STATUS_PRESENTATION,
@@ -144,6 +148,14 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   pause?: TimelineLivePause | null | undefined;
   facets?: TurnSummaryFacetConfiguration | undefined;
   /**
+   * Show how the agent works on each turn row. Defaults to true. With `false`
+   * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
+   * step under it and no step facets (yours included). The steps stay behind
+   * the row for anyone who opens it. `NativeSessionScreen` passes its own
+   * `agentSignals` here.
+   */
+  agentSignals?: boolean | undefined;
+  /**
    * Your own mark (a small animated logo or mascot) at the leading edge of the
    * live "Working" / "Waiting" / "Paused" row. Called with the row's state
    * while the turn is live, and no longer once it settles. Draw it about the
@@ -224,10 +236,12 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
-  const items = useMemo(
-    () => props.items ?? buildTimeline(t, props.events ?? []),
-    [t, props.items, props.events],
-  );
+  const items = useMemo(() => {
+    const built = props.items ?? buildTimeline(t, props.events ?? []);
+    // A person who never sees the agent's work reads an automation run as
+    // its line and its answer only.
+    return props.agentSignals === false ? automationRunOutcomesOnly(built) : built;
+  }, [t, props.items, props.events, props.agentSignals]);
   const pauses = useTimelinePauses(props.events, props.pause);
   const groups = useMemo(
     () => groupTimeline(t, items, { readableTurns: true, pauses }),
@@ -637,7 +651,9 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const context: GroupContext = {
     turnsWithOutput,
-    facets: props.facets,
+    // Without agent signals a turn row is only its status ("Working · 8s").
+    facets: props.agentSignals === false ? STATUS_ONLY_FACETS : props.facets,
+    agentSignals: props.agentSignals !== false,
     renderLiveMark: props.renderLiveMark,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
@@ -851,9 +867,12 @@ function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPr
   );
 }
 
+const STATUS_ONLY_FACETS: TurnSummaryFacetConfiguration = { replace: [] };
+
 type GroupContext = {
   turnsWithOutput: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  agentSignals: boolean;
   renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
@@ -917,6 +936,7 @@ function TimelineGroupView({
       )
         return null;
       if (group.work) {
+        if (!context.agentSignals && readableWorkIsEmpty(group)) return null;
         if (isPreparingWork(group, { startupDetails: false, startupDismissed })) {
           return (
             <ActivityRail
@@ -933,9 +953,10 @@ function TimelineGroupView({
                 kind: "working",
                 since: base.since,
                 label: base.label,
-                preview: readableWorkShowsPreview(group) ? (
-                  <RollingActivity items={group.items} showCount={false} />
-                ) : undefined,
+                preview:
+                  context.agentSignals && readableWorkShowsPreview(group) ? (
+                    <RollingActivity items={group.items} showCount={false} />
+                  ) : undefined,
               }
             : base.kind === "waiting"
               ? {
@@ -1007,7 +1028,9 @@ function TimelineGroupView({
           failureText={group.failureText}
           defaultOpen={group.outcome === "failed" || image ? true : undefined}
           liveHeader={
-            !image && !group.outcome ? <RollingActivity items={group.items} /> : undefined
+            context.agentSignals && !image && !group.outcome ? (
+              <RollingActivity items={group.items} />
+            ) : undefined
           }
           foldKey={group.id}
           facets={context.facets}
@@ -1151,9 +1174,55 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       // An agent's connect request becomes a card the person can finish
       // here; anything else (a lapsed account, unavailable tools) is a row.
       return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
+    case "machine-input-batch":
+      // An automation that acted here says what happened in one line; other
+      // machine updates stay out of the native chat.
+      return isAutomationRunBatch(item.members) ? <AutomationRunRow item={item} /> : null;
     default:
       return null;
   }
+}
+
+/**
+ * An automation acted in this chat: one quiet line saying what happened,
+ * above the agent's answer, never the automation's instructions. As on web.
+ */
+function AutomationRunRow({
+  item,
+}: {
+  item: Extract<TimelineItem, { kind: "machine-input-batch" }>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const line = automationRunLine(t, item.members);
+  const event = item.members.some((member) => (member.automation?.eventCount ?? 0) > 0);
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${line}, ${t("messageTimeline.receivedClocktime", { clockTime: nativeClockTime(t, item.occurredAt) })}`}
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        gap: 6,
+        paddingHorizontal: 12,
+      }}
+    >
+      <Icon name={event ? "zap" : "calendar-clock"} size={14} color={theme.colors["fg-subtle"]} />
+      <Text
+        numberOfLines={2}
+        style={{
+          ...fontStyle(theme),
+          flexShrink: 1,
+          textAlign: "center",
+          fontSize: theme.size.sm,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {line}
+      </Text>
+    </View>
+  );
 }
 
 /**

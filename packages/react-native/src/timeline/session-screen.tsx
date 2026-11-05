@@ -128,10 +128,12 @@ export interface NativeSessionScreenProps extends Omit<
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
   /**
-   * Show how the agent works behind the scenes above the composer: the goal,
-   * agents and commands chips. Defaults to true. Set `false` for end users to
-   * whom a paused goal, a count of helper agents or a running command means
-   * nothing; queued messages, approvals and the agent's questions still show.
+   * Show how the agent works behind the scenes: above the composer, the goal,
+   * agents and commands chips; on each turn row, the live step and step
+   * facets. Defaults to true. Set `false` for end users to whom a paused
+   * goal, a count of helper agents, a running command or a tool step means
+   * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+   * Queued messages, approvals and the agent's questions still show.
    */
   agentSignals?: boolean | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
@@ -365,6 +367,7 @@ function SessionScreenBody({
         annotationRevealRef={annotationReveal}
         followLatestSignal={followLatestSignal}
         {...timelineProps}
+        agentSignals={agentSignals}
         hasOlder={controller.hasOlder}
         loadingOlder={controller.loadingOlder}
         onLoadOlder={controller.loadOlder}

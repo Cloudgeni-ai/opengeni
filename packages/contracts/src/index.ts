@@ -9,6 +9,8 @@ export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
+export * from "./no-reply";
+import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
   ApiIntegrationAuthPreview,
@@ -11746,6 +11748,14 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurre
 export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
   "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
 
+/**
+ * An automation acts in a person's chat; a run with nothing for them should
+ * not interrupt it. The chat leaves out a run whose whole final response is
+ * the no-reply token (see `isNoReplyText`). Rendered only into new
+ * occurrences; delivered ones keep their text.
+ */
+export const SCHEDULED_OCCURRENCE_QUIET_GUIDANCE = `The person in this chat sees your final response. When this occurrence leaves nothing for them to see or do (nothing new happened, or nothing needed doing), make your entire final response exactly ${NO_REPLY_SENTINEL} and the run stays out of their chat. Never answer ${NO_REPLY_SENTINEL} for a blocker, a failure, a question for them, or something you did that they would want to know about.`;
+
 /** The model-facing name of the tool that reads stored events in full. */
 export const EVENTS_GET_MODEL_TOOL_NAME = "opengeni__events_get" as const;
 
@@ -11835,6 +11845,7 @@ function renderScheduledOccurrenceTaskBatch(
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
     SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
+    SCHEDULED_OCCURRENCE_QUIET_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [

@@ -2243,6 +2243,15 @@ export const englishMessages = {
   "machineInputDisplay.agentWaitingForCapacity": "Agent waiting for capacity",
   "machineInputDisplay.automationRun": "Automation run",
   "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
+  /**
+   * The one line a chat shows when an automation acted in it: the automation's
+   * name, then what the event that started it says, e.g. "New task assigned:
+   * Replace the gutter".
+   */
+  "machineInputDisplay.automationRunWhat": "{name}: {what}",
+  /** As above when several events started the run; count is the others. */
+  "machineInputDisplay.automationRunWhatAndMore_one": "{name}: {what} and {count} more",
+  "machineInputDisplay.automationRunWhatAndMore_other": "{name}: {what} and {count} more",
   "machineInputDisplay.commandResultReceived": "Command result received",
   "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
