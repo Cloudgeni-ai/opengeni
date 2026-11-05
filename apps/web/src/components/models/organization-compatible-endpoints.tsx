@@ -28,6 +28,7 @@ import {
 } from "@opengeni/react/app/lib/shared-query";
 import { ModelsFormPage, ProviderTile } from "@opengeni/react/app/components/models/models-ui";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { providerRefusalText } from "@/components/organization-model-provider-connection";
 import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
@@ -42,9 +43,9 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
 /** How the Connect provider list names an endpoint. */
 export const COMPATIBLE_ENDPOINT_CHOICE = {
-  title: "OpenAI-compatible endpoint",
-  summary: "Pay per token through your own provider",
-  note: "Any API in OpenAI’s format: a base URL, an API key and a model ID",
+  title: "Custom endpoint",
+  summary: "Pay per token through any OpenAI-compatible API",
+  note: "A model host or your own server",
 } as const;
 
 /** An endpoint's name: the one it was given, or its address. */
@@ -110,19 +111,6 @@ function writeEndpoint(
     ...(next.status === "active" ? [next] : []),
   ]);
   void invalidateSharedQueries(client, ["model-settings"]);
-}
-
-/** The endpoint's own sentence when the API refused it, or plain advice. */
-function endpointErrorText(error: unknown): string {
-  if (error instanceof OpenGeniApiError) {
-    try {
-      const body = JSON.parse(error.body) as { error?: { message?: unknown } };
-      if (typeof body.error?.message === "string" && error.status < 500) return body.error.message;
-    } catch {
-      /* Keep the plain advice when the body has no structured message. */
-    }
-  }
-  return userErrorText(error);
 }
 
 /** Retry a request whose answer was lost; its operation id makes that safe. */
@@ -229,7 +217,7 @@ export function useCompatibleEndpointConnection({
       return true;
     } catch (error) {
       toast.error(`Couldn't replace the ${config.title} key`, {
-        description: endpointErrorText(error),
+        description: providerRefusalText(error),
       });
       return false;
     } finally {
@@ -289,7 +277,7 @@ export function useCompatibleEndpointConnection({
         description: "It can now appear in model pickers where the endpoint is available.",
       });
     } catch (error) {
-      toast.error(`Couldn't add ${submitted}`, { description: endpointErrorText(error) });
+      toast.error(`Couldn't add ${submitted}`, { description: providerRefusalText(error) });
     } finally {
       if (mounted.current) {
         setModelBusy(false);
@@ -405,21 +393,54 @@ function ApiFormatControl({
   );
 }
 
+/** What a custom endpoint's connect step sends; the API checks it before saving. */
+export type CompatibleEndpointRequest = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api: CompatibleModelApi;
+  label?: string | undefined;
+};
+
 /**
- * Connect an OpenAI-compatible endpoint for the organization: which
- * workspaces can use it (`fields`), then its base URL, key and first model.
- * The API checks them with a short test request before anything is saved.
+ * Saves a custom endpoint where it is being connected, and returns its id
+ * and name. Throws the API's refusal when its check fails.
+ */
+export type ConnectCompatibleEndpoint = (
+  request: CompatibleEndpointRequest,
+  operationId: string,
+) => Promise<{ id: string; title: string }>;
+
+/** Connect an endpoint for the organization, keeping its cached list current. */
+export function organizationEndpointConnect(
+  endpoints: OrganizationCompatibleEndpoints,
+): ConnectCompatibleEndpoint {
+  const { client, organizationId } = endpoints;
+  return async (request, operationId) => {
+    const created = await once(() =>
+      client.createOrganizationCompatibleEndpoint(organizationId, { operationId, ...request }),
+    );
+    writeEndpoint(client, organizationId, created);
+    return { id: created.id, title: compatibleEndpointTitle(created) };
+  };
+}
+
+/**
+ * Connect a custom OpenAI-compatible endpoint: where it lives and who can use
+ * it (`fields`), then its base URL, key and first model. The API checks them
+ * with a short test request before anything is saved. The same step connects
+ * one for the organization or for one workspace (`connect`).
  */
 export function CompatibleEndpointConnectPage({
-  endpoints,
+  connect,
   fields,
   blockedReason,
   onClose,
   onConnected,
   afterSave,
 }: {
-  endpoints: OrganizationCompatibleEndpoints;
-  /** Fields above the endpoint's, such as which workspaces can use it. */
+  connect: ConnectCompatibleEndpoint;
+  /** Fields above the endpoint's: who can use it, or which workspace it belongs to. */
   fields?: ReactNode;
   /** Why it can't be connected yet (a choice above is incomplete). */
   blockedReason?: string | null;
@@ -428,7 +449,6 @@ export function CompatibleEndpointConnectPage({
   /** Runs once the endpoint is saved, before its page opens (the form stays pending). */
   afterSave?: ((connectionId: string) => Promise<void>) | undefined;
 }) {
-  const { client, organizationId } = endpoints;
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
@@ -447,7 +467,7 @@ export function CompatibleEndpointConnectPage({
     <ModelsFormPage
       connectStep
       headerAside={<ProviderTile provider="openai_compatible" />}
-      title="Connect an OpenAI-compatible endpoint"
+      title="Connect a custom endpoint"
       description="Use models from any API that follows OpenAI’s Chat Completions or Responses format, such as a model host or your own server. Usage is billed by that provider."
       onClose={onClose}
       submitLabel="Connect endpoint"
@@ -473,22 +493,16 @@ export function CompatibleEndpointConnectPage({
         const operationId = operation.current.id;
         const journey = beginIntegrationConnect("openai_compatible", "api_key");
         try {
-          const created = await once(() =>
-            client.createOrganizationCompatibleEndpoint(organizationId, {
-              operationId,
-              ...request,
-            }),
-          );
+          const created = await connect(request, operationId);
           journey.finish("connected");
-          writeEndpoint(client, organizationId, created);
           operation.current = null;
           connectedId.current = created.id;
           await afterSave?.(created.id);
-          toast.success(`${compatibleEndpointTitle(created)} connected`);
+          toast.success(`${created.title} connected`);
           return true;
         } catch (failure) {
           journey.finish(integrationConnectErrorOutcome(failure));
-          setError(endpointErrorText(failure));
+          setError(providerRefusalText(failure));
           return false;
         }
       }}

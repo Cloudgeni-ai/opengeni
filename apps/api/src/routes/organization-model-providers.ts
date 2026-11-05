@@ -215,6 +215,10 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       throw new HTTPException(422, {
         message: "An endpoint is only valid for an Azure OpenAI connection.",
       });
+    if (payload.models && kind !== "openai" && kind !== "azure_openai")
+      throw new HTTPException(422, {
+        message: "Only an OpenAI or Azure OpenAI connection saves models with its key.",
+      });
     if (payload.claudeIdentity)
       throw new HTTPException(422, {
         message: "Claude identity is only valid for subscription connections.",
@@ -230,12 +234,24 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       });
     // Sign in once before saving, so a wrong tenant, app or secret is caught
     // here instead of on the first turn. The token itself is not kept.
-    if (authentication)
-      await organizationAzureEntraSetupToken(
-        deps.settings,
-        azureEntraCredential(authentication),
+    const entraToken = authentication
+      ? await organizationAzureEntraSetupToken(
+          deps.settings,
+          azureEntraCredential(authentication),
+          deps.directModelFetch,
+        )
+      : null;
+    // Models saved with the key are checked with it first, with the same
+    // short request as adding one later, so nothing is saved if one fails.
+    for (const model of new Set(payload.models ?? [])) {
+      await verifyOrganizationDirectModel(
+        kind === "openai"
+          ? { provider: "openai", model }
+          : { provider: "azure_openai", model, endpoint: payload.endpoint! },
+        entraToken ?? apiKey,
         deps.directModelFetch,
       );
+    }
     const stored: OrganizationModelProviderCredential =
       authentication?.method === "entra_client_secret"
         ? {
@@ -261,6 +277,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         credentialDigest: organizationModelProviderCredentialDigest(credential),
         ...(kind === "azure_openai" ? { endpoint: payload.endpoint ?? null } : {}),
         ...(authMethod === "api_key" ? {} : { authMethod }),
+        ...(payload.models ? { models: payload.models } : {}),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}

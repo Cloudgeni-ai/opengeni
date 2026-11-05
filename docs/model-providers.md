@@ -248,11 +248,21 @@ singleton owns membership.
 ### Customer OpenAI and Azure OpenAI keys
 
 The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
-asks for an API key, with the model preselected and an optional Change model
-control. Azure asks for an API key, resource endpoint
-(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
-name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+organization setup and in **Models → Connect provider**. Connect provider lists
+the same providers, in the same order and with the same connect steps, on the
+organization's Models page and on a workspace's: what differs is only where
+the connection lives. Organization owners and admins connect an organization
+account and choose its **Available in** (starting from the workspace whose
+page they opened it from); a shared workspace's admins connect a key that
+belongs to that workspace; anyone else sees the API-key providers listed but
+disabled, with who can add them. OpenAI asks for an API key and a model
+(prefilled). Azure asks for the resource endpoint, the deployment name and an
+API key; pasting any address Azure shows for the resource (its
+`https://RESOURCE.openai.azure.com` endpoint, its Cognitive Services or Foundry
+endpoint, or a deployment's Target URI) is read as
+`https://RESOURCE.openai.azure.com`, and a Target URI also fills in the
+deployment name. A workspace's own keys are listed with its other accounts,
+where they can be disconnected. Both use Responses and ordinary function tools; arbitrary proxy endpoints
 are refused. Azure endpoint/deployment/API-version configuration remains available
 separately for deployment operators.
 
@@ -285,11 +295,12 @@ are not enabled implicitly for an arbitrary Azure deployment name.
 
 #### A workspace's own OpenAI-compatible endpoint
 
-The web console connects new OpenAI-compatible endpoints for the organization
-(see [Organization OpenAI-compatible endpoints](#organization-openai-compatible-endpoints)).
-Workspace-owned compatible connections made earlier, or through the
-Connections API below, keep working and stay listed on the workspace's Models
-page, where they can be disconnected. Such a connection is for any provider or
+A shared workspace's admins connect one from **Connect provider → Custom
+endpoint** on the workspace's Models page, with the same step organization
+owners and admins use for an
+[organization endpoint](#organization-openai-compatible-endpoints). It is
+listed with the workspace's other accounts, where it can be disconnected.
+Such a connection is for any provider or
 self-run server whose API follows OpenAI's Chat Completions or Responses
 format. It has an optional name, the API's HTTPS
 base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
@@ -351,7 +362,13 @@ the whole organization** in **Organization settings → Models**
 (`OrganizationModelProviderKind` `openai` and `azure_openai`).
 
 **OpenAI** stores only the encrypted API key and uses the official
-`https://api.openai.com/v1` Responses API with a bearer key. Admins add exact
+`https://api.openai.com/v1` Responses API with a bearer key. Connecting can
+name the first models in the same request (`models` on
+`PUT /v1/organizations/:id/model-providers/:kind`, OpenAI and Azure OpenAI
+only, up to 16): each is checked with the new key (or Entra sign-in) before
+anything is saved, a failure saves nothing, and they are saved with the key in
+one transaction, keeping any the organization already offers. The console
+always sends the first model, so a connected key is ready to use. Admins add exact
 OpenAI model IDs as the organization's models; each is checked with the
 organization's key before it is saved (422 on failure, 409 when OpenAI is not
 connected). Products are `organization-openai/<model>` (provider
@@ -429,8 +446,8 @@ reach and administration are the same as for a key connection.
 #### Organization OpenAI-compatible endpoints
 
 Organization owners/admins connect their own OpenAI-compatible endpoints from
-**Organization settings → Models → Connect provider → OpenAI-compatible
-endpoint**, the same list as the organization's other accounts, with the same
+**Organization settings → Models → Connect provider → Custom endpoint**,
+the same list as the organization's other accounts, with the same
 **Available in** step (`OrganizationModelProviderKind` `openai_compatible`).
 Unlike the other organization providers, an organization can connect several
 endpoints, for example two model hosts; each is its own connection, addressed
@@ -465,7 +482,10 @@ Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
 `loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
-provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`
+(onboarding); on the Models page, `ConnectPickerPage` in
+`apps/web/src/components/models/workspace-models-page.tsx` and a workspace's
+own keys in `apps/web/src/components/models/workspace-model-keys.tsx`.
 Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `withOrganizationDirectCredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
