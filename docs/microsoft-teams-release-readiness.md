@@ -136,8 +136,8 @@ ops turns them on. Operator-approved installers keep working alongside it.
    chat, or adds it in the personal scope. They get a welcome that says a
    Microsoft 365 Global Administrator or Teams Administrator connects Opengeni
    once for everyone, with a **Connect your organization** link. The link holds
-   a signed proof (ten minutes) of the Teams tenant, the Teams user and the 1:1
-   chat. Group chats and channels never get this reply.
+   a signed proof (one hour, enough to sign up for Opengeni and create a shared
+   workspace first) of the Teams tenant, the Teams user and the 1:1 chat. Group chats and channels never get this reply.
 2. The setup page requires the Opengeni browser sign-in of a human and a shared
    workspace they administer. Choosing **Connect workspace** starts a Microsoft
    sign-in (authorization code with PKCE) through the bot's Entra app, at the
@@ -165,18 +165,41 @@ Privileged Identity Management activates it first. Microsoft personal accounts
 
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
-that tenant), replace or take over an active connection, or move a tenant or
-workspace to another binding. An administrator of a tenant whose connection was
-disconnected may reconnect it only in its original workspace, and only as an
-Opengeni administrator of that workspace. Moving a connection remains
-unsupported. A setup proof is single-use (its nonce is recorded at install), and
-Microsoft codes are single-use and PKCE-bound.
+that tenant), replace, take over or move an active connection, or bind a
+workspace that is already bound to another tenant. Even two setups racing never
+rotate an active installation.
 
-Replies to tenants that have not connected are bounded on each API replica: one
-per person per ten minutes, six per person and 200 per tenant per day, and 2,000
-per hour overall. With self-serve on, a person in a tenant that isn't admitted
-gets a short not-available notice under the same limits; with it off, such
-messages are ignored as before.
+What a tenant administrator can do with a connection that already exists:
+
+- **Active**: nothing through self-serve. An Opengeni administrator of the bound
+  workspace can disconnect it there first.
+- **Disconnected, same workspace**: a Global Administrator or Teams
+  Administrator who is an Opengeni administrator of that workspace reconnects
+  it.
+- **Disconnected, another workspace**: only a Global Administrator can move it.
+  The old binding is deleted together with its account links and routes, and
+  the old workspace gets a `connection.disconnected` audit record with reason
+  `released_by_tenant_administrator`. This keeps a binding left behind by a
+  departed admin, consultant or trial from locking the organization out.
+
+A setup proof is single-use (its nonce is recorded at install), and Microsoft
+codes are single-use and PKCE-bound.
+
+Replies to tenants that have not connected are bounded on each API replica, in
+separate budgets so one kind can't use up another:
+
+- Connect cards for people who message the bot: one per person per ten minutes,
+  six per person and 200 per tenant per day, 2,000 per hour overall.
+- Welcomes when someone installs the app: one per person and 25 per tenant per
+  day, 500 per hour overall. A tenant that pre-installs the app for everyone
+  gets only a few.
+- With self-serve on, people in a tenant that isn't admitted get a short
+  not-available notice when they message the bot: one per person and 20 per
+  tenant per day, 200 per hour overall, never for installs. With it off, such
+  messages are ignored as before.
+
+The counters are in memory, so the limits apply per replica and reset on
+restart.
 
 ### Entra app configuration
 
@@ -212,7 +235,9 @@ Staging acceptance for self-serve, in the dedicated test tenant:
 5. A Teams Administrator (or Global Administrator) connects a shared workspace
    they administer, gets the confirmation in Teams, and can start work.
 6. After connection, other people get the account-link card rather than a setup
-   link, and a disconnected tenant reconnects only in its original workspace.
+   link.
+7. After disconnecting, a Teams Administrator can reconnect only in the original
+   workspace; a Global Administrator can move it to another shared workspace.
 
 ## Generate a package
 
@@ -377,9 +402,11 @@ References: [publisher verification](https://learn.microsoft.com/en-us/entra/ide
 
 ## Disable and recover
 
-The initial release keeps each tenant/workspace binding fixed. Disconnect pauses
-that binding; reconnect uses the same tenant and workspace. Disconnect does not
-permit transferring either side to another binding.
+Each tenant/workspace binding stays fixed while active. Disconnect pauses that
+binding; reconnect uses the same tenant and workspace. With self-serve setup, a
+Global Administrator of the tenant can move a disconnected binding to another
+workspace (see Self-serve organization setup); nothing else transfers either
+side.
 
 Remove the pilot/reviewer allowlists and keep broad switches false to close
 admission. Revoke a compromised credential at its Microsoft authority and rotate
@@ -400,8 +427,9 @@ Microsoft delivery.
 
 
 Disconnect disables the existing tenant/workspace binding and cancels pending work.
-Reconnect uses that same binding. Moving a Teams organization to a different
-workspace, or replacing the Teams organization bound to a workspace, is not supported.
+Reconnect uses that same binding. Replacing the Teams organization bound to a
+workspace is not supported; only a Global Administrator's self-serve setup moves
+a disconnected organization to a different workspace.
 The retained binding preserves existing conversation and delivery history.
 
 ## Approved group chats

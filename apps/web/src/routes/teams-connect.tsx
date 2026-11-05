@@ -173,7 +173,12 @@ export function TeamsConnectRoute() {
           setError(null);
           try {
             const api = teamsApi(client, workspaceId);
-            const { authorizationUrl } = await api.startMicrosoftSignIn(token);
+            const { authorizationUrl } = await api.startMicrosoftSignIn(token).catch((caught) => {
+              // An API without self-serve setup keeps the operator-approved flow.
+              if ((caught as { status?: unknown } | null)?.status === 404)
+                return { authorizationUrl: null };
+              throw caught;
+            });
             if (authorizationUrl) {
               savePendingTeamsSetup({ setupToken: token, workspaceId });
               window.location.assign(authorizationUrl);

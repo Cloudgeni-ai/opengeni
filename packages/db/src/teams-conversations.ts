@@ -109,6 +109,12 @@ export async function installTeamsBot(
     actorId: string;
     subjectId: string;
     nonce: string;
+    /**
+     * Self-serve setup connects a new organization or reactivates its own
+     * disconnected binding; it never rotates an active installation, even
+     * when two setups race.
+     */
+    requireInactive?: boolean;
   },
 ) {
   return withRlsContext(db, input, async (tx) => {
@@ -120,10 +126,23 @@ export async function installTeamsBot(
     );
     const rows = await rawRows<TeamsInstallation>(
       tx,
-      sql`insert into teams_bot_installations(tenant_id,account_id,workspace_id) values(${input.tenantId}::uuid,${input.accountId}::uuid,${input.workspaceId}::uuid)
+      input.requireInactive
+        ? sql`insert into teams_bot_installations(tenant_id,account_id,workspace_id) values(${input.tenantId}::uuid,${input.accountId}::uuid,${input.workspaceId}::uuid)
+    on conflict(tenant_id) do update set active=true,generation=gen_random_uuid() where teams_bot_installations.workspace_id=excluded.workspace_id and not teams_bot_installations.active returning *`
+        : sql`insert into teams_bot_installations(tenant_id,account_id,workspace_id) values(${input.tenantId}::uuid,${input.accountId}::uuid,${input.workspaceId}::uuid)
     on conflict(tenant_id) do update set active=true,generation=gen_random_uuid() where teams_bot_installations.workspace_id=excluded.workspace_id returning *`,
     );
-    if (!rows[0]) throw new Error("teams_tenant_already_bound");
+    if (!rows[0]) {
+      const [current] = await rawRows<{ workspace_id: string; active: boolean }>(
+        tx,
+        sql`select workspace_id,active from teams_bot_installations where tenant_id=${input.tenantId}::uuid`,
+      );
+      throw new Error(
+        current?.workspace_id === input.workspaceId && current.active
+          ? "teams_installation_already_active"
+          : "teams_tenant_already_bound",
+      );
+    }
     await tx.execute(
       sql`update teams_bot_inbox set state='failed',error_code='installation_replaced' where state='pending' and route_id in(select route_id from teams_bot_routes where tenant_id=${input.tenantId}::uuid and generation<>${rows[0].generation}::uuid)`,
     );
@@ -136,6 +155,36 @@ export async function installTeamsBot(
     );
     if (!linked.length) throw new Error("teams_identity_already_linked");
     return rows[0];
+  });
+}
+/**
+ * Removes a disconnected tenant binding from its workspace so a verified
+ * tenant administrator can connect the organization to another workspace.
+ * Deleting the installation also removes its account links and routes. The
+ * removal is audited in the old workspace. Returns false, changing nothing,
+ * when the binding was reactivated or changed after `i` was read.
+ */
+export async function releaseInactiveTeamsInstallation(
+  db: Database,
+  i: TeamsInstallation,
+  options: { audit?: DisconnectAuditActor | null } = {},
+): Promise<boolean> {
+  return teamsScoped(db, i, async (tx) => {
+    const released = await rawRows<{ tenant_id: string }>(
+      tx,
+      sql`delete from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid and generation=${i.generation}::uuid and not active returning tenant_id`,
+    );
+    if (!released.length) return false;
+    if (options.audit)
+      await insertDisconnectAuditEventInScope(tx, {
+        accountId: i.account_id,
+        workspaceId: i.workspace_id,
+        action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+        actor: options.audit,
+        target: { type: "teams_bot_installation", id: i.tenant_id, provider: "microsoft_teams" },
+        details: { reason: "released_by_tenant_administrator" },
+      });
+    return true;
   });
 }
 export async function linkTeamsActor(

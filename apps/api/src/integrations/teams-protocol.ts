@@ -281,6 +281,15 @@ const Proof = z
   })
   .strict();
 export type TeamsLinkProof = z.infer<typeof Proof>;
+/**
+ * Link proofs are short-lived. A setup proof also has to cover signing up for
+ * Opengeni, creating a shared workspace and the Microsoft sign-in; its
+ * single-use nonce still prevents replay.
+ */
+const PROOF_TTL_MS: Record<TeamsLinkProof["purpose"], number> = {
+  link: 10 * 60_000,
+  setup: 60 * 60_000,
+};
 export function mintTeamsProof(
   secret: string,
   input: Omit<TeamsLinkProof, "version" | "nonce" | "expiresAt">,
@@ -288,7 +297,12 @@ export function mintTeamsProof(
 ): string {
   const payload = Buffer.from(
     JSON.stringify(
-      Proof.parse({ ...input, version: 1, nonce: randomUUID(), expiresAt: now + 10 * 60_000 }),
+      Proof.parse({
+        ...input,
+        version: 1,
+        nonce: randomUUID(),
+        expiresAt: now + PROOF_TTL_MS[input.purpose],
+      }),
     ),
   ).toString("base64url");
   return `${payload}.${createHmac("sha256", secret).update(`teams-link-v1:${payload}`).digest("base64url")}`;
@@ -302,7 +316,7 @@ export function verifyTeamsProof(secret: string, token: string, now = Date.now()
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
     throw new Error("teams_link_invalid");
   const proof = Proof.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
-  if (proof.expiresAt <= now || proof.expiresAt > now + 10 * 60_000)
+  if (proof.expiresAt <= now || proof.expiresAt > now + PROOF_TTL_MS[proof.purpose])
     throw new Error("teams_link_expired");
   return proof;
 }

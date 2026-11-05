@@ -10,6 +10,7 @@ import {
   disconnectTeamsBot,
   getTeamsActor,
   getTeamsInstallation,
+  installTeamsBot,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -293,41 +294,119 @@ describe("Teams self-serve setup", () => {
     expect(provider.tokenRequests).toHaveLength(0);
   }, 60_000);
 
-  test("a disconnected organization reconnects only in its own workspace", async () => {
+  test("a disconnected organization reconnects in its workspace, or a Global Administrator moves it", async () => {
     const provider = microsoft();
     const d = deps(provider);
     const admin = await person();
     const tenantId = crypto.randomUUID();
     const actorId = crypto.randomUUID();
-    const claims = { oid: actorId, wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator] };
+    const teamsAdmin = { oid: actorId, wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator] };
     const first = setupProof(tenantId, actorId);
     await completeTeamsSetup(d, admin.grant, {
       setupToken: first,
-      microsoft: await adminSignIn(provider, d, admin, first, claims),
+      microsoft: await adminSignIn(provider, d, admin, first, teamsAdmin),
     });
     await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, tenantId))!);
     expect((await getTeamsInstallation(client.db, tenantId))?.active).toBe(false);
 
-    const elsewhere = await person();
-    const moveToken = setupProof(tenantId, actorId);
-    const moved = await refusal(
-      completeTeamsSetup(d, elsewhere.grant, {
-        setupToken: moveToken,
-        microsoft: await adminSignIn(provider, d, elsewhere, moveToken, claims),
-      }),
-    );
-    expect(moved.status).toBe(409);
-    expect(moved.message).toContain("linked to another workspace");
-
+    // The same workspace's administrator reconnects with a tenant administrator sign-in.
     const again = setupProof(tenantId, actorId);
     const status = await completeTeamsSetup(d, admin.grant, {
       setupToken: again,
-      microsoft: await adminSignIn(provider, d, admin, again, claims),
+      microsoft: await adminSignIn(provider, d, admin, again, teamsAdmin),
     });
     expect(status.installation).toMatchObject({
       workspaceId: admin.grant.workspaceId,
       active: true,
     });
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, tenantId))!);
+    const left = (await getTeamsInstallation(client.db, tenantId))!;
+
+    // A Teams Administrator can't move a binding someone else left behind.
+    const elsewhere = await person();
+    const moverActor = crypto.randomUUID();
+    const moveToken = setupProof(tenantId, moverActor);
+    const refused = await refusal(
+      completeTeamsSetup(d, elsewhere.grant, {
+        setupToken: moveToken,
+        audit: { subjectId: elsewhere.subject, source: "app", principalKind: "human_session" },
+        microsoft: await adminSignIn(provider, d, elsewhere, moveToken, {
+          oid: moverActor,
+          wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+        }),
+      }),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.message).toContain("Global Administrator");
+    expect(await getTeamsInstallation(client.db, tenantId)).toMatchObject({
+      workspace_id: admin.grant.workspaceId,
+      active: false,
+    });
+
+    // A Global Administrator moves it; the old binding's links go with it and
+    // the old workspace keeps an audit record.
+    const moved = await completeTeamsSetup(d, elsewhere.grant, {
+      setupToken: moveToken,
+      audit: { subjectId: elsewhere.subject, source: "app", principalKind: "human_session" },
+      microsoft: await adminSignIn(provider, d, elsewhere, moveToken, {
+        oid: moverActor,
+        wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
+      }),
+    });
+    expect(moved.installation).toMatchObject({
+      tenantId,
+      workspaceId: elsewhere.grant.workspaceId,
+      active: true,
+    });
+    const current = (await getTeamsInstallation(client.db, tenantId))!;
+    expect(await getTeamsActor(client.db, current, moverActor)).toBe(elsewhere.subject);
+    expect(await getTeamsActor(client.db, current, actorId)).toBeNull();
+    const audit = await shared.admin<
+      Array<{ workspace_id: string; subject_id: string; metadata: Record<string, unknown> }>
+    >`select workspace_id, subject_id, metadata from audit_events
+      where target_id = ${tenantId} and action = 'connection.disconnected'
+        and workspace_id = ${left.workspace_id}::uuid and subject_id = ${elsewhere.subject}`;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.metadata).toMatchObject({ reason: "released_by_tenant_administrator" });
+
+    // An active binding is never moved, even by a Global Administrator.
+    const third = await person();
+    const thirdActor = crypto.randomUUID();
+    const thirdToken = setupProof(tenantId, thirdActor);
+    const active = await refusal(
+      completeTeamsSetup(d, third.grant, {
+        setupToken: thirdToken,
+        microsoft: await adminSignIn(provider, d, third, thirdToken, {
+          oid: thirdActor,
+          wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
+        }),
+      }),
+    );
+    expect(active.status).toBe(409);
+    expect(active.message).toContain("disconnect it first");
+    expect((await getTeamsInstallation(client.db, tenantId))?.workspace_id).toBe(
+      elsewhere.grant.workspaceId,
+    );
+  }, 60_000);
+
+  test("self-serve installation never rotates an active binding, even in a race", async () => {
+    const admin = await person();
+    const tenantId = crypto.randomUUID();
+    const input = {
+      accountId: admin.grant.accountId,
+      workspaceId: admin.grant.workspaceId,
+      tenantId,
+      actorId: crypto.randomUUID(),
+      subjectId: admin.subject,
+      requireInactive: true,
+    };
+    const installed = await installTeamsBot(client.db, { ...input, nonce: crypto.randomUUID() });
+    await expect(
+      installTeamsBot(client.db, { ...input, nonce: crypto.randomUUID() }),
+    ).rejects.toThrow("teams_installation_already_active");
+    expect((await getTeamsInstallation(client.db, tenantId))?.generation).toBe(
+      installed.generation,
+    );
   }, 60_000);
 
   test("a workspace connected to another organization can't start setup for a new one", async () => {

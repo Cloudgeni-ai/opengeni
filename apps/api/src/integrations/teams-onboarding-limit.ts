@@ -4,7 +4,8 @@
  * message a Store app, so these replies must not answer every message forever.
  *
  * Per person: one reply per cooldown and a daily cap. Per tenant: a daily cap.
- * Per process: an hourly cap, so many tenants together stay bounded. The
+ * Per process: an hourly cap, so many tenants together stay bounded. Each kind
+ * of reply has its own budget (`createTeamsOnboardingBudgets`). The
  * tables are size-bounded; this is abuse protection for one API replica, not a
  * billing meter, and resets on restart.
  */
@@ -21,6 +22,23 @@ export const DEFAULT_TEAMS_ONBOARDING_LIMITS: TeamsOnboardingLimits = {
   actorDailyMax: 6,
   tenantDailyMax: 200,
   processHourlyMax: 2_000,
+  maxTrackedKeys: 20_000,
+};
+/** Welcome cards sent because someone installed the app, not because they wrote. */
+export const TEAMS_INSTALL_WELCOME_LIMITS: TeamsOnboardingLimits = {
+  actorCooldownMs: 10 * 60_000,
+  actorDailyMax: 1,
+  // A tenant can pre-install the app for every user; only a few get a welcome.
+  tenantDailyMax: 25,
+  processHourlyMax: 500,
+  maxTrackedKeys: 20_000,
+};
+/** Not-available notices for tenants that aren't admitted yet. */
+export const TEAMS_UNAVAILABLE_NOTICE_LIMITS: TeamsOnboardingLimits = {
+  actorCooldownMs: 24 * 60 * 60_000,
+  actorDailyMax: 1,
+  tenantDailyMax: 20,
+  processHourlyMax: 200,
   maxTrackedKeys: 20_000,
 };
 
@@ -74,4 +92,24 @@ export class TeamsOnboardingLimiter {
       map.delete(oldest);
     }
   }
+}
+/**
+ * Separate budgets, so notices for tenants that aren't admitted and welcomes
+ * triggered by installs can never use up the replies to people in admitted
+ * tenants who message the bot.
+ */
+export type TeamsOnboardingBudgets = {
+  /** Connect cards for people who message the bot. */
+  connect: TeamsOnboardingLimiter;
+  /** Connect cards for people who just installed the app. */
+  installWelcome: TeamsOnboardingLimiter;
+  /** Not-available notices; never sent for installs. */
+  unavailableNotice: TeamsOnboardingLimiter;
+};
+export function createTeamsOnboardingBudgets(): TeamsOnboardingBudgets {
+  return {
+    connect: new TeamsOnboardingLimiter(DEFAULT_TEAMS_ONBOARDING_LIMITS),
+    installWelcome: new TeamsOnboardingLimiter(TEAMS_INSTALL_WELCOME_LIMITS),
+    unavailableNotice: new TeamsOnboardingLimiter(TEAMS_UNAVAILABLE_NOTICE_LIMITS),
+  };
 }

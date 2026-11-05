@@ -10,7 +10,11 @@ import {
   sendTeamsOnboarding,
   teamsSelfServeSetupAvailable,
 } from "../src/integrations/teams-bot";
-import { TeamsOnboardingLimiter } from "../src/integrations/teams-onboarding-limit";
+import {
+  TeamsOnboardingLimiter,
+  createTeamsOnboardingBudgets,
+  type TeamsOnboardingBudgets,
+} from "../src/integrations/teams-onboarding-limit";
 import {
   mintTeamsProof,
   normalizeTeamsMessage,
@@ -34,6 +38,11 @@ const message = normalizeTeamsMessage({
   channelData: { tenant: { id: tenantId } },
   text: "Hello",
 })!;
+
+/** Fresh budgets whose connect budget is `connect`. */
+function budgetsOf(connect = new TeamsOnboardingLimiter()): TeamsOnboardingBudgets {
+  return { ...createTeamsOnboardingBudgets(), connect };
+}
 
 function transport(receipt: { id?: string } = { id: "sent-1" }) {
   const calls: Array<{ serviceUrl: string; conversationId: string; activity: unknown }> = [];
@@ -179,22 +188,29 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
   test("self-serve off keeps today's behavior: only an operator-approved installer gets a link", async () => {
     const { app, calls } = transport();
     const limiter = new TeamsOnboardingLimiter();
-    expect(await replyToUnconnectedTeamsTenant(onboardingDeps(), app, message, limiter)).toBe(
-      "setup_not_permitted",
-    );
+    expect(
+      await replyToUnconnectedTeamsTenant(
+        onboardingDeps(),
+        app,
+        message,
+        "message",
+        budgetsOf(limiter),
+      ),
+    ).toBe("setup_not_permitted");
     expect(
       await replyToUnconnectedTeamsTenant(
         onboardingDeps({ teamsBotAllowedTenantIds: [] }),
         app,
         message,
-        limiter,
+        "message",
+        budgetsOf(limiter),
       ),
     ).toBe("tenant_disabled");
     expect(calls).toEqual([]);
     const approved = onboardingDeps({ teamsBotSetupAdminIds: [`${tenantId}:${actorId}`] });
-    expect(await replyToUnconnectedTeamsTenant(approved, app, message, limiter)).toBe(
-      "setup_link_sent",
-    );
+    expect(
+      await replyToUnconnectedTeamsTenant(approved, app, message, "message", budgetsOf(limiter)),
+    ).toBe("setup_link_sent");
     expect(calls).toHaveLength(1);
     expect(cardUrl(calls[0]!.activity).pathname).toBe("/teams/connect");
   });
@@ -202,9 +218,9 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
   test("self-serve sends a welcome with a Connect your organization link bound to tenant, person and chat", async () => {
     const { app, calls } = transport();
     const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });
-    expect(
-      await replyToUnconnectedTeamsTenant(deps, app, message, new TeamsOnboardingLimiter()),
-    ).toBe("connect_link_sent");
+    expect(await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgetsOf())).toBe(
+      "connect_link_sent",
+    );
     expect(calls).toHaveLength(1);
     const activity = calls[0]!.activity as { text: string; attachments: unknown[] };
     expect(activity.text).toContain("Global Administrator or Teams Administrator");
@@ -237,27 +253,65 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       processHourlyMax: 100,
       maxTrackedKeys: 100,
     });
-    expect(await replyToUnconnectedTeamsTenant(deps, app, message, limiter)).toBe(
-      "connect_link_sent",
-    );
-    expect(await replyToUnconnectedTeamsTenant(deps, app, message, limiter)).toBe(
-      "onboarding_reply_limited",
-    );
+    expect(
+      await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgetsOf(limiter)),
+    ).toBe("connect_link_sent");
+    expect(
+      await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgetsOf(limiter)),
+    ).toBe("onboarding_reply_limited");
     expect(calls).toHaveLength(1);
     const others = ["3", "4", "5"].map((n) => ({
       ...message,
       actorId: `10000000-0000-4000-8000-00000000010${n}`,
     }));
-    expect(await replyToUnconnectedTeamsTenant(deps, app, others[0]!, limiter)).toBe(
-      "connect_link_sent",
-    );
-    expect(await replyToUnconnectedTeamsTenant(deps, app, others[1]!, limiter)).toBe(
-      "connect_link_sent",
-    );
-    expect(await replyToUnconnectedTeamsTenant(deps, app, others[2]!, limiter)).toBe(
-      "onboarding_reply_limited",
-    );
+    expect(
+      await replyToUnconnectedTeamsTenant(deps, app, others[0]!, "message", budgetsOf(limiter)),
+    ).toBe("connect_link_sent");
+    expect(
+      await replyToUnconnectedTeamsTenant(deps, app, others[1]!, "message", budgetsOf(limiter)),
+    ).toBe("connect_link_sent");
+    expect(
+      await replyToUnconnectedTeamsTenant(deps, app, others[2]!, "message", budgetsOf(limiter)),
+    ).toBe("onboarding_reply_limited");
     expect(calls).toHaveLength(3);
+  });
+
+  test("install welcomes and not-available notices have their own budgets", async () => {
+    const { app, calls } = transport();
+    const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });
+    const limits = {
+      actorCooldownMs: 60_000,
+      actorDailyMax: 1,
+      tenantDailyMax: 2,
+      processHourlyMax: 100,
+      maxTrackedKeys: 100,
+    };
+    const budgets: TeamsOnboardingBudgets = {
+      connect: new TeamsOnboardingLimiter({ ...limits, actorDailyMax: 6, tenantDailyMax: 100 }),
+      installWelcome: new TeamsOnboardingLimiter(limits),
+      unavailableNotice: new TeamsOnboardingLimiter({ ...limits, processHourlyMax: 1 }),
+    };
+    const people = ["1", "2", "3"].map((n) => ({
+      ...message,
+      actorId: `10000000-0000-4000-8000-00000000020${n}`,
+    }));
+    const reply = (m: typeof message, source: "message" | "install") =>
+      replyToUnconnectedTeamsTenant(deps, app, m, source, budgets);
+    expect(await reply(people[0]!, "install")).toBe("connect_link_sent");
+    expect(await reply(people[1]!, "install")).toBe("connect_link_sent");
+    // A tenant that pre-installs the app for everyone gets only a few welcomes.
+    expect(await reply(people[2]!, "install")).toBe("onboarding_reply_limited");
+    // Writing to the bot is answered from its own budget.
+    expect(await reply(people[2]!, "message")).toBe("connect_link_sent");
+    // Notices for tenants that aren't admitted only use their own budget.
+    const outsiders = ["5", "6"].map((n) => ({
+      ...message,
+      tenantId: `30000000-0000-4000-8000-00000000000${n}`,
+    }));
+    expect(await reply(outsiders[0]!, "message")).toBe("tenant_unavailable_notice_sent");
+    expect(await reply(outsiders[1]!, "message")).toBe("tenant_disabled");
+    expect(await reply(people[0]!, "message")).toBe("connect_link_sent");
+    expect(calls).toHaveLength(5);
   });
 
   test("group chats and channels never get onboarding replies", async () => {
@@ -269,7 +323,8 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
           deps,
           app,
           { ...message, personal: false, groupChat } as typeof message,
-          new TeamsOnboardingLimiter(),
+          "message",
+          budgetsOf(),
         ),
       ).toBe("setup_not_permitted");
     expect(calls).toEqual([]);
@@ -281,11 +336,16 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       teamsBotSelfServeSetupEnabled: true,
       teamsBotAllowedTenantIds: [],
     });
-    const limiter = new TeamsOnboardingLimiter();
-    expect(await replyToUnconnectedTeamsTenant(deps, app, message, limiter)).toBe(
+    const budgets = createTeamsOnboardingBudgets();
+    expect(await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgets)).toBe(
       "tenant_unavailable_notice_sent",
     );
-    expect(await replyToUnconnectedTeamsTenant(deps, app, message, limiter)).toBe(
+    expect(await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgets)).toBe(
+      "tenant_disabled",
+    );
+    // Another person gets one notice; installing the app never triggers one.
+    const other = { ...message, actorId: "10000000-0000-4000-8000-000000000109" };
+    expect(await replyToUnconnectedTeamsTenant(deps, app, other, "install", budgets)).toBe(
       "tenant_disabled",
     );
     expect(calls).toHaveLength(1);
@@ -330,6 +390,18 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     await expect(
       confirmTeamsSetup(app, { id: "a:personal", serviceUrl: "https://untrusted.example.test/" }),
     ).rejects.toThrow("teams_service_url_rejected");
+  });
+});
+
+describe("Teams proof lifetimes", () => {
+  test("setup proofs last long enough to sign up first; link proofs stay short", () => {
+    const base = { tenantId, actorId, workspaceId: null, generation: null };
+    const setup = mintTeamsProof("secret", { ...base, purpose: "setup" }, 0);
+    const link = mintTeamsProof("secret", { ...base, purpose: "link", workspaceId, generation }, 0);
+    expect(verifyTeamsProof("secret", setup, 30 * 60_000).purpose).toBe("setup");
+    expect(() => verifyTeamsProof("secret", setup, 60 * 60_000)).toThrow("teams_link_expired");
+    expect(verifyTeamsProof("secret", link, 9 * 60_000).purpose).toBe("link");
+    expect(() => verifyTeamsProof("secret", link, 10 * 60_000)).toThrow("teams_link_expired");
   });
 });
 

@@ -34,6 +34,7 @@ import {
   getWorkspaceTeamsInstallation,
   listTeamsInstallations,
   installTeamsBot,
+  releaseInactiveTeamsInstallation,
   linkTeamsActor,
   getTeamsActor,
   getOwnTeamsLink,
@@ -51,6 +52,7 @@ import {
   renewTeamsRoute,
   teamsDeliveryStatus,
   refuseTeamsRouteOutputs,
+  type DisconnectAuditActor,
   type TeamsInstallation,
   type TeamsRoute,
 } from "@opengeni/db";
@@ -74,10 +76,15 @@ import {
   teamsSelfServeTenantAllowed,
   verifyTeamsAdminSignIn,
   verifyTeamsAdminState,
+  TEAMS_ADMIN_ROLE_IDS,
   TeamsAdminProofError,
+  type TeamsAdminIdentity,
   type TeamsAdminSignInConfig,
 } from "./teams-admin-proof";
-import { TeamsOnboardingLimiter } from "./teams-onboarding-limit";
+import {
+  createTeamsOnboardingBudgets,
+  type TeamsOnboardingBudgets,
+} from "./teams-onboarding-limit";
 
 import {
   resolveTeamsGroupAudience,
@@ -89,7 +96,7 @@ const ENDPOINT = "/v1/integrations/teams/messages";
 const ROOT = "/v1/workspaces/:workspaceId/integrations/teams";
 const inventoryCursors = new WeakMap<ApiRouteDeps, string>();
 const runtimes = new WeakMap<ApiRouteDeps, Promise<App>>();
-const onboardingLimiters = new WeakMap<ApiRouteDeps, TeamsOnboardingLimiter>();
+const onboardingBudgetsByDeps = new WeakMap<ApiRouteDeps, TeamsOnboardingBudgets>();
 
 function configuredBase(deps: ApiRouteDeps): string {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
@@ -210,13 +217,13 @@ export type TeamsUnconnectedOutcome =
   | "onboarding_reply_limited"
   | "setup_not_permitted";
 
-function onboardingLimiter(deps: ApiRouteDeps): TeamsOnboardingLimiter {
-  let limiter = onboardingLimiters.get(deps);
-  if (!limiter) {
-    limiter = new TeamsOnboardingLimiter();
-    onboardingLimiters.set(deps, limiter);
+function onboardingBudgets(deps: ApiRouteDeps): TeamsOnboardingBudgets {
+  let budgets = onboardingBudgetsByDeps.get(deps);
+  if (!budgets) {
+    budgets = createTeamsOnboardingBudgets();
+    onboardingBudgetsByDeps.set(deps, budgets);
   }
-  return limiter;
+  return budgets;
 }
 
 /** An admitted Microsoft work or school tenant may be connected by its own administrator. */
@@ -234,21 +241,25 @@ export function teamsSelfServeSetupAvailable(settings: Settings, tenantId: strin
  * else gets a welcome with the self-serve Connect your organization link (or a
  * not-available notice when the tenant isn't admitted). Only 1:1 chats get a
  * reply, and replies are bounded per person, per tenant and per process, so a
- * tenant can't make the bot answer every message forever.
+ * tenant can't make the bot answer every message forever. Installing the app
+ * (`source` "install") gets at most a welcome, from its own smaller budget, and
+ * never a not-available notice.
  */
 export async function replyToUnconnectedTeamsTenant(
   deps: ApiRouteDeps,
   app: App,
   m: TeamsPersonalContact & Pick<TeamsMessage, "botId">,
-  limiter: TeamsOnboardingLimiter = onboardingLimiter(deps),
+  source: "message" | "install" = "message",
+  budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
 ): Promise<TeamsUnconnectedOutcome> {
   const admitted = teamsTenantEnabled(deps.settings, m.tenantId);
   if (!m.personal) return admitted ? "setup_not_permitted" : "tenant_disabled";
   if (!admitted) {
     if (
+      source === "install" ||
       !deps.settings.teamsBotSelfServeSetupEnabled ||
       !teamsBotConfigured(deps.settings) ||
-      !limiter.tryReserve(m.tenantId, m.actorId)
+      !budgets.unavailableNotice.tryReserve(m.tenantId, m.actorId)
     )
       return "tenant_disabled";
     await send(app, { ...m, threadId: null }, TEAMS_TENANT_UNAVAILABLE_TEXT);
@@ -259,7 +270,8 @@ export async function replyToUnconnectedTeamsTenant(
     return "setup_link_sent";
   }
   if (!teamsSelfServeSetupAvailable(deps.settings, m.tenantId)) return "setup_not_permitted";
-  if (!limiter.tryReserve(m.tenantId, m.actorId)) return "onboarding_reply_limited";
+  const budget = source === "install" ? budgets.installWelcome : budgets.connect;
+  if (!budget.tryReserve(m.tenantId, m.actorId)) return "onboarding_reply_limited";
   await sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null));
   return "connect_link_sent";
 }
@@ -405,9 +417,10 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
         const botId = `28:${deps.settings.teamsBotClientId!.toLowerCase()}`;
         const unconnected = async (
           contact: Parameters<typeof replyToUnconnectedTeamsTenant>[2],
+          source: "message" | "install" = "message",
         ) => {
           try {
-            observed(await replyToUnconnectedTeamsTenant(deps, app, contact));
+            observed(await replyToUnconnectedTeamsTenant(deps, app, contact, source));
           } catch {
             observed("onboarding_reply_failed");
           }
@@ -420,7 +433,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             const installation = teamsTenantEnabled(deps.settings, install.tenantId)
               ? await getTeamsInstallation(deps.db, install.tenantId)
               : null;
-            if (!installation?.active) await unconnected(install);
+            if (!installation?.active) await unconnected(install, "install");
           }
           return { status: 200 };
         }
@@ -648,7 +661,7 @@ async function requireTenantAdministrator(
   p: TeamsLinkProof,
   grant: AccessGrant,
   microsoft: { code: string; state: string },
-): Promise<void> {
+): Promise<TeamsAdminIdentity> {
   const config = teamsAdminSignInConfig(deps);
   try {
     const state = verifyTeamsAdminState(config.stateSecret, microsoft.state);
@@ -660,7 +673,7 @@ async function requireTenantAdministrator(
       state.workspaceId !== grant.workspaceId
     )
       throw new TeamsAdminProofError("state_mismatch");
-    await verifyTeamsAdminSignIn(config, state, microsoft.code, deps.teamsAdminSignInFetch);
+    return await verifyTeamsAdminSignIn(config, state, microsoft.code, deps.teamsAdminSignInFetch);
   } catch (error) {
     if (!(error instanceof TeamsAdminProofError)) throw error;
     deps.observability?.info("Teams self-serve setup refused", { reason: error.code });
@@ -702,27 +715,48 @@ export async function startTeamsSetupSignIn(
 export async function completeTeamsSetup(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-  input: { setupToken: string; microsoft?: { code: string; state: string } | undefined },
+  input: {
+    setupToken: string;
+    microsoft?: { code: string; state: string } | undefined;
+    /** Who connected, for the audit record when a disconnected binding is moved. */
+    audit?: DisconnectAuditActor | null;
+  },
 ) {
   const { setupToken, microsoft } = input;
   const p = setupProof(deps, setupToken);
   const approved = operatorApprovedInstaller(deps, p);
+  let admin: TeamsAdminIdentity | null = null;
   if (!approved) {
     if (!microsoft || !teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
       throw notApprovedInstaller();
     // Prove the tenant administrator before revealing anything about the
     // tenant's existing binding.
-    await requireTenantAdministrator(deps, p, grant, microsoft);
+    admin = await requireTenantAdministrator(deps, p, grant, microsoft);
   }
   const workspace = await getWorkspace(deps.db, grant.workspaceId);
   if (workspace?.kind !== "shared")
     throw new HTTPException(422, { message: "Install the Teams bot in a shared workspace." });
   const existingTenant = await getTeamsInstallation(deps.db, p.tenantId);
-  if (existingTenant && existingTenant.workspace_id !== grant.workspaceId)
-    throw new HTTPException(409, {
-      message:
-        "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
-    });
+  // A Global Administrator may move a disconnected binding to this workspace,
+  // so a binding left behind by someone else never locks the organization out.
+  // An active binding is never moved or replaced through self-serve setup.
+  let release: TeamsInstallation | null = null;
+  if (existingTenant && existingTenant.workspace_id !== grant.workspaceId) {
+    if (existingTenant.active || !admin)
+      throw new HTTPException(409, {
+        message: existingTenant.active
+          ? "Opengeni is already connected for this Teams organization in another workspace. An admin of that workspace can disconnect it first."
+          : "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
+      });
+    if (
+      !admin.roles.some((role) => role.toLowerCase() === TEAMS_ADMIN_ROLE_IDS.globalAdministrator)
+    )
+      throw new HTTPException(409, {
+        message:
+          "This Teams organization was connected to another workspace and is disconnected. Reconnect it in that workspace, or ask a Microsoft 365 Global Administrator to connect it here.",
+      });
+    release = existingTenant;
+  }
   // Self-serve setup connects a new organization or reconnects a paused
   // binding in its own workspace. It never replaces an active installation.
   if (!approved && existingTenant?.active)
@@ -734,6 +768,16 @@ export async function completeTeamsSetup(
     throw new HTTPException(409, {
       message: "This workspace is linked to another Teams organization.",
     });
+  if (release) {
+    if (!(await releaseInactiveTeamsInstallation(deps.db, release, { audit: input.audit ?? null })))
+      throw new HTTPException(409, {
+        message:
+          "This Teams organization's connection changed while you were connecting it. Start again from the setup link in Teams.",
+      });
+    deps.observability?.info("Teams disconnected binding released", {
+      method: "global_administrator",
+    });
+  }
   try {
     await installTeamsBot(deps.db, {
       accountId: grant.accountId,
@@ -742,13 +786,30 @@ export async function completeTeamsSetup(
       actorId: p.actorId,
       subjectId: grant.subjectId,
       nonce: p.nonce,
+      requireInactive: !approved,
     });
   } catch (error) {
-    const cause = error as { code?: string; cause?: { code?: string }; message?: string };
+    const cause = error as {
+      code?: string;
+      constraint_name?: string;
+      cause?: { code?: string; constraint_name?: string };
+      message?: string;
+    };
     if (cause.message === "teams_tenant_already_bound")
       throw new HTTPException(409, {
         message:
           "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
+      });
+    if (cause.message === "teams_installation_already_active")
+      throw new HTTPException(409, {
+        message: "Opengeni is already connected for this Teams organization.",
+      });
+    if (
+      (cause.constraint_name ?? cause.cause?.constraint_name) ===
+      "teams_bot_installations_workspace_id_key"
+    )
+      throw new HTTPException(409, {
+        message: "This workspace is linked to another Teams organization.",
       });
     if (
       cause.message === "teams_identity_already_linked" ||
@@ -838,7 +899,12 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
         })
         .strict(),
     );
-    return c.json(await completeTeamsSetup(deps, grant, input));
+    return c.json(
+      await completeTeamsSetup(deps, grant, {
+        ...input,
+        audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
+      }),
+    );
   });
   app.delete(`${ROOT}/bot`, async (c) => {
     await browserHuman(c, deps);
