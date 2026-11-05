@@ -53,6 +53,11 @@ export class ToolGatewayCatalogTooLargeError extends Error {
   }
 }
 
+/**
+ * @deprecated Catalog builds no longer throw on path collisions: a colliding
+ * tool gets a disambiguated path or is left out with a warning. Kept exported
+ * so existing `instanceof` checks keep compiling.
+ */
 export class ToolGatewayPathCollisionError extends Error {
   readonly code = "tool_path_collision";
 

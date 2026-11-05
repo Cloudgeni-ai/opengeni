@@ -1009,6 +1009,22 @@ services, the desktop app and compute sandboxes already start the agent again an
 run it without a keeper; an in-place update keeps the agent's process, and so its
 keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
 runs the agent itself without a keeper, as before.
+
+The generated services start a stopped agent again however often it stops, for
+example when a command kills it. The systemd unit has no start limit
+(`StartLimitIntervalSec=0`); units from agent 0.1.150 and older allowed five
+starts a minute and then left the agent stopped until someone started it by hand.
+On systemd 254 and newer it restarts after 2 s, backing off to 30 s over five
+restarts (`RestartSteps=`, `RestartMaxDelaySec=`); systemd resets that count only
+when the service is started by hand, `systemctl reset-failed` runs or the machine
+boots, so after several stops the agent comes back within 30 s. Older systemd
+restarts after a fixed 5 s. The macOS LaunchAgent (`KeepAlive`) has no start limit
+either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
+task's one-minute repetition starts an exited agent within a minute, with no limit;
+a process that keeps the agent's hidden console host open after the agent exits
+delays that start until it ends, because the task skips a tick while its previous
+run is still going.
+
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
@@ -1016,9 +1032,13 @@ must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
 installer never resets them with runtime `set-property`. The agent never rewrites
-a unit on its own: at startup it only warns when the live unit is custom or systemd
-did not place it in the `supervisor` subgroup, and `service install --restart`
-adopts the generated unit. The default operation leaf has no
+a custom unit: at startup it warns when the live unit is custom or systemd did not
+place it in the `supervisor` subgroup, and `service install --restart` adopts the
+generated unit. The one rewrite it makes on its own is of an unchanged unit an
+earlier release generated (agent 0.1.150 and older, marker `v3` or
+`v3-compatible`): it replaces it with the current unit of the same cgroup shape and
+reloads systemd, which applies the new restart policy without restarting the
+agent. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any

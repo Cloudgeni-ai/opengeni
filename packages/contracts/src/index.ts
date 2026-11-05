@@ -4,6 +4,7 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
@@ -209,10 +210,6 @@ import {
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
-export * from "./secret-value-masking";
-export * from "./secret-shape-masking";
-export * from "./credential-names";
-export * from "./secret-field-hints";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -9001,6 +8998,12 @@ export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
  * Replace the complete durable session tool policy, or explicitly opt back in
  * to current workspace defaults. MCP servers and individual Opengeni tools
  * advance atomically under one policy version.
+ *
+ * `firstPartyMcpPermissions`, when supplied, replaces the session's
+ * first-party permission set under the same version, so a newly granted tool
+ * and the permission it needs arrive together. The caller must hold every
+ * permission; a child stays within its parent and an agent may only narrow.
+ * Omission keeps the current set.
  */
 export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
@@ -9010,6 +9013,7 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
         // When supplied, edit only connector exclusions and preserve built-in tools.
         // Omission explicitly resets the complete policy to workspace defaults.
         excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+        firstPartyMcpPermissions: z.array(Permission).min(1).max(100).optional(),
         expectedVersion: primitives.positiveInteger,
       })
       .strict(),
@@ -9018,6 +9022,7 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
         mode: z.literal("explicit"),
         tools: z.array(ToolRef).max(64),
         firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        firstPartyMcpPermissions: z.array(Permission).min(1).max(100).optional(),
         expectedVersion: primitives.positiveInteger,
       })
       .strict(),

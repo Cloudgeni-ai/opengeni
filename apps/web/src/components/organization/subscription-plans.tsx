@@ -197,11 +197,11 @@ export function SubscriptionPlans({
         description={
           <>
             <span className="block">
-              Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can
-              bring your own keys.
+              Plan credit is for the Opengeni apps. Paid plans include your own AI subscriptions,
+              with no usage fee.
             </span>
             <span className="block">
-              API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.
+              API use spends credits, not plan credit, and cannot use connected subscriptions.
             </span>
           </>
         }

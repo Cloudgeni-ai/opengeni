@@ -13,6 +13,7 @@ use crate::fresh::{CLOCK_SKEW, Clock, FIRST_HOUR, LEGACY_SWEEP_AFTER, day_of, pe
 use crate::store::{Begun, Held, Publication, Put, Rewrite, TEST_EPOCH, next_save, unstamped};
 
 mod incremental;
+mod packs;
 
 const SECOND: Duration = Duration::from_secs(1);
 const MINUTE: Duration = Duration::from_secs(60);

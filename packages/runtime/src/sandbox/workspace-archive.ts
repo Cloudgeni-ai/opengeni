@@ -169,6 +169,13 @@ export type WorkspaceArchiveCaptureOptions = {
   requestId: string;
   strategy?: "configured" | "portable_tar";
   /**
+   * Hard provider-side timeout for this capture, where the provider has one
+   * (Modal native snapshots). Only a zero-holder drain sets it, so its
+   * snapshot may outlive the caller's wait and publish late; every other
+   * capture keeps the provider session's configured timeout.
+   */
+  providerTimeoutMs?: number;
+  /**
    * Abandons the capture while it still waits for the provider operation gate,
    * and stops a host-backed spool capture mid-read. A provider-native persist
    * call that already started is not interrupted: its own settlement remains

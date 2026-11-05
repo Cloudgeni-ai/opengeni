@@ -1,5 +1,5 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { settingsWithModelProviderCredentials } from "@opengeni/core";
+import { checkOwnSubscriptionPlan, settingsWithModelProviderCredentials } from "@opengeni/core";
 import {
   admitSessionTitleOperation,
   appendSessionEvents,
@@ -15,6 +15,7 @@ import {
   isRetryablePersistenceSqlState,
   nestedPostgresSqlState,
   readSubscriptionCoreTurnIdentity,
+  readTurnBillingOrigin,
   retrySessionTitleOperation,
   recordSessionTitleResponse,
   reserveSessionTitleDispatch,
@@ -207,6 +208,19 @@ export async function reconcileSessionTitleOperation(
       });
       if (!completed) return { action: "retry", delayMs: 5_000 };
       return { action: "terminal" };
+    }
+    if (operation.connectionId) {
+      const origin = await readTurnBillingOrigin(db, {
+        accountId: operation.accountId,
+        workspaceId: operation.workspaceId,
+        turnId: operation.sourceTurnId,
+      });
+      const decision = await checkOwnSubscriptionPlan(
+        { db, settings: service.settings },
+        operation.accountId,
+        origin ?? "api",
+      );
+      if (!decision.allowed) return await finish("failed");
     }
     const target = await getSessionTitleTarget(db, operation);
     if (

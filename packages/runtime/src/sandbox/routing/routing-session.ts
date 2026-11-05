@@ -68,11 +68,7 @@ import {
   isConnectedMachineAbsolutePath,
   resolveConnectedMachinePath,
 } from "../selfhosted/workspace-path";
-import {
-  renderSelfhostedFault,
-  selfhostedFaultPlacement,
-  type SelfhostedFaultPlacement,
-} from "../selfhosted/fault-rendering";
+import { renderSelfhostedFault, selfhostedFaultContext } from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
   isDefinitePathNotFoundError,
@@ -2523,12 +2519,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * turn handles, not a model-facing fault. Any non-selfhosted error (a Modal fault, a
    * `RoutingUnsupportedError`) is re-thrown unchanged.
    */
-  private renderSelfhostedFaultOrThrow(
-    error: unknown,
-    placement: SelfhostedFaultPlacement,
-  ): string {
+  private renderSelfhostedFaultOrThrow(error: unknown, backendKind?: string): string {
     if (error instanceof SelfhostedControlError && !error.fenced) {
-      return renderSelfhostedFault(error, placement);
+      return renderSelfhostedFault(error, selfhostedFaultContext(backendKind));
     }
     throw error;
   }
@@ -2688,30 +2681,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
-    // The box the command was last dispatched to names itself in a rendered
-    // fault: the chat's own cloud computer is not a Connected Machine.
-    let faultPlacement: SelfhostedFaultPlacement | undefined;
+    // The backend each provider error came from, keyed by the error itself so
+    // a fault is never attributed to an earlier attempt's backend: a Connected
+    // Machine's offline copy differs from a compute box's.
+    const faultBackendKinds = new WeakMap<object, string>();
     try {
       return await this.dispatch(
         "execCommand",
         true,
         async (s, backend) => {
-          faultPlacement = selfhostedFaultPlacement(backend.kind);
-          notifyRemoteOperationTransportSelected(s);
-          // Secret delivery happens here, below every recorder: connected
-          // machines deliver natively in their own session; every other
-          // backend gets a sourced-then-deleted env file.
-          if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
-          const providerArgs =
-            backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
-          if (s.execCommand) {
-            return s.execCommand(providerArgs);
+          try {
+            return await this.execOnBackend(s, backend, args);
+          } catch (error) {
+            if (typeof error === "object" && error !== null) {
+              faultBackendKinds.set(error, backend.kind);
+            }
+            throw error;
           }
-          if (s.exec) {
-            const r = (await s.exec(providerArgs)) as { stdout?: string; output?: string };
-            return r.stdout ?? r.output ?? "";
-          }
-          throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
         },
         eligibleForSupervision(args),
         options?.onMutationAdmissionRefused,
@@ -2721,9 +2707,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // verdict) instead of letting the SDK mislabel it "Please try again".
       return this.renderSelfhostedFaultOrThrow(
         error,
-        faultPlacement ?? selfhostedFaultPlacement(this.cached?.kind),
+        typeof error === "object" && error !== null ? faultBackendKinds.get(error) : undefined,
       );
     }
+  }
+
+  private async execOnBackend(
+    s: RoutableBackendSession,
+    backend: ResolvedActiveBackend,
+    args: unknown,
+  ): Promise<string> {
+    notifyRemoteOperationTransportSelected(s);
+    // Secret delivery happens here, below every recorder: connected
+    // machines deliver natively in their own session; every other
+    // backend gets a sourced-then-deleted env file.
+    if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
+    const providerArgs =
+      backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
+    if (s.execCommand) {
+      return s.execCommand(providerArgs);
+    }
+    if (s.exec) {
+      const r = (await s.exec(providerArgs)) as { stdout?: string; output?: string };
+      return r.stdout ?? r.output ?? "";
+    }
+    throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
   }
 
   /**

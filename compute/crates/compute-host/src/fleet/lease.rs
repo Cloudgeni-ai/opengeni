@@ -237,16 +237,33 @@ impl Running {
                 }
                 Err(_) => anyhow::bail!("the agent stopped"),
             };
-            if !status.blocked.is_empty() {
+            // A sandbox whose VM the guard holds frozen is listed under the
+            // owner epoch its record names: the service rules on it, and
+            // the deadline that would thaw it is written only once a drop
+            // has ended its VM (see `registered`). Waiting for it to
+            // answer instead would wait for good, since only that
+            // deadline thaws it.
+            let unruled = status
+                .blocked
+                .iter()
+                .filter(|blocked| blocked.frozen_owner_epoch.is_none())
+                .count();
+            if unruled > 0 {
                 // It cannot rule on what it cannot manage: wait until they
                 // can be read again, or someone removes them.
                 tracing::warn!(
-                    blocked = status.blocked.len(),
+                    blocked = unruled,
                     "not registering while sandboxes are blocked"
                 );
                 self.attempt = None;
                 return Ok(());
             }
+            let frozen = status.blocked.iter().filter_map(|blocked| {
+                Some(Held {
+                    id: blocked.id,
+                    owner_epoch: blocked.frozen_owner_epoch?,
+                })
+            });
             self.attempt = Some(Register {
                 host: renewer.host,
                 attempt: renewal.attempt,
@@ -259,6 +276,7 @@ impl Running {
                         id: sandbox.id,
                         owner_epoch: sandbox.owner_epoch,
                     })
+                    .chain(frozen)
                     .collect(),
             });
         }
@@ -609,6 +627,8 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         guest: renewer.guest.clone(),
         // A host of this release keeps its pointers in the service.
         pointers_in_service: true,
+        // And it reads copies whose chunks are in packs (ADR 31).
+        reads_packs: true,
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
         info: Some(renewer.info.clone()),

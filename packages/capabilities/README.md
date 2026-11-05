@@ -14,7 +14,10 @@ Security defaults:
 - credentials are resolved for one exact destination and verified before use;
 - header, query, and cookie placements are bounded and validated atomically;
 - curated Google/Microsoft Integration Definition OAuth stays in the normal encrypted Connection spine;
-- redirects are never followed on credential-bearing requests;
+- credentials never follow a redirect: a safe read (GET/HEAD) follows at most
+  three https redirects, such as a download's pre-signed URL, through the same
+  pinned transport with no credential header, cookie or query parameter, and a
+  mutation's redirect is rejected;
 - response bodies, schemas, operation counts, and deadlines are bounded;
 - mutating operations are marked approval-required by default;
 - a safe read/query may refresh and retry exactly once on `401`, while a

@@ -485,17 +485,29 @@ impl Fleet {
         path: &str,
         body: &impl serde::Serialize,
     ) -> (u16, String) {
+        self.post_as_host_with(name, path, body, &[]).await
+    }
+
+    /// As [`Self::post_as_host`], with `headers` on the request.
+    pub async fn post_as_host_with(
+        &self,
+        name: &str,
+        path: &str,
+        body: &impl serde::Serialize,
+        headers: &[(&str, &str)],
+    ) -> (u16, String) {
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(self.pki.host_client(name))
             .https_only(true)
             .build()
             .unwrap();
-        let response = http
+        let mut request = http
             .post(format!("https://{}{path}", self.running.hosts))
-            .json(body)
-            .send()
-            .await
-            .unwrap();
+            .json(body);
+        for (header, value) in headers {
+            request = request.header(*header, *value);
+        }
+        let response = request.send().await.unwrap();
         let status = response.status().as_u16();
         (status, response.text().await.unwrap())
     }
@@ -568,6 +580,7 @@ pub fn roomy() -> Capacity {
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
+        reads_packs: true,
         info: None,
     }
 }
