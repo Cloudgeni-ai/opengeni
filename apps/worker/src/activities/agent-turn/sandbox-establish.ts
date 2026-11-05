@@ -27,6 +27,7 @@ import {
   type SelfhostedSession,
   type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
@@ -95,6 +96,7 @@ import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from ".
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import {
   createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
   recoverSandboxSetupFailure,
   recoverUnresponsiveComputeAgent,
 } from "./sandbox-setup-agent-failure";
@@ -166,11 +168,12 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
 
 export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   attachGitCredentialRenewal: (
     tokenSession: GitCredentialTokenWriterSession,
     initial: MintedRunGitCredentials | undefined,
@@ -1236,6 +1239,9 @@ export async function bindLazySandboxProvisioner(
                     environment: sandboxEnvironment,
                     recordLazyManifest: true,
                     measureSetup: measure,
+                    ...(materialization.value
+                      ? { priorSoftSetupFailures: [materialization.value] }
+                      : {}),
                     onRuntimeEvent: async (event) => {
                       await eventing.publish?.(
                         [{ type: event.type, payload: event.payload }],
@@ -1323,6 +1329,14 @@ export async function bindLazySandboxProvisioner(
             throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
               session: provisioned.established.session,
               backend: activeSandboxBackend ?? groupBoxBackend,
+              boxReplacement: modalSandboxBoxReplacer(db, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: sandboxState.sandboxGroupId,
+                box: provisioned,
+                session: provisioned.established.session,
+              }),
               restartsThisTurn: async () =>
                 await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
                   sessionId: input.sessionId,

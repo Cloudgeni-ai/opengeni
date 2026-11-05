@@ -239,9 +239,9 @@ describe("the words a command whose workspace machine stopped answering gets", (
     // Not named for a Connected Machine, and the same when routed as an
     // Opengeni-owned box.
     expect(text).not.toStartWith("[connected machine]");
-    expect(renderSelfhostedFault(unresponsive("restarted", false), { cloudComputer: true })).toBe(
-      text,
-    );
+    expect(
+      renderSelfhostedFault(unresponsive("restarted", false), { workspaceMachine: true }),
+    ).toBe(text);
   });
 
   test("already restarted this turn", () => {
@@ -308,7 +308,7 @@ describe("the words a command whose workspace machine stopped answering gets", (
       neverSent: true,
       detail: { [AGENT_UNRESPONSIVE_DETAIL_KEY]: "180000" },
     });
-    expect(renderSelfhostedFault(error, { cloudComputer: true })).toContain(
+    expect(renderSelfhostedFault(error, { workspaceMachine: true })).toContain(
       "this chat's workspace machine stopped responding",
     );
     expect(renderSelfhostedFault(error, { connectedMachine: true })).toContain(

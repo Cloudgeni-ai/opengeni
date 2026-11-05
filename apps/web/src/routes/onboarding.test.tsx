@@ -853,6 +853,66 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("an OpenAI-compatible endpoint connects for the organization and selects its model", async () => {
+    const onConnected = mock(() => undefined);
+    const createConnection = mock(async () => {
+      throw new Error("must not connect a workspace-only endpoint");
+    });
+    const createOrganizationCompatibleEndpoint = mock(
+      async (_organization: string, request: Record<string, unknown>) => ({
+        id: "00000000-0000-4000-8000-0000000000e1",
+        status: "active",
+        version: 1,
+        baseUrl: request.baseUrl,
+        api: request.api,
+        label: request.label ?? null,
+        models: [],
+      }),
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <DirectModelProviderForm
+            client={{ createConnection, createOrganizationCompatibleEndpoint } as never}
+            workspaceId="workspace"
+            organizationId="organization"
+            provider="openai_compatible"
+            onConnected={onConnected}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("everyone in your organization can use it");
+      const [baseUrl, key, model] = Array.from(container.querySelectorAll("input"));
+      await enter(baseUrl!, "https://api.example.com/v1/chat/completions");
+      await enter(key!, "sk-endpoint");
+      await enter(model!, "org/model-9b");
+      const connect = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Connect endpoint",
+      )!;
+      await act(async () => connect.click());
+      await flush();
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(createOrganizationCompatibleEndpoint).toHaveBeenCalledWith(
+        "organization",
+        expect.objectContaining({
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "sk-endpoint",
+          model: "org/model-9b",
+          api: "chat",
+        }),
+      );
+      expect(onConnected).toHaveBeenCalledWith(
+        "organization-compatible-00000000-0000-4000-8000-0000000000e1/org/model-9b",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("SuperGrok onboarding connects for the whole organization", async () => {
     const organizationSupergrokConnectStart = mock(async (_organizationId: string) => ({
       state: "state-a",

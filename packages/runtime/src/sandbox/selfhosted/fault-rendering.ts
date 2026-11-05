@@ -90,21 +90,21 @@ export interface SelfhostedFaultContext {
   /** The command ran on a Connected Machine (the person's own computer), not
    *  a compute box. Only then can the copy point at the Opengeni app there. */
   connectedMachine?: boolean;
-  /** The command ran on the chat's own cloud computer (a compute box), which
+  /** The command ran on the chat's own workspace machine (a compute box), which
    *  speaks the same agent protocol but restarts on its own. Its faults are
    *  named for it instead of for a Connected Machine. */
-  cloudComputer?: boolean;
+  workspaceMachine?: boolean;
 }
 
 /** The context of a routed backend kind: `selfhosted` is a Connected Machine,
- *  `compute` is the chat's cloud computer; anything else (or unknown) is
+ *  `compute` is the chat's workspace machine; anything else (or unknown) is
  *  neither and keeps the generic copy. */
 export function selfhostedFaultContext(kind: string | undefined): SelfhostedFaultContext {
-  return { connectedMachine: kind === "selfhosted", cloudComputer: kind === "compute" };
+  return { connectedMachine: kind === "selfhosted", workspaceMachine: kind === "compute" };
 }
 
 const CONNECTED_MACHINE_PREFIX = "[connected machine] ";
-const CLOUD_COMPUTER_PREFIX = "[cloud computer] ";
+const WORKSPACE_MACHINE_PREFIX = "[workspace machine] ";
 
 /** What the person is told when their machine went offline mid-command. The
  *  code cannot know what stopped the agent (a command, sleep, a lost
@@ -168,52 +168,51 @@ export function renderSelfhostedFault(
     // The session names the machine kind; the caller's context is the
     // fallback should an error ever arrive without it.
     const machine = error.detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY];
-    const compute = machine === "compute" || (machine === undefined && !!context.cloudComputer);
+    const compute = machine === "compute" || (machine === undefined && !!context.workspaceMachine);
     const rendered = assemble(error, unresponsiveAgentFields(error, compute));
-    return compute ? onCloudComputer(rendered) : rendered;
+    return compute ? onWorkspaceMachine(rendered) : rendered;
   }
-  if (!context.cloudComputer) return renderConnectedMachineFault(error, context);
+  if (!context.workspaceMachine) return renderConnectedMachineFault(error, context);
   if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
     // The box did not come back while waking, before anything was sent.
     const wakeSeconds = error.detail[COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY];
     if (wakeSeconds) {
-      return onCloudComputer(
+      return onWorkspaceMachine(
         assemble(error, {
-          headline: "the cloud computer this chat runs on did not come back",
-          happened: `the cloud computer this chat runs on did not answer within ${wakeSeconds}s of being woken`,
-          layer: "the cloud computer itself, not your command",
+          headline: "this chat's workspace machine did not come back",
+          happened: `this chat's workspace machine did not answer within ${wakeSeconds}s of being woken`,
+          layer: "the workspace machine itself, not your command",
           preserved: "nothing ran; the command was never sent.",
           tryNext:
-            "retry once; if it still does not answer, stop and tell the person the cloud computer is not starting.",
+            "retry once; if it still does not answer, stop and tell the person the workspace machine is not starting.",
         }),
       );
     }
-    // A cloud computer that stops answering is most likely restarting (its
+    // A workspace machine that stops answering is most likely restarting (its
     // agent or the whole box) and comes back on its own within seconds; it is
     // not "offline" the way a person's own computer can be.
-    return onCloudComputer(
+    return onWorkspaceMachine(
       assemble(error, {
-        headline:
-          "the cloud computer this chat runs on stopped answering; it is most likely restarting",
+        headline: "this chat's workspace machine stopped answering; it is most likely restarting",
         happened:
-          "the cloud computer this chat runs on did not answer, most likely because it is restarting",
-        layer: "the cloud computer itself, not your command",
+          "this chat's workspace machine did not answer, most likely because it is restarting",
+        layer: "the workspace machine itself, not your command",
         preserved: error.neverSent
-          ? "nothing ran; the command never reached the cloud computer."
-          : "unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
+          ? "nothing ran; the command never reached the workspace machine."
+          : "unknown — the command was in flight when the workspace machine stopped answering, so it may not have run, or may have run fully or partly.",
         tryNext: error.neverSent
-          ? "retry the command; the cloud computer is usually back within seconds."
-          : "once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+          ? "retry the command; the workspace machine is usually back within seconds."
+          : "once the workspace machine is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
       }),
     );
   }
-  return onCloudComputer(renderConnectedMachineFault(error, {}));
+  return onWorkspaceMachine(renderConnectedMachineFault(error, {}));
 }
 
-/** The same four fields, named for the chat's cloud computer. */
-function onCloudComputer(rendered: string): string {
+/** The same four fields, named for the chat's workspace machine. */
+function onWorkspaceMachine(rendered: string): string {
   return rendered.startsWith(CONNECTED_MACHINE_PREFIX)
-    ? `${CLOUD_COMPUTER_PREFIX}${rendered.slice(CONNECTED_MACHINE_PREFIX.length)}`
+    ? `${WORKSPACE_MACHINE_PREFIX}${rendered.slice(CONNECTED_MACHINE_PREFIX.length)}`
     : rendered;
 }
 

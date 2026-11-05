@@ -13,6 +13,7 @@ import {
   getOrganizationModelProviderCatalogInScope,
   type OrganizationModelCatalogProviderKind,
 } from "./organization-model-providers";
+import { listOrganizationCompatibleEndpointsInScope } from "./organization-compatible-model-endpoints";
 
 /**
  * One invocation's public model metadata, in one short tenant-scoped read.
@@ -50,6 +51,16 @@ export async function loadWorkspaceModelCatalogInputs(
       ...input,
       providerKinds: input.organizationProviderKinds,
     });
-    return { workspaceConnections, workspaceCustomModels, organizationProviders };
+    // The organization's own OpenAI-compatible endpoints, without their keys.
+    const organizationCompatibleEndpoints = await listOrganizationCompatibleEndpointsInScope(
+      scopedDb,
+      { accountId: input.accountId },
+    );
+    return {
+      workspaceConnections,
+      workspaceCustomModels,
+      organizationProviders,
+      organizationCompatibleEndpoints,
+    };
   });
 }

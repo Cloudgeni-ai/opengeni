@@ -1,7 +1,16 @@
 import {
+  type Database,
+  requestSandboxProcessStartReplacement,
+  SandboxLeaseTransitionError,
+} from "@opengeni/db";
+import {
   isMachineProcessStartFailureMessage,
+  isModalShellStartFailureMessage,
   isProcessStartFailureMessage,
   processStartFailureNullDeviceNote,
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sanitizeModalShellStartFailureMessage,
   sanitizeProcessStartFailureMessage,
   SelfhostedControlError,
   type UnresponsiveAgentRecovery,
@@ -127,8 +136,9 @@ export const SANDBOX_PROCESS_START_FAILED_CODE = "sandbox_process_start_failed";
 
 /** Whether the machine's inability to start programs appears anywhere in the
  * error's cause graph: a typed agent answer, or its stable marker in a
- * wrapper's message (older wrappers keep only the text). One missing program
- * is not that: it keeps its ordinary handling. */
+ * wrapper's message (older wrappers keep only the text), or Modal's answer
+ * for an exec whose /bin/sh cannot load (Modal runs every command through
+ * it). One missing program is not that: it keeps its ordinary handling. */
 export function isSandboxProcessStartFailure(error: unknown): boolean {
   return findProcessStartFailure(error) !== null;
 }
@@ -137,8 +147,18 @@ function findProcessStartFailure(error: unknown): Error | null {
   return findInCauseGraph(error, (node) =>
     node instanceof SelfhostedControlError
       ? node.processStartFailed
-      : isMachineProcessStartFailureMessage(node.message),
+      : isMachineProcessStartFailureMessage(node.message) ||
+        isModalShellStartFailureMessage(node.message),
   );
+}
+
+/** A process-start failure on one bounded line with nothing from the
+ * command: the program's name from a machine agent, or Modal's stable tail
+ * (its message repeats the whole command). */
+export function sanitizeSandboxProcessStartMessage(message: string): string {
+  return isModalShellStartFailureMessage(message)
+    ? sanitizeModalShellStartFailureMessage(message)
+    : sanitizeProcessStartFailureMessage(message);
 }
 
 /** The probe ran the shell builtin `true` in the default working directory,
@@ -200,16 +220,18 @@ export class SandboxMachineRestartingError extends Error {
 export class SandboxMachineBackError extends Error {
   override readonly name = "SandboxMachineBackError";
 
-  constructor(cause: unknown) {
+  constructor(cause: unknown, reason: "works_again" | "already_replaced" = "works_again") {
     super(
-      "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because a check didn't confirm it is still broken; the same turn will retry after a short delay.",
+      reason === "already_replaced"
+        ? "The workspace machine couldn't start programs, and nothing the model asked for ran. It has already been replaced, so the same turn will retry on the new one after a short delay."
+        : "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because a check didn't confirm it is still broken; the same turn will retry after a short delay.",
       { cause },
     );
   }
 }
 
 /** Where the machine that cannot start programs runs, for the person's copy. */
-export type SandboxProcessStartMachine = "compute" | "connected_machine" | "other";
+export type SandboxProcessStartMachine = "compute" | "modal" | "connected_machine" | "other";
 
 /**
  * The sandbox cannot start programs and the worker will not restart it
@@ -236,7 +258,7 @@ export class SandboxProcessStartFailedError extends Error {
     const found = findProcessStartFailure(cause);
     // A wrapper keeps the agent's raw text, which older agents filled with
     // the whole command: only its sanitized form is kept.
-    const agentMessage = sanitizeProcessStartFailureMessage(
+    const agentMessage = sanitizeSandboxProcessStartMessage(
       found?.message ?? (cause instanceof Error ? cause.message : String(cause)),
     ).slice(0, 2_000);
     super(
@@ -276,12 +298,24 @@ function processStartFailedCopy(
   return "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.";
 }
 
-/** A sandbox session that can boot its box afresh (compute). `exec` runs a
- * command on the box, which shows whether it can start programs again. */
+/** A sandbox session whose box can be started afresh: compute reboots it
+ * from its disk; Modal replaces it with a new box restored from the saved
+ * /workspace. `exec` (or `execCommand`) runs a command on the box, which
+ * shows whether it can start programs again. */
 type RestartableMachine = {
-  backendId: "compute";
-  restartMachine(): Promise<void>;
+  backendId: "compute" | "modal";
+  restartMachine?(): Promise<void>;
   exec?: (args: { cmd: string }) => Promise<unknown>;
+  execCommand?: (args: { cmd: string }) => Promise<unknown>;
+};
+
+/** A Modal box's replacement, requested from the lease: the turn waits for
+ * this lifecycle transition and then continues on the restored box. */
+export type SandboxBoxReplacement = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  liveness: "warm" | "draining";
 };
 
 /** How long the box gets to start one trivial program before a restart. */
@@ -300,12 +334,24 @@ async function probeProgramStart(
   machine: RestartableMachine,
 ): Promise<"starts" | "cannot" | "unknown"> {
   // No way to ask: the restart is the only remedy, as before the probe.
-  if (typeof machine.exec !== "function") return "cannot";
+  const exec =
+    typeof machine.exec === "function"
+      ? machine.exec.bind(machine)
+      : typeof machine.execCommand === "function"
+        ? machine.execCommand.bind(machine)
+        : null;
+  if (!exec) return "cannot";
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      machine.exec({ cmd: "true" }).then(
-        () => "starts" as const,
+      exec({ cmd: "true" }).then(
+        // Modal answers an exec it could not start with a result (exit code
+        // 128 and its shell-load error), not a rejection.
+        (result: unknown) =>
+          sandboxCommandExitCode(result) !== 0 &&
+          isModalShellStartFailureMessage(sandboxCommandOutput(result))
+            ? ("cannot" as const)
+            : ("starts" as const),
         (probeError: unknown) =>
           isSandboxProcessStartFailure(probeError) || probeCannotStartPrograms(probeError)
             ? ("cannot" as const)
@@ -320,12 +366,28 @@ async function probeProgramStart(
   }
 }
 
-function restartableMachine(session: unknown): RestartableMachine | null {
+function restartableMachine(
+  session: unknown,
+  backend: string | null | undefined,
+  boxReplacement: SandboxProcessStartRecovery["boxReplacement"],
+): RestartableMachine | null {
   if (!session || typeof session !== "object") return null;
   const candidate = session as { backendId?: unknown; restartMachine?: unknown };
-  return candidate.backendId === "compute" && typeof candidate.restartMachine === "function"
-    ? (session as RestartableMachine)
-    : null;
+  if (candidate.backendId === "compute" && typeof candidate.restartMachine === "function") {
+    return session as RestartableMachine;
+  }
+  // A Modal box has no restart of its own: the lease replaces it.
+  if (backend === "modal" && boxReplacement) {
+    const box = session as Pick<RestartableMachine, "exec" | "execCommand">;
+    return {
+      backendId: "modal",
+      ...(typeof box.exec === "function" ? { exec: box.exec.bind(session) } : {}),
+      ...(typeof box.execCommand === "function"
+        ? { execCommand: box.execCommand.bind(session) }
+        : {}),
+    };
+  }
+  return null;
 }
 
 export type SandboxProcessStartRecovery = {
@@ -348,7 +410,106 @@ export type SandboxProcessStartRecovery = {
   ) => Promise<void>;
   /** The operation name the guard counts. */
   operationName: string;
+  /**
+   * Modal only: the exact box and how to ask the lease to replace it. The
+   * reaper saves /workspace with Modal's own snapshot (no command runs in the
+   * box), ends the box, and the next acquire restores a fresh one; arrivals
+   * meanwhile wait instead of reusing it. `request` answers null when the
+   * lease no longer names the box.
+   */
+  boxReplacement?: SandboxBoxReplacementRequest | undefined;
 };
+
+/** A Modal box (lease group, epoch, provider instance) and its replacement. */
+export type SandboxBoxReplacementRequest = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  request: () => Promise<SandboxBoxReplacement | null>;
+};
+
+/** How a Modal session saves /workspace (`tar`, `snapshot_filesystem` or
+ * `snapshot_directory`), or null when it does not say. */
+function modalWorkspacePersistence(session: unknown): string | null {
+  if (!session || typeof session !== "object") return null;
+  const state = (session as { state?: unknown }).state;
+  if (!state || typeof state !== "object") return null;
+  const record = state as {
+    workspacePersistence?: unknown;
+    providerState?: { workspacePersistence?: unknown } | null;
+  };
+  const value = record.workspacePersistence ?? record.providerState?.workspacePersistence;
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * The Modal box replacement for `SandboxProcessStartRecovery.boxReplacement`.
+ * Only a Modal box with a known lease epoch and provider instance that saves
+ * /workspace as a directory snapshot can be replaced: that save runs no
+ * command in the box, and the fresh box starts from the clean image with
+ * /workspace restored. A whole-filesystem snapshot would restore the broken
+ * /bin/sh too, and a `tar` save needs the box's shell. Every other box gets
+ * none, so its turn stops with short copy.
+ */
+export function modalSandboxBoxReplacer(
+  db: Database,
+  input: {
+    backend: string | null | undefined;
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string | null | undefined;
+    box: { leaseEpoch: number; established: { instanceId: string } } | null | undefined;
+    session: unknown;
+  },
+): SandboxProcessStartRecovery["boxReplacement"] {
+  const { backend, accountId, workspaceId, sandboxGroupId, box } = input;
+  if (backend !== "modal" || !sandboxGroupId || !box?.established.instanceId) return undefined;
+  if (modalWorkspacePersistence(input.session) !== "snapshot_directory") return undefined;
+  const target = {
+    sandboxGroupId,
+    leaseEpoch: box.leaseEpoch,
+    instanceId: box.established.instanceId,
+  };
+  return {
+    ...target,
+    request: async () =>
+      await requestSandboxProcessStartReplacement(db, { accountId, workspaceId, ...target }),
+  };
+}
+
+/**
+ * Platform setup failed because a Modal box could not start programs, and
+ * its replacement was requested. Its cause is the lease transition the turn
+ * waits on (see failure-settlement): the same turn continues on a fresh box
+ * restored from the saved /workspace.
+ */
+export class SandboxMachineReplacingError extends Error {
+  override readonly name = "SandboxMachineReplacingError";
+
+  constructor(transition: SandboxLeaseTransitionError) {
+    super(
+      "The workspace machine couldn't start programs, so it is being replaced with a fresh one restored from /workspace. The same turn continues once it is ready.",
+      { cause: transition },
+    );
+  }
+}
+
+/**
+ * This turn asked to replace a Modal box that could not start programs, and
+ * the drain could not save that box's /workspace yet. The turn stops instead
+ * of waiting on saves that keep failing; the box stays fenced, so no turn
+ * reuses it, and it is replaced once a save succeeds. No cause: this is a
+ * terminal stop, never a lifecycle wait.
+ */
+export class SandboxBoxNotSavedError extends Error {
+  override readonly name = "SandboxBoxNotSavedError";
+
+  constructor() {
+    super(
+      "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then.",
+    );
+  }
+}
 
 /**
  * The error a failed platform setup throws, with process-start recovery: when
@@ -365,22 +526,24 @@ export async function recoverSandboxSetupFailure(
   if (mapped !== error) return mapped;
   if (
     error instanceof SandboxMachineRestartingError ||
+    error instanceof SandboxMachineReplacingError ||
     error instanceof SandboxMachineBackError ||
     error instanceof SandboxProcessStartFailedError ||
     !isSandboxProcessStartFailure(error)
   ) {
     return error;
   }
-  const machine = restartableMachine(recovery.session);
+  const machine = restartableMachine(recovery.session, recovery.backend, recovery.boxReplacement);
   if (!machine) {
     return new SandboxProcessStartFailedError(error, {
       machine: recovery.backend === "selfhosted" ? "connected_machine" : "other",
       restartedThisTurn: false,
     });
   }
+  const kind = machine.backendId;
   if (!guard.replaySafe()) {
     return new SandboxProcessStartFailedError(error, {
-      machine: "compute",
+      machine: kind,
       restartedThisTurn: false,
       restartFailure: "a setup script had started, so the setup is not replayed",
     });
@@ -391,17 +554,20 @@ export async function recoverSandboxSetupFailure(
   } catch (countError) {
     // Without proof that no restart happened, never risk a restart loop.
     return new SandboxProcessStartFailedError(error, {
-      machine: "compute",
+      machine: kind,
       restartedThisTurn: false,
       restartFailure: `could not read earlier restarts: ${errorText(countError)}`,
     });
   }
   if (restarts.started > 0) {
     // One restart was begun this turn; the copy says it happened only when it
-    // completed (the worker may have stopped before or during it).
+    // completed (the worker may have stopped before or during it). A Modal
+    // replacement is never marked completed (the drain completes it), and a
+    // later setup of this turn runs on a box it did not ask to replace (unless
+    // the worker stopped between recording and requesting it, which is rare).
     return new SandboxProcessStartFailedError(error, {
-      machine: "compute",
-      restartedThisTurn: restarts.completed > 0,
+      machine: kind,
+      restartedThisTurn: restarts.completed > 0 || kind === "modal",
     });
   }
   // Checked before the restart: a box another session sharing it already
@@ -413,19 +579,41 @@ export async function recoverSandboxSetupFailure(
   try {
     // Recorded before the restart, so a crash during it still counts.
     await recovery.publish([
-      { type: "sandbox.operation.started", payload: { name, reason: "process_start_failed" } },
+      {
+        type: "sandbox.operation.started",
+        payload: {
+          name,
+          reason: "process_start_failed",
+          // The replaced box: a drain that cannot save it releases this
+          // turn instead of leaving it waiting (see failure settlement).
+          ...(kind === "modal" && recovery.boxReplacement
+            ? {
+                sandboxGroupId: recovery.boxReplacement.sandboxGroupId,
+                leaseEpoch: recovery.boxReplacement.leaseEpoch,
+              }
+            : {}),
+        },
+      },
     ]);
   } catch (publishError) {
     // A fenced or cancelled attempt stops as such; nothing was restarted.
     if (isAttemptStop(publishError)) return publishError;
     return new SandboxProcessStartFailedError(error, {
-      machine: "compute",
+      machine: kind,
       restartedThisTurn: false,
       restartFailure: `could not record the restart: ${errorText(publishError)}`,
     });
   }
+  let replacement: SandboxBoxReplacement | null = null;
   try {
-    await machine.restartMachine();
+    if (kind === "modal") {
+      replacement = await recovery.boxReplacement!.request();
+      // The lease no longer names this box: it was already replaced (or
+      // ended), so a retry gets a new box. The restart still counts.
+      if (!replacement) return new SandboxMachineBackError(error, "already_replaced");
+    } else {
+      await machine.restartMachine!();
+    }
   } catch (restartError) {
     await recovery
       .publish([
@@ -436,11 +624,26 @@ export async function recoverSandboxSetupFailure(
       ])
       .catch(() => undefined);
     return new SandboxProcessStartFailedError(error, {
-      machine: "compute",
+      machine: kind,
       restartedThisTurn: false,
       restartAttemptFailed: true,
       restartFailure: errorText(restartError),
     });
+  }
+  if (replacement) {
+    // Not completed yet: the box is replaced only once the drain has saved
+    // /workspace and ended it. The row reads "Restarting the workspace
+    // machine" while the turn waits and settles with the turn.
+    return new SandboxMachineReplacingError(
+      new SandboxLeaseTransitionError(
+        replacement.sandboxGroupId,
+        replacement.leaseEpoch,
+        "rotation_in_progress",
+        "modal",
+        replacement.instanceId,
+        replacement.liveness,
+      ),
+    );
   }
   await recovery
     .publish([{ type: "sandbox.operation.completed", payload: { name } }])

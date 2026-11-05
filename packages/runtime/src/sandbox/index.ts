@@ -60,9 +60,12 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  findRebuildableWorkspacePaths,
   probeRemoteWorkspaceSize,
   WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,
   workspaceSizeFromArchiveDescriptor,
+  type RebuildableWorkspacePaths,
   type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
@@ -612,6 +615,10 @@ export {
   sanitizeProcessStartFailureMessage,
   processStartFailureNullDeviceNote,
 } from "./selfhosted/process-start-failure";
+export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
 export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,

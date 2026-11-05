@@ -19,7 +19,21 @@ import {
   installSandboxSetupNoticeDelivery,
   queueSandboxSetupNotice,
   takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
 } from "./sandbox-setup-notices";
+export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
+import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
+  softFailingSetupHooks,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
+import { SandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
+export {
+  softRunCredentialWriteFailure,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -11386,6 +11400,15 @@ function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: Prepar
 }
 
 /**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
+}
+
+/**
  * A per-run `Runner` whose `modelProvider` is built from THIS turn's settings.
  *
  * The standalone `run()` uses a process-global default Runner whose modelProvider
@@ -11878,6 +11901,9 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Setup steps the worker ran first that already failed softly (run
+     * credential files), reported in the same notice as the hooks'. */
+    priorSoftSetupFailures?: readonly SoftSetupFailure[];
     /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
     recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
@@ -11953,8 +11979,11 @@ export async function runOwnedSandboxSetup(
   // (effective backend "selfhosted"): the box is the user's REAL computer — the
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
+  // Setup steps that failed softly this turn, including the worker's own
+  // earlier steps (run credential files), reported in one notice below.
+  const softFailures: SoftSetupFailure[] = [...(opts.priorSoftSetupFailures ?? [])];
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-    // CLOUD COMPUTER SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
     // clock or resolver the agent broke is repaired before anything below needs
     // the network (rig setup, clones, the Codemode client). Never on any other
     // backend, and above all never on a connected machine.
@@ -11992,8 +12021,30 @@ export async function runOwnedSandboxSetup(
         await execute();
       }
     }
-    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
+    // A hook failure the box itself caused (a full /workspace, a blocked
+    // path) must not fail every later turn before the model can fix it: the
+    // turn starts and the model is told what failed (sandbox-setup-soft-failure.ts).
+    await runBeforeAgentStartHooks(
+      setupSession,
+      softFailingSetupHooks(ownedTurnPrivateHooks, softFailures, (failure) => {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "platform setup step failed softly; the turn continues with a notice",
+            event: "sandbox.setup.soft_failure",
+            hookId: failure.hookId,
+            cause: failure.cause.kind,
+            ...(failure.cause.kind === "command_failed"
+              ? { exitCode: failure.cause.exitCode }
+              : {}),
+          }),
+        );
+      }),
+      ownedHookContext,
+    );
   }
+  const softFailureNotice = softSetupFailureNotice(softFailures);
+  if (softFailureNotice) sandboxSetupNoticeSink(agent, opts.preparedInput)(softFailureNotice);
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
   // workspace-relative, integrity-verified, read-only, and atomic; repository,
@@ -12841,14 +12892,14 @@ async function repairOwnedComputeBox(
     );
   } catch (error) {
     if (error instanceof TurnSandboxCommandCancelledError) throw error;
-    console.warn("[sandbox] cloud computer clock and DNS check failed", {
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
       error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
     return null;
   }
   const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
   if (report.clock || report.dns) {
-    console.warn("[sandbox] cloud computer clock or DNS was broken before the turn", report);
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
   }
   return report;
 }
@@ -14856,7 +14907,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
-  // A folder another user owns (for example after `chown -R` inside the box) is
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
   // not a broken repository: Git only refuses to read it. Trust exactly that
   // path (and its resolved form) in the global Git config and keep the work
   // tree as it is. The message is matched in the C locale, in both wordings.
@@ -16153,8 +16204,10 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(
+    throw new SandboxLifecycleCommandExitError(
       `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+      exitCode,
+      output,
     );
   }
   if (exitCode === null) {
