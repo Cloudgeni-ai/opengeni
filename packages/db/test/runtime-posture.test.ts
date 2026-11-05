@@ -582,10 +582,10 @@ function safePosture(): RuntimeDatabasePosture {
       },
       {
         // 0988 reads only session tables present in every current posture;
-        // its runtime grant stays deferred for previous-release compatibility.
+        // 0988 withheld its runtime grant and 1274 granted it.
         name: "summarize_queued_turns_by_hold()",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -4143,7 +4143,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 0946, 1103, 1060 and 1107 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239 and 1274 grant what 0937, 0946, 1103, 1060, 1107 and 0988 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4283,7 +4283,6 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-      "summarize_queued_turns_by_hold()",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "read_external_identity_v1(uuid, text, text)",
@@ -4299,6 +4298,9 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
     );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
