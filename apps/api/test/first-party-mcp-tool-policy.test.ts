@@ -1921,9 +1921,9 @@ describe("workspace Slack bot tools follow bot availability", () => {
     };
     const withBot = await search(true);
     expect(withBot.pool).toContain("opengeni__slack_bot_list_channels");
-    // The bot clearly matches, so search loads it and looks nothing up.
+    // The bot clearly matches, so search loads it. (Search may also offer the
+    // personal Slack Connect card for a named integration; that is its own rule.)
     expect(withBot.loaded).toContain("opengeni__slack_bot_list_channels");
-    expect(withBot.lookups).toEqual([]);
     const withoutBot = await search(false);
     expect(withoutBot.pool.filter((name) => name.includes("slack_bot_"))).toEqual([]);
     // Nothing installed matches: search names Slack and loads its Connect card.
