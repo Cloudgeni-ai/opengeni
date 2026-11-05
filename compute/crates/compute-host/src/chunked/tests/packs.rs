@@ -122,7 +122,10 @@ async fn a_copy_of_chunk_objects_reuses_them_and_packs_only_what_changes() {
         chunk_objects,
         "nothing copied into this hour"
     );
-    assert_eq!(listed(&backend, "t/packs").await, [] as [(ObjectPath, u64); 0]);
+    assert_eq!(
+        listed(&backend, "t/packs").await,
+        [] as [(ObjectPath, u64); 0]
+    );
     let disk = fs::read(saved.disk.path()).unwrap();
     assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
 
