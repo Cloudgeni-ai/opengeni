@@ -594,7 +594,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         )));
     }
     let config_dir = config::config_dir().ok();
-    install_shell_tools(config_dir.as_deref());
+    install_shell_tools(config_dir.as_deref(), instance_lock_guard.is_some());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) = attach_browser_controller(
         platform,
@@ -611,7 +611,6 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             if removed > 0 {
                 info!(removed, "removed earlier interaction runtime generations");
             }
-            prune_shell_tools();
         });
     }
     // Clone connection platforms only after browser control is attached. Existing
@@ -761,21 +760,22 @@ fn operation_cgroups(
 }
 
 /// Puts this release's ripgrep and jq at the end of every command's `PATH`.
-/// A failure only costs the fallback tools, so it never stops the agent.
-fn install_shell_tools(config_dir: Option<&Path>) {
+/// A failure only costs the fallback tools, so it never stops the agent. The
+/// agent holding the instance lock (`prune`) then removes generations no
+/// agent has used for a while, off the startup path.
+fn install_shell_tools(config_dir: Option<&Path>, prune: bool) {
     match shell_tools::install(config_dir) {
         Ok(Some(directory)) => info!(directory = %directory.display(), "shell tools ready"),
         Ok(None) => {}
         Err(error) => warn!(%error, "shell tools unavailable; commands use the machine's own"),
     }
-}
-
-/// Removes shell tools generations no agent has used for a while. Only the
-/// agent holding the instance lock calls this, off the startup path.
-fn prune_shell_tools() {
-    let removed = shell_tools::prune_stale_generations();
-    if removed > 0 {
-        info!(removed, "removed earlier shell tools generations");
+    if prune {
+        std::thread::spawn(|| {
+            let removed = shell_tools::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier shell tools generations");
+            }
+        });
     }
 }
 
@@ -828,10 +828,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
-    install_shell_tools(config_dir.as_deref());
-    if instance_lock_guard.is_some() {
-        std::thread::spawn(prune_shell_tools);
-    }
+    install_shell_tools(config_dir.as_deref(), instance_lock_guard.is_some());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone(), true);
