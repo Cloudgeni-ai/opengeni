@@ -2859,8 +2859,11 @@ never rewrites durable home policy.
 
 Repository skill discovery skips definite path misses. A typed unreachable
 Connected Machine (offline or control timeout) degrades that run's repository
-index to an "unavailable" notice instead of blocking the model. Other failures
-reach turn settlement; rotation resumes through the durable lifecycle wake.
+index to an "unavailable" notice instead of blocking the model. A failure that
+shows the workspace answered but one search path or skill folder was unusable
+skips only that entry with a reason on every backend; box, route, fence,
+transport, cancellation and unrecognized failures reach turn settlement; rotation resumes through the
+durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement

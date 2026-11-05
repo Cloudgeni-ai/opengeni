@@ -18,10 +18,27 @@ import {
   SandboxWorkspaceReadNotFoundError,
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
-import { SandboxFilesystemNotFoundError } from "modal";
+import {
+  NotFoundError as ModalNotFoundError,
+  SandboxFilesystemFileTooLargeError,
+  SandboxFilesystemIsADirectoryError,
+  SandboxFilesystemNotADirectoryError,
+  SandboxFilesystemNotFoundError,
+  SandboxFilesystemPermissionError,
+} from "modal";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
-import { isDefinitePathNotFoundError } from "./sandbox/channel-a";
+import {
+  ChannelASymlinkPathError,
+  ChannelAUnavailableError,
+  ChannelAUnsupportedError,
+  ChannelAValidationError,
+  isDefinitePathNotFoundError,
+} from "./sandbox/channel-a";
 import { withSandboxOperationPurpose } from "./sandbox/operation-purpose";
+import {
+  classifyProviderSandboxFailure,
+  isProviderSandboxGoneDuringRoutedOperation,
+} from "./sandbox/provider-errors";
 import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 
 const SKILL_FILE = "SKILL.md";
@@ -33,9 +50,11 @@ const DISCOVERY_CONCURRENCY = 8;
 
 // Keep ordered results, bound remote work, and drain already-started operations
 // before propagating a failure. Never leave detached filesystem work behind.
-// A genuine failure always outranks an unreachable-workspace failure, so an
-// in-flight real error is never hidden behind a degradable one; within one
-// class the lowest index wins deterministically.
+// A failure that must reach turn recovery always outranks the rest, so an
+// in-flight real error is never hidden behind a degradable one. An
+// unreachable workspace outranks a degradable answer, because its notice
+// (sandbox tools may fail) is the more accurate one for the run. Within one
+// rank the lowest index wins deterministically.
 async function mapDiscovery<T, R>(
   items: readonly T[],
   read: (item: T) => Promise<R>,
@@ -45,7 +64,7 @@ async function mapDiscovery<T, R>(
   let failed = false;
   let failure: unknown;
   let failureIndex = Infinity;
-  let failureUnreachable = true;
+  let failureRank = -1;
   await Promise.all(
     Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, items.length) }, async () => {
       while (!failed && next < items.length) {
@@ -53,14 +72,12 @@ async function mapDiscovery<T, R>(
         try {
           results[index] = await read(items[index]!);
         } catch (error) {
-          const unreachable = isUnreachableWorkspaceError(error);
-          if (
-            (failureUnreachable && !unreachable) ||
-            (failureUnreachable === unreachable && index < failureIndex)
-          ) {
+          const rank =
+            DISCOVERY_FAILURE_RANK[classifyRepositorySkillDiscoveryFailure(error).handling];
+          if (rank > failureRank || (rank === failureRank && index < failureIndex)) {
             failure = error;
             failureIndex = index;
-            failureUnreachable = unreachable;
+            failureRank = rank;
           }
           failed = true;
         }
@@ -77,6 +94,23 @@ function isMissingSkillPath(error: unknown): boolean {
     error instanceof SandboxWorkspaceReadNotFoundError ||
     error instanceof SandboxFilesystemNotFoundError
   );
+}
+
+/** One search path or skill folder that the workspace answered for but that
+ * cannot be used. Only these classes skip a single entry; bounds and a missing
+ * file API still degrade the whole index, and everything else propagates. */
+const SKIPPABLE_SKILL_PATH_CLASSES = new Set<RepositorySkillDiscoveryErrorClass>([
+  "permission_denied",
+  "filesystem",
+  "symlink",
+  "machine_refused",
+]);
+
+function skippableSkillPathFailure(error: unknown): RepositorySkillDiscoveryErrorClass | null {
+  const failure = classifyRepositorySkillDiscoveryFailure(error);
+  return failure.handling === "degraded" && SKIPPABLE_SKILL_PATH_CLASSES.has(failure.errorClass)
+    ? failure.errorClass
+    : null;
 }
 
 /**
@@ -97,12 +131,197 @@ function isUnreachableWorkspaceError(error: unknown): boolean {
   );
 }
 
+/** Discovery found more than its fixed bounds allow. The workspace answered. */
+class RepositorySkillDiscoveryLimitError extends Error {
+  override readonly name = "RepositorySkillDiscoveryLimitError";
+}
+
+/** The bound session cannot list or read files at all. */
+class RepositorySkillDiscoveryUnsupportedError extends Error {
+  override readonly name = "RepositorySkillDiscoveryUnsupportedError";
+}
+
+export type RepositorySkillDiscoveryHandling = "propagated" | "degraded" | "unreachable";
+
+/** Bounded, content-free failure vocabulary for logs, metrics and the notice. */
+export const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES = [
+  "cancelled",
+  "fenced",
+  "route_changed",
+  "sandbox_gone",
+  "workspace_unavailable",
+  "transport",
+  "control_error",
+  "provider_error",
+  "unclassified",
+  "unreachable",
+  "permission_denied",
+  "filesystem",
+  "symlink",
+  "machine_refused",
+  "unsupported",
+  "limit_exceeded",
+] as const;
+
+export type RepositorySkillDiscoveryErrorClass =
+  (typeof REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES)[number];
+
+export type RepositorySkillDiscoveryFailure = Readonly<{
+  errorClass: RepositorySkillDiscoveryErrorClass;
+  handling: RepositorySkillDiscoveryHandling;
+}>;
+
+const DISCOVERY_FAILURE_RANK: Record<RepositorySkillDiscoveryHandling, number> = {
+  degraded: 0,
+  unreachable: 1,
+  propagated: 2,
+};
+
+/** Typed route and lease transitions that the turn's recovery owns. The
+ * worker re-establishes or re-resolves the box and retries the attempt. */
+const ROUTE_TRANSITION_ERROR_NAMES = new Set([
+  "RoutingBackendRecoveryRequiredError",
+  "RoutingWorkspaceRootChangedError",
+  "RoutingActiveRouteChangedError",
+  "ActiveBackendUnresolvableError",
+  "SelfhostedWorkspaceRootChangedError",
+  "SandboxCapabilitiesChangedError",
+  "ChannelAFileSystemRouteChangedError",
+]);
+
+const PERMISSION_ERRNO = new Set(["EACCES", "EPERM"]);
+const FILESYSTEM_ERRNO = new Set(["ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG", "EILSEQ", "EFBIG"]);
+/** errno codes count only from a filesystem call: `connect EACCES` on a
+ * socket is a transport failure, not a skill folder permission. */
+const FILESYSTEM_SYSCALLS = new Set([
+  "open",
+  "opendir",
+  "scandir",
+  "stat",
+  "lstat",
+  "fstat",
+  "read",
+  "readlink",
+  "realpath",
+  "access",
+]);
+
+/** Connected Machine answers that refuse the request itself. Draining,
+ * replaced connections, stream, protocol and unspecified control errors are
+ * liveness or transport failures and propagate. */
+const MACHINE_REFUSAL_CODES = new Set<ErrorCode>([
+  ErrorCode.ERROR_CODE_CONSENT_REQUIRED,
+  ErrorCode.ERROR_CODE_OS,
+  ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
+  ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER,
+  ErrorCode.ERROR_CODE_UNSUPPORTED,
+]);
+
+function errorField(error: unknown, key: string): unknown {
+  if (!error || typeof error !== "object") return undefined;
+  try {
+    return (error as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Decide whether a discovery failure may degrade to a run without repository
+ * skills. Only evidence that the workspace itself answered, but its skill
+ * folders could not be used (permission, not-a-directory, a machine's
+ * consent/OS refusal, bounds, no filesystem API), degrades. Everything that
+ * says the box or its route could not answer (cancellation, a fence, a route
+ * transition, a vanished sandbox, transport loss, any unrecognized error) is
+ * propagated so the existing recovery path still sees it before the model
+ * runs; masking it would only move the same failure to the first tool call.
+ * A Connected Machine that is unreachable keeps its own degraded notice.
+ */
+export function classifyRepositorySkillDiscoveryFailure(
+  error: unknown,
+): RepositorySkillDiscoveryFailure {
+  const propagated = (errorClass: RepositorySkillDiscoveryErrorClass) =>
+    ({ errorClass, handling: "propagated" }) as const;
+  const degraded = (errorClass: RepositorySkillDiscoveryErrorClass) =>
+    ({ errorClass, handling: "degraded" }) as const;
+  try {
+    const name = errorField(error, "name");
+    const code = errorField(error, "code");
+    if (name === "AbortError" || name === "CancelledFailure" || code === "ABORT_ERR")
+      return propagated("cancelled");
+    if (errorField(error, "fenced") === true) return propagated("fenced");
+    if (typeof name === "string" && ROUTE_TRANSITION_ERROR_NAMES.has(name))
+      return propagated("route_changed");
+    if (error instanceof SelfhostedControlError) {
+      if (isUnreachableWorkspaceError(error))
+        return { errorClass: "unreachable", handling: "unreachable" };
+      if (
+        !error.draining &&
+        !error.connectionReplaced &&
+        (error.payloadTooLarge ||
+          error.reason === "consent_required" ||
+          MACHINE_REFUSAL_CODES.has(error.code))
+      )
+        return degraded("machine_refused");
+      // Draining, a replaced connection and stream loss are transport; a
+      // protocol, unspecified or other control error is still not an answer.
+      return propagated(
+        error.draining || error.connectionReplaced || error.code === ErrorCode.ERROR_CODE_STREAM
+          ? "transport"
+          : "control_error",
+      );
+    }
+    if (error instanceof RepositorySkillDiscoveryLimitError) return degraded("limit_exceeded");
+    if (
+      error instanceof RepositorySkillDiscoveryUnsupportedError ||
+      error instanceof ChannelAUnsupportedError ||
+      name === "RoutingUnsupportedError"
+    )
+      return degraded("unsupported");
+    if (isProviderSandboxGoneDuringRoutedOperation("modal", error))
+      return propagated("sandbox_gone");
+    // Modal's filesystem API reports a vanished sandbox as a bare NotFoundError.
+    if (error instanceof ModalNotFoundError) return propagated("sandbox_gone");
+    // Channel A replaces exec failures during a listing with this class.
+    if (error instanceof ChannelAUnavailableError) return propagated("workspace_unavailable");
+    if (classifyProviderSandboxFailure("modal", error).kind === "transient_transport")
+      return propagated("transport");
+    if (error instanceof ChannelASymlinkPathError) return degraded("symlink");
+    if (error instanceof SandboxFilesystemPermissionError) return degraded("permission_denied");
+    if (
+      error instanceof SandboxFilesystemNotADirectoryError ||
+      error instanceof SandboxFilesystemIsADirectoryError ||
+      error instanceof SandboxFilesystemFileTooLargeError ||
+      error instanceof ChannelAValidationError
+    )
+      return degraded("filesystem");
+    // The base Modal SandboxFilesystemError also carries lost gRPC errors and a
+    // killed filesystem helper; it is not proof that the workspace answered.
+    if (name === "SandboxFilesystemError") return propagated("provider_error");
+    const syscall = errorField(error, "syscall");
+    if (
+      typeof code === "string" &&
+      typeof syscall === "string" &&
+      FILESYSTEM_SYSCALLS.has(syscall)
+    ) {
+      if (PERMISSION_ERRNO.has(code)) return degraded("permission_denied");
+      if (FILESYSTEM_ERRNO.has(code)) return degraded("filesystem");
+    }
+  } catch {
+    // An unreadable error is not proof that the workspace answered.
+  }
+  return propagated("unclassified");
+}
+
 type WorkspaceSkillDiscovery = Readonly<{
   skills: readonly WorkspaceSkill[];
   warnings: readonly WorkspaceSkillWarning[];
   /** True only when the workspace was unreachable: `skills` is then empty and
    * is not an authoritative "no repository skills" answer. */
   unavailable: boolean;
+  /** Set when discovery failed in a way that degrades: `skills` is then empty
+   * and is not an authoritative "no repository skills" answer. */
+  degraded?: RepositorySkillDiscoveryErrorClass;
 }>;
 
 export type WorkspaceSkillWarning = Readonly<{
@@ -111,7 +330,9 @@ export type WorkspaceSkillWarning = Readonly<{
     | "invalid_name"
     | "invalid_description"
     | "configured_name_conflict"
-    | "conflicting_definitions";
+    | "conflicting_definitions"
+    | "unreadable_search_path"
+    | "unreadable_skill";
   paths: readonly string[];
   name?: string;
   /** Bounded, content-free explanation of why the entry was omitted. */
@@ -172,6 +393,12 @@ export class WorkspaceSkillsCapability extends Capability {
    * degraded result is memoized only for this binding, so the run keeps a
    * stable instruction prefix and pays the unreachable cost once; the next
    * run clones and rebinds the capability and discovers again.
+   *
+   * Any other failure that `classifyRepositorySkillDiscoveryFailure` marks
+   * degradable (the workspace answered, but its skill folders could not be
+   * used) also yields an empty index with a short notice, on every backend.
+   * Box, route, fence, transport and cancellation failures still propagate to
+   * the turn's recovery path.
    */
   private discover(): Promise<WorkspaceSkillDiscovery> {
     const session = requireWorkspaceSkillSession(this._session);
@@ -186,8 +413,11 @@ export class WorkspaceSkillsCapability extends Capability {
     ).then(
       (skills) => ({ skills, warnings, unavailable: false }),
       (error: unknown) => {
-        if (!isUnreachableWorkspaceError(error)) throw error;
-        return { skills: [], warnings, unavailable: true };
+        const failure = classifyRepositorySkillDiscoveryFailure(error);
+        if (failure.handling === "unreachable") return { skills: [], warnings, unavailable: true };
+        if (failure.handling === "degraded")
+          return { skills: [], warnings, unavailable: false, degraded: failure.errorClass };
+        throw error;
       },
     ));
   }
@@ -252,14 +482,20 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override async instructions(): Promise<string | null> {
-    const { skills, warnings, unavailable } = await this.discover();
+    const { skills, warnings, unavailable, degraded } = await this.discover();
     const warningText = warnings.length
-      ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
+      ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
       : "";
     if (unavailable) {
       return `## Repository skills
 
 Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.${warningText}`;
+    }
+
+    if (degraded) {
+      return `## Repository skills
+
+${degradedRepositorySkillsNotice(degraded)}${warningText}`;
     }
     if (skills.length === 0) return warnings.length ? `## Repository skills${warningText}` : null;
 
@@ -284,6 +520,21 @@ ${available}
   }
 }
 
+/** Short, class-specific model notice for an index that could not be built. */
+function degradedRepositorySkillsNotice(errorClass: RepositorySkillDiscoveryErrorClass): string {
+  if (errorClass === "unsupported")
+    return "Repository skills are not indexed for this run (this workspace cannot list files).";
+  const cause =
+    errorClass === "limit_exceeded"
+      ? "too many skill folders or files"
+      : errorClass === "permission_denied"
+        ? "permission denied"
+        : errorClass === "machine_refused"
+          ? "the machine refused the request"
+          : "the skill folders could not be read";
+  return `Repository skills are not indexed for this run (${cause}). If a repository skill matters, try reading its SKILL.md directly.`;
+}
+
 export function workspaceSkills(
   searchPaths: readonly WorkspaceSkillSearchPath[],
   reservedNames: Iterable<string> = [],
@@ -306,6 +557,8 @@ export async function discoverWorkspaceSkills(
 ): Promise<readonly WorkspaceSkill[]> {
   const startedAt = performance.now();
   let outcome: "completed" | "failed" = "completed";
+  let failure: RepositorySkillDiscoveryFailure | undefined;
+  const skipped: RepositorySkillDiscoveryErrorClass[] = [];
   try {
     return await withSandboxOperationPurpose("repository_skills", () =>
       discoverWorkspaceSkillsUnmeasured(
@@ -318,10 +571,18 @@ export async function discoverWorkspaceSkills(
           console.warn("Repository skill skipped", warning);
           onWarning?.(warning);
         },
+        (errorClass) => skipped.push(errorClass),
       ),
     );
   } catch (error) {
     outcome = "failed";
+    try {
+      failure = classifyRepositorySkillDiscoveryFailure(error);
+      // Bounded class only: provider messages may contain repository paths or content.
+      console.warn("Repository skill discovery failed", failure);
+    } catch {
+      // Telemetry never changes discovery behavior.
+    }
     throw error;
   } finally {
     recordModelPreparationMeasurement({
@@ -329,6 +590,8 @@ export async function discoverWorkspaceSkills(
       outcome,
       durationSeconds: (performance.now() - startedAt) / 1_000,
       count: searchPaths.length,
+      ...(failure ? { failure } : {}),
+      ...(skipped.length ? { skipped } : {}),
     });
   }
 }
@@ -340,20 +603,66 @@ async function discoverWorkspaceSkillsUnmeasured(
   runAs: string | undefined,
   shadowedNames: ReadonlySet<string>,
   warn: (warning: WorkspaceSkillWarning) => void,
+  onSkip: (errorClass: RepositorySkillDiscoveryErrorClass) => void,
 ): Promise<readonly WorkspaceSkill[]> {
+  type SkippedEntry = Readonly<{
+    code: "unreadable_search_path" | "unreadable_skill";
+    path: string;
+    reason: RepositorySkillDiscoveryErrorClass;
+  }>;
+  const skip = ({ code, path, reason }: SkippedEntry, quiet = false) => {
+    onSkip(reason);
+    if (quiet) {
+      console.info("Repository skill folder skipped", { code, reason });
+      return;
+    }
+    warn({ code, paths: [path], reason });
+  };
   if (!session.listDir || !session.readFile) {
-    throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
+    throw new RepositorySkillDiscoveryUnsupportedError(
+      "Workspace skill discovery requires sandbox listDir() and readFile() support",
+    );
   }
   const discovered = new Map<string, DiscoveredWorkspaceSkill>();
   const conflictingNames = new Set<string>();
-  const roots = await mapDiscovery(searchPaths, async (searchPath) => {
+  const listed = await mapDiscovery(searchPaths, async (searchPath) => {
     try {
-      return await session.listDir!({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
+      return {
+        entries: await session.listDir!({ path: searchPath.path, ...(runAs ? { runAs } : {}) }),
+      };
     } catch (error) {
-      if (!isMissingSkillPath(error)) throw error;
-      return [];
+      if (isMissingSkillPath(error)) return { entries: [] };
+      // The workspace answered but this folder cannot be used (for example a
+      // symlinked search path the file API refuses): skip only this path.
+      const reason = skippableSkillPathFailure(error);
+      if (!reason) throw error;
+      return {
+        entries: [],
+        skipped: { code: "unreadable_search_path", path: searchPath.path, reason } as const,
+      };
     }
   });
+  // A symlinked search path is excluded like a symlinked skill entrypoint: the
+  // confined file API cannot prove its target stays in the workspace. When a
+  // sibling search path under the same root has skill folders (the usual
+  // `.claude/skills -> ../.agents/skills`), the link's skills are indexed
+  // there, so the model is not told about it. Otherwise it is listed, so
+  // skills behind a link to an unindexed folder never vanish silently.
+  listed.forEach(({ skipped }, index) => {
+    if (!skipped) return;
+    const root = searchPathRoot(searchPaths[index]!.path);
+    const coveredBySibling =
+      skipped.reason === "symlink" &&
+      listed.some(
+        (other, otherIndex) =>
+          otherIndex !== index &&
+          !other.skipped &&
+          searchPathRoot(searchPaths[otherIndex]!.path) === root &&
+          other.entries.some((entry) => entry.type === "dir"),
+      );
+    skip(skipped, coveredBySibling);
+  });
+  const roots = listed.map(({ entries }) => entries);
   const candidates = roots.flatMap((entries, index) =>
     [...entries]
       .sort((left, right) => left.name.localeCompare(right.name))
@@ -361,7 +670,9 @@ async function discoverWorkspaceSkillsUnmeasured(
       .map((entry) => ({ entry, searchPath: searchPaths[index]! })),
   );
   if (candidates.length > MAX_DISCOVERED_SKILLS) {
-    throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
+    throw new RepositorySkillDiscoveryLimitError(
+      `Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`,
+    );
   }
   const loaded = await mapDiscovery(candidates, async ({ entry, searchPath }) => {
     const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
@@ -385,8 +696,10 @@ async function discoverWorkspaceSkillsUnmeasured(
       });
       markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
     } catch (error) {
-      if (!isMissingSkillPath(error)) throw error;
-      return null;
+      if (isMissingSkillPath(error)) return null;
+      const reason = skippableSkillPathFailure(error);
+      if (!reason) throw error;
+      return { skipped: { code: "unreadable_skill", path: entry.path, reason } as const };
     }
     const warning = (code: WorkspaceSkillWarning["code"], reason: string, name?: string) => ({
       warning: { code, paths: [skillMarkdownPath], ...(name ? { name } : {}), reason },
@@ -438,6 +751,10 @@ async function discoverWorkspaceSkillsUnmeasured(
   });
   for (const candidate of loaded) {
     if (!candidate) continue;
+    if ("skipped" in candidate) {
+      skip(candidate.skipped);
+      continue;
+    }
     if ("warning" in candidate) {
       warn(candidate.warning);
       continue;
@@ -479,6 +796,12 @@ async function discoverWorkspaceSkillsUnmeasured(
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
+/** The workspace or repository folder a search path such as
+ * `repo/.claude/skills` belongs to (`repo`). */
+function searchPathRoot(path: string): string {
+  return path.split("/").filter(Boolean).slice(0, -2).join("/");
+}
+
 async function fingerprintWorkspaceDirectory(
   session: SandboxSessionLike,
   root: string,
@@ -493,7 +816,9 @@ async function fingerprintWorkspaceDirectory(
     for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
       entryCount += 1;
       if (entryCount > MAX_SKILL_ENTRIES) {
-        throw new Error(`Workspace skill exceeds ${MAX_SKILL_ENTRIES} filesystem entries`);
+        throw new RepositorySkillDiscoveryLimitError(
+          `Workspace skill exceeds ${MAX_SKILL_ENTRIES} filesystem entries`,
+        );
       }
       const childRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
       hash.update(entry.type);
@@ -512,7 +837,9 @@ async function fingerprintWorkspaceDirectory(
       const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
       byteCount += bytes.byteLength;
       if (byteCount > MAX_SKILL_BYTES) {
-        throw new Error(`Workspace skill exceeds ${MAX_SKILL_BYTES} bytes`);
+        throw new RepositorySkillDiscoveryLimitError(
+          `Workspace skill exceeds ${MAX_SKILL_BYTES} bytes`,
+        );
       }
       hash.update(bytes);
       hash.update("\0");
