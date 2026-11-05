@@ -2872,6 +2872,15 @@ describe("buildTimeline", () => {
     expect(compactionSkipSubtitle(englishText, "summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    expect(compactionSkipSubtitle(englishText, "summarization_failed", null, "operator")).toBe(
+      "Request it again to retry. Chat history is unchanged.",
+    );
+    // Nobody requested an automatic checkpoint, so it is not offered again.
+    for (const trigger of ["proactive", "auto", "overflow"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Chat history is unchanged.",
+      );
+    }
     expect(
       compactionFailureDetails(englishText, { ...projected, providerRejection: null }),
     ).toBeNull();

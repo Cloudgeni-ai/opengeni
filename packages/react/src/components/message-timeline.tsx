@@ -4347,7 +4347,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
         : null;
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
