@@ -261,15 +261,20 @@ export function ClaudeUsageReadout({
     state.error ||
     state.value?.refreshStatus === "unavailable" ||
     state.value?.refreshStatus === "reconnect";
+  const windows = claudeUsageListWindows(unavailable ? null : state.value, now, plan);
+  // A reading whose windows are all kept off the list is not "no usage".
+  const reported = !unavailable && (state.value?.windows?.length ?? 0) > 0;
   // A failed live check is not evidence of no usage (or a fresh old reading).
   return (
     <SubscriptionUsageCell
-      windows={claudeUsageListWindows(unavailable ? null : state.value, now, plan)}
+      windows={windows}
       loading={state.loading}
       fallback={
         unavailable || state.value?.refreshStatus === "scope_required"
           ? "Usage unavailable"
-          : "No usage yet"
+          : reported
+            ? null
+            : "No usage yet"
       }
     />
   );

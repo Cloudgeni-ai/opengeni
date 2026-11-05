@@ -38,9 +38,9 @@ function windowLevel(window: SubscriptionWindow) {
 /**
  * Every reported window of one account. `inline` flows the windows on one
  * line and wraps rather than truncating (menus); `stack` puts one window per
- * line (list rows, right-aligned with `align="end"`), on one grid so labels,
- * bars, values and reset times line up, and short enough for a row's usage
- * column (a reached limit's time needs no "until" there).
+ * line on one grid so labels, bars, values and reset times line up. A stacked
+ * list-row cell (`align="end"`, right-aligned by its column) is kept short: a
+ * reached limit's time needs no "until" there.
  */
 export function SubscriptionUsageWindows({
   windows,
@@ -72,6 +72,7 @@ export function SubscriptionUsageWindows({
     ) : null;
   }
   const stack = layout === "stack";
+  const terse = stack && align === "end";
   return (
     <span
       data-slot="subscription-usage"
@@ -128,7 +129,7 @@ export function SubscriptionUsageWindows({
             </span>
             {window.resetsAt !== null ? (
               <span className="text-fg-subtle">
-                {window.limitReached && !stack ? "until " : ""}
+                {window.limitReached && !terse ? "until " : ""}
                 {formatShortTime(window.resetsAt, { now })}
               </span>
             ) : stack ? (
@@ -172,8 +173,8 @@ export function SubscriptionUsageCell({
 }: {
   windows: readonly SubscriptionWindow[];
   loading?: boolean | undefined;
-  /** Words for a missing reading: "No usage yet", "Usage unavailable". */
-  fallback?: string | undefined;
+  /** Words for a missing reading: "No usage yet", "Usage unavailable"; null shows nothing. */
+  fallback?: string | null | undefined;
   now?: number | undefined;
 }) {
   if (loading) return <UsageReadout percent={null} window="" loading />;

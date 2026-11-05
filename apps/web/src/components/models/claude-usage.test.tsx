@@ -141,6 +141,14 @@ test("an account row shows the week alone while the 5h has room, and never a Fab
     "Week",
     "Fable week",
   ]);
+  // A reading with only windows kept off the list is not "No usage yet".
+  value.windows = [value.windows[0]!, value.windows[2]!];
+  value.refreshStatus = "available";
+  await act(async () =>
+    root.render(<ClaudeUsageReadout state={{ ...state, value }} plan="claude_max_5x" />),
+  );
+  expect(labels()).toEqual([]);
+  expect(container.textContent).not.toContain("No usage yet");
 });
 test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
   const value = usage();

@@ -227,6 +227,14 @@ describe("the shared usage display", () => {
         expect(line.className).toContain("grid-cols-subgrid");
         expect(line.children).toHaveLength(4);
       }
+      // The chat menu stacks the same lines but keeps "until".
+      await act(async () =>
+        root.render(<SubscriptionUsageWindows windows={windows} layout="stack" now={NOW} />),
+      );
+      expect(
+        container.querySelector<HTMLElement>('[data-slot="subscription-usage-window"]')!
+          .textContent,
+      ).toContain("until");
     } finally {
       await act(async () => root.unmount());
       container.remove();
