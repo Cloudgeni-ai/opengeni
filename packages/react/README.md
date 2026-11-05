@@ -219,6 +219,12 @@ someone else's product with zero styling:
   `modelPicker`, or report `modelSelection: true` from the proxy
   (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
   also fixes the policy server-side.
+- **Agent signals can be hidden**: the goal pill (and any agents or commands
+  segments you pass in `chromeProps`) show how the agent works. For end users
+  to whom a paused goal or a helper-agent count means nothing, pass
+  `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
+  `OpenGeniChat`). Queued messages, approvals and the agent's questions still
+  show, and the goal is not read at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
@@ -1369,6 +1375,16 @@ earlier prose and activity in chronological order, not a fold of multiple turns.
 An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
+
+`turnSummary.renderLiveMark` leads the live Working, Waiting or Paused row with
+the host's own mark, such as a small animated mascot. It receives the row's
+state (`{ kind: "working" | "waiting" | "paused", waitingOn?: "you" }`, where
+`waitingOn: "you"` marks an approval or question), is no longer called once
+the turn settles, and renders nothing by default. Draw it about 20 px tall; it
+is `aria-hidden` because the row's words carry the meaning.
+`SessionConversation` takes it as
+`timelineProps={{ turnSummary: { rolling: true, renderLiveMark } }}`.
+
 Expanded outer work headers stay reachable at the top of the timeline until
 their own details end; nested headers never stick. The contextual navigation
 pill stays below the sticky-header strip and avoids interactive controls. If

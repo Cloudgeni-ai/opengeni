@@ -8,6 +8,7 @@ export {
   formatDurationFacet,
   formatElapsed,
   resolveTurnSummaryFacets,
+  turnSummaryLiveMarkState,
 } from "./timeline/turn-summary-model";
 export type {
   BuiltInTurnSummaryFacetId,
@@ -15,6 +16,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryStatus,
 } from "./timeline/turn-summary-model";
