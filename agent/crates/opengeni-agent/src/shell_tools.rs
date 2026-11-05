@@ -235,6 +235,24 @@ fn mark_in_use(directory: &Path) {
     }
 }
 
+/// How often a running agent renews its generation's [`IN_USE_MARKER`], well
+/// inside [`UNUSED_GENERATION_RETENTION`], so an agent that runs for weeks
+/// keeps the generation its commands use.
+pub const IN_USE_RENEWAL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+// A running agent's generation never looks idle to another agent's pruning.
+const _: () =
+    assert!(IN_USE_RENEWAL_INTERVAL.as_secs() * 7 <= UNUSED_GENERATION_RETENTION.as_secs());
+
+/// Renews this process's generation's [`IN_USE_MARKER`]. Does nothing for a
+/// build without tools or before [`install`] succeeded.
+pub fn mark_current_generation_in_use() {
+    if let Some(current) = CURRENT_GENERATION.get() {
+        mark_in_use(current);
+    }
+}
+
 /// Removes generations no agent has started with for
 /// [`UNUSED_GENERATION_RETENTION`], beside this process's own. Only the agent
 /// holding the instance lock calls this. Returns the number removed.
@@ -403,6 +421,16 @@ mod tests {
         assert!(current.join("rg").is_file());
         assert!(!earlier.exists());
         assert!(unrelated.is_dir());
+    }
+
+    #[test]
+    fn marking_in_use_renews_the_marker() {
+        let root = tempfile::tempdir().expect("root");
+        let current = materialize_into(root.path(), &FILES).expect("materialize");
+        let marker = current.join(IN_USE_MARKER);
+        let _ = std::fs::remove_file(&marker);
+        mark_in_use(&current);
+        assert!(marker.is_file());
     }
 
     /// A build without embedded tools (every development build) installs

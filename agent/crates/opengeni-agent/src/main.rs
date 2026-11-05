@@ -762,13 +762,21 @@ fn operation_cgroups(
 /// Puts this release's ripgrep and jq at the end of every command's `PATH`.
 /// A failure only costs the fallback tools, so it never stops the agent. The
 /// agent holding the instance lock (`prune`) then removes generations no
-/// agent has used for a while, off the startup path.
+/// agent has used for a while, off the startup path, and every agent renews
+/// its own generation's in-use marker while it runs.
 fn install_shell_tools(config_dir: Option<&Path>, prune: bool) {
     match shell_tools::install(config_dir) {
         Ok(Some(directory)) => info!(directory = %directory.display(), "shell tools ready"),
-        Ok(None) => {}
-        Err(error) => warn!(%error, "shell tools unavailable; commands use the machine's own"),
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, "shell tools unavailable; commands use the machine's own");
+            return;
+        }
     }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(shell_tools::IN_USE_RENEWAL_INTERVAL);
+        shell_tools::mark_current_generation_in_use();
+    });
     if prune {
         std::thread::spawn(|| {
             let removed = shell_tools::prune_stale_generations();

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
 import { sandboxCommandExitCode, sandboxCommandOutput } from "./command-result";
+import { TurnSandboxCommandCancelledError } from "./turn-tool-cancellation";
 import {
   MANAGED_SHELL_TOOLS_TARGETS,
   SHELL_TOOLS_NOTICES_FILE,
@@ -404,9 +405,10 @@ function parseResult(output: string): ManagedShellToolsInstallResult | `need ${s
 /**
  * Give one box this release's rg and jq unless it already has them. A command
  * that runs but cannot deliver them returns "failed" and the box keeps what it
- * had. Provider errors (from `run` or the file API) propagate unchanged; the
- * setup hook treats each one except a turn cancellation as a failed delivery,
- * so a Steer or Pause still stops setup.
+ * had. A provider error while staging through the file API is recorded on
+ * the box like a failed install. Other provider errors propagate; the setup
+ * hook treats each one except a turn cancellation as a failed delivery, so a
+ * Steer or Pause still stops setup.
  */
 export async function installManagedShellTools(
   session: SandboxSessionLike,
@@ -444,6 +446,16 @@ export async function installManagedShellTools(
     } else if (installedResult === "present") {
       // A concurrent setup finished first.
       result = "present";
+    }
+  } catch (error) {
+    // A Steer or Pause still stops setup. Any other failure here (a file API
+    // that rejects the upload, a lost command) repeats on every turn, so the
+    // box records it like a failed install.
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    try {
+      await run(managedShellToolsGiveUpCommand(tools, directory));
+    } catch (recordError) {
+      if (recordError instanceof TurnSandboxCommandCancelledError) throw recordError;
     }
   } finally {
     try {

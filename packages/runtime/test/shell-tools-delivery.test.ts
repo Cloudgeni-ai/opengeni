@@ -334,6 +334,53 @@ describe("managed shell tools delivery", () => {
     ).toBe("skipped");
   });
 
+  test("a file API that rejects the upload is recorded, not retried every turn", async () => {
+    const directory = box();
+    const rejecting = {
+      createEditor: () => ({
+        createFile: async () => {
+          throw new Error("payload too large");
+        },
+        deleteFile: async () => {},
+      }),
+    } as never;
+    expect(
+      await installManagedShellTools(
+        rejecting,
+        tools,
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("failed");
+    expect(
+      await installManagedShellTools(
+        rejecting,
+        tools,
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("skipped");
+  });
+
+  test("a turn cancellation while staging is not swallowed", async () => {
+    const cancelled = new TurnSandboxCommandCancelledError("paused");
+    const cancelling = {
+      createEditor: () => ({
+        createFile: async () => {
+          throw cancelled;
+        },
+        deleteFile: async () => {},
+      }),
+    } as never;
+    await expect(
+      installManagedShellTools(cancelling, tools, runner(imageBin), undefined, undefined, box()),
+    ).rejects.toBe(cancelled);
+  });
+
   test("a linked tools directory is refused", async () => {
     const directory = box();
     const elsewhere = join(root, `elsewhere-${++counter}`);
