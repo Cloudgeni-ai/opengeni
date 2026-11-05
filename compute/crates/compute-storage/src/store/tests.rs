@@ -1093,3 +1093,80 @@ async fn a_sweep_deletes_everything_on_a_slow_sequential_store_a_key_at_a_time()
     let again = store.delete_all(&keys[..10]).await.unwrap();
     assert_eq!(again.len(), 10);
 }
+
+/// An S3 endpoint at a local address that takes `taking` to read each
+/// request's body, as a store pushing back on its writers does, and then
+/// takes a `PUT` and answers anything else that nothing is there.
+fn slow_reading_store(taking: Duration) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    const PIECE: usize = 64 * 1024;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                loop {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if stream.read(&mut byte).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                    let mut left: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |len| len.trim().parse().unwrap());
+                    let pause = taking / u32::try_from(left.div_ceil(PIECE).max(1)).unwrap();
+                    let mut piece = vec![0u8; PIECE];
+                    while left > 0 {
+                        std::thread::sleep(pause);
+                        let read = stream.read(&mut piece[..left.min(PIECE)]).unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        left -= read;
+                    }
+                    let answer = if head.starts_with("put ") {
+                        "HTTP/1.1 200 OK\r\nETag: \"stored\"\r\nContent-Length: 0\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+                    };
+                    if stream.write_all(answer.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pack_the_store_takes_over_half_a_minute_to_read_is_stored() {
+    // The client's usual deadline is 30 s for a whole request, its body
+    // included, and a create is never sent again after it: every pack a
+    // busy store read this slowly failed, wherever the store was.
+    let addr = slow_reading_store(Duration::from_secs(35));
+    let endpoint = format!("http://{addr}");
+    let settings: Vec<(String, String)> = [
+        ("AWS_ENDPOINT", endpoint.as_str()),
+        ("AWS_ALLOW_HTTP", "true"),
+        ("AWS_ACCESS_KEY_ID", "key"),
+        ("AWS_SECRET_ACCESS_KEY", "secret"),
+        ("AWS_REGION", "us-east-1"),
+    ]
+    .iter()
+    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+    .collect();
+    let store = ChunkStore::from_url_with("s3://bucket/tenant", &settings)
+        .unwrap()
+        .unwrap();
+    let pack = Bytes::from(vec![7u8; crate::pack::PACK_BYTES]);
+    let started = tokio::time::Instant::now();
+    assert!(store.put_immutable_once("packs/v1/a", &pack).await.unwrap());
+    assert!(started.elapsed() > Duration::from_secs(30));
+}

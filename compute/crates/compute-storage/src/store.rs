@@ -129,11 +129,13 @@ pub struct ChunkStore {
 /// after it is back.
 pub const SETTLE: Duration = Duration::from_secs(5 * 60);
 
-/// How long one upload request may take, sending its bytes included: a
-/// pack ([`crate::pack::PACK_BYTES`]) at a quarter of a megabyte a second,
-/// as a store busy with other writers can be, on top of the half minute
-/// any request may take. Other requests keep the client's usual deadline.
-pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long one upload request may take, sending its bytes included. The
+/// client's usual 30 s covers the whole request, and a store busy with
+/// other writers has been seen taking three minutes to read one pack
+/// ([`crate::pack::PACK_BYTES`]) that it then stored; a create that ran
+/// out of time is not sent again by the client. Other requests keep the
+/// client's usual deadline.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// The longest wait between two reads while one settles.
 const SETTLE_DELAY_MAX: Duration = Duration::from_secs(10);
