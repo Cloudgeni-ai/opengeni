@@ -9,12 +9,20 @@
 //! or broadcast. The sender does. The agent therefore stays up for a stop
 //! signal one of its commands sent (the command itself still receives every
 //! signal and nothing blocks it), and stops as before for one from anywhere
-//! else: its service manager, its keeper, the desktop app, a person's terminal,
-//! or a process this check cannot place.
+//! else: its service manager, its keeper, the desktop app or a person's
+//! terminal.
+//!
+//! A sender is looked up after its signal arrived, and a short-lived one
+//! (`/bin/kill`, `sh -c 'kill …'`, the last `kill` of a script) has often
+//! exited and been reaped by then: [`Sender::Gone`]. The caller decides what
+//! that means; the agent counts it as its command's while a command runs or
+//! just ended.
 
 use std::path::Path;
 
-pub use opengeni_agent_linux_ffi::{relay_signals, wait_for_signal, SignalDelivery, SignalRelay};
+pub use opengeni_agent_linux_ffi::{
+    queue_signal_from, relay_signals, wait_for_signal, SignalDelivery, SignalRelay,
+};
 
 /// Longest parent chain followed; real process trees are far shallower.
 const MAX_DEPTH: usize = 4096;
@@ -22,6 +30,37 @@ const MAX_DEPTH: usize = 4096;
 /// The cgroup leaf the agent's own process occupies under operation isolation
 /// (see the `cgroup` module); its siblings named `op-<n>` hold commands.
 const SUPERVISOR_LEAF: &str = "/supervisor";
+
+/// Who sent a signal, as far as `/proc` tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sender {
+    /// One of the agent's commands, or a process one of them started.
+    Command,
+    /// Anyone else: a process that is not a command, the kernel (a terminal's
+    /// Ctrl-C), or a process in an outer PID namespace.
+    Outside(Option<i32>),
+    /// A process that exited before it could be placed.
+    Gone(i32),
+}
+
+/// Places the sender of a signal `agent` received.
+#[must_use]
+pub fn place(sender: Option<i32>, agent: i32) -> Sender {
+    place_in(Path::new("/proc"), sender, agent)
+}
+
+fn place_in(proc_root: &Path, sender: Option<i32>, agent: i32) -> Sender {
+    // Without a `/proc` that shows the agent, nothing can be placed: a sender
+    // missing there says nothing.
+    let proc_works = proc_root.join(agent.to_string()).exists();
+    match sender {
+        Some(pid) if pid > 0 && is_command_of_in(proc_root, pid, agent) => Sender::Command,
+        Some(pid) if pid > 0 && proc_works && !proc_root.join(pid.to_string()).exists() => {
+            Sender::Gone(pid)
+        }
+        other => Sender::Outside(other),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Stat {
@@ -97,7 +136,7 @@ fn in_operation_cgroup(proc_root: &Path, pid: i32, agent: i32) -> bool {
 ///
 /// `false` for `agent` itself, for its parent and every other ancestor, and
 /// whenever the sender cannot be placed (it already exited, or `/proc` is
-/// unavailable), so such a signal still stops the agent.
+/// unavailable); [`place`] tells those apart.
 #[must_use]
 pub fn is_command_of(sender: i32, agent: i32) -> bool {
     is_command_of_in(Path::new("/proc"), sender, agent)
@@ -223,5 +262,26 @@ mod tests {
         assert!(!is_command_of(this, this));
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn a_sender_that_is_gone_is_neither_a_command_nor_outside() {
+        let proc_root = fake_proc(&[
+            (KEEPER, 50, KEEPER, 40, "/user.slice/session-1.scope"),
+            (AGENT, KEEPER, KEEPER, 40, "/user.slice/session-1.scope"),
+            (200, AGENT, 200, 40, "/user.slice/session-1.scope"),
+        ]);
+        let place = |sender| place_in(proc_root.path(), sender, AGENT);
+        assert_eq!(place(Some(200)), Sender::Command);
+        assert_eq!(place(Some(KEEPER)), Sender::Outside(Some(KEEPER)));
+        assert_eq!(place(Some(777)), Sender::Gone(777));
+        // The kernel, and a sender in an outer PID namespace.
+        assert_eq!(place(None), Sender::Outside(None));
+        assert_eq!(place(Some(0)), Sender::Outside(Some(0)));
+        // A `/proc` that does not show the agent places nothing.
+        assert_eq!(
+            place_in(proc_root.path(), Some(777), 4242),
+            Sender::Outside(Some(777))
+        );
     }
 }

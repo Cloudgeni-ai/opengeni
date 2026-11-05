@@ -384,6 +384,8 @@ struct ExecProcessGroup {
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
     op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
+    /// Counts this command as running until its process tree is cleaned up.
+    running_command: Option<crate::command_activity::RunningCommand>,
 }
 
 #[cfg(unix)]
@@ -453,6 +455,7 @@ impl ExecProcessGroup {
             background_children_stopped: false,
             termination_requested: false,
             op_cgroup: None,
+            running_command: Some(crate::command_activity::RunningCommand::start()),
         };
         let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
             unreachable!("new anchor is owned");
@@ -632,6 +635,7 @@ impl Drop for ExecProcessGroup {
             background_children_stopped: self.background_children_stopped,
             termination_requested: true,
             op_cgroup: self.op_cgroup.take(),
+            running_command: self.running_command.take(),
         };
         self.running = false;
         let witness = crate::work_scope::CleanupWitness::new(
@@ -752,6 +756,7 @@ impl ExecProcessGroup {
                 background_children_stopped: handover.background_children_stopped,
                 termination_requested: handover.termination_requested,
                 op_cgroup,
+                running_command: Some(crate::command_activity::RunningCommand::start()),
             },
             (stdin, stdout, stderr),
         ))
@@ -800,6 +805,8 @@ struct ExecProcessGroup {
     reservation: Option<crate::WorkReservation>,
     background_children_stopped: bool,
     termination_requested: bool,
+    /// Counts this command as running for as long as this owner lives.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 #[cfg(windows)]
@@ -849,6 +856,7 @@ impl ExecProcessGroup {
             reservation: crate::current_work_reservation(),
             background_children_stopped: false,
             termination_requested: false,
+            _running_command: crate::command_activity::RunningCommand::start(),
         })
     }
 
@@ -2318,7 +2326,8 @@ mod tests {
         for (name, script) in [
             (
                 "kill -TERM -<own pgid>",
-                "pgid=$(ps -o pgid= -p $$ | tr -d ' '); \
+                "if [ -r /proc/$$/stat ]; then read -r _ _ _ _ pgid _ < /proc/$$/stat; \
+                 else pgid=$(ps -o pgid= -p $$ | tr -d ' '); fi; \
                  [ -n \"$pgid\" ] || exit 90; \
                  [ \"$pgid\" != \"$OPENGENI_TEST_AGENT_PGID\" ] || exit 91; \
                  kill -TERM \"-$pgid\"; sleep 5; exit 92",
@@ -2362,20 +2371,27 @@ mod tests {
         let _ = sibling.wait().await;
     }
 
-    /// The Windows `kill 0`: a console control event sent to "every process on
-    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
-    /// process sharing the sender's console. A command therefore runs on a
-    /// console of its own: the agent (this test process) must not be among the
-    /// processes on a command's console. Skips where this process has no
-    /// console its children would share.
+    /// Set in the helper [`a_command_does_not_share_the_agents_console`]
+    /// starts on a console of its own.
+    #[cfg(windows)]
+    const CONSOLE_HELPER: &str = "OPENGENI_TEST_CONSOLE_HELPER";
+
+    /// Only re-executed, on a new console, by
+    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent: reports
+    /// whether a plain child and a command it runs list it among the processes
+    /// on their console.
     #[cfg(windows)]
     #[tokio::test]
-    async fn a_command_does_not_share_the_agents_console() {
+    #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
+    async fn agent_on_a_console() {
         const LIST_CONSOLE: &str = "$sig = '[DllImport(\"kernel32.dll\")] public static extern uint GetConsoleProcessList(uint[] list, uint count);'\r\n\
             $k = Add-Type -MemberDefinition $sig -Name ConsoleList -Namespace OpengeniTest -PassThru\r\n\
             $list = New-Object 'uint[]' 256\r\n\
             $n = $k::GetConsoleProcessList($list, 256)\r\n\
             if ($n -eq 0) { 'none' } else { ($list[0..($n - 1)]) -join ' ' }\r\n";
+        if std::env::var_os(CONSOLE_HELPER).is_none() {
+            return;
+        }
         let (platform, dir) = rooted();
         let script = dir.path().join("list-console.ps1");
         std::fs::write(&script, LIST_CONSOLE).expect("write the console probe");
@@ -2397,19 +2413,10 @@ mod tests {
                 .split_whitespace()
                 .any(|pid| pid == this)
         };
-        // A plain child shares this process's console, if it has one.
         let inherited = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output()
             .expect("run the console probe");
-        assert!(
-            inherited.status.success(),
-            "the console probe failed: {inherited:?}"
-        );
-        if !on_console(&inherited.stdout) {
-            eprintln!("skipped: this process has no console its children share");
-            return;
-        }
         let req = ExecRequest {
             command: argv,
             ..Default::default()
@@ -2417,16 +2424,60 @@ mod tests {
         let resp = retry_transient_spawn(|| platform.exec(&req))
             .await
             .expect("exec the console probe");
-        assert_eq!(
-            resp.exit_code,
-            0,
-            "stderr: {}",
-            String::from_utf8_lossy(&resp.stderr)
+        println!(
+            "\nverdict child: {} ({})",
+            on_console(&inherited.stdout),
+            String::from_utf8_lossy(&inherited.stdout).trim()
         );
-        assert!(
-            !on_console(&resp.stdout),
-            "a command shares the agent's console: {}",
-            String::from_utf8_lossy(&resp.stdout)
+        println!(
+            "\nverdict command: {} (exit {}, {})",
+            on_console(&resp.stdout),
+            resp.exit_code,
+            String::from_utf8_lossy(&resp.stdout).trim()
+        );
+    }
+
+    /// The Windows `kill 0`: a console control event sent to "every process on
+    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
+    /// process sharing the sender's console. A command therefore runs on a
+    /// console of its own: the agent must not be among the processes on a
+    /// command's console. The agent is this test binary again, started on a
+    /// console of its own as from a terminal, since a CI runner gives this
+    /// process none.
+    #[cfg(windows)]
+    #[test]
+    fn a_command_does_not_share_the_agents_console() {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::agent_on_a_console",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_HELPER, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("start the agent on a console");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let verdict = |name: &str| {
+            text.lines()
+                .find_map(|line| line.split(&format!("verdict {name}: ")).nth(1))
+                .map(|rest| rest.starts_with("true"))
+        };
+        assert_eq!(
+            verdict("child"),
+            Some(true),
+            "a plain child must share the agent's console, or this test proves nothing: {text} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            verdict("command"),
+            Some(false),
+            "a command shares the agent's console: {text}"
         );
     }
 

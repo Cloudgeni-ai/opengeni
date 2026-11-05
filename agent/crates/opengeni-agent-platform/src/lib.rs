@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+pub mod command_activity;
 mod continuous_clock;
 mod desktop;
 mod error;

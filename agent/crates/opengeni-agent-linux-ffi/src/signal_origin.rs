@@ -4,7 +4,7 @@
 
 use std::fs::File;
 use std::io::{self, Read as _};
-use std::mem::{size_of, zeroed};
+use std::mem::{align_of, size_of, zeroed};
 use std::os::fd::{FromRawFd as _, OwnedFd};
 
 /// One signal delivery and its sender.
@@ -147,6 +147,39 @@ pub fn wait_for_signal(signals: &[i32]) -> io::Result<SignalDelivery> {
     }
 }
 
+/// Sends `signal` to process `pid` as if `sender` had sent it
+/// (`rt_sigqueueinfo(2)` with `SI_QUEUE`), so a receiver that asks who sent a
+/// signal sees the original sender rather than the process passing it on. The
+/// kernel allows this towards a process this one may signal anyway.
+///
+/// # Errors
+/// Returns the `rt_sigqueueinfo` failure (`ESRCH` once `pid` is gone).
+pub fn queue_signal_from(pid: i32, signal: i32, sender: i32) -> io::Result<()> {
+    // The `kill`/`rt` member of the siginfo union starts after the three ints
+    // `si_signo`, `si_errno` and `si_code`, aligned like a pointer (the union
+    // holds pointers): `si_pid`, then `si_uid`.
+    let union_offset = (3 * size_of::<libc::c_int>()).next_multiple_of(align_of::<usize>());
+    // SAFETY: an all-zero siginfo_t is valid. Both writes stay inside the
+    // value (128 bytes) at the layout the kernel reads for SI_QUEUE, and are
+    // unaligned writes. rt_sigqueueinfo only reads the value.
+    unsafe {
+        let mut info: libc::siginfo_t = zeroed();
+        info.si_signo = signal;
+        info.si_code = libc::SI_QUEUE;
+        let base = (&raw mut info).cast::<u8>();
+        base.add(union_offset)
+            .cast::<libc::pid_t>()
+            .write_unaligned(sender);
+        base.add(union_offset + size_of::<libc::pid_t>())
+            .cast::<libc::uid_t>()
+            .write_unaligned(libc::getuid());
+        if libc::syscall(libc::SYS_rt_sigqueueinfo, pid, signal, &raw const info) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +216,20 @@ mod tests {
             SignalDelivery {
                 signal: libc::SIGUSR2,
                 sender: Some(sender),
+            }
+        );
+    }
+
+    #[test]
+    fn a_queued_signal_names_the_original_sender() {
+        let mut relay = relay_signals(&[libc::SIGUSR1]).expect("relay SIGUSR1");
+        let this = i32::try_from(std::process::id()).expect("pid fits");
+        queue_signal_from(this, libc::SIGUSR1, 4_194_000).expect("queue SIGUSR1");
+        assert_eq!(
+            relay.recv().expect("one delivery"),
+            SignalDelivery {
+                signal: libc::SIGUSR1,
+                sender: Some(4_194_000),
             }
         );
     }

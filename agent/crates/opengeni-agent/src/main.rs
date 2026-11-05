@@ -1883,8 +1883,9 @@ mod stop_signal_tests {
             .expect("runtime");
         runtime.block_on(async move {
             let mut stop = tokio::spawn(super::wait_for_shutdown_signal());
-            // Let the wait install its handlers, as the agent does at startup.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Wait until it handles both stop signals, as the agent does once
+            // it started.
+            wait_until_handled(&[Signal::SIGTERM, Signal::SIGINT]).await;
             let mut command = tokio::process::Command::new("/bin/sh");
             command
                 .arg("-c")
@@ -1912,6 +1913,47 @@ mod stop_signal_tests {
             println!("\nverdict: stopped");
         });
     }
+
+    /// Waits until this process handles every one of `signals`.
+    async fn wait_until_handled(signals: &[Signal]) {
+        let wanted = signals
+            .iter()
+            .fold(0_u64, |mask, signal| mask | 1 << (*signal as i32 - 1));
+        for _ in 0..400 {
+            let caught = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("SigCgt:"))
+                        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+                })
+                .unwrap_or(0);
+            if caught & wanted == wanted {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the stop signal handlers were never installed");
+    }
+
+    /// Sends the agent `TERM` and `INT` in the ways a command does, many
+    /// times over, so a sender that exits before the agent can look it up is
+    /// covered: the shell's own `kill`, `/bin/kill` where it exists, a nested
+    /// shell, and a `kill` that ends the script.
+    const SIGNAL_THE_AGENT: &str = "i=0; while [ $i -lt 10 ]; do \
+         kill -TERM \"$AGENT\"; \
+         if [ -x /bin/kill ]; then /bin/kill -INT \"$AGENT\"; fi; \
+         sh -c 'kill -TERM \"$AGENT\"'; \
+         sh -c 'kill -INT \"$AGENT\"'; \
+         i=$((i + 1)); done; \
+         kill -TERM \"$AGENT\"";
+
+    /// `kill -1` as a command sends it. The command keeps its own shell
+    /// alive, and ends with a nested shell's `kill -1`, a sender often gone
+    /// before the agent can look it up.
+    const KILL_MINUS_ONE: &str = "trap '' TERM INT; kill -TERM -1; kill -INT -1; \
+         sh -c 'kill -TERM -1; kill -INT -1'";
 
     fn agent_command(script: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("test binary"));
@@ -1951,9 +1993,7 @@ mod stop_signal_tests {
     /// signal from anywhere else still does.
     #[test]
     fn a_stop_signal_from_the_agents_own_command_does_not_stop_it() {
-        let (mut agent, mut lines) = start(agent_command(
-            "kill -TERM \"$AGENT\"; kill -INT \"$AGENT\"; sleep 0.2",
-        ));
+        let (mut agent, mut lines) = start(agent_command(SIGNAL_THE_AGENT));
         let verdict = next_line(&mut lines);
         if verdict != "survived" {
             let _ = agent.kill();
@@ -2016,7 +2056,7 @@ mod stop_signal_tests {
         };
         // The namespace's first process is immune to `kill -1`, so a shell
         // takes that place and the agent runs as its child.
-        let inner = agent_command("kill -TERM -1; kill -INT -1; sleep 0.2");
+        let inner = agent_command(KILL_MINUS_ONE);
         let mut command = Command::new("unshare");
         command
             .args(namespace)
@@ -2026,7 +2066,7 @@ mod stop_signal_tests {
             .arg(inner.get_program())
             .args(inner.get_args())
             .env(EXIT_AFTER, "1")
-            .env(SCRIPT, "kill -TERM -1; kill -INT -1; sleep 0.2")
+            .env(SCRIPT, KILL_MINUS_ONE)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());

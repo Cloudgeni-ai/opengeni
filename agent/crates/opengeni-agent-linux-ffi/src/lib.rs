@@ -29,7 +29,9 @@ pub use process_group::process_group_has_live_children;
 #[allow(unsafe_code)]
 mod signal_origin;
 #[cfg(target_os = "linux")]
-pub use signal_origin::{relay_signals, wait_for_signal, SignalDelivery, SignalRelay};
+pub use signal_origin::{
+    queue_signal_from, relay_signals, wait_for_signal, SignalDelivery, SignalRelay,
+};
 
 /// Configures `command` to set its own Linux OOM victim bias to `score` after
 /// `fork` but before user code can run or create descendants. `score` must be in

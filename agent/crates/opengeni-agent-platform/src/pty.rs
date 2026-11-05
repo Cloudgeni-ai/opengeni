@@ -42,6 +42,8 @@ pub struct PtyProcess {
 struct OwnedChild {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     reservation: Option<crate::WorkReservation>,
+    /// Counts the terminal's shell as a running command while it is owned.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 impl Drop for OwnedChild {
@@ -253,6 +255,7 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     let child = OwnedChild {
         child: Some(child),
         reservation: crate::current_work_reservation(),
+        _running_command: crate::command_activity::RunningCommand::start(),
     };
 
     let reader = pair
@@ -344,6 +347,7 @@ mod tests {
         drop(OwnedChild {
             child: Some(Box::new(RecoveringChild(exited.clone()))),
             reservation: drain.reserve_work(None),
+            _running_command: crate::command_activity::RunningCommand::start(),
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while drain.unavailable_reason().is_none() {

@@ -9,23 +9,37 @@
 //! only declines to stop for a signal its own command sent (see
 //! [`opengeni_agent_platform::signal_sender`]). Its service manager, keeper,
 //! the desktop app, a person's terminal or `opengeni-agent stop` still stop it.
+//!
+//! A sender that exited before it could be placed counts as the agent's
+//! command while a command runs or ended within [`GONE_SENDER_WINDOW`]: a
+//! short-lived `kill` from a command usually is gone by then. Outside that
+//! window it stops the agent, as before.
+
+use std::time::Duration;
 
 use nix::sys::signal::Signal;
-use opengeni_agent_platform::signal_sender::{self, SignalDelivery};
+use opengeni_agent_platform::command_activity;
+use opengeni_agent_platform::signal_sender::{self, Sender, SignalDelivery};
 use tracing::warn;
 
 /// The stop signals the agent handles itself.
 const STOP_SIGNALS: [Signal; 2] = [Signal::SIGTERM, Signal::SIGINT];
 
+/// How long after its last command ended a stop signal from a sender that is
+/// already gone still counts as that command's.
+pub(crate) const GONE_SENDER_WINDOW: Duration = Duration::from_secs(5);
+
 /// Whether `delivery` came from one of the commands `agent` runs.
-pub(crate) fn sent_by_own_command(delivery: SignalDelivery, agent: i32) -> bool {
-    delivery
-        .sender
-        .is_some_and(|sender| signal_sender::is_command_of(sender, agent))
+fn sent_by_own_command(delivery: SignalDelivery, agent: i32) -> bool {
+    match signal_sender::place(delivery.sender, agent) {
+        Sender::Command => true,
+        Sender::Gone(_) => command_activity::commands_ran_within(GONE_SENDER_WINDOW),
+        Sender::Outside(_) => false,
+    }
 }
 
 /// Logs that a stop signal from a command was not obeyed.
-pub(crate) fn log_ignored(delivery: SignalDelivery, who: &str) {
+fn log_ignored(delivery: SignalDelivery, who: &str) {
     let signal = Signal::try_from(delivery.signal).map_or_else(
         |_| delivery.signal.to_string(),
         |signal| signal.as_str().to_string(),
@@ -33,7 +47,7 @@ pub(crate) fn log_ignored(delivery: SignalDelivery, who: &str) {
     warn!(
         signal,
         sender = delivery.sender,
-        "{who} keeps running: one of the agent's own commands sent this stop signal (for example `kill -1`, which signals every process of the user). Stop the agent from outside its commands, or with `opengeni-agent stop` for a service."
+        "{who} keeps running: one of the agent's own commands sent this stop signal (for example `kill -1`, which signals every process of the user). Stop the agent with its service manager, `opengeni-agent stop`, Ctrl-C or `kill` from a shell outside its commands."
     );
 }
 
