@@ -315,6 +315,8 @@ export type AppDependencies = {
   /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
   mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
+  /** Injectable Microsoft sign-in transport for Teams self-serve setup tests. */
+  teamsAdminSignInFetch?: typeof fetch;
   /** Injectable calendar transport for naming meetings after calendar events, for tests. */
   meetingCalendarFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */

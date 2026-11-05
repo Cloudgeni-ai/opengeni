@@ -5835,6 +5835,15 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
       "method": "DELETE",
       "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
       "sdk": [
@@ -37882,7 +37891,9 @@
     },
     "@opengeni/sdk/teams": {
       "teamsApi": "value",
-      "TeamsBotStatus": "type"
+      "TeamsBotStatus": "type",
+      "TeamsMicrosoftSignInResult": "type",
+      "TeamsMicrosoftSignInStart": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BotIcon } from "lucide-react";
 import { teamsApi } from "@opengeni/sdk/teams";
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -11,22 +11,82 @@ import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
-import { teamsFragmentToken, clearTeamsFragment } from "@/lib/teams-connect";
+import {
+  teamsFragmentToken,
+  clearTeamsFragment,
+  clearPendingTeamsSetup,
+  clearTeamsMicrosoftReturn,
+  readPendingTeamsSetup,
+  savePendingTeamsSetup,
+  teamsMicrosoftFailureText,
+  teamsMicrosoftReturn,
+  type TeamsMicrosoftReturn,
+  type TeamsPendingSetup,
+} from "@/lib/teams-connect";
 
-/** The signed Teams challenge is submitted only after the human chooses a workspace. */
+type Arrival = { pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null };
+
+/** A return from Microsoft sign-in restores this tab's pending setup. Reads only. */
+function readArrival(): Arrival {
+  const microsoft = teamsMicrosoftReturn(window.location.search);
+  return microsoft
+    ? { pending: readPendingTeamsSetup(), microsoft }
+    : { pending: null, microsoft: null };
+}
+
+/**
+ * The signed Teams challenge is submitted only after the human chooses a
+ * workspace. Unless the operator approved this Teams identity, the person then
+ * signs in with Microsoft as a tenant administrator before the bot connects.
+ */
 export function TeamsConnectRoute() {
   const { client, workspaces, accessContext } = useAppContext();
-  const [token, setToken] = useState(() => teamsFragmentToken(window.location.hash, "teams_setup"));
+  const [arrival] = useState(readArrival);
+  const [token, setToken] = useState(
+    () => arrival.pending?.setupToken ?? teamsFragmentToken(window.location.hash, "teams_setup"),
+  );
   const choices = workspaces.filter(
     (workspace) =>
       workspace.kind === "shared" &&
       hasWorkspacePermission(accessContext, workspace.id, "workspace:admin"),
   );
-  const [workspaceId, setWorkspaceId] = useState(() =>
-    choices.length === 1 ? choices[0]!.id : "",
+  const [workspaceId, setWorkspaceId] = useState(
+    () => arrival.pending?.workspaceId ?? (choices.length === 1 ? choices[0]!.id : ""),
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() =>
+    arrival.microsoft?.kind === "failed"
+      ? teamsMicrosoftFailureText(arrival.microsoft)
+      : arrival.microsoft && !arrival.pending
+        ? "This setup expired. Message Opengeni in Teams to get a new setup link."
+        : null,
+  );
   const [connected, setConnected] = useState(false);
+  const [finishing, setFinishing] = useState(
+    arrival.microsoft?.kind === "signed_in" && Boolean(arrival.pending),
+  );
+  const finished = useRef(false);
+
+  useEffect(() => {
+    if (!arrival.microsoft) return;
+    // The code and pending setup are single-use; neither survives a reload.
+    clearTeamsMicrosoftReturn();
+    clearPendingTeamsSetup();
+    const signedIn = arrival.microsoft.kind === "signed_in" ? arrival.microsoft : null;
+    if (!signedIn || !arrival.pending || finished.current) return;
+    finished.current = true;
+    const { setupToken, workspaceId: chosen } = arrival.pending;
+    void teamsApi(client, chosen)
+      .installBot(setupToken, { code: signedIn.code, state: signedIn.state })
+      .then(() => {
+        clearTeamsFragment("teams_setup");
+        setToken(null);
+        setConnected(true);
+      })
+      .catch((caught) =>
+        setError(userErrorText(caught, "Microsoft sign-in couldn't be verified. Try again.")),
+      )
+      .finally(() => setFinishing(false));
+  }, [arrival, client]);
 
   useEffect(() => {
     const captureSetup = () => {
@@ -41,19 +101,14 @@ export function TeamsConnectRoute() {
     return () => window.removeEventListener("hashchange", captureSetup);
   }, []);
 
-  if (!token)
+  if (finishing)
     return (
       <ConsentFrame>
         <EmptyState
           variant="page"
           icon={<BotIcon />}
-          title="Open the setup link from Teams"
-          description="Message Opengeni in Teams to get a new setup link."
-          action={
-            <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
-              Open Teams
-            </Button>
-          }
+          title="Connecting Teams…"
+          description="Checking your Microsoft sign-in."
         />
       </ConsentFrame>
     );
@@ -83,6 +138,23 @@ export function TeamsConnectRoute() {
       </ConsentFrame>
     );
 
+  if (!token)
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<BotIcon />}
+          title="Open the setup link from Teams"
+          description="Message Opengeni in Teams to get a new setup link."
+          action={
+            <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
+              Open Teams
+            </Button>
+          }
+        />
+      </ConsentFrame>
+    );
+
   return (
     <ConsentFrame>
       <FormPage
@@ -100,7 +172,14 @@ export function TeamsConnectRoute() {
           }
           setError(null);
           try {
-            await teamsApi(client, workspaceId).installBot(token);
+            const api = teamsApi(client, workspaceId);
+            const { authorizationUrl } = await api.startMicrosoftSignIn(token);
+            if (authorizationUrl) {
+              savePendingTeamsSetup({ setupToken: token, workspaceId });
+              window.location.assign(authorizationUrl);
+              return false;
+            }
+            await api.installBot(token);
             clearTeamsFragment("teams_setup");
             setConnected(true);
           } catch (caught) {
@@ -145,7 +224,8 @@ export function TeamsConnectRoute() {
             </p>
           ) : null}
           <p className="text-sm text-fg-muted">
-            This also links your Teams account so you can start work right away.
+            You may be asked to sign in to Microsoft as a Global Administrator or Teams
+            Administrator. This also links your Teams account so you can start work right away.
           </p>
         </FieldStack>
       </FormPage>

@@ -12,6 +12,11 @@ test("Teams defaults off without changing existing Microsoft connectors", () => 
   const settings = getSettings({});
   expect(settings.teamsBotEnabled).toBe(false);
   expect(settings.teamsBotAllowedTenantIds).toEqual([]);
+  expect(settings.teamsBotSelfServeSetupEnabled).toBe(false);
+  expect(
+    getSettings({ OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED: "true" })
+      .teamsBotSelfServeSetupEnabled,
+  ).toBe(true);
   expect(integrationAvailable(settings, workspace, "microsoft-teams")).toBe(false);
   expect(() => requireIntegrationAvailable(settings, workspace, "microsoft-teams")).toThrow(
     "not available",

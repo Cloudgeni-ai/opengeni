@@ -19,6 +19,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsBotAllowedChannelIds: [],
     teamsBotAllowedGroupChatIds: [],
     teamsBotSetupAdminIds: [],
+    teamsBotSelfServeSetupEnabled: false,
     signupChallengeEnabled: false,
     signupChallengeHostnames: "",
     decisionModelAuth: "api_key",

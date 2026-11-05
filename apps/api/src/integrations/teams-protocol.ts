@@ -214,6 +214,55 @@ export function normalizeTeamsMessage(
     routeIdentity: envelope.route.identity,
   };
 }
+const PersonalInstall = z.object({
+  type: z.literal("conversationUpdate"),
+  channelId: z.literal("msteams"),
+  serviceUrl: z.string().url(),
+  from: z.object({ id: opaque, aadObjectId: uuid, role: z.string().optional() }),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.literal("personal"),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({ tenant: z.object({ id: uuid }) }),
+  membersAdded: z
+    .array(z.object({ id: z.string() }).passthrough())
+    .min(1)
+    .max(16),
+});
+export type TeamsPersonalInstall = Pick<
+  TeamsMessage,
+  "tenantId" | "actorId" | "conversationId" | "serviceUrl" | "botId" | "personal"
+>;
+/** The bot being added to a person's 1:1 scope. Called only after SDK authentication. */
+export function normalizeTeamsPersonalInstall(raw: unknown): TeamsPersonalInstall | null {
+  const parsed = PersonalInstall.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (
+    a.from.role === "bot" ||
+    a.from.id === a.recipient.id ||
+    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId) ||
+    !a.membersAdded.some((member) => member.id === a.recipient.id)
+  )
+    return null;
+  let serviceUrl: string;
+  try {
+    serviceUrl = teamsServiceUrl(a.serviceUrl);
+  } catch {
+    return null;
+  }
+  return {
+    tenantId,
+    actorId: a.from.aadObjectId.toLowerCase(),
+    conversationId: a.conversation.id,
+    serviceUrl,
+    botId: a.recipient.id,
+    personal: true,
+  };
+}
 const Proof = z
   .object({
     version: z.literal(1),
@@ -222,6 +271,11 @@ const Proof = z
     actorId: uuid,
     workspaceId: uuid.nullable(),
     generation: uuid.nullable(),
+    /** The 1:1 chat the setup link was sent to, so setup can confirm there. */
+    conversation: z
+      .object({ id: opaque, serviceUrl: z.string().url().max(512) })
+      .strict()
+      .optional(),
     nonce: uuid,
     expiresAt: z.number().int(),
   })

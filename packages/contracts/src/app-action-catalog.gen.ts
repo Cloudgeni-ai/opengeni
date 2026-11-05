@@ -7035,6 +7035,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "workspace:admin"
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
