@@ -199,7 +199,7 @@ describe("a command whose Connected Machine stops answering", () => {
     );
     // The command may itself have stopped the agent, so the words say so,
     // as the offline-during-command words do.
-    expect(text).toContain("or the command may have stopped the Opengeni agent");
+    expect(text).toContain("or this or an earlier command may have stopped the Opengeni agent");
     expect(text).toContain("don't re-run a command that stops or deletes the Opengeni agent");
   }, 30_000);
 
@@ -296,5 +296,23 @@ describe("the words a command whose workspace machine stopped answering gets", (
     expect(text).toContain("nothing ran; the command never reached the machine.");
     expect(text).toContain("check that it is on, awake and connected, then re-run the command");
     expect(text).not.toContain("may have stopped the Opengeni agent");
+  });
+
+  test("without the machine kind, the routed context names the box", () => {
+    const error = new SelfhostedControlError({
+      message: "the agent did not answer for 180s",
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: false,
+      agentOffline: true,
+      neverSent: true,
+      detail: { [AGENT_UNRESPONSIVE_DETAIL_KEY]: "180000" },
+    });
+    expect(renderSelfhostedFault(error, { cloudComputer: true })).toContain(
+      "this chat's workspace machine stopped responding",
+    );
+    expect(renderSelfhostedFault(error, { connectedMachine: true })).toContain(
+      "the person's machine stopped responding",
+    );
   });
 });

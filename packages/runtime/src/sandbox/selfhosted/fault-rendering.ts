@@ -114,6 +114,13 @@ export const CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE =
   "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
   "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
 
+/** What the person is told when their machine answered nothing for the op
+ *  stream's bound after a command may have reached it. Unlike the
+ *  offline-during-command notice, it has evidently not come back on its own. */
+export const CONNECTED_MACHINE_UNRESPONSIVE_NOTICE =
+  "Your machine stopped responding, and a command may have stopped the Opengeni agent. " +
+  "If it doesn't come back in a moment, open the Opengeni app on that machine (or reinstall).";
+
 /** What the person is told when the agent came back on a new connection
  *  mid-command: the machine is answering again, so it is not "offline". */
 export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
@@ -158,10 +165,12 @@ export function renderSelfhostedFault(
   // A command's start left unanswered for the op stream's bound: the words
   // say which machine stopped answering and what Opengeni did about it.
   if (error.detail[AGENT_UNRESPONSIVE_DETAIL_KEY] !== undefined) {
-    const rendered = assemble(error, unresponsiveAgentFields(error));
-    return error.detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY] === "compute"
-      ? onCloudComputer(rendered)
-      : rendered;
+    // The session names the machine kind; the caller's context is the
+    // fallback should an error ever arrive without it.
+    const machine = error.detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY];
+    const compute = machine === "compute" || (machine === undefined && !!context.cloudComputer);
+    const rendered = assemble(error, unresponsiveAgentFields(error, compute));
+    return compute ? onCloudComputer(rendered) : rendered;
   }
   if (!context.cloudComputer) return renderConnectedMachineFault(error, context);
   if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
@@ -403,7 +412,7 @@ function renderConnectedMachineOfflineDuringCommand(error: SelfhostedControlErro
 
 /** The fields of a command whose machine's agent answered nothing for the op
  *  stream's bound, by the kind of machine and what was done about it. */
-function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
+function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean): FaultFields {
   const detail = error.detail;
   const waitedMs = Number(detail[AGENT_UNRESPONSIVE_DETAIL_KEY]);
   const minutes = Number.isFinite(waitedMs) ? Math.max(1, Math.round(waitedMs / 60_000)) : 3;
@@ -411,14 +420,15 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
   const command = error.neverSent
     ? "This command never reached it."
     : "This command may have reached it before it stopped answering.";
-  if (detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY] !== "compute") {
-    // A command that may have reached the machine may also be what stopped
-    // its agent, so this says so as the offline-during-command copy does.
+  if (!compute) {
+    // A command may be what stopped the agent: this one, if it reached the
+    // machine, or an earlier one (a `pkill`), so the words say so without
+    // blaming this command, which is often an innocent one sent after.
     return {
       headline: "the person's machine stopped responding",
       happened: error.neverSent
         ? `the person's connected machine did not answer for ${waited}; it appears to be offline, asleep or disconnected`
-        : `the person's connected machine did not answer for ${waited}; it appears to be offline, asleep or disconnected, or the command may have stopped the Opengeni agent`,
+        : `the person's connected machine did not answer for ${waited}; it appears to be offline, asleep or disconnected, or this or an earlier command may have stopped the Opengeni agent`,
       layer: error.neverSent
         ? "the person's machine and its connection — not your command"
         : "the person's machine, its connection or its Opengeni agent",
@@ -427,7 +437,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
         : "unknown — the command may have started before the machine stopped answering.",
       tryNext: error.neverSent
         ? "tell the person their machine is offline and ask them to check that it is on, awake and connected, then re-run the command. Retrying before it reconnects will not help."
-        : `ask the person to check that their machine is on, awake and connected; once it is, check whether the command took effect before re-running it, and don't re-run a command that stops or deletes the Opengeni agent. Retrying before it reconnects will not help. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
+        : `ask the person to check that their machine is on, awake and connected; once it is, check whether the command took effect before re-running it, and don't re-run a command that stops or deletes the Opengeni agent. Retrying before it reconnects will not help. Tell the person: "${CONNECTED_MACHINE_UNRESPONSIVE_NOTICE}"`,
     };
   }
   switch (detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]) {
