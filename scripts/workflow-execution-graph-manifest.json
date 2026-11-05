@@ -167,10 +167,6 @@
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
       "sha256": "d741d74897672d7c6e6a50bfbb772c9679cc98d997a915cc2814045e10dfbde8"
-    },
-    {
-      "path": ".github/workflows/xai-client-version-pin.yml",
-      "sha256": "63aa1b9a3c40fa23aede34d1a21e3959c98e40001c1fa32bf9adf62e9c079303"
     }
   ],
   "actions": [
@@ -2286,18 +2282,6 @@
       "job": "verify",
       "step": "Verify anonymous image discovery",
       "sha256": "91371275f8173d2dcd42929125baa49f2cb97286071cec04bb509a26f6e3c5d1"
-    },
-    {
-      "workflow": ".github/workflows/xai-client-version-pin.yml",
-      "job": "update",
-      "step": "Open or update the pull request",
-      "sha256": "d59097bce2fd938d54a69f7b48632da3aa75419236ea372ac06f5b84285f230b"
-    },
-    {
-      "workflow": ".github/workflows/xai-client-version-pin.yml",
-      "job": "update",
-      "step": "Resolve and rewrite the pin",
-      "sha256": "31a09ce2a153dd175da499047cb249f3de5b61b4607833ba415cc7562a5efadb"
     }
   ]
 }
