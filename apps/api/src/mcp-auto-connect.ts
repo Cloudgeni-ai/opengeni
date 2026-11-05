@@ -1002,6 +1002,10 @@ function registerConnectorAutoConnectRoutes(app: Hono, deps: ApiRouteDeps): void
     async (c) => {
       c.header("cache-control", "private, no-store");
       const workspaceId = c.req.param("workspaceId");
+      // Registered before the native workspace middleware: refuse the external
+      // namespace and malformed IDs the same way, before anything reads them.
+      if (!z.string().uuid().safeParse(workspaceId).success)
+        throw new HTTPException(404, { message: "workspace not found" });
       const access = await requireAccessGrantAuthorization(
         c,
         deps,
