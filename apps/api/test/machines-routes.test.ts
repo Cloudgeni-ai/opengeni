@@ -2694,12 +2694,13 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
     await nextRecord("the second failure");
     expect((await machine()).agentUpdateFailedAttempts).toBe(1);
     expect(updateRequests()).toHaveLength(2);
-    // The third attempt waits 20 minutes, not 10.
-    clock.now += 11 * 60_000;
+    // The third attempt waits 20 minutes after the second failure, not 10.
+    const secondFailedAt = Date.parse((await machine()).agentUpdate!.updatedAt);
+    clock.now = secondFailedAt + 11 * 60_000;
     await heartbeat();
     await Bun.sleep(500);
     expect(updateRequests()).toHaveLength(2);
-    clock.now += 10 * 60_000;
+    clock.now = secondFailedAt + 21 * 60_000;
     await nextRecord("the third failure");
     expect(updateRequests()).toHaveLength(3);
     expect((await machine()).agentUpdateFailedAttempts).toBe(2);
