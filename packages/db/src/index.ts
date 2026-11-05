@@ -87614,9 +87614,11 @@ export async function readSessionTurnSandboxBoxNotSaved(
  * box stays fenced and its drain keeps retrying under the existing policy.
  * Only a rotation some turn requested for this exact box (its process-start
  * restart event names the group and epoch) releases anyone. Returns how many
- * turns were released. Waiting turns are locked in turn-id order, the order
- * every other multi-turn writer uses, so two releases for one box (or a release
- * and another writer) cannot deadlock.
+ * turns were released. The waiting sessions and turns are locked in the
+ * canonical event-write order (sessions, then turns, each in id order) before
+ * the waits are cleared, and the waiters are woken in session-id order. The
+ * turn update's archive guard locks the parent session, so locking a turn first
+ * would invert that order and could deadlock with any ordinary writer.
  */
 export async function releaseSandboxProcessStartReplacementWaiters(
   db: Database,
@@ -87637,53 +87639,64 @@ export async function releaseSandboxProcessStartReplacementWaiters(
       leaseEpoch: input.leaseEpoch,
     },
   });
+  const waitingOnThisBox = sql`session.workspace_id = ${input.workspaceId}
+    and session.sandbox_group_id = ${input.sandboxGroupId}
+    and session.status = 'recovering'
+    and turn.workspace_id = session.workspace_id
+    and turn.session_id = session.id
+    and turn.id = session.active_turn_id
+    and turn.status = 'recovering'
+    and turn.metadata @> ${waitJson}::jsonb`;
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
+      // Find the waiters without locking anything.
+      const candidates = await rawRows<{ session_id: string; turn_id: string }>(
+        tx,
+        sql`select session.id as session_id, turn.id as turn_id
+          from sessions session, session_turns turn
+          where ${waitingOnThisBox}
+            and exists (
+              select 1 from sessions requester
+              join session_events restart
+                on restart.workspace_id = requester.workspace_id
+                and restart.session_id = requester.id
+              where requester.workspace_id = ${input.workspaceId}
+                and requester.sandbox_group_id = ${input.sandboxGroupId}
+                and restart.type = 'sandbox.operation.started'
+                and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
+                and restart.payload->>'sandboxGroupId' = ${input.sandboxGroupId}
+                and restart.payload->>'leaseEpoch' = ${String(input.leaseEpoch)}
+            )`,
+      );
+      if (candidates.length === 0) return 0;
+      const turnIds = [...new Set(candidates.map((row) => row.turn_id))].sort();
+      await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        rowProjection: "event",
+        sessionIds: candidates.map((row) => row.session_id),
+        turnIds,
+      });
+      // Re-check under the locks: a waiter may have moved on meanwhile.
       const released = await rawRows<{
         account_id: string;
         session_id: string;
         temporal_workflow_id: string | null;
       }>(
         tx,
-        sql`with replacement as (
-            select 1 from sessions requester
-            join session_events restart
-              on restart.workspace_id = requester.workspace_id
-              and restart.session_id = requester.id
-            where requester.workspace_id = ${input.workspaceId}
-              and requester.sandbox_group_id = ${input.sandboxGroupId}
-              and restart.type = 'sandbox.operation.started'
-              and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
-              and restart.payload->>'sandboxGroupId' = ${input.sandboxGroupId}
-              and restart.payload->>'leaseEpoch' = ${String(input.leaseEpoch)}
-            limit 1
-          ), waiting as (
-            select turn.id as turn_id, session.id as session_id, session.account_id,
-              session.temporal_workflow_id
-            from sessions session
-            join session_turns turn
-              on turn.workspace_id = session.workspace_id
-              and turn.session_id = session.id
-              and turn.id = session.active_turn_id
-            where session.workspace_id = ${input.workspaceId}
-              and session.sandbox_group_id = ${input.sandboxGroupId}
-              and session.status = 'recovering'
-              and turn.status = 'recovering'
-              and turn.metadata @> ${waitJson}::jsonb
-              and exists (select 1 from replacement)
-            order by turn.id
-            for update of turn
-          )
-          update session_turns turn
+        sql`update session_turns turn
           set metadata = (turn.metadata - ${SANDBOX_LIFECYCLE_WAIT_METADATA_KEY})
               || ${notSavedJson}::jsonb,
             version = turn.version + 1,
             updated_at = now()
-          from waiting
-          where turn.id = waiting.turn_id
-          returning waiting.account_id, waiting.session_id, waiting.temporal_workflow_id`,
+          from sessions session
+          where ${waitingOnThisBox}
+            and turn.id = any(${`{${turnIds.join(",")}}`}::uuid[])
+          returning session.account_id, session.id as session_id,
+            session.temporal_workflow_id`,
       );
+      released.sort((left, right) => (left.session_id < right.session_id ? -1 : 1));
       for (const waiter of released) {
         await enqueueSessionWorkflowWakeInTransaction(tx, {
           accountId: waiter.account_id,

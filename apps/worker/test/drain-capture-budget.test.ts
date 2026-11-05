@@ -196,33 +196,32 @@ async function drainingModalLease(epoch: number, instanceId: string) {
   return ids;
 }
 
-/** A turn in a session on the drained box that asked to replace it (the box
- * cannot start programs) and now waits on its rotation. Call again after the
- * turn was released to make it wait once more. */
+/** A new session on the drained box whose turn waits on its rotation. The
+ * first such turn asked to replace the box because it cannot start programs. */
 async function waitOnReplacement(
   ids: { accountId: string; workspaceId: string; groupId: string },
   epoch: number,
-  sessionId?: string,
+  options: { requestReplacement: boolean } = { requestReplacement: true },
 ) {
-  if (!sessionId) {
+  const session = await dbModule.createSession(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    initialMessage: "my box lost its shell",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "modal",
+    sandboxGroupId: ids.groupId,
+  });
+  const sessionId = session.id;
+  if (options.requestReplacement) {
     // The turn's replacement request fenced the box for rotation.
     await shared!.admin`
       update sandbox_leases
       set rotation_requested_at = now(), rotation_reason = 'operator'
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
-    const session = await dbModule.createSession(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      initialMessage: "my box lost its shell",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "modal",
-      sandboxGroupId: ids.groupId,
-    });
-    sessionId = session.id;
     await dbModule.appendSessionEvents(db, ids.workspaceId, sessionId, [
       {
         type: "sandbox.operation.started",
@@ -446,8 +445,10 @@ describe("drain retry while an earlier capture is settling", () => {
       expect(release).toHaveBeenCalledTimes(2);
       expect(release.mock.calls[1]?.[1]).toEqual(release.mock.calls[0]?.[1]);
       expect(await release.mock.results[1]?.value).toBe(0);
-      // A turn that started waiting since the first failed save is released.
-      await waitOnReplacement(ids, epoch, sessionId);
+      // A turn that started waiting since the first failed save (another
+      // session on the same box) is released.
+      const sibling = await waitOnReplacement(ids, epoch, { requestReplacement: false });
+      expect(sibling).not.toBe(sessionId);
       await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
         "next attempt in",
       );
