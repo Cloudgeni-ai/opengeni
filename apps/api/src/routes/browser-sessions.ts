@@ -31,6 +31,7 @@ import {
   BrowserDownload,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserDownloadSaveProgress,
   BrowserRecordingSaveProgress,
   BrowserRecordingSaveRequest,
   BrowserRecordingSaveResponse,
@@ -1011,6 +1012,8 @@ export function registerBrowserSessionRoutes(
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const downloadId = requireUuidParam(context, "downloadId");
       const request = await parseJsonBody(context, BrowserDownloadSaveRequest);
+      // Existing raw HTTP callers keep the final-only response contract.
+      const respondAsync = context.req.query("respondAsync") === "true";
       const objectStorage = deps.objectStorage;
       const identity = {
         accountId: grant.accountId,
@@ -1199,7 +1202,7 @@ export function registerBrowserSessionRoutes(
                 }
                 const current = await sessionClient.download(downloadId);
                 assertBrowserDownloadSaveSource(current, preparedSave.download);
-                return await sessionClient.exportDownload(downloadId, {
+                const exportRequest = {
                   operationId: request.operationId,
                   downloadId,
                   upload: {
@@ -1207,9 +1210,28 @@ export function registerBrowserSessionRoutes(
                     requiredHeaders: put.requiredHeaders,
                     expiresAt: put.expiresAt.toISOString(),
                   },
-                });
+                };
+                if (respondAsync) {
+                  const status = await sessionClient.uploadDownload({
+                    ...exportRequest,
+                    waitMs: 45_000,
+                  });
+                  if (status) return status.receipt;
+                }
+                return await sessionClient.exportDownload(downloadId, exportRequest);
               },
             );
+            if (!receipt) {
+              return context.json(
+                BrowserDownloadSaveProgress.parse({
+                  state: "uploading",
+                  operationId: request.operationId,
+                  downloadId,
+                  retryAfterMs: 2_000,
+                }),
+                202,
+              );
+            }
             if (
               receipt.sizeBytes !== save.download.receivedBytes ||
               receipt.sha256 !== save.download.sha256

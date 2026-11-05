@@ -799,6 +799,75 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("joins bounded download uploads and falls back only for an absent route", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const downloadId = randomUUID(),
+      operationId = randomUUID();
+    let mode: "uploading" | "completed" | "legacy" | "mismatch" | "missing" = "uploading";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(new URL(request.url).pathname).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/downloads/${downloadId}/uploads`,
+        );
+        expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
+        expect(await request.json()).toMatchObject({ downloadId, operationId, waitMs: 10 });
+        if (mode === "legacy") return failure(404, "resource_not_found", "route not found");
+        if (mode === "missing") return failure(404, "resource_not_found", "download not found");
+        return success({
+          operationId,
+          downloadId,
+          receipt:
+            mode === "uploading"
+              ? null
+              : {
+                  operationId: mode === "mismatch" ? randomUUID() : operationId,
+                  downloadId,
+                  sizeBytes: 294 * 1024 * 1024,
+                  sha256: "a".repeat(64),
+                  replayed: false,
+                },
+        });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    );
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const request = {
+      downloadId,
+      operationId,
+      waitMs: 10,
+      upload: {
+        url: "https://storage.example/file?signature=synthetic",
+        requiredHeaders: {},
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    };
+    try {
+      expect(await browser.uploadDownload(request)).toEqual({
+        operationId,
+        downloadId,
+        receipt: null,
+      });
+      mode = "completed";
+      expect((await browser.uploadDownload(request))?.receipt?.sizeBytes).toBe(294 * 1024 * 1024);
+      mode = "mismatch";
+      await expect(browser.uploadDownload(request)).rejects.toBeInstanceOf(
+        BrowserControlProtocolError,
+      );
+      mode = "legacy";
+      expect(await browser.uploadDownload(request)).toBeNull();
+      mode = "missing";
+      await expect(browser.uploadDownload(request)).rejects.toMatchObject({ status: 404 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("asks for a bounded recording upload and reports a controller without it", async () => {
     const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
     const recordingId = randomUUID();

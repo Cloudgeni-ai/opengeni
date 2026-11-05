@@ -2753,6 +2753,7 @@
         "BrowserDownloadSaveRequest"
       ],
       "response": [
+        "BrowserDownloadSaveProgress",
         "BrowserDownloadSaveResponse"
       ]
     },
@@ -12828,6 +12829,18 @@
         "$.controllerGeneration": "string!",
         "$.downloads": "array!",
         "$.downloads[]": "ref(BrowserDownload)"
+      }
+    },
+    "BrowserDownloadSaveProgress": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.downloadId": "string!",
+        "$.operationId": "string!",
+        "$.retryAfterMs": "integer!",
+        "$.state": "const!=[\"\\\"uploading\\\"\"]"
       }
     },
     "BrowserDownloadSaveRequest": {

@@ -31,6 +31,8 @@ import {
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserDownloadUploadRequest,
+  BrowserDownloadUploadStatus,
   BrowserRecordingExportReceipt,
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
@@ -67,6 +69,8 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserDownloadUploadRequest as BrowserDownloadUploadRequestValue,
+  type BrowserDownloadUploadStatus as BrowserDownloadUploadStatusValue,
   type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
   type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
   type BrowserRecordingSummary as BrowserRecordingSummaryValue,
@@ -132,7 +136,7 @@ const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
 /** Stopping writes the recording's bundle (up to 200 MB) to local disk. */
 const BROWSER_RECORDING_STOP_TIMEOUT_MS = 2 * 60_000;
 /** Slack for the controller to answer after its bounded upload wait. */
-const BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
+const BROWSER_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -2059,6 +2063,38 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
+  /** Starts or joins a download export with a bounded wait. Null means the
+   * controller predates this route, not that an upload is still running. */
+  async uploadDownload(
+    requestInput: BrowserDownloadUploadRequestValue,
+  ): Promise<BrowserDownloadUploadStatusValue | null> {
+    const request = BrowserDownloadUploadRequest.parse(requestInput);
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`downloads/${request.downloadId}/uploads`),
+        token: this.controlToken,
+        body: request,
+        timeoutMs: request.waitMs + BROWSER_UPLOAD_RESPONSE_MARGIN_MS,
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return null;
+      throw error;
+    }
+    const status = BrowserDownloadUploadStatus.parse(data);
+    if (
+      status.downloadId !== request.downloadId ||
+      status.operationId !== request.operationId ||
+      (status.receipt &&
+        (status.receipt.downloadId !== request.downloadId ||
+          status.receipt.operationId !== request.operationId))
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned another export receipt");
+    }
+    return status;
+  }
+
   async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
     let data: unknown;
     try {
@@ -2140,7 +2176,7 @@ export class BrowserControlSessionClient {
         path: this.path(`recordings/${request.recordingId}/uploads`),
         token: this.controlToken,
         body: request,
-        timeoutMs: request.waitMs + BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS,
+        timeoutMs: request.waitMs + BROWSER_UPLOAD_RESPONSE_MARGIN_MS,
       });
     } catch (error) {
       if (isLegacyRouteMiss(error)) return null;

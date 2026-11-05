@@ -2440,6 +2440,17 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Completed browser downloads use the same bounded-transfer pattern as recordings:
+browserd's download store joins in-flight exports by operation, retains completed
+receipts in SQLite, and keeps uploading when a request stops waiting. The save
+route opts into 202 upload progress with `respondAsync=true`; the SDK repeats the
+same operation until it gets the existing materialized-file receipt. Callers
+without that query keep the final-only response. Progress is transport-internal,
+not a new agent tool result. Workspace import still verifies size and SHA-256,
+replays an already-matching destination, and only replaces a differing file on
+the first authorized dispatch. Its command wait is 20 minutes (curl transfer
+timeout: 15 minutes), separate from the controller's one-minute default request.
+
 `packages/browserd/src/page-protection.ts` owns the shared protected-field
 policy for DOM reads, editable-value confirmation and accessibility reads.
 Chromium DOM snapshots find protected nodes in child documents and flattened
