@@ -2377,25 +2377,22 @@ mod tests {
     const CONSOLE_HELPER: &str = "OPENGENI_TEST_CONSOLE_HELPER";
 
     /// Only re-executed, on a new console, by
-    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent: reports
-    /// whether a plain child and a command it runs list it among the processes
-    /// on their console.
+    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent:
+    /// reports the console window of a plain child (which shares this
+    /// process's console) and of a command it runs. Processes on one console
+    /// report the same window.
     #[cfg(windows)]
     #[tokio::test]
     #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
     async fn agent_on_a_console() {
-        const LIST_CONSOLE: &str = "$sig = '[DllImport(\"kernel32.dll\", SetLastError = true)] public static extern uint GetConsoleProcessList([In, Out] uint[] list, uint count); [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();'\r\n\
-            $k = Add-Type -MemberDefinition $sig -Name ConsoleList -Namespace OpengeniTest -PassThru\r\n\
-            $list = New-Object 'uint[]' 256\r\n\
-            $n = $k::GetConsoleProcessList($list, 256)\r\n\
-            $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()\r\n\
-            if ($n -eq 0) { \"none (error $err, window $($k::GetConsoleWindow()))\" } else { ($list[0..($n - 1)]) -join ' ' }\r\n";
+        const CONSOLE_WINDOW: &str = "$k = Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();' -Name ConsoleWindow -Namespace OpengeniTest -PassThru\r\n\
+            'window ' + $k::GetConsoleWindow().ToInt64()\r\n";
         if std::env::var_os(CONSOLE_HELPER).is_none() {
             return;
         }
         let (platform, dir) = rooted();
-        let script = dir.path().join("list-console.ps1");
-        std::fs::write(&script, LIST_CONSOLE).expect("write the console probe");
+        let script = dir.path().join("console-window.ps1");
+        std::fs::write(&script, CONSOLE_WINDOW).expect("write the console probe");
         let argv: Vec<String> = [
             "powershell",
             "-NoProfile",
@@ -2408,12 +2405,6 @@ mod tests {
         .map(str::to_string)
         .chain([script.to_string_lossy().into_owned()])
         .collect();
-        let this = std::process::id().to_string();
-        let on_console = |output: &[u8]| {
-            String::from_utf8_lossy(output)
-                .split_whitespace()
-                .any(|pid| pid == this)
-        };
         let inherited = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output()
@@ -2426,25 +2417,22 @@ mod tests {
             .await
             .expect("exec the console probe");
         println!(
-            "\nverdict child: {} ({})",
-            on_console(&inherited.stdout),
+            "\nverdict child: {}",
             String::from_utf8_lossy(&inherited.stdout).trim()
         );
         println!(
-            "\nverdict command: {} (exit {}, {})",
-            on_console(&resp.stdout),
-            resp.exit_code,
-            String::from_utf8_lossy(&resp.stdout).trim()
+            "\nverdict command: {} (exit {})",
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            resp.exit_code
         );
     }
 
     /// The Windows `kill 0`: a console control event sent to "every process on
     /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
     /// process sharing the sender's console. A command therefore runs on a
-    /// console of its own: the agent must not be among the processes on a
-    /// command's console. The agent is this test binary again, started on a
-    /// console of its own as from a terminal, since a CI runner gives this
-    /// process none.
+    /// console of its own, never the agent's. The agent is this test binary
+    /// again, started on a console of its own as from a terminal, since a CI
+    /// runner gives this process none.
     #[cfg(windows)]
     #[test]
     fn a_command_does_not_share_the_agents_console() {
@@ -2464,20 +2452,22 @@ mod tests {
             .output()
             .expect("start the agent on a console");
         let text = String::from_utf8_lossy(&output.stdout);
-        let verdict = |name: &str| {
+        let window = |name: &str| {
             text.lines()
-                .find_map(|line| line.split(&format!("verdict {name}: ")).nth(1))
-                .map(|rest| rest.starts_with("true"))
+                .find_map(|line| line.split(&format!("verdict {name}: window ")).nth(1))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|window| window.parse::<i64>().ok())
         };
-        assert_eq!(
-            verdict("child"),
-            Some(true),
-            "a plain child must share the agent's console, or this test proves nothing: {text} {}",
+        let agents = window("child");
+        assert!(
+            agents.is_some_and(|window| window != 0),
+            "the agent must have a console, or this test proves nothing: {text} {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            verdict("command"),
-            Some(false),
+        let commands = window("command");
+        assert!(commands.is_some(), "the command's probe failed: {text}");
+        assert_ne!(
+            commands, agents,
             "a command shares the agent's console: {text}"
         );
     }
