@@ -209,6 +209,11 @@ function personalRepositoryAuthority(
 ): GitHubRestRepository[] {
   const personalResources = personalGitHubRepositoryResources(resources);
   if (personalResources.length === 0) return [];
+  // A turn can run without the person's GitHub authority, for example a
+  // background compaction checkpoint or work someone else started. Its
+  // personal GitHub tools are left out instead of failing the whole turn;
+  // they could not act without that authority anyway.
+  if (!delegations.some(isPersonalGitHubDelegation)) return [];
   const delegation = exactPersonalDelegation(delegations);
   const snapshot = delegation.personalGitHubRepositorySelection!;
   const acceptedById = new Map(
@@ -595,11 +600,7 @@ async function validatePersonalRepository(
 function exactPersonalDelegation(
   delegations: McpPersonalConnectionDelegation[],
 ): McpPersonalConnectionDelegation {
-  const matches = delegations.filter(
-    (delegation) =>
-      delegation.serverId === PERSONAL_GITHUB_DELEGATION_SERVER_ID &&
-      delegation.connectionType === "github_personal",
-  );
+  const matches = delegations.filter(isPersonalGitHubDelegation);
   const delegation = matches[0];
   if (
     matches.length !== 1 ||
@@ -612,6 +613,13 @@ function exactPersonalDelegation(
     throw new GitHubRestAuthorityError("Personal GitHub delegation is unavailable");
   }
   return delegation;
+}
+
+function isPersonalGitHubDelegation(delegation: McpPersonalConnectionDelegation): boolean {
+  return (
+    delegation.serverId === PERSONAL_GITHUB_DELEGATION_SERVER_ID &&
+    delegation.connectionType === "github_personal"
+  );
 }
 
 function githubConnectorBindings(

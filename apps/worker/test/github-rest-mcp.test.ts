@@ -155,6 +155,56 @@ describe("buildGitHubRestMcpForTurn", () => {
       approvalMode: "connector_write",
     });
   });
+
+  // Staging, 5 November 2026: the idle compaction checkpoint of a chat with a
+  // personal repository runs without the person's delegation, and this threw
+  // "Personal GitHub delegation is unavailable" and failed the whole turn.
+  test("leaves the personal tools out of a turn without the person's GitHub authority", async () => {
+    const personalResource: ResourceRef = {
+      kind: "repository",
+      uri: "https://github.com/Cloudgeni-ai/opengeni",
+      ref: "main",
+      provider: "github",
+      connectionType: "github_personal",
+      credentialBindingId: "22222222-2222-4222-8222-222222222222",
+      repositoryId: "72",
+      access: "write",
+    };
+    const appOps: ResourceRef = {
+      ...appResource,
+      uri: "https://github.com/Cloudgeni-ai/opengeni-ops.git",
+      githubRepositoryId: 73,
+    };
+    const result = await buildGitHubRestMcpForTurn({
+      db: {} as Database,
+      settings: testSettings({ githubRestMcpEnabled: true }),
+      accountId: "00000000-0000-4000-8000-000000000001",
+      workspaceId: "00000000-0000-4000-8000-000000000002",
+      sessionId: "00000000-0000-4000-8000-000000000003",
+      attemptId: "00000000-0000-4000-8000-000000000004",
+      turn: { personalConnectionDelegations: [] } as unknown as SessionTurn,
+      resources: [appOps, personalResource],
+      tools: [],
+      resolveCredential: async () => ({
+        status: "auth_needed",
+        reason: "missing_connection",
+        providerDomain: "github.com",
+      }),
+    });
+    // The workspace App repository keeps its tools.
+    expect(result.localMcpServers.map((entry) => entry.id)).toEqual([
+      GITHUB_REST_MCP_APP_SERVER_ID,
+    ]);
+    expect(result.tools).toEqual([{ kind: "mcp", id: GITHUB_REST_MCP_APP_SERVER_ID }]);
+    expect(
+      result.settings.mcpServers.some((server) => server.id === GITHUB_REST_MCP_PERSONAL_SERVER_ID),
+    ).toBe(false);
+    expect(
+      result.connectorBindings.some((binding) =>
+        binding.modelName.startsWith(prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "")),
+      ),
+    ).toBe(false);
+  });
 });
 
 async function build(input: { enabled: boolean; resource?: ResourceRef }) {
