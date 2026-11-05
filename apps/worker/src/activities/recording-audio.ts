@@ -2,6 +2,7 @@ import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
+import { pcmWavPiece, readPcmWav } from "./dictation-pieces";
 import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
@@ -141,6 +142,20 @@ export const ARCHIVAL_AUDIO_FORMAT: PreparedAudioFormat = {
   muxer: "mp4",
   codec: "libopus",
   encoderArgs: ["-b:a", "16k", "-application", "voip", "-ac", "1", "-movflags", "+faststart"],
+};
+
+/**
+ * The audio a transcript is made from: 16 kHz mono 16-bit PCM, what speech
+ * models and our speaker models run at. Decoding a track to it takes
+ * seconds even for an hour, where encoding the compact kept copy takes most
+ * of a minute, and its pieces are cut from the samples themselves.
+ */
+export const SPEECH_PCM_FORMAT: PreparedAudioFormat = {
+  extension: "wav",
+  mimeType: "audio/wav",
+  muxer: "wav",
+  codec: "pcm_s16le",
+  encoderArgs: ["-ar", "16000", "-ac", "1"],
 };
 
 /**
@@ -702,6 +717,40 @@ export async function renderRecordingAudioPiece(input: {
   tempRoot?: string | undefined;
   signal?: AbortSignal | undefined;
 }): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
+  const output = PIECE_OUTPUT[input.format];
+  // A piece of speech PCM is cut from its samples: no decode, and the whole
+  // track is never written out again for each of its pieces.
+  const pcm = input.audio.extension === "wav" ? readPcmWav(input.audio.bytes) : null;
+  if (pcm && pcm.sampleRate === 16_000) {
+    const samples = pcm.data.byteLength / 2;
+    const startSample = input.whole
+      ? 0
+      : Math.min(samples, Math.max(0, Math.round((input.startMilliseconds * 16_000) / 1_000)));
+    const endSample = input.whole
+      ? samples
+      : Math.min(
+          samples,
+          Math.max(startSample, Math.round((input.endMilliseconds * 16_000) / 1_000)),
+        );
+    if (endSample <= startSample) {
+      throw new RecordingAudioError("The audio piece is empty", "invalid_audio");
+    }
+    const piece = pcmWavPiece(pcm, startSample, endSample);
+    if (input.format === "wav") {
+      return { bytes: piece, mimeType: output.mimeType, extension: output.extension };
+    }
+    return await convertRecordingAudioPiece({
+      ...input,
+      audio: { bytes: piece, extension: "wav" },
+      whole: true,
+    });
+  }
+  return await convertRecordingAudioPiece(input);
+}
+
+async function convertRecordingAudioPiece(
+  input: Parameters<typeof renderRecordingAudioPiece>[0],
+): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
   const output = PIECE_OUTPUT[input.format];
   const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-piece-"));
   try {
