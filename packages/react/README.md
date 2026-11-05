@@ -1025,6 +1025,15 @@ headless controller and compound primitives as a namespace. The controller is
 the one behavior path for keyboard routing, guarded queue/steer submission,
 attachments, commands, pause/resume, focus, confirmations, and feedback.
 
+Pass `imageTags` (on `ChatComposer`, `useChatComposerController`, or
+`SessionConversation`'s `composerProps`) to keep each image next to the words
+about it. Pasting, dropping or attaching an image puts a plain-text
+`[Image N]` tag in the text where the person was writing, and the image's chip
+shows the same number. Removing an image removes its tag and renumbers the
+later ones. Image N is the Nth image the message carries, which is the order
+the agent receives them, so the message and API stay the same. It is off by
+default.
+
 ```tsx
 import * as Composer from "@opengeni/react/composer";
 

@@ -124,6 +124,12 @@ export type ChatComposerProps = {
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back (`useQueuedPromptRecall`). */
   queuedRecall?: ComposerQueuedRecall | undefined;
+  /**
+   * Opt-in: each attached image gets a numbered tag, `[Image 1]`, in the text
+   * where the person was writing, so they can say which comment goes with
+   * which image. Off by default.
+   */
+  imageTags?: boolean | undefined;
 };
 
 /**
@@ -167,6 +173,7 @@ export function ChatComposer({
   runControl,
   running,
   queuedRecall,
+  imageTags,
 }: ChatComposerProps) {
   const controller = useChatComposerController({
     delivery: composer,
@@ -186,6 +193,7 @@ export function ChatComposer({
     runControl,
     running,
     queuedRecall,
+    imageTags,
   });
   const hasControls = Boolean(
     attachments || models || controlsLeading || controlsStart || transcription,
