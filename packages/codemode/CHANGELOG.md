@@ -1,5 +1,29 @@
 # @opengeni/codemode
 
+## 6.10.0
+
+### Patch Changes
+
+- 7fb4b0d: `ogtool` and the Codemode client now say why they cannot reach Opengeni instead of printing only "fetch failed". A broken DNS setup reads "Can't reach Opengeni: DNS lookup for <host> failed (ENOTFOUND). Check /etc/resolv.conf." (other systems are pointed at their DNS settings), and a wrong clock reads "Can't reach Opengeni: TLS certificate not yet valid. This machine's clock says <time>, so it is probably wrong." An expired certificate names both possibilities, the clock or the server. Refused, timed-out, unanswered and closed connections, unreachable networks and certificates that cannot be verified get their own sentence, including a connection lost while reading the answer. When a call was already submitted, the message adds that it may have run and how to check it with `ogtool read <operationId>`. The error is a new `CodemodeConnectionError` that keeps the original error as its `cause`; a failure with an unknown reason, or a caller's own abort, keeps its original error.
+- 3b162f4: A turn paused or cancelled while a platform setup command runs no longer stalls its finalization. The setup command's registered shell kept the turn's cancellation signal on the reads the writer drain uses to prove the command exited, so after the cancel every proof read was refused, and a command that had already exited on its own could never be proven settled; the drain now reads without that signal, as it does for ordinary shells. A worker contained by a stalled finalizer now stops cleanly once every other in-flight turn has settled or checkpointed, instead of running into the Temporal SDK force stop, whose native worker finalization fails with "Worker still in use" while the stalled activity keeps its poll open, and exiting non-zero. Each containment request is a hold the finalizer releases if its stage recovers, so a worker never stops under a live turn. `CodemodeClient` treats `agent_attempt_caller_stale` as permanent for that bearer: later requests with the same bearer, from any client in the process, fail locally with the same non-retryable refusal instead of reaching the API again, while a renewed bearer is tried normally (`isCodemodeCallerStaleError`).
+- f0d27b2: One connector's bad tool no longer stops a turn. When a connector lists the same tool more than once (as the ElevenLabs hosted MCP did while its tool list changed), Opengeni keeps one copy. Two different tools that would share a Codemode path now get distinct paths, and a tool that still cannot be added, or whose definition is invalid, is left out for that turn. Each case is logged as a structured warning. A call always runs the tool the model was shown: when two different tools claim one model name, the catalog keeps one, and a call meant for the other is refused rather than sent to the wrong tool. OpenAPI connectors whose operation names differ only by a number suffix keep a separate tool for each operation.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [f619179]
+- Updated dependencies [15763a2]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [f0d27b2]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/sdk@6.10.0
+  - @opengeni/tool-gateway@6.10.0
+
 ## 6.9.0
 
 ### Patch Changes
