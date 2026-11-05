@@ -45,10 +45,12 @@ impl Chunked {
     ///
     /// A chunk an `earlier` copy stored is reused, as it is without packs,
     /// unless reusing it would keep alive an object mostly of chunks no
-    /// copy names: a chunk stored on its own, or in a pack this file names
-    /// less than half of, is stored again in this file's packs from the
-    /// local bytes, when they are still the same. A chunk the image names
-    /// is always reused, since the image keeps it anyway.
+    /// copy names: a chunk in a pack this file names less than half of is
+    /// stored again in this file's packs from the local bytes, when they
+    /// are still the same. A chunk stored on its own (by an earlier
+    /// release) is a pack of one chunk, named whole, so it is reused as it
+    /// is. A chunk the image names is always reused, since the image keeps
+    /// it anyway.
     pub(super) async fn put_packed(
         &self,
         file: &Arc<File>,
@@ -272,6 +274,8 @@ impl<'a> Packing<'a> {
 
     /// The pieces named by a chunk stored before that is better stored
     /// again ([`Chunked::put_packed`]), in file order, with that chunk.
+    /// A chunk stored on its own is never among them: whoever names it
+    /// names all of its object.
     fn sparse(&self) -> Vec<(usize, ChunkRef)> {
         // Of each pack, the places this file names.
         let mut named: HashMap<String, HashSet<u64>> = HashMap::new();
@@ -291,7 +295,7 @@ impl<'a> Packing<'a> {
             .iter()
             .filter_map(|(&index, slot)| match slot {
                 Slot::Named(reference, false) => {
-                    let sparse = reference.pack.as_ref().is_none_or(|pack| {
+                    let sparse = reference.pack.as_ref().is_some_and(|pack| {
                         covered.get(&reference.key()).copied().unwrap_or(0) * 2 < pack.len
                     });
                     sparse.then(|| (index, reference.clone()))

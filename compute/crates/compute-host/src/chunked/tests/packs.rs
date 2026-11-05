@@ -4,11 +4,17 @@ use super::*;
 
 /// A clock stopped half way through an hour, so no test spans two.
 fn mid_hour() -> compute_storage::fresh::Clock {
+    hours_before_mid(0)
+}
+
+/// A clock stopped half way through the hour `hours` before this one.
+fn hours_before_mid(hours: u64) -> compute_storage::fresh::Clock {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(now - now % 3_600 + 1_800);
+    let at =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(now - now % 3_600 + 1_800 - hours * 3_600);
     compute_storage::fresh::Clock::from_fn(move || at)
 }
 
@@ -16,10 +22,12 @@ fn packed(backend: &Arc<Counted>) -> Chunked {
     Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_clock(mid_hour()))
 }
 
+/// A store of an earlier release, one object per chunk, in the hour
+/// before.
 fn unpacked(backend: &Arc<Counted>) -> Chunked {
     Chunked::new(
         ChunkStore::new(backend.clone(), ObjectPath::from("t"))
-            .with_clock(mid_hour())
+            .with_clock(hours_before_mid(1))
             .with_packs(false),
     )
 }
@@ -90,25 +98,53 @@ async fn an_archive_packs_its_chunks_and_comes_back_byte_for_byte() {
     assert_eq!(listed(&backend, "t/packs").await.len(), 1);
 }
 
-/// A copy an earlier release stored as one object per chunk moves whole
-/// into packs at its next archive, from the local bytes: once archived,
-/// it no longer needs any of those objects.
+/// A copy an earlier release stored as one object per chunk keeps those
+/// objects: each is a pack of one chunk, named whole, so the next archive
+/// reuses it as it is, storing and copying nothing. Only chunks that
+/// change go into packs, and the objects they replace are no longer named.
 #[tokio::test]
-async fn a_copy_of_chunk_objects_moves_into_packs_at_its_next_archive() {
+async fn a_copy_of_chunk_objects_reuses_them_and_packs_only_what_changes() {
     let dir = tempfile::tempdir().unwrap();
     let saved = files(dir.path(), false);
     disk_of(&saved, *b"abcdefgh");
     let backend = Arc::new(Counted::default());
     let sandbox = id("000000000000000000000000000000a2");
     archived(&unpacked(&backend), sandbox, &saved).await;
-    assert_eq!(objects(&backend.inner, "t/chunks").await, 8);
+    let chunk_objects = listed(&backend, "t/chunks").await;
+    assert_eq!(chunk_objects.len(), 8);
 
     let store = packed(&backend);
+    backend.take();
     archived(&store, sandbox, &saved).await;
-    assert_eq!(listed(&backend, "t/packs").await.len(), 1);
-    delete_all(&backend, "t/chunks").await;
+    assert_eq!(backend.take().1, 0, "nothing uploaded again");
+    assert_eq!(
+        listed(&backend, "t/chunks").await,
+        chunk_objects,
+        "nothing copied into this hour"
+    );
+    assert!(listed(&backend, "t/packs").await.is_empty());
     let disk = fs::read(saved.disk.path()).unwrap();
     assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
+
+    // Two chunks change: they go into one pack, and the six left are
+    // still read from their objects.
+    disk_of(&saved, *b"xycdefgh");
+    archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take().1, 1, "one pack stored");
+    let packs = listed(&backend, "t/packs").await;
+    assert_eq!(packs.len(), 1);
+    let largest = chunk_objects.iter().map(|(_, size)| *size).max().unwrap();
+    assert!(
+        packs[0].1 < 3 * largest,
+        "the pack holds the two changed chunks alone: {packs:?} beside {chunk_objects:?}"
+    );
+    let disk = fs::read(saved.disk.path()).unwrap();
+    assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
+    delete_all(&backend, "t/chunks").await;
+    assert!(
+        fetched_disk(&store, sandbox).await.is_err(),
+        "the copy still names the chunk objects left unchanged"
+    );
 }
 
 /// A pack the next copy would name less than half of is not kept alive
