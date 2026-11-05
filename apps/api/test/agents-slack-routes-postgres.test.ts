@@ -345,4 +345,42 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       connectionId: install.connectionId,
     });
   }, 120_000);
+
+  test("a backfilled bot template (long First message, no Instructions, description or avatar) turns on in Slack", async () => {
+    if (!available) return;
+    const install = await installation(`template-${Date.now()}`);
+    // As an older release writes it; PR1's trigger makes it an agent whose
+    // First message is the template text and whose Instructions are empty.
+    const firstMessage = `Set up the weekly report. ${"Step. ".repeat(2_450)}`.trim();
+    expect(firstMessage.length).toBeGreaterThan(14_000);
+    const id = crypto.randomUUID();
+    await shared!.admin`insert into bot_templates (id, account_id, workspace_id, name, description,
+        avatar, setup_instructions, visibility, source_session_id, created_by_subject_id)
+      values (${id}, ${install.accountId}, ${install.home}, 'Weekly report', '', null,
+        ${firstMessage}, 'workspace', null, ${install.owner})`;
+    const before = await call(install.admin, "GET", `${install.base}/${id}`);
+    expect(before.status).toBe(200);
+    expect(before.json.agent).toMatchObject({
+      instructions: "",
+      firstMessage,
+      description: "",
+      avatar: null,
+    });
+
+    const on = await call(
+      install.admin,
+      "PUT",
+      `${install.base}/${id}/slack/${install.connectionId}`,
+      {},
+    );
+    expect(on.status).toBe(201);
+    const [legacy] = await shared!.admin<
+      { description: string; instructions: string; avatarKind: string }[]
+    >`select description, instructions, jsonb_typeof(avatar) as "avatarKind"
+      from slack_agents where id = ${id}`;
+    expect(legacy).toEqual({ description: "", instructions: "", avatarKind: "object" });
+    const [template] = await shared!.admin<{ setup: string }[]>`
+      select setup_instructions as setup from bot_templates where id = ${id}`;
+    expect(template?.setup).toBe(firstMessage);
+  }, 120_000);
 });
