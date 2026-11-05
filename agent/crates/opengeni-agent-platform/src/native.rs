@@ -303,9 +303,89 @@ fn is_placeholder_home(path: &Path) -> bool {
             .any(|placeholder| path == Path::new(placeholder))
 }
 
-/// Creates the missing working directory `path` as `kind` describes. The mode
-/// is set explicitly afterwards, so the agent's umask does not narrow it.
+/// Creates the missing working directory `path` as `kind` describes.
+///
+/// On Linux and macOS the directory is made under a private staging name in
+/// the same parent, given its owner and mode (set explicitly, so the agent's
+/// umask does not narrow it), and only then renamed into place without
+/// replacing anything. So `path` never appears half-made: a command that
+/// finds it (including one that lost a race to create it) starts in the
+/// finished directory. When the owner or mode cannot be set, the staged
+/// directory is removed and the error returned, and the command that needed
+/// it fails as not found.
 fn recreate_directory(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        recreate_directory_staged(path, kind)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        recreate_directory_in_place(path, kind)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recreate_directory_staged(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STAGES: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if matches!(kind, RecreatedCwd::WorkspaceRoot) {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A short name, so even a parent with a long name has room for it.
+    let stage = parent.join(format!(
+        ".opengeni-cwd-{}-{}",
+        std::process::id(),
+        STAGES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&stage)?;
+    let prepared = (|| {
+        let mode = match kind {
+            RecreatedCwd::WorkspaceRoot => 0o755,
+            RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+        };
+        if let RecreatedCwd::UserHome(identity) = kind {
+            std::os::unix::fs::chown(&stage, Some(identity.uid), Some(identity.gid))?;
+        }
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(mode))
+    })();
+    let published = prepared.and_then(|()| {
+        match renameat_with(CWD, &stage, CWD, path, RenameFlags::NOREPLACE) {
+            Ok(()) => Ok(()),
+            Err(rustix::io::Errno::EXIST) => {
+                Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+            }
+            // A filesystem without no-replace renames: publish only while
+            // nothing is there (a rename never replaces a non-empty
+            // directory, and the window for an empty one is this check).
+            Err(
+                rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP,
+            ) => {
+                if std::fs::symlink_metadata(path).is_ok() {
+                    Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+                } else {
+                    std::fs::rename(&stage, path)
+                }
+            }
+            Err(errno) => Err(errno.into()),
+        }
+    });
+    if published.is_err() {
+        let _ = std::fs::remove_dir(&stage);
+    }
+    published
+}
+
+/// Creates the missing working directory `path` where no staged rename is
+/// available, then sets its mode.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn recreate_directory_in_place(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(matches!(kind, RecreatedCwd::WorkspaceRoot));
     builder.create(path)?;
@@ -2128,20 +2208,14 @@ mod tests {
         assert!(mounted.success(), "mount an empty /dev");
         assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
 
-        // `Command::output` opens /dev/null by path for stdin, so the agent's
-        // other program starts (self-update check, metrics, service probes,
-        // app launch) hand it the retained device instead.
+        // `Command::output` opens /dev/null by path for stdin. This changes
+        // nothing, so the exec below still meets the missing device.
         let bare = std::process::Command::new("true").output();
         assert!(
             bare.as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "{bare:?}"
         );
-        let probed = std::process::Command::new("true")
-            .stdin(crate::discarded_stdio())
-            .output()
-            .expect("a program starts with the retained null device");
-        assert!(probed.status.success());
 
         let response = platform
             .exec(&echo_request("still-starts"))
@@ -2160,6 +2234,22 @@ mod tests {
             assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
         }
         eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+
+        // The agent's other program starts (self-update check, metrics,
+        // service probes, app launch) hand `Command::output` the retained
+        // device instead. Checked after exec, so exec's own repair is what the
+        // checks above saw; in `ro` the device is still missing here.
+        let probed = std::process::Command::new("true")
+            .stdin(crate::discarded_stdio())
+            .output()
+            .expect("a program starts with the retained null device");
+        assert!(probed.status.success());
+        if mode == "ro" {
+            assert_eq!(
+                crate::null_device::inspect(Path::new("/dev/null")),
+                crate::null_device::NullDeviceState::Missing
+            );
+        }
     }
 
     /// Whether this process's root is the machine's root, not a user
@@ -2493,6 +2583,20 @@ mod tests {
             let response = response.expect("every concurrent command runs");
             assert_eq!(response.exit_code, 0);
         }
+        // Every command started in the finished home, and nothing but the
+        // root and the home is left in their parent.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["agent-home", "workspace"], "{entries:?}");
 
         // A home is only created inside an existing parent.
         let nested = parent.path().join("homes").join("agent");
@@ -2516,6 +2620,58 @@ mod tests {
             "{error}"
         );
         assert!(!other.exists());
+    }
+
+    /// A home the agent cannot hand to its user is not left behind: no
+    /// command may start in an agent-owned directory with the umask's mode
+    /// where the user's own home belongs.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_that_cannot_be_handed_to_its_user_is_not_left_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("open the parent to every user");
+        let home = parent.path().join("user-home");
+        // The home belongs to root, which this process may not hand it to:
+        // an unprivileged test runs as itself, a root one as `nobody`.
+        let target = RunAsIdentity {
+            name: "root".to_string(),
+            uid: 0,
+            gid: 0,
+            groups: vec![0],
+            home: home.clone(),
+            shell: PathBuf::from("/bin/sh"),
+        };
+        let attempt = {
+            let home = home.clone();
+            move || recreate_directory(&home, RecreatedCwd::UserHome(&target))
+        };
+        let result = if nix::unistd::geteuid().is_root() {
+            let nobody = crate::run_as::supported()
+                .then(|| crate::run_as::resolve("nobody").ok().flatten())
+                .flatten();
+            let Some(nobody) = nobody else {
+                eprintln!("skipped: a root test needs run-as and the nobody account");
+                return;
+            };
+            crate::run_as::on_identity_thread(&nobody, move || Ok(attempt()))
+                .expect("switch to nobody")
+        } else {
+            attempt()
+        };
+        let error = result.expect_err("the home cannot be handed to root");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert!(!home.exists(), "the half-made home is gone");
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
     }
 
     #[test]

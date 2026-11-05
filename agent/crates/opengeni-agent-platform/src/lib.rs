@@ -817,9 +817,9 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
         let installed = *DEVELOPER_TOOLS.get_or_init(|| {
             std::process::Command::new("xcode-select")
                 .arg("-p")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdin(discarded_stdio())
+                .stdout(discarded_stdio())
+                .stderr(discarded_stdio())
                 .status()
                 .is_ok_and(|status| status.success())
         });
