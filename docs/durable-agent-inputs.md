@@ -566,6 +566,18 @@ exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
 omits the run's line, work and answer, unless the run asked the person
 something or holds another item that waits on them.
 
+Since migration 1278 an agent message whose text is the no-reply token, and a
+`turn.completed` whose `output` is (without a recorded `reply`), is not
+attention: the event cursor trigger leaves `last_meaningful_sequence` where it
+was, so a quiet turn sets no unread mark. Its turn opens no inbox reply item
+and sends no `reply_ready` push. The `reply_ready` push of any other finished
+turn carries the turn's answer (its newest non-commentary agent message, up to
+1000 characters) instead of "The agent replied."; a turn with no answer sends
+none. `opengeni_private.no_reply_text_v1` and `noReplyTextSql`
+(`packages/db/src/session-meaningful-events.ts`) apply the same normalization
+as `isNoReplyText`. The partial attention index keeps its 0774 predicate;
+attention queries add the exclusion as a filter on top of it.
+
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation
 controls.

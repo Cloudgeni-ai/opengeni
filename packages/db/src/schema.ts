@@ -4,7 +4,7 @@ import type { StoredApiIntegrationRevision } from "./capability-integrations";
 import {
   commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
-  meaningfulSessionEventSql,
+  meaningfulAttentionIndexPredicateSql,
 } from "./session-meaningful-events";
 import type {
   OrganizationAccessPolicy,
@@ -10049,7 +10049,7 @@ export const sessionEvents = pgTable(
       .where(commentaryExclusiveMeaningfulSessionEventSql("session_events")),
     meaningfulAttentionWithUsageLimitStops: index("session_events_meaningful_attention_v3_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
-      .where(meaningfulSessionEventSql("session_events")),
+      .where(meaningfulAttentionIndexPredicateSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),

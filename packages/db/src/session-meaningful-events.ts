@@ -116,9 +116,54 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "07
  * API message started it, the `reply` it records is that answer. Exactly the
  * migration 0774 partial-index predicate, which also counts a task usage limit
  * stop as an actionable boundary.
+ *
+ * Since migration 1278 an answer that is exactly the no-reply token is not
+ * attention either (`noReplyAnswerExcludedSql`): it is nothing for the person
+ * and no timeline draws it. That exclusion is a filter on top of the 0774
+ * index predicate, so queries keep using that index.
  */
 export function meaningfulSessionEventSql(alias: string): SQL {
+  return sql`${attentionSessionEventSql(alias, "0774")}
+    and ${noReplyAnswerExcludedSql(alias)}`;
+}
+
+/**
+ * Exactly the migration 0774 partial-index predicate
+ * (`session_events_meaningful_attention_v3_idx`). Attention queries use
+ * `meaningfulSessionEventSql`, which implies it.
+ */
+export function meaningfulAttentionIndexPredicateSql(alias: string): SQL {
   return attentionSessionEventSql(alias, "0774");
+}
+
+/**
+ * The no-reply token test, as SQL over a text expression: the same
+ * normalization as `isNoReplyText` in `@opengeni/contracts/no-reply` and
+ * migration 1278's `opengeni_private.no_reply_text_v1`. Code-owned literals,
+ * so the predicate needs no runtime routine or parameter.
+ */
+export function noReplyTextSql(text: SQL): SQL {
+  return sql`coalesce(char_length(${text}) <= 256 and upper(regexp_replace(${text}, ${sql.raw(
+    NO_REPLY_WRAPPING_PATTERN_LITERAL,
+  )}, '', 'g')) = 'NO_REPLY', false)`;
+}
+
+const NO_REPLY_WRAPPING_PATTERN_LITERAL = `'^[[:space:]\`*_"''“”]+|[[:space:]\`*_"''“”.!]+$'`;
+
+/**
+ * An agent message, or a turn's output, that is the no-reply token is not an
+ * answer for the person: migration 1278's cursor trigger does not count it as
+ * attention, so a quiet run sets no unread mark. A turn that recorded a
+ * `reply` keeps it.
+ */
+export function noReplyAnswerExcludedSql(alias: string): SQL {
+  const e = sql.identifier(alias);
+  return sql`(${e}.type <> 'agent.message.completed' or not ${noReplyTextSql(
+    sql`${e}.payload ->> 'text'`,
+  )})
+    and (${e}.type <> 'turn.completed' or not ${noReplyTextSql(
+      sql`${e}.payload ->> 'output'`,
+    )} or coalesce(${e}.payload ->> 'reply', '') <> '')`;
 }
 
 /**
@@ -139,10 +184,12 @@ export function commentaryInclusiveMeaningfulSessionEventSql(alias: string): SQL
 }
 
 /** A stored audit preview can still need attention, but cannot stand in for
- * consumption of the original content, even when the reader returned it whole. */
+ * consumption of the original content, even when the reader returned it whole.
+ * This is about what a reader received, so an answer that is the no-reply
+ * token is still content a parent agent can have read. */
 export function completeMeaningfulSessionEventSql(alias: string): SQL {
   const e = sql.identifier(alias);
-  return sql`${meaningfulSessionEventSql(alias)}
+  return sql`${meaningfulAttentionIndexPredicateSql(alias)}
     and coalesce(${e}.payload -> 'truncation' ->> 'truncated', 'false') <> 'true'
     and coalesce(${e}.payload ->> 'sourceOmitted', 'false') <> 'true'`;
 }

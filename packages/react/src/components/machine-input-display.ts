@@ -1,4 +1,5 @@
 import { isSessionId } from "../timeline/agent-identity";
+import { withoutInternalIds } from "../timeline/internal-ids";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import type { MachineInputMember } from "../timeline/types";
 import { type OpenGeniText } from "../messages/runtime";
@@ -163,13 +164,16 @@ function namedAgentBatchLabel(
   return `${agentPart} · ${rest}`;
 }
 
-/** Strip protocol prefixes and worker/session UUIDs from display summaries. */
+/**
+ * Strip protocol prefixes and worker/session UUIDs from display summaries. An
+ * ID goes with its label ("Organisation: <id>"), so nothing dangles.
+ */
 export function cleanMachineInputSummary(summary: string): string {
-  return summary
-    .replace(/^\[[A-Z][A-Z _-]*(?:\s+\d+\/\d+)?\]\s*/, "")
-    .replace(/\bWorker session id:\s*[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "")
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "")
-    .replace(/\(\s*\)/g, "")
+  return withoutInternalIds(
+    summary
+      .replace(/^\[[A-Z][A-Z _-]*(?:\s+\d+\/\d+)?\]\s*/, "")
+      .replace(/\bWorker session id:\s*[0-9a-f]{8}-[0-9a-f-]{27,}\b\.?/gi, ""),
+  )
     .replace(/\s*[·|]\s*$/g, "")
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([.,;:])/g, "$1")
@@ -199,7 +203,10 @@ export function automationRunLine(
       ? t("machineInputDisplay.automationRun")
       : t("machineInputDisplay.automationRunsCount", { count: members.length });
   }
-  const what = named.flatMap((run) => run.eventSummaries);
+  // What an event says can carry an internal ID; it goes with its label.
+  const what = named.flatMap((run) =>
+    run.eventSummaries.map(withoutInternalIds).filter((text) => text.length > 0),
+  );
   if (what.length === 0) return name;
   const total = named.reduce(
     (sum, run) => sum + Math.max(run.eventCount, run.eventSummaries.length),

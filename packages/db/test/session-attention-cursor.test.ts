@@ -66,6 +66,13 @@ test("the app-role attention cursor equals the indexed history predicate for eve
     })),
     { type: "agent.message.completed", payload: { text: "Progress", phase: "commentary" } },
     { type: "agent.message.completed", payload: { text: "" } },
+    // 1278: an answer that is the no-reply token is nothing for the person.
+    { type: "agent.message.completed", payload: { text: "NO_REPLY" } },
+    { type: "agent.message.completed", payload: { text: " `NO_REPLY`. " } },
+    { type: "agent.message.completed", payload: { text: "NO_REPLY, nothing changed" } },
+    { type: "turn.completed", payload: { output: "NO_REPLY" } },
+    { type: "turn.completed", payload: { output: "**no_reply**" } },
+    { type: "turn.completed", payload: { output: "NO_REPLY", reply: "Choose" } },
     { type: "turn.completed", payload: { output: null, result: "Fallback" } },
     { type: "turn.completed", payload: { output: null, reply: "Choose" } },
     { type: "turn.completed", payload: { output: "" } },

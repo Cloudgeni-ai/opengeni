@@ -572,3 +572,27 @@ test("without agent signals there is no work row under the line", async () => {
     await simple.unmount();
   }
 });
+
+test("an ID in what the event says goes with its label, never leaving it dangling", async () => {
+  const withId = {
+    summary: "Ticket assigned to you",
+    automation: {
+      name: "Ticket assigned to you",
+      eventSummaries: [
+        "T-4907 Refund request. Organisation: 3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c.",
+      ],
+      eventCount: 1,
+    },
+  };
+  const view = await renderComponent(
+    <MessageTimeline events={automationRun(withId, "Contoso wants a refund.")} />,
+  );
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Ticket assigned to you: T-4907 Refund request.");
+    expect(text).not.toContain("Organisation");
+    expect(text).not.toContain("3f2b8c1e");
+  } finally {
+    await view.unmount();
+  }
+});
