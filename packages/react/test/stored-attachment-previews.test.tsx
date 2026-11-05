@@ -11,6 +11,7 @@ import { ChatComposer } from "../src/components/chat-composer";
 import { QueueSurface } from "../src/components/queue-surface";
 import { SessionChrome } from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
+import type { UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import {
@@ -205,6 +206,51 @@ describe("a draft restored on another device or after a reload", () => {
     expect(remove).toBeDefined();
     await act(async () => remove!.click());
     expect(removed).toEqual([1]);
+  });
+
+  test("with image tags on, a restored picture keeps its tag", async () => {
+    const { client } = storedFilesClient();
+    const attachments: UseFileAttachmentsResult = {
+      attachments: [],
+      readyResources: [],
+      uploading: false,
+      hasUnresolved: false,
+      addFiles: () => {},
+      addFromPaste: () => {},
+      restoreReadyFiles: () => {},
+      retry: () => {},
+      retainPreview: () => undefined,
+      remove: () => {},
+      removeReadyFiles: () => {},
+      clear: () => {},
+      loadFileContentType: async (fileId) =>
+        fileId === IMAGE_ID ? "image/png" : "application/pdf",
+    };
+    mounted = await renderComponent(
+      <ChatComposer
+        imageTags
+        attachments={attachments}
+        composer={composer({
+          value: "Here [Image 1] ",
+          restoredResources: [
+            { kind: "file", fileId: PDF_ID },
+            { kind: "file", fileId: IMAGE_ID },
+          ],
+          fileSource: { client, workspaceId: WORKSPACE_ID, sessionId: SESSION_ID },
+        })}
+      />,
+    );
+    const container = mounted.container;
+    await settle(
+      container,
+      () => images(container).length > 0 && !!container.querySelector("[data-image-tag]"),
+    );
+    expect(images(container)[0]?.getAttribute("src")).toStartWith(
+      `https://files.example/${IMAGE_ID}`,
+    );
+    expect(container.textContent).toContain("Image 1whiteboard.png");
+    const tags = [...container.querySelectorAll("[data-image-tag]")].map((tag) => tag.textContent);
+    expect(tags).toEqual(["Image 1"]);
   });
 });
 

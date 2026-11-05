@@ -402,6 +402,78 @@ test("narrow headers keep a compact lifecycle dot instead of hiding status", asy
   }
 });
 
+test("an archived chat reads as Archived, never cancelled, paused or waiting", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (value: Session, status: Session["status"]) => (
+    <SessionHeader
+      session={value}
+      ancestors={[]}
+      connectionState="live"
+      status={status}
+      keyAuthRequired={false}
+      onForgetAccessKey={() => undefined}
+      inspectorOpen={false}
+      onToggleInspector={() => undefined}
+      onRename={async () => null}
+      onPin={async () => null}
+    />
+  );
+  const compact = () => container.querySelector<HTMLElement>("[data-compact-session-status]");
+  const badge = () =>
+    container.querySelector<HTMLElement>("[data-status]:not([data-compact-session-status])");
+  try {
+    // Archiving a running chat cancels its work, which also pauses it and
+    // settles its waits: the header still names only the archive.
+    await act(async () =>
+      root.render(
+        render(
+          {
+            ...session,
+            status: "cancelled",
+            archived: true,
+            archivedAt: "2026-11-05T08:00:00.000Z",
+            inputWait: { deadlineAt: "2026-11-05T09:00:00.000Z", reason: "Waiting for CI" },
+            effectiveControl: {
+              ...session.effectiveControl,
+              state: "paused",
+              directState: "paused",
+            },
+          } as Session,
+          "cancelled",
+        ),
+      ),
+    );
+    expect(compact()?.dataset.compactSessionStatus).toBe("archived");
+    expect(compact()?.textContent).toBe("Archived");
+    expect(badge()?.dataset.status).toBe("archived");
+    expect(badge()?.textContent).toBe("Archived");
+    expect(container.textContent).not.toMatch(/cancel|paused|waiting/i);
+    // An idle chat the deployment moved to long-term storage reads the same.
+    await act(async () =>
+      root.render(
+        render(
+          {
+            ...session,
+            retention: {
+              keepLive: false,
+              archive: { state: "archived", archivedAt: "2026-11-05T08:00:00.000Z" },
+            },
+          } as Session,
+          "idle",
+        ),
+      ),
+    );
+    expect(compact()?.textContent).toBe("Archived");
+    expect(badge()?.textContent).toBe("Archived");
+    expect(container.textContent).not.toContain("Idle");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("names the model cleanly for org- and workspace-connected copies alike", async () => {
   const container = document.createElement("div");
   document.body.append(container);

@@ -41,6 +41,18 @@ delivery can be late or missed.
   so it is offered again; a session token that expired is refreshed once
   for the acquisition. After five failures in a row the session is given
   up and opened again.
+- **A job GitHub takes back still wants a runner.** When no runner takes
+  a job assigned to the set in time (its start failed for want of room,
+  say), GitHub takes the assignment back: the job is reported completed,
+  `canceled`, with no runner, and no longer counts as assigned. It stays
+  queued, but GitHub offers it again only once something changes, such
+  as a runner registering; an idle runner that was there already changes
+  nothing, and neither does a new session. So the pool owes each job
+  taken back a fresh runner, up to its maximum, on top of what it scales
+  to, and starts it as soon as there is room. Once GitHub offers the job
+  again it is assigned and scaled for as any, and the surplus idle runner
+  is removed. What is owed is held in memory only, so a restart in
+  between forgets it.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
   in its environment and its runner's name and id in its metadata, with

@@ -7,7 +7,8 @@ import {
   isMachineProcessStartFailureMessage,
   isModalShellStartFailureMessage,
   isProcessStartFailureMessage,
-  processStartFailureNullDeviceNote,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   sanitizeModalShellStartFailureMessage,
@@ -282,9 +283,12 @@ function processStartFailedCopy(
   agentMessage: string,
 ): string {
   if (machine === "connected_machine") {
-    const nullDevice = processStartFailureNullDeviceNote(agentMessage);
-    return nullDevice
-      ? `Your connected machine can't start programs because ${nullDevice}. Restart the machine to restore it, then retry.`
+    const note = processStartFailureMachineNote(agentMessage);
+    if (note === MISSING_SHELL_NOTE) {
+      return "Your connected machine can't start programs because /bin/sh is missing. Put it back on the machine, then retry.";
+    }
+    return note
+      ? `Your connected machine can't start programs because ${note}. Restart the machine to restore it, then retry.`
       : "Your connected machine can't start programs. Restart the machine, then retry.";
   }
   if (restartedThisTurn) {

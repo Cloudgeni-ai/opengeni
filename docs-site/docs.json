@@ -66,6 +66,7 @@
         "group": "Guides",
         "pages": [
           "guides/excel-add-in",
+          "guides/microsoft-teams",
           "guides/developer-plugin",
           "guides/self-host",
           "run-locally",

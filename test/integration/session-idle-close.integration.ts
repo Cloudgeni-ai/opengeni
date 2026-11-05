@@ -8,10 +8,6 @@ import type { MaybeContinueGoalResult } from "../../apps/worker/src/activities/t
 
 const patchId = "session-normal-idle-no-grace-v1";
 const workflowsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname;
-const legacyWorkflowsPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-session-normal-idle-workflow.ts",
-  import.meta.url,
-).pathname;
 const timeoutMs = 60_000;
 type History = Awaited<ReturnType<WorkflowHandle["fetchHistory"]>>;
 type Activities = Record<string, (...args: any[]) => Promise<unknown>>;
@@ -77,17 +73,15 @@ describe("normal session idle close", () => {
   let nativeConnection: NativeConnection;
   let client: Client;
   let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
-  let legacyBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
 
   beforeAll(async () => {
     const external = process.env.OPENGENI_TEST_TEMPORAL_HOST?.trim();
     if (!external) services = await startTestServices({ temporal: true });
     const address = external ?? services!.temporalHost;
-    [connection, nativeConnection, workflowBundle, legacyBundle] = await Promise.all([
+    [connection, nativeConnection, workflowBundle] = await Promise.all([
       Connection.connect({ address }),
       NativeConnection.connect({ address }),
       bundleWorkflowCode({ workflowsPath }),
-      bundleWorkflowCode({ workflowsPath: legacyWorkflowsPath }),
     ]);
     client = new Client({ connection });
   }, 300_000);
@@ -108,7 +102,6 @@ describe("normal session idle close", () => {
         args: [{ accountId: string; workspaceId: string; sessionId: string }];
       },
     ) => Promise<void>,
-    legacy = false,
   ) {
     const taskQueue = `idle-close-${crypto.randomUUID()}`;
     const options = {
@@ -127,7 +120,7 @@ describe("normal session idle close", () => {
       connection: nativeConnection,
       namespace: "default",
       taskQueue,
-      workflowBundle: legacy ? legacyBundle : workflowBundle,
+      workflowBundle,
       activities: controlActivities,
     });
     const turns = await Worker.create({
@@ -346,159 +339,4 @@ describe("normal session idle close", () => {
     },
     timeoutMs,
   );
-
-  test(
-    "upgrades a live legacy idle timer and activates no-grace on the next idle cycle in the same run",
-    async () => {
-      const state = durableQueue();
-      state.queued.length = 0;
-      const taskQueue = `idle-upgrade-${crypto.randomUUID()}`;
-      const gate = barrier();
-      let idleMarks = 0;
-      let handle: WorkflowHandle | undefined;
-      const { runAgentTurn, ...controlActivities } = state.activities;
-      const legacy = await Worker.create({
-        connection: nativeConnection,
-        namespace: "default",
-        taskQueue,
-        workflowBundle: legacyBundle,
-        activities: controlActivities,
-      });
-      try {
-        // runUntil shuts down ONLY this worker. It neither cancels nor
-        // terminates the server workflow, whose legacy timer is still pending.
-        await legacy.runUntil(async () => {
-          handle = await client.workflow.start("sessionWorkflow", {
-            taskQueue,
-            workflowId: `session-${crypto.randomUUID()}`,
-            args: [
-              {
-                accountId: crypto.randomUUID(),
-                workspaceId: crypto.randomUUID(),
-                sessionId: crypto.randomUUID(),
-              },
-            ],
-          });
-          await waitFor(async () => timers(await handle!.fetchHistory()).length === 1, {
-            timeoutMs: 20_000,
-          });
-          const pending = await handle.fetchHistory();
-          expect(pending.events?.filter((event) => event.timerFiredEventAttributes)).toHaveLength(
-            0,
-          );
-          expect(patchIds(pending)).not.toContain(patchId);
-        });
-        const running = handle!;
-        const originalRunId = (await running.describe()).runId;
-        expect((await running.describe()).status.name).toBe("RUNNING");
-        const handoff = await running.fetchHistory();
-        expect(handoff.events?.filter((event) => event.timerFiredEventAttributes)).toHaveLength(0);
-
-        const upgraded = await Worker.create({
-          connection: nativeConnection,
-          namespace: "default",
-          taskQueue,
-          workflowBundle,
-          activities: {
-            ...controlActivities,
-            markSessionIdle: async () => {
-              await state.activities.markSessionIdle();
-              idleMarks += 1;
-              if (idleMarks === 1) await gate.promise;
-            },
-          },
-        });
-        const turns = await Worker.create({
-          connection: nativeConnection,
-          namespace: "default",
-          taskQueue: turnTaskQueue(taskQueue),
-          activities: { runAgentTurn },
-        });
-        await upgraded.runUntil(() =>
-          turns.runUntil(async () => {
-            try {
-              // Reaching markSessionIdle proves that the new worker replayed
-              // the old timer and processed its real server-side firing.
-              await waitFor(() => idleMarks === 1, { timeoutMs: 20_000 });
-              const resumed = await running.fetchHistory();
-              expect(
-                resumed.events?.filter((event) => event.timerFiredEventAttributes),
-              ).toHaveLength(1);
-              expect(patchIds(resumed)).not.toContain(patchId);
-              state.queued.push("follow-up-after-worker-upgrade");
-              await running.signal("queueChanged");
-              gate.release();
-              await running.result();
-            } finally {
-              gate.release();
-            }
-          }),
-        );
-        const history = await running.fetchHistory();
-        expect((await running.describe()).runId).toBe(originalRunId);
-        expect(state.runs).toEqual(["follow-up-after-worker-upgrade"]);
-        expect(state.attempts).toHaveLength(1);
-        expect(idleMarks).toBe(2);
-        expect(patchIds(history)).toContain(patchId);
-        // The second idle cycle activated the patch in this SAME run: the
-        // only timer in the whole history is the inherited legacy timer.
-        expect(timers(history)).toHaveLength(1);
-        expect(
-          Number(timers(history)[0]!.timerStartedEventAttributes!.startToFireTimeout!.seconds),
-        ).toBe(5);
-        expect(history.events?.filter((event) => event.timerCanceledEventAttributes)).toHaveLength(
-          0,
-        );
-        await Worker.runReplayHistory({ workflowBundle }, history);
-      } finally {
-        gate.release();
-        if (handle && (await handle.describe()).status.name === "RUNNING") {
-          await handle.terminate("idle-upgrade test cleanup");
-        }
-      }
-    },
-    timeoutMs,
-  );
-
-  for (const signalDuringTimer of [false, true]) {
-    test(
-      `replays genuine prepatch history with a ${signalDuringTimer ? "signal-cancelled then fired" : "fired"} five-second idle timer`,
-      async () => {
-        const state = durableQueue();
-        state.queued.length = 0;
-        await withWorker(
-          state.activities,
-          async (start) => {
-            const handle = await start();
-            if (signalDuringTimer) {
-              await waitFor(async () => timers(await handle.fetchHistory()).length === 1, {
-                timeoutMs: 20_000,
-              });
-              await handle.signal("queueChanged");
-            }
-            await handle.result();
-            const history = await handle.fetchHistory();
-            expect(patchIds(history)).not.toContain(patchId);
-            expect(timers(history)).toHaveLength(signalDuringTimer ? 2 : 1);
-            for (const timer of timers(history))
-              expect(Number(timer.timerStartedEventAttributes!.startToFireTimeout!.seconds)).toBe(
-                5,
-              );
-            expect(history.events?.filter((event) => event.timerFiredEventAttributes)).toHaveLength(
-              1,
-            );
-            expect(
-              history.events?.filter((event) => event.timerCanceledEventAttributes),
-            ).toHaveLength(signalDuringTimer ? 1 : 0);
-            expect(state.runs).toEqual([]);
-            // No marker deletion or synthetic history edits: replay the exact
-            // server history against the new production workflow bundle.
-            await Worker.runReplayHistory({ workflowBundle }, history);
-          },
-          true,
-        );
-      },
-      timeoutMs,
-    );
-  }
 });

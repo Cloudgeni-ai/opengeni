@@ -40,6 +40,11 @@ export type FileAttachment = {
    * shows and the text it exposed, sent to the agent with the image.
    */
   appShot?: AppShotCapture | undefined;
+  /**
+   * Brought back with a saved draft (`restoreReadyFiles`) rather than added
+   * by the person just now.
+   */
+  restored?: true | undefined;
 };
 
 export type UseFileAttachmentsResult = {
@@ -76,6 +81,14 @@ export type UseFileAttachmentsResult = {
    * previews remain usable without it.
    */
   loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
+  /**
+   * Look up a workspace file's content type by its file id, for files a
+   * restored draft names without their metadata. Optional: present when the
+   * client can read file metadata.
+   */
+  loadFileContentType?:
+    | ((fileId: string, signal?: AbortSignal) => Promise<string | undefined>)
+    | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -406,6 +419,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                restored: true,
                 ...(file.appShot ? { appShot: file.appShot } : {}),
                 // No source File and no object URL: server metadata is the
                 // only authority restored across page/device boundaries.
@@ -442,6 +456,16 @@ export function useFileAttachments(
       const current = attachmentsRef.current.find((candidate) => candidate.id === id);
       if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
       return url;
+    },
+    [client, workspaceId],
+  );
+
+  const loadFileContentType = useCallback(
+    async (fileId: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const getFile = client.getFile;
+      if (typeof getFile !== "function") return undefined;
+      const file = await getFile.call(client, workspaceId, fileId, { signal });
+      return file.contentType;
     },
     [client, workspaceId],
   );
@@ -491,6 +515,7 @@ export function useFileAttachments(
     addFromPaste,
     restoreReadyFiles,
     ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),
+    ...(typeof client.getFile === "function" ? { loadFileContentType } : {}),
     retry,
     retainPreview,
     remove,

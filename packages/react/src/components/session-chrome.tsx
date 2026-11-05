@@ -196,19 +196,19 @@ const GOAL_LABEL = (t: OpenGeniText): Record<GoalPillState, string> => ({
  * human decision. Unknown or legacy reasons keep the bare "Paused".
  */
 const GOAL_PAUSED_REASON_SUFFIX = (t: OpenGeniText): Record<string, string> => ({
-  max_auto_continuations: "cap",
-  limits: "limits",
-  model_unavailable: "model",
-  model_policy: "policy",
-  credits: "credits",
-  budget: "budget",
+  max_auto_continuations: t("sessionChrome.pausedReasonCap"),
+  limits: t("sessionChrome.pausedReasonLimits"),
+  model_unavailable: t("sessionChrome.pausedReasonModel"),
+  model_policy: t("sessionChrome.pausedReasonPolicy"),
+  credits: t("sessionChrome.pausedReasonCredits"),
+  budget: t("sessionChrome.pausedReasonBudget"),
   usage_limit: t("sessionChrome.usageLimit"),
-  usage_policy: "limits",
-  allowance: "allowance",
+  usage_policy: t("sessionChrome.pausedReasonLimits"),
+  allowance: t("sessionChrome.pausedReasonAllowance"),
   session_usage_limit: t("sessionChrome.usageLimit"),
-  user_pause: "manually",
-  api: "manually",
-  agent: "agent",
+  user_pause: t("sessionChrome.pausedReasonManually"),
+  api: t("sessionChrome.pausedReasonManually"),
+  agent: t("sessionChrome.pausedReasonAgent"),
 });
 
 const GOAL_PAUSED_REASON_EXPLANATION = (t: OpenGeniText): Record<string, string> => ({

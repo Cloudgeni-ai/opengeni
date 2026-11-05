@@ -78,6 +78,8 @@ import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
 import { useOpenGeniText } from "../messages/runtime";
+import { useComposerImageTags } from "../hooks/use-composer-image-tags";
+import { restoredImageKey } from "../lib/image-markers";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
@@ -193,6 +195,13 @@ export type UseChatComposerControllerOptions = {
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
   queuedRecall?: ComposerQueuedRecall | undefined;
+  /**
+   * Opt-in: each attached image gets a numbered tag, `[Image 1]`, in the text
+   * where the person was writing, and its chip shows that number, so they can
+   * say which comment goes with which image. The tags are plain text; image N
+   * is the Nth image, the order the images reach the agent. Off by default.
+   */
+  imageTags?: boolean | undefined;
 };
 
 /**
@@ -286,6 +295,8 @@ export function applyComposerTextareaHeight(
  * it soon after the agent is done.
  */
 const WORKING_CONTROLS_LINGER_MS = 1_000;
+const NO_ATTACHMENTS: UseFileAttachmentsResult["attachments"] = [];
+const NO_RESOURCES: ComposerState["restoredResources"] = [];
 
 /**
  * `value`, but a `true` that just ended stays `true` for `lingerMs`. The
@@ -335,6 +346,7 @@ export function useChatComposerController({
   runControl = "pause",
   running = false,
   queuedRecall,
+  imageTags = false,
 }: UseChatComposerControllerOptions) {
   const t = useOpenGeniText();
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
@@ -411,6 +423,16 @@ export function useChatComposerController({
     [setDeliveryValue],
   );
   const visibleValue = deliveryChanged ? deliveryValue : renderedValue;
+
+  const imageNumbers = useComposerImageTags({
+    enabled: imageTags,
+    attachments: attachments?.attachments ?? NO_ATTACHMENTS,
+    restoredResources: draft?.restoredResources ?? NO_RESOURCES,
+    loadFileContentType: attachments?.loadFileContentType,
+    readValue: () => liveValueRef.current,
+    setValue: setComposerValue,
+    textareaRef,
+  });
 
   useLayoutEffect(() => {
     if (renderedValue !== liveValueRef.current) {
@@ -905,6 +927,7 @@ export function useChatComposerController({
     id,
     rootRef,
     textareaRef,
+    imageNumbers,
     pauseButtonRef,
     fileInputRef,
     listboxId,
@@ -1231,6 +1254,16 @@ export function RestoredResources() {
   fileIdByIdRef.current = new Map(
     fileEntries.map((entry) => [entry.attachment.id, entry.attachment.file.id]),
   );
+  // Image tags number restored images by file; these chips are keyed by attachment.
+  const imageNumbers = controller.imageNumbers;
+  const restoredImageNumbers = imageNumbers
+    ? new Map(
+        fileEntries.flatMap((entry) => {
+          const number = imageNumbers.get(restoredImageKey(entry.attachment.file.id));
+          return number === undefined ? [] : [[entry.attachment.id, number] as const];
+        }),
+      )
+    : undefined;
   return (
     <>
       {fileEntries.length > 0 ? (
@@ -1244,6 +1277,7 @@ export function RestoredResources() {
           }}
           onRetainPreview={noRetainedPreview}
           onLoadPreview={loadPreview}
+          imageNumbers={restoredImageNumbers}
         />
       ) : null}
       {otherEntries.length > 0 ? (
@@ -1251,6 +1285,7 @@ export function RestoredResources() {
           entries={otherEntries}
           messages={controller.messages}
           onRemove={onRemove}
+          imageNumbers={controller.imageNumbers}
         />
       ) : null}
     </>
@@ -1286,6 +1321,7 @@ export function Attachments() {
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
       onLoadPreview={controller.attachments.loadPreview}
+      imageNumbers={controller.imageNumbers}
     />
   );
 }
@@ -2161,11 +2197,15 @@ function RestoredResourceChips({
   entries,
   messages,
   onRemove,
+  imageNumbers,
 }: {
   entries: Array<{ resource: ComposerState["restoredResources"][number]; index: number }>;
   messages: ChatComposerMessages;
   onRemove: (index: number) => void;
+  /** With image tags on, the number each restored image's tag carries. */
+  imageNumbers?: ReadonlyMap<string, number> | undefined;
 }) {
+  const t = useOpenGeniText();
   return (
     <div
       className="flex flex-wrap gap-1.5 border-b border-og-border px-3 py-2"
@@ -2177,6 +2217,13 @@ function RestoredResourceChips({
           className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-og-md border border-og-border bg-og-surface-2 px-2 py-1 text-og-xs text-og-fg-muted"
         >
           <FileIcon className="size-3 shrink-0" />
+          {resource.kind === "file" && imageNumbers?.has(restoredImageKey(resource.fileId)) ? (
+            <ImageTagLabel>
+              {t("composer.imageTag", {
+                number: imageNumbers.get(restoredImageKey(resource.fileId))!,
+              })}
+            </ImageTagLabel>
+          ) : null}
           <span className="truncate">
             {resource.kind === "file" ? messages.restoredFile(resource.fileId) : resource.uri}
           </span>
@@ -2191,6 +2238,15 @@ function RestoredResourceChips({
         </span>
       ))}
     </div>
+  );
+}
+
+/** The `Image N` a chip shows when its image has a tag in the text. */
+function ImageTagLabel({ children }: { children: ReactNode }) {
+  return (
+    <span data-image-tag="" className="shrink-0 font-medium text-og-fg tabular-nums">
+      {children}
+    </span>
   );
 }
 
@@ -2261,6 +2317,7 @@ function AttachmentChips({
   onRetry,
   onRetainPreview,
   onLoadPreview,
+  imageNumbers,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
@@ -2269,6 +2326,8 @@ function AttachmentChips({
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
   onLoadPreview: UseFileAttachmentsResult["loadPreview"];
+  /** With image tags on, the number each image's tag in the text carries. */
+  imageNumbers?: ReadonlyMap<string, number> | undefined;
 }) {
   const t = useOpenGeniText();
   const lightbox = useLightboxOptional();
@@ -2410,6 +2469,7 @@ function AttachmentChips({
         // conversation as little height as possible; states that need words
         // (failures, app-shots) keep their two-line layout.
         const compact = !appShot && !failed && !previewFailed;
+        const imageNumber = imageNumbers?.get(attachment.id);
         const thumbSize = appShot ? "h-10 w-16" : compact ? "size-6" : "size-8";
         return (
           <div
@@ -2486,14 +2546,29 @@ function AttachmentChips({
             )}
             {compact ? (
               <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                <span className="truncate font-medium text-og-fg">{displayName}</span>
+                {imageNumber !== undefined ? (
+                  <ImageTagLabel>{t("composer.imageTag", { number: imageNumber })}</ImageTagLabel>
+                ) : null}
+                <span
+                  className={cn(
+                    "truncate",
+                    imageNumber === undefined ? "font-medium text-og-fg" : "text-og-fg-muted",
+                  )}
+                >
+                  {displayName}
+                </span>
                 <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">
                   {statusText}
                 </span>
               </div>
             ) : (
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium text-og-fg">{displayName}</div>
+                <div className="flex min-w-0 items-baseline gap-1.5">
+                  {imageNumber !== undefined ? (
+                    <ImageTagLabel>{t("composer.imageTag", { number: imageNumber })}</ImageTagLabel>
+                  ) : null}
+                  <div className="min-w-0 truncate font-medium text-og-fg">{displayName}</div>
+                </div>
                 {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
                   <ComposerTip
                     tip={
