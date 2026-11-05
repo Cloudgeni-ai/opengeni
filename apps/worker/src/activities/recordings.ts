@@ -2266,7 +2266,13 @@ export function createRecordingActivities(
       }
     } finally {
       // What is being heard is still kept: the final transcript may be waiting for it.
-      while (hearing.size > 0) await Promise.all([...hearing]);
+      while (hearing.size > 0) {
+        heartbeat({ phase: "listening" });
+        await Promise.race([
+          Promise.all([...hearing]),
+          new Promise((resolve) => setTimeout(resolve, 10_000)),
+        ]);
+      }
       await saving;
     }
     // Deleted meanwhile: nothing of it may stay behind.
