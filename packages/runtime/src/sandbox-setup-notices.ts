@@ -3,10 +3,10 @@
  * was moved aside instead of deleted.
  *
  * Setup that finishes before the model runs puts its notices into the turn's
- * input. Setup that runs at the first sandbox operation (a box established on
- * demand) has no input left to extend, so its notices follow the next
+ * input. Setup that runs at the first sandbox operation (a workspace machine
+ * started on demand) has no input left to extend, so its notices follow the next
  * plain-text result of a sandbox shell tool: normally the result of the very
- * command that waited for the box. The text is appended when the result is
+ * command that waited for the machine. The text is appended when the result is
  * produced and is stored with it, so earlier history and the prompt-cache
  * prefix never change. Only the shell tools are wrapped: every other tool keeps
  * its exact identity, which the SDK and Opengeni's approval and human-input

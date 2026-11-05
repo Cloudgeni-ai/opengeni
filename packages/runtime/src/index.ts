@@ -14856,7 +14856,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
-  // A folder another user owns (for example after `chown -R` inside the box) is
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
   // not a broken repository: Git only refuses to read it. Trust exactly that
   // path (and its resolved form) in the global Git config and keep the work
   // tree as it is. The message is matched in the C locale, in both wordings.
