@@ -1997,9 +1997,16 @@ the parked turn is superseded with its waiter and the new prompt runs next on
 its own accepted model, so a person who switched model or provider after a
 usage limit is never held until the reset. A queue-edit resubmission, agent
 or machine input, and a Send to a paused or admission-blocked branch keep ordinary queue semantics
-and remain behind the current turn. Pause
-leaves the waiter intact and lets the workflow close; Resume's revisioned
-`signalWithStart` wake reconstructs it. Session and workspace Resume, and a
+and remain behind the current turn. A session model switch
+(`session_set_model`) releases the parked turn without a new prompt:
+`releaseCapacityWaitingTurnInTransaction` deletes the waiter and moves the
+same logical turn onto the new model's accepted policy as `recovering`, so the
+work continues now on a model with capacity. A session Pause releases it too:
+the waiter is deleted and the turn parks `recovering` with the session `idle`
+(`paused_recovery_settled`), exactly like a paused running turn, so Resume
+claims it again (and a model switch while paused moves it to the new model).
+A workspace Pause leaves the waiter intact and lets the workflow close;
+Resume's revisioned `signalWithStart` wake reconstructs it. Session and workspace Resume, and a
 Steer that automatically resumes a paused branch, register that wake for
 every unblocked session with a shared-core waiter, a legacy waiter, or an
 active turn still `waiting_capacity`. While the waiter is
@@ -2709,10 +2716,11 @@ child freezes in `requires_action` (`child_requires_action`, immediate wake
 class, bounded question previews and approval ids), when such a request is
 answered, skipped, expired, decided, or cancelled
 (`child_requires_action_resolved`), when a human/API/agent pauses the child
-directly (`child_paused`), when a capacity waiter is armed
-(`child_waiting_capacity`), and when the child records goal progress
-(`child_progress`); the latter four are `deferred` (pending row + event, no wake,
-delivered with the next claim). Each producer takes the child-lifecycle lock
+directly (`child_paused`), when a long capacity wait is armed
+(`child_waiting_capacity`, immediate, with `resetsAt`), and when the child
+records goal progress (`child_progress`); the resolution, pause and progress
+notices are `deferred` (pending row + event, no wake, delivered with the next
+claim). Each producer takes the child-lifecycle lock
 prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).

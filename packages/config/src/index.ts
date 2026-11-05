@@ -888,10 +888,12 @@ const SettingsSchema = z.object({
   // pre-notice image must never restart while any new-kind row is still
   // pending (session_system_updates or session_system_update_outbox); turning
   // the flag back off stops production but does not drain already committed
-  // rows. Default off. The API and both workers install the validated value
-  // into @opengeni/db once at boot.
+  // rows. Default on since every supported image understands these kinds
+  // (they shipped in August 2026); set it to false to stop producing them. The
+  // API and both workers install the validated value into @opengeni/db once
+  // at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
-  childLifecycleNoticesEnabled: EnvBoolean.default(false),
+  childLifecycleNoticesEnabled: EnvBoolean.default(true),
   // Per-task (root session) API-equivalent usage limits: producer
   // flag only. Off (default) rejects NEW non-null limits on create and on the
   // usage-limit route and hides the editor; limits already persisted are still
