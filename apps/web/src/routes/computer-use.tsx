@@ -26,7 +26,7 @@ export function ComputerUseRoute() {
       <PageHeader
         icon={<MonitorIcon className="size-4" />}
         title="Computer use"
-        description="What agents may do on this computer. Changing the screen or Chrome restarts the agent here and stops what it's running."
+        description="What agents may do on this computer."
       />
       <div className="flex flex-col gap-6 pt-6">
         {thisComputerSettingsAvailable() ? (

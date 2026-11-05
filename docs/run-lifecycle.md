@@ -2358,6 +2358,16 @@ bounded file inventories. Configured `skill_read` stays sandbox-free and does
 not resolve repository names. Identifiers cannot silently switch between these
 sources, even when names match. Repository metadata uses the same YAML parser as
 portable Skills, retaining multiline description text in the JSON descriptor.
+When that strict parse fails, `parseLenientSkillFrontmatter`
+(`packages/contracts/src/skill-metadata.ts`) recovers the top-level `name` and
+`description` lines of common hand-written headers (an unquoted `: ` in a
+description, tab indentation, unindented continuation lines, values starting
+with a YAML indicator) and logs the bounded parser code plus key names, never
+values. It never invents a name: a header without exactly one usable `name:`
+line (an unquoted `null`, boolean or number is not a name, and stray
+unindented text is never borrowed) is still skipped, and the "Skipped
+repository skills" notice carries a `reason` for every omitted entry. Managed
+and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
@@ -2367,7 +2377,30 @@ When discovery meets a typed unreachable workspace (a Connected Machine
 `agentOffline` or control-timeout `SelfhostedControlError`), the bound
 capability memoizes an explicitly unavailable, empty index and contributes a
 short notice instead of failing instruction preparation; the next run rebinds
-and discovers again. Every other discovery failure still fails the turn.
+and discovers again. On every backend, including Modal, a failure that proves
+the workspace answered but one search path or skill folder could not be used
+(typed permission or not-a-directory errors, errno codes from a filesystem
+call, a machine's consent, OS, run-as or payload refusal) skips only that entry,
+listed with its `reason` under "Skipped repository skills"; other skills stay
+indexed. A symlinked search path the confined file API refuses is skipped the
+same way, like a symlinked skill entrypoint; it is left out of the notice only
+when a sibling search path under the same root has skill folders (the usual
+`.claude/skills -> ../.agents/skills`). Discovery bounds, no filesystem API, or an unusable folder
+while comparing duplicate skills degrade the whole index to a short notice. Cancellation, fences, route and lease
+transitions, a vanished sandbox (including Modal's bare `NotFoundError`), Channel
+A's `ChannelAUnavailableError`, Connected Machine draining, replaced
+connections and stream errors (`transport`), protocol and unspecified control
+errors (`control_error`), Modal's untyped
+`SandboxFilesystemError` (lost gRPC status or a killed filesystem helper),
+transport loss and unrecognized errors still fail instruction preparation so
+the turn's existing recovery sees them before the model runs
+(`classifyRepositorySkillDiscoveryFailure` in
+`packages/runtime/src/workspace-skills.ts`). Every failed discovery records
+`opengeni_repository_skill_discovery_failures_total{backend, error_class, handling}`
+and a content-free `Repository skill discovery failed` log line. In
+`opengeni_sandbox_setup_operation_duration_seconds`, a read-only probe's
+definite path miss (an absent `.agents/skills`) is `outcome="not_found"`, not
+`failed`.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves

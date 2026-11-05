@@ -180,7 +180,7 @@ describe("MachineStatusPill — state matrix", () => {
   test("consent_required / display_unavailable / enrolling carry a state badge", async () => {
     for (const [state, label] of [
       ["consent_required", "Consent required"],
-      ["display_unavailable", "No display"],
+      ["display_unavailable", "No screen"],
       ["enrolling", "Enrolling"],
     ] as const) {
       const r = await renderComponent(<MachineStatusPill state={state} />);

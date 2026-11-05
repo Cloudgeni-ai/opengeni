@@ -40,6 +40,7 @@ import {
   getSessionAuthorityEpoch,
   acquireLease,
   activateComputerSession,
+  AttachedBrowserDeviceNotFoundError,
   completeComputerSessionEnd,
   ComputerSessionNotFoundError,
   ComputerSessionOperationConflictError,
@@ -2407,7 +2408,7 @@ function interactionFailure(error: unknown) {
   };
 }
 
-function computerRouteError(
+export function computerRouteError(
   error: unknown,
   request: InteractionControlRequest = "request",
 ): HTTPException {
@@ -2422,6 +2423,13 @@ function computerRouteError(
     return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof AttachedBrowserDeviceNotFoundError) {
+    return new HTTPException(404, {
+      message:
+        "No attached device has this ID. To use a connected machine's screen, use placement kind connected_machine with its sandboxId.",
+      cause: error,
+    });
   }
   if (
     error instanceof ComputerSessionOperationConflictError ||

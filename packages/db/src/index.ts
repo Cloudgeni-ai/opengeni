@@ -31314,6 +31314,37 @@ export async function previewConnectorActionApproval(
   );
 }
 
+/**
+ * The decision this attempt's frozen tool permissions give one connector tool
+ * on one connection, as a call of it would resolve: an explicit choice, else
+ * `defaultDecision`. Reads only the snapshot; creates no request or audit row.
+ * Lets one tool follow the choice a person made for another, such as a bot
+ * send following the person's own Slack send permission.
+ */
+export async function resolveAttemptConnectorToolDecision(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  input: {
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    defaultDecision: "allow" | "ask";
+  },
+): Promise<"allow" | "ask" | "block"> {
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        ...input,
+        actionName: input.toolName,
+      });
+      return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
+    },
+  );
+}
+
 export async function beginConnectorActionExecution(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -34575,6 +34606,84 @@ export async function getSessionParentXaiProviderAccountAuthority(
   childSessionId: string,
 ): Promise<FrozenXaiExecutionAuthority> {
   return getAcceptedSubscriptionParentAuthority(db, "xai", workspaceId, childSessionId);
+}
+
+/** The top of a worker chain, as it runs now. */
+export type SessionChainRoot = {
+  rootSessionId: string;
+  /** Whether no person answers in the root chat right now. */
+  rootUnattended: boolean;
+  /**
+   * Metadata of the exact root turn that started this chain, through each
+   * child's immutable parent turn. Null when that lineage is not recorded
+   * (legacy children) or the turn is gone.
+   */
+  rootTurnMetadata: Record<string, unknown> | null;
+};
+
+const SESSION_CHAIN_MAX_HOPS = 64;
+
+/**
+ * The root chat of a worker session and the root turn that started its chain,
+ * following `parentSessionId`/`parentTurnId`. Null for a top-level session.
+ * Lets a worker act as attended or not the way the chat it works for does: a
+ * worker spawned by a scheduled or unattended run has nobody to answer it.
+ */
+export async function getSessionChainRoot(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionChainRoot | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    let currentId = sessionId;
+    let rootTurnId: string | null = null;
+    for (let hop = 0; hop <= SESSION_CHAIN_MAX_HOPS; hop += 1) {
+      const [row] = await scopedDb
+        .select({
+          parentSessionId: schema.sessions.parentSessionId,
+          parentTurnId: schema.sessions.parentTurnId,
+          unattendedSetting: schema.sessions.unattendedSetting,
+          metadata: schema.sessions.metadata,
+          forkedFromSessionId: schema.sessions.forkedFromSessionId,
+        })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, currentId)))
+        .limit(1);
+      if (!row) {
+        if (currentId === sessionId) return null;
+        throw new Error("session chain root is unavailable");
+      }
+      if (row.parentSessionId) {
+        rootTurnId = row.parentTurnId;
+        currentId = row.parentSessionId;
+        continue;
+      }
+      if (currentId === sessionId) return null;
+      const [turn] = rootTurnId
+        ? await scopedDb
+            .select({ metadata: schema.sessionTurns.metadata })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, currentId),
+                eq(schema.sessionTurns.id, rootTurnId),
+              ),
+            )
+            .limit(1)
+        : [];
+      return {
+        rootSessionId: currentId,
+        rootUnattended: resolveSessionUnattended({
+          setting: (row.unattendedSetting as SessionUnattendedSetting | null) ?? null,
+          createdUnattended: sessionMetadataUnattended(row.metadata),
+          forked: row.forkedFromSessionId !== null,
+        }),
+        rootTurnMetadata: turn?.metadata ?? null,
+      };
+    }
+    throw new Error("session chain is deeper than any admitted worker chain");
+  });
 }
 
 export async function getSessionSpawnDenial(
@@ -47335,6 +47444,10 @@ type LeaseRow = {
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
   untracked_writer_since?: Date | string | null;
+  drain_capture_failures?: number | string | null;
+  drain_capture_failure_epoch?: number | string | null;
+  drain_capture_first_failed_at?: Date | string | null;
+  drain_capture_last_failed_at?: Date | string | null;
   deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -47411,6 +47524,10 @@ export interface LeaseSnapshot {
    * generation admissions) that no capture taken with none attached has
    * covered yet. Null when every such write is in the archive. */
   untrackedWriterSince: Date | null;
+  /** Consecutive settled drain snapshot failures of THIS lease epoch since
+   * its last published save (zero after a new box or a save). Drives the
+   * drain retry backoff and its alerts. */
+  drainCaptureFailures?: SandboxDrainCaptureFailures;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -48203,6 +48320,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
                   ? row.archive_capture_published_at
                   : new Date(row.archive_capture_published_at),
           },
+    drainCaptureFailures: drainCaptureFailuresFromLeaseRow(row),
     reaperHold:
       row.reaper_hold_id === null ||
       row.reaper_hold_until === null ||
@@ -48244,6 +48362,32 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
+  };
+}
+
+export type SandboxDrainCaptureFailures = {
+  count: number;
+  firstFailedAt: Date | null;
+  lastFailedAt: Date | null;
+};
+
+function drainCaptureFailuresFromLeaseRow(row: LeaseRow): SandboxDrainCaptureFailures {
+  const count = Number(row.drain_capture_failures ?? 0);
+  if (
+    row.drain_capture_failure_epoch === null ||
+    row.drain_capture_failure_epoch === undefined ||
+    Number(row.drain_capture_failure_epoch) !== Number(row.lease_epoch) ||
+    !Number.isSafeInteger(count) ||
+    count <= 0
+  ) {
+    return { count: 0, firstFailedAt: null, lastFailedAt: null };
+  }
+  const date = (value: Date | string | null | undefined) =>
+    value === null || value === undefined ? null : value instanceof Date ? value : new Date(value);
+  return {
+    count,
+    firstFailedAt: date(row.drain_capture_first_failed_at),
+    lastFailedAt: date(row.drain_capture_last_failed_at),
   };
 }
 
@@ -63447,6 +63591,10 @@ export async function releaseWorkspaceArchiveCapture(
      * without this a dead checkpoint worker's claim fenced every later turn
      * and checkpoint until the provider deadline. */
     onlyExpiredWarmTakeover?: boolean;
+    /** The released draining capture settled as a failure: count it toward
+     * this lease epoch's consecutive drain snapshot failures, atomically with
+     * the release (a fenced, already replaced claim counts nothing). */
+    recordDrainCaptureFailure?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -63486,6 +63634,30 @@ export async function releaseWorkspaceArchiveCapture(
           archive_capture_started_at = null,
           archive_capture_deadline_at = null,
           archive_capture_published_at = null,
+          ${
+            input.recordDrainCaptureFailure === true
+              ? sql`drain_capture_failures = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failures
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then sandbox_leases.drain_capture_failures + 1
+                  else 1
+                end,
+                drain_capture_first_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_first_failed_at
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then coalesce(sandbox_leases.drain_capture_first_failed_at, now())
+                  else now()
+                end,
+                drain_capture_last_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_last_failed_at
+                  else now()
+                end,
+                drain_capture_failure_epoch = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failure_epoch
+                  else sandbox_leases.lease_epoch
+                end,`
+              : sql``
+          }
           rotation_requested_at = case
             when rotation_reason = 'teardown_claim' then null
             else rotation_requested_at
@@ -65044,6 +65216,12 @@ async function foldWorkspaceArchiveOntoLease(
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
+      -- A published save ends any run of drain snapshot failures: the count
+      -- means failures since this box's last successful save.
+      drain_capture_failures = 0,
+      drain_capture_failure_epoch = null,
+      drain_capture_first_failed_at = null,
+      drain_capture_last_failed_at = null,
       ${
         input.livenessGuard === "warm"
           ? sql`

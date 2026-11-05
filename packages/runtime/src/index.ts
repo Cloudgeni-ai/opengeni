@@ -520,6 +520,13 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import {
+  ownedBoxRepairCommand,
+  ownedBoxRepairHost,
+  ownedBoxRepairNote,
+  parseOwnedBoxRepairOutput,
+  type OwnedBoxRepairReport,
+} from "./sandbox/owned-box-repair";
+import {
   sandboxHookOperationPurpose,
   withSandboxOperationPurpose,
 } from "./sandbox/operation-purpose";
@@ -591,6 +598,7 @@ import {
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -11333,7 +11341,10 @@ function appendSandboxFileDownloadFailureNote(
   appendPreparedInputNote(input, sandboxFileDownloadFailureNote(failures));
 }
 
-/** Add setup's note to the turn's input; false when that input cannot take one. */
+/**
+ * Append a platform note to this turn's model input, after the person's
+ * message. False when that input cannot take one.
+ */
 function appendPreparedInputNote(input: PreparedAgentInput, note: string): boolean {
   if (!note) {
     return true;
@@ -11943,6 +11954,15 @@ export async function runOwnedSandboxSetup(
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+    // CLOUD COMPUTER SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // clock or resolver the agent broke is repaired before anything below needs
+    // the network (rig setup, clones, the Codemode client). Never on any other
+    // backend, and above all never on a connected machine.
+    if ((agentActiveSandboxBackend.get(agent) ?? settings.sandboxBackend) === "compute") {
+      const repair = await repairOwnedComputeBox(setupSession, environment, opts.commandRunner);
+      const note = repair ? ownedBoxRepairNote(repair) : null;
+      if (note && opts.preparedInput) appendPreparedInputNote(opts.preparedInput, note);
+    }
     if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
       const execute = async (): Promise<void> => {
         await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
@@ -12791,6 +12811,47 @@ export type SandboxLifecycleHookContext = {
    */
   onSetupNotice?: (notice: string) => void;
 };
+
+/**
+ * Check a compute box's clock and resolver against the worker and repair what
+ * is broken (see sandbox/owned-box-repair). Best effort: a failed check never
+ * fails setup, but a Steer/Pause cancellation still stops it.
+ */
+async function repairOwnedComputeBox(
+  session: SandboxSessionLike,
+  environment: Record<string, string>,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<OwnedBoxRepairReport | null> {
+  let result: unknown;
+  try {
+    result = await withSandboxOperationPurpose("box_repair", () =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: ownedBoxRepairCommand({
+            workerEpochSeconds: Date.now() / 1000,
+            host: ownedBoxRepairHost(environment),
+          }),
+          workdir: "/workspace",
+          yieldTimeMs: 30_000,
+          maxOutputTokens: 1_000,
+        },
+        commandRunner,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("[sandbox] cloud computer clock and DNS check failed", {
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+    });
+    return null;
+  }
+  const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
+  if (report.clock || report.dns) {
+    console.warn("[sandbox] cloud computer clock or DNS was broken before the turn", report);
+  }
+  return report;
+}
 
 async function runSandboxLifecycleCommand(
   session: SandboxSessionLike,

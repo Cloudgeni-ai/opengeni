@@ -331,6 +331,9 @@ export class ChannelAValidationError extends Error {
     this.name = "ChannelAValidationError";
   }
 }
+/** The requested path itself is a symbolic link, which the confined file API
+ * refuses because it cannot prove the target stays inside the workspace. */
+export class ChannelASymlinkPathError extends ChannelAValidationError {}
 /** A structurally valid Channel-A request could not be completed because the
  * sandbox/provider control plane was temporarily unavailable. Callers may retry
  * this class; it must never be presented as a bad user path. */
@@ -1226,7 +1229,7 @@ export class SandboxChannelAService {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
     if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
-      throw new ChannelAValidationError(`${kind} path must not be a symbolic link: ${path}`);
+      throw new ChannelASymlinkPathError(`${kind} path must not be a symbolic link: ${path}`);
     }
     if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
       throw new ChannelANotFoundError(`${kind} path not found: ${path}`);
@@ -3790,7 +3793,7 @@ export class SandboxChannelAService {
         throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
       }
       if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
-        throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
+        throw new ChannelASymlinkPathError(`directory path must not be a symbolic link: ${safe}`);
       }
       if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
         throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);

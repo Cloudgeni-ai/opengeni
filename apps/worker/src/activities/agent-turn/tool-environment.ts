@@ -2,6 +2,13 @@ import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
+  PERSONAL_SLACK_SEND_TOOL_NAME,
+  personalSlackSendTargets,
+  slackBotSendHasPerson,
+  strictestDecision,
+  withSlackBotSendApproval,
+} from "./slack-bot-send-approval";
+import {
   firstPartyToolsForAttendance,
   sessionStartedUnattended,
   sessionUnattendedNow,
@@ -24,6 +31,9 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
+  readPreparedBotMessage,
+  resolveAttemptConnectorToolDecision,
+  getSessionChainRoot,
   resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -614,7 +624,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
+  const appActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
@@ -679,6 +689,49 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           approvalId,
         }),
       cards: eventing.appActionApprovalCards,
+    },
+  );
+  // A bot send where a person can answer follows the person's own Slack send
+  // permission; scheduled and unattended runs, and workers of them, keep
+  // sending at once.
+  const connectorActionPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(
+    appActionPolicy,
+    {
+      interactive: async () =>
+        await slackBotSendHasPerson({
+          scheduled: scheduledTurnMcpServerIds(turn) !== null,
+          unattended,
+          chainRoot: async () => {
+            const root = await getSessionChainRoot(db, input.workspaceId, input.sessionId);
+            return root
+              ? {
+                  rootUnattended: root.rootUnattended,
+                  rootTurnScheduled:
+                    root.rootTurnMetadata !== null &&
+                    scheduledTurnMcpServerIds({ metadata: root.rootTurnMetadata }) !== null,
+                }
+              : null;
+          },
+        }),
+      personalSlackSendDecision: async () =>
+        strictestDecision(
+          await Promise.all(
+            personalSlackSendTargets(turn.personalConnectionDelegations, runSettings).map(
+              async (target) =>
+                await resolveAttemptConnectorToolDecision(db, connectorActionIdentity, {
+                  ...target,
+                  toolName: PERSONAL_SLACK_SEND_TOOL_NAME,
+                }),
+            ),
+          ),
+        ),
+      preparedMessage: async (messageId) =>
+        await readPreparedBotMessage(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          id: messageId,
+        }),
     },
   );
   const bundledSkills =
