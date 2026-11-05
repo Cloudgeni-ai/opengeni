@@ -318,7 +318,8 @@ conversation, organization connected or not, account linked or not).
   Written feedback is kept up to 4,000 UTF-16 code units, the feedback store's
   limit, without splitting a character. A chat whose session is gone, or that
   the person may no longer see, answers the invoke and records nothing. The
-  lookup uses the partial index `teams_bot_outbox_delivered_message`.
+  reply is found by its Teams message id through the partial index
+  `teams_bot_outbox_delivered_message`, then its chat by primary key.
 
 ## Publisher verification and Store submission
 

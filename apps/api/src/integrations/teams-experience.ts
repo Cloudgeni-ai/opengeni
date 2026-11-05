@@ -251,66 +251,110 @@ function heading(line: string): { level: number; text: string } | null {
 
 /**
  * Text that looks like an HTML tag, such as `List<string>` or `<name>`, would
- * be read by Teams as markup and disappear. Escape it outside code spans,
- * leaving autolinks such as <https://example.com> and link targets alone.
+ * be read by Teams as markup and disappear. Escape it, leaving autolinks such
+ * as <https://example.com>, `<br>` and link targets alone. Linear: each `)`
+ * search resumes where the last one stopped, and each `<` is checked with
+ * bounded sticky patterns.
  */
-function escapeTags(line: string): string {
-  if (!line.includes("<")) return line;
+const KEPT_TAG =
+  /<br[ \t]{0,2}\/?>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]{0,2048}>|<[^\s<>@]{1,256}@[^\s<>@]{1,256}>/iy;
+function escapeTagsInText(text: string): string {
+  if (!text.includes("<")) return text;
   let out = "";
-  let index = 0;
-  /** Backtick run lengths with no closing run later in the line. */
-  const unclosed = new Set<number>();
-  while (index < line.length) {
-    const char = line[index]!;
-    if (char === "`") {
-      let run = 1;
-      while (line[index + run] === "`") run += 1;
-      const marker = "`".repeat(run);
-      let close = unclosed.has(run) ? -1 : line.indexOf(marker, index + run);
-      while (close !== -1 && line[close + run] === "`") {
-        let skip = close;
-        while (line[skip] === "`") skip += 1;
-        close = line.indexOf(marker, skip);
-      }
-      if (close === -1) {
-        unclosed.add(run);
-        out += marker;
-        index += run;
-      } else {
-        out += line.slice(index, close + run);
-        index = close + run;
-      }
-      continue;
-    }
-    if (char === "]" && line[index + 1] === "(") {
-      // A link target is a URL, not text: keep it as written.
-      const end = line.indexOf(")", index + 2);
-      if (end !== -1 && end - index <= 2100) {
-        out += line.slice(index, end + 1);
-        index = end + 1;
-        continue;
-      }
-    }
-    if (char === "\\" && index + 1 < line.length) {
-      out += line.slice(index, index + 2);
-      index += 2;
-      continue;
-    }
-    if (
-      char === "<" &&
-      /[A-Za-z/!?]/.test(line[index + 1] ?? "") &&
-      !/^<br\s{0,2}\/?>/i.test(line.slice(index, index + 8)) &&
-      !/^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/.test(line.slice(index, index + 2100)) &&
-      !/^<[^\s<>@]+@[^\s<>@]+>/.test(line.slice(index, index + 320))
-    ) {
-      out += "\\<";
+  let start = 0;
+  /** The next `)` at or after some earlier search point; -1 when none is left. */
+  let paren = -2;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (char === "\\") {
       index += 1;
       continue;
     }
-    out += char;
-    index += 1;
+    if (char === "]" && text[index + 1] === "(") {
+      // A link target is a URL, not text: keep it as written.
+      if (paren !== -1 && paren < index + 2) paren = text.indexOf(")", index + 2);
+      if (paren !== -1 && paren - index <= 2100) {
+        index = paren;
+        continue;
+      }
+    }
+    if (char !== "<" || !/[A-Za-z/!?]/.test(text[index + 1] ?? "")) continue;
+    KEPT_TAG.lastIndex = index;
+    if (!KEPT_TAG.test(text)) {
+      out += `${text.slice(start, index)}\\`;
+      start = index;
+    }
   }
-  return out;
+  return out + text.slice(start);
+}
+
+const IMAGE =
+  /!\[([^[\]\n]{0,512})\]\([ \t]{0,8}([^\s()]{1,2048})(?:[ \t]+"[^"\n]{0,512}")?[ \t]{0,8}\)/g;
+
+/**
+ * Rewrites the text of one line outside its code spans, which are kept as
+ * written: tag-like text is escaped and, with `images`, images become links.
+ * One pass: the closing run for each backtick length is found by a pointer
+ * that only moves forward.
+ */
+function escapeTags(line: string, images = false): string {
+  const rewrite = (text: string) =>
+    escapeTagsInText(
+      images && text.includes("![")
+        ? text.replace(
+            IMAGE,
+            (_match, alt: string, url: string) => `[${alt.trim() || url}](${url})`,
+          )
+        : text,
+    );
+  if (!line.includes("`")) return rewrite(line);
+  /** Start positions of every maximal backtick run, by run length. */
+  const runs = new Map<number, number[]>();
+  for (let index = 0; index < line.length;) {
+    if (line[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (line[end] === "`") end += 1;
+    const list = runs.get(end - index) ?? [];
+    list.push(index);
+    runs.set(end - index, list);
+    index = end;
+  }
+  const cursor = new Map<number, number>();
+  const closing = (at: number, length: number) => {
+    const list = runs.get(length);
+    if (!list) return -1;
+    let next = cursor.get(length) ?? 0;
+    while (next < list.length && list[next]! <= at) next += 1;
+    cursor.set(length, next);
+    return next < list.length ? list[next]! : -1;
+  };
+  let out = "";
+  let start = 0;
+  for (let index = 0; index < line.length;) {
+    const char = line[index]!;
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char !== "`") {
+      index += 1;
+      continue;
+    }
+    let run = 1;
+    while (line[index + run] === "`") run += 1;
+    const close = closing(index, run);
+    if (close === -1) {
+      index += run;
+      continue;
+    }
+    out += rewrite(line.slice(start, index)) + line.slice(index, close + run);
+    index = close + run;
+    start = index;
+  }
+  return out + rewrite(line.slice(start));
 }
 
 /**
@@ -410,15 +454,11 @@ export function teamsMarkdown(input: string): string {
       plainLine = index;
     out.push(
       escapeTags(
-        line
-          .replace(
-            /!\[([^\]\n]{0,512})\]\([ \t]{0,8}([^\s()]{1,2048})(?:[ \t]+"[^"\n]{0,512}")?[ \t]{0,8}\)/g,
-            (_match, alt: string, url: string) => `[${alt.trim() || url}](${url})`,
-          )
-          .replace(
-            /^([ \t]{0,12}(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})\[([ xX])\][ \t]/,
-            (_match, marker: string, checked: string) => `${marker}${checked === " " ? "☐" : "☑"} `,
-          ),
+        line.replace(
+          /^([ \t]{0,12}(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})\[([ xX])\][ \t]/,
+          (_match, marker: string, checked: string) => `${marker}${checked === " " ? "☐" : "☑"} `,
+        ),
+        true,
       ),
     );
   }

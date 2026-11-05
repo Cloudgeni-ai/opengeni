@@ -152,6 +152,8 @@ describe("Teams Markdown", () => {
     );
     const long = `${"word ".repeat(1000)}List<string>`;
     expect(teamsMarkdown(long)).toBe(long.replace("<", "\\<"));
+    // Images in code spans stay as written.
+    expect(teamsMarkdown("`![a](b.png)` and ![c](d.png)")).toBe("`![a](b.png)` and [c](d.png)");
   });
   test("indented code, and code nested in a list item, is left as written", () => {
     const indented = "Example:\n\n    List<string> xs\n\n    xs.Add(<a>)\n\nList<b>";
@@ -198,6 +200,14 @@ describe("Teams Markdown", () => {
       const lines = `#${" \t".repeat(2000)}${separator}\n`.repeat(100);
       const begun = performance.now();
       teamsMarkdownParts(teamsMarkdown(lines));
+      expect(performance.now() - begun).toBeLessThan(500);
+    }
+    // Long lines are escaped in one pass, whatever links or backticks they hold.
+    let runs = "";
+    for (let length = 1; runs.length < 400_000; length += 1) runs += `${"`".repeat(length)}<a `;
+    for (const line of ["<a](".repeat(100_000), runs, "![".repeat(200_000)]) {
+      const begun = performance.now();
+      teamsMarkdown(line);
       expect(performance.now() - begun).toBeLessThan(500);
     }
   });
