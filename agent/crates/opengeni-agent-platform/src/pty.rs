@@ -246,6 +246,10 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     if let Some(email) = crate::default_git_email(req.env.keys()) {
         cmd.env("EMAIL", email);
     }
+    // The agent's own shell tools go last, so the machine's copies win.
+    if let Some(path) = crate::shell_tools::path_with_shell_tools(&req.env) {
+        cmd.env("PATH", path);
+    }
     // Advertise a sensible TERM so curses apps render; the request may override.
     let term = if req.term.is_empty() {
         "xterm-256color"

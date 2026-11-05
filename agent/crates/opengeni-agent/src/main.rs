@@ -62,6 +62,7 @@ mod ops;
 mod overrides;
 mod rpc_replay;
 mod service;
+mod shell_tools;
 mod stream_digest;
 mod supervisor;
 mod uninstall;
@@ -593,6 +594,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         )));
     }
     let config_dir = config::config_dir().ok();
+    install_shell_tools(config_dir.as_deref());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) = attach_browser_controller(
         platform,
@@ -608,6 +610,10 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             let removed = embedded_runtime::prune_stale_generations();
             if removed > 0 {
                 info!(removed, "removed earlier interaction runtime generations");
+            }
+            let removed = shell_tools::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier shell tools generations");
             }
         });
     }
@@ -769,6 +775,16 @@ fn operation_cgroups(
 /// run for good. The verified release replaces the binary on that disk and
 /// this process execs it, handing its commands over, so the guest init that
 /// supervises it sees the same process carry on.
+/// Puts this release's ripgrep and jq at the end of every command's `PATH`.
+/// A failure only costs the fallback tools, so it never stops the agent.
+fn install_shell_tools(config_dir: Option<&Path>) {
+    match shell_tools::install(config_dir) {
+        Ok(Some(directory)) => info!(directory = %directory.display(), "shell tools ready"),
+        Ok(None) => {}
+        Err(error) => warn!(%error, "shell tools unavailable; commands use the machine's own"),
+    }
+}
+
 async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     // Capture before any update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
@@ -806,6 +822,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    install_shell_tools(config_dir.as_deref());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone(), true);

@@ -567,6 +567,12 @@ import {
   managedCodemodeClientDirectory,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
+import { installManagedShellTools, loadManagedShellTools } from "./sandbox/shell-tools";
+export {
+  loadManagedShellTools,
+  MANAGED_SHELL_TOOLS_ARCHES,
+  type ManagedShellToolsDownload,
+} from "./sandbox/shell-tools";
 export {
   loadManagedCodemodeClient,
   managedCodemodeClientBytes,
@@ -13415,6 +13421,16 @@ function sandboxCodemodeTokenHooksForAgent(
               },
             ]
           : []),
+        ...(managedShellToolsBackend(agentActiveSandboxBackend.get(agent))
+          ? [
+              {
+                id: "shell-tools",
+                phase: "beforeAgentStart" as const,
+                independent: true,
+                run: runManagedShellToolsHook,
+              },
+            ]
+          : []),
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
@@ -15594,6 +15610,64 @@ export async function runManagedCodemodeClientHook(
       context.codemodeClientDownload,
     ),
   );
+}
+
+/**
+ * Managed sandboxes whose commands the worker runs itself. Compute sandboxes,
+ * Connected Machines and run_on targets run commands through the machine
+ * agent, which carries its own rg and jq; `local` is the operator's own host.
+ */
+export function managedShellToolsBackend(backend: Settings["sandboxBackend"] | undefined): boolean {
+  return (
+    backend !== undefined &&
+    backend !== "selfhosted" &&
+    backend !== "compute" &&
+    backend !== "local" &&
+    backend !== "none"
+  );
+}
+
+/**
+ * Delivers the release's rg and jq beside the managed Codemode client. Best
+ * effort: a box that cannot receive them keeps its own tools, so only a turn
+ * cancellation stops setup here.
+ */
+export async function runManagedShellToolsHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  try {
+    const tools = await loadManagedShellTools();
+    if (!tools) return;
+    const result = await withSandboxOperationPurpose("hook.shell-tools", () =>
+      installManagedShellTools(
+        session,
+        tools,
+        async (cmd) =>
+          await runSandboxLifecycleCommand(
+            session,
+            {
+              cmd,
+              workdir: "/workspace",
+              ...(context.runAs ? { runAs: context.runAs } : {}),
+              yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+              maxOutputTokens: 1_000,
+            },
+            context.commandRunner,
+          ),
+        context.runAs,
+        context.codemodeClientDownload?.shellTools,
+      ),
+    );
+    if (result === "failed") {
+      console.warn("Managed shell tools were not delivered; the box keeps its own tools");
+    }
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("Managed shell tools were not delivered; the box keeps its own tools", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 export async function refreshCodemodeTokenFile(

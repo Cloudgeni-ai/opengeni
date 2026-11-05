@@ -1373,6 +1373,10 @@ impl Platform for NativePlatform {
         if let Some(email) = crate::default_git_email(req.env.keys()) {
             cmd.env("EMAIL", email);
         }
+        // The agent's own shell tools go last, so the machine's copies win.
+        if let Some(path) = crate::shell_tools::path_with_shell_tools(&req.env) {
+            cmd.env("PATH", path);
+        }
 
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()

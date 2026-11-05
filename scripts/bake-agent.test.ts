@@ -28,6 +28,7 @@ type BuildCall = {
   args: string[];
   buildId?: string;
   embedded: Record<string, string | undefined>;
+  shellTools?: string;
 };
 
 async function fixture() {
@@ -41,7 +42,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 const embedded = Object.fromEntries(["OPENGENI_EMBEDDED_BROWSERD", "OPENGENI_EMBEDDED_COMPUTER_NATIVE"].map(name => [name, process.env[name]]));
-await appendFile(process.env.BAKE_FIXTURE_LOG, JSON.stringify({tool, args, buildId:process.env.OPENGENI_RUNTIME_BUILD_ID, embedded}) + "\n");
+await appendFile(process.env.BAKE_FIXTURE_LOG, JSON.stringify({tool, args, buildId:process.env.OPENGENI_RUNTIME_BUILD_ID, embedded, shellTools:process.env.OPENGENI_EMBEDDED_SHELL_TOOLS}) + "\n");
 async function output(path, bytes) {
   await mkdir(dirname(path), {recursive:true});
   await writeFile(path, bytes);
@@ -60,6 +61,8 @@ if (tool === "git") {
 } else if (tool === "bun") {
   if (args[0] === "build") {
     if (process.env.BAKE_FIXTURE_SKIP !== "browserd") await output(args[args.indexOf("--outfile") + 1], "browserd " + process.env.OPENGENI_RUNTIME_BUILD_ID);
+  } else if (args[0] === "scripts/fetch-shell-tools.ts") {
+    // The pinned rg/jq fetch is covered by scripts/shell-tools.test.ts.
   } else if (args[0] === "docker/distrust-embedded-roots.ts") {
     // The fixture binaries carry no root list; the call itself is asserted.
   } else throw Error("unexpected Bun command");
@@ -133,6 +136,23 @@ describe("exact-source canary interaction bundle", () => {
       expect((await readdir(baked)).filter((name) => name.startsWith("opengeni-")).sort()).toEqual(
         [...files].sort(),
       );
+      const fetch = result.calls.find(
+        (call) => call.tool === "bun" && call.args[0] === "scripts/fetch-shell-tools.ts",
+      );
+      expect(fetch?.args).toEqual([
+        "scripts/fetch-shell-tools.ts",
+        "--out",
+        expect.stringMatching(/\/shell-tools$/u),
+        "--target",
+        "x86_64-unknown-linux-musl",
+        "--target",
+        "aarch64-unknown-linux-musl",
+      ]);
+      const agentBuilds = result.calls.filter(
+        (call) => call.tool === "cargo" && call.args.at(-1) === "opengeni-agent",
+      );
+      expect(agentBuilds).toHaveLength(targets.length);
+      for (const build of agentBuilds) expect(build.shellTools).toBe(fetch?.args[2]);
       for (const target of targets) {
         const agent = JSON.parse(await readFile(join(baked, "opengeni-agent-" + target), "utf8"));
         expect(agent.buildId).toBe(sourceId);

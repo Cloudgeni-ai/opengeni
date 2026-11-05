@@ -108,6 +108,15 @@ else
   fi
 fi
 
+# The pinned rg and jq each agent embeds and appends to its commands' PATH
+# (agent/crates/opengeni-agent/build.rs). Verified against the manifest.
+SHELL_TOOLS_DIR="$STAGE_DIR/shell-tools"
+(
+  cd "$REPO_ROOT"
+  bun scripts/fetch-shell-tools.ts --out "$SHELL_TOOLS_DIR" \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+)
+
 for target in $TARGETS; do
   case "$target" in
     x86_64-unknown-linux-musl) bun_target=bun-linux-x64 ;;
@@ -155,6 +164,7 @@ for target in $TARGETS; do
     cd "$AGENT_DIR"
     OPENGENI_EMBEDDED_BROWSERD="$browserd" \
     OPENGENI_EMBEDDED_COMPUTER_NATIVE="$computer_native" \
+    OPENGENI_EMBEDDED_SHELL_TOOLS="$SHELL_TOOLS_DIR" \
       cargo zigbuild --locked --release --target "$target" -p opengeni-agent
   )
   cp "$AGENT_DIR/target/$target/release/opengeni-agent" "$STAGE_DIR/opengeni-agent-$target"

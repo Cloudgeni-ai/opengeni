@@ -4,6 +4,7 @@ import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeManagedCodemodeClient } from "./build-managed-codemode-client";
+import { writeManagedShellTools } from "./build-managed-shell-tools";
 
 type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
@@ -149,6 +150,7 @@ async function buildWorker(): Promise<void> {
   );
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
   await writeManagedCodemodeClient(repositoryRoot, join(outdir, "assets/codemode-client.json"));
+  await writeManagedShellTools(join(outdir, "assets/shell-tools"), process.env.OPENGENI_SHELL_TOOLS_DIR);
 }
 
 async function buildArtifactSidecar(
