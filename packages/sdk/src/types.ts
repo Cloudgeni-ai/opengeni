@@ -2434,6 +2434,8 @@ export type SessionRetention = {
   archive: {
     state: "archiving" | "archived";
     archivedAt: string | null;
+    /** Someone restored the chat; its stored content is being put back. */
+    restoring?: true | undefined;
   } | null;
 };
 
@@ -2446,8 +2448,17 @@ export type UpdateSessionUnattendedRequest = {
   unattended: boolean;
 };
 
+/**
+ * `archived: true` archives a root chat and its sub-chats; it is refused
+ * (409 `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless each is listed in `confirmActiveSubChats`.
+ * `archived: false` brings the chat back at any time: exactly as it was within
+ * the undo window, and later with stored content restored in the background.
+ */
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ids of sub-chats still in use to archive (and stop) too. */
+  confirmActiveSubChats?: string[];
   /** Ignored; kept for older clients. */
   clientEventId?: string;
   /** Ignored; there is one kind of archive. Kept for older clients. */
@@ -4750,7 +4761,8 @@ export type ModelConnectionAccessKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
@@ -4858,6 +4870,47 @@ export type OrganizationProviderCustomModelsResponse = {
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export type OrganizationCompatibleEndpoint = {
+  id: string;
+  status: "active" | "revoked";
+  version: number;
+  /** The public HTTPS base URL, usually ending in `/v1`. */
+  baseUrl: string;
+  /** `chat` for Chat Completions, `responses` for the Responses API. */
+  api: "chat" | "responses";
+  label: string | null;
+  /** The endpoint's active models. */
+  models: OrganizationProviderCustomModel[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationCompatibleEndpointsResponse = {
+  endpoints: OrganizationCompatibleEndpoint[];
+};
+/** Connect an endpoint with its first model; the API checks it with a short test request first. */
+export type CreateOrganizationCompatibleEndpointRequest = {
+  operationId: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api?: "chat" | "responses" | undefined;
+  label?: string | undefined;
+};
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
+  operationId: string;
+  expectedVersion: number;
+  apiKey: string;
+};
+export type CreateOrganizationCompatibleEndpointModelRequest = {
+  operationId: string;
+  upstreamModelId: string;
+};
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
@@ -8136,6 +8189,15 @@ export type ScheduledTaskAgentConfigInput = {
   memoryScope?: SessionMemoryScope | undefined;
   agentAccess?: SessionAgentAccess | undefined;
   skills?: ScheduledTaskSkill[] | undefined;
+  /**
+   * Opengeni tools and permissions of each chat the task starts, as on
+   * session create. Set once at creation (an update that names them is
+   * refused); omitted, an agent's task keeps its own chat's selection and any
+   * other task follows the defaults. Permissions must be held by the creating
+   * credential. Only a task that starts its own chats can carry them.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {

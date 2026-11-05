@@ -3,6 +3,7 @@ import {
   CreateEventSourceRequest,
   CreateScheduledTaskRequest,
   SetSessionUsageLimitRequest,
+  UpdateScheduledTaskRequest,
 } from "../src/index";
 
 const generated = {
@@ -54,6 +55,15 @@ describe("scheduled task chat settings and creator lock", () => {
         agentConfig: { prompt: "Check", memoryScope: "off" },
       },
     ],
+    [
+      "Opengeni tools on an existing-chat task",
+      {
+        runMode: "existing_session",
+        targetSessionId: "11111111-2222-4333-8444-555555555555",
+        agentConfig: { prompt: "Check", firstPartyMcpTools: ["goal_set"] },
+      },
+    ],
+    ["an empty permission set", { agentConfig: { prompt: "Check", firstPartyMcpPermissions: [] } }],
   ])("rejects %s", (_label, override) => {
     expect(
       CreateScheduledTaskRequest.safeParse({
@@ -62,6 +72,26 @@ describe("scheduled task chat settings and creator lock", () => {
         ...override,
       }).success,
     ).toBe(false);
+  });
+
+  test("a generated-chat task takes Opengeni tools and permissions only at creation", () => {
+    const selection = {
+      firstPartyMcpTools: ["goal_set", "notify_user"],
+      firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
+    };
+    expect(
+      CreateScheduledTaskRequest.parse({
+        ...generated,
+        agentConfig: { prompt: "Check", ...selection },
+      }).agentConfig,
+    ).toMatchObject(selection);
+    for (const field of ["firstPartyMcpTools", "firstPartyMcpPermissions"] as const) {
+      const update = UpdateScheduledTaskRequest.safeParse({
+        agentConfig: { prompt: "Check", [field]: selection[field] },
+      });
+      expect(update.success).toBe(false);
+      expect(update.error?.issues[0]?.path).toEqual(["agentConfig", field]);
+    }
   });
 });
 

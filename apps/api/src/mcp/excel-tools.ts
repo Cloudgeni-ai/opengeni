@@ -11,10 +11,23 @@ import {
 } from "@opengeni/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { OFFICE_RUN_DEFAULT_TIMEOUT_MS, type OfficeWorkbook } from "../office-workbooks";
+import {
+  OFFICE_RUN_DEFAULT_TIMEOUT_MS,
+  OFFICE_RUN_MAX_TIMEOUT_MS,
+  type OfficeRunExtras,
+  type OfficeWorkbook,
+  type OfficeWorkbookCopy,
+} from "../office-workbooks";
+import {
+  OfficeWorkbookFileError,
+  officeRunFiles,
+  publishWorkbookCopy,
+  workbookCopyScope,
+} from "../office-workbook-files";
 import { officeWorkbookRelayFor } from "../routes/office-workbooks";
 
 export const EXCEL_RUN_MAX_CODE_CHARS = 200_000;
+export const EXCEL_RUN_MAX_FILES = 5;
 const MAX_RESULT_CHARS = 40_000;
 
 export { excelAddin, type ExcelAddin };
@@ -26,6 +39,8 @@ const DESCRIPTION = [
   "Changes appear in the person's workbook at once and may not be undoable, so look before you change anything and change only what was asked.",
   "A failure returns Office's error code, message and failing statement; operations synced before the failure stay applied.",
   "Omit `workbook` when one workbook is open; otherwise the error lists the open workbooks to choose from.",
+  "To open chat files in Excel, pass their artifactIds in `files`: the code gets them as `files[i]` with `name` and `base64`, for `Excel.createWorkbook(files[0].base64)` (a new workbook) or `context.workbook.insertWorksheetsFromBase64(files[0].base64)` (sheets into this one).",
+  "To give the person the workbook as a file, pass `saveCopyAs` with a file name: after the code runs, a copy of the whole workbook with its unsaved changes is saved to this chat as an .xlsx, and the result's `copy` gives the artifactId to link as [name](artifact:<artifactId>). `code` may then be omitted.",
   `When someone works on a spreadsheet and no workbook is connected, offer the Excel add-in: capability_authorization_request with ${EXCEL_ADDIN_CAPABILITY_ID} shows its install card.`,
 ].join(" ");
 
@@ -155,32 +170,72 @@ export function registerExcelTools(input: {
           .string()
           .min(1)
           .max(EXCEL_RUN_MAX_CODE_CHARS)
-          .describe("Body of an async function (context, Excel). Use await context.sync()."),
+          .optional()
+          .describe(
+            "Body of an async function (context, Excel, console, files). Use await context.sync().",
+          ),
         workbook: z
           .string()
           .trim()
           .max(300)
           .optional()
           .describe("Workbook id or name. Omit when only one workbook is open."),
+        files: z
+          .array(z.string().uuid())
+          .min(1)
+          .max(EXCEL_RUN_MAX_FILES)
+          .optional()
+          .describe("artifactIds of chat files to hand to the code as `files`."),
+        saveCopyAs: z
+          .string()
+          .trim()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("File name for a copy of the workbook saved to this chat after the code runs."),
       },
     },
-    async ({ code, workbook: wanted }) => {
+    async ({ code, workbook: wanted, files: fileIds, saveCopyAs }) => {
       await authorize();
+      if (!code && !saveCopyAs) return textResult("Pass `code`, `saveCopyAs`, or both.", true);
       const owner = await workbookOwner(deps, grant, sessionId);
       const relay = officeWorkbookRelayFor(deps);
       const addin = excelAddin(deps.settings);
       const chosen = chooseWorkbook(await relay.list(owner), wanted, addin);
       if ("error" in chosen) return textResult(chosen.error, true);
       const { workbook } = chosen;
-      const outcome = await relay.run(owner, workbook.id, code, OFFICE_RUN_DEFAULT_TIMEOUT_MS);
+      const extras: OfficeRunExtras = {};
+      try {
+        if (fileIds?.length) extras.files = await officeRunFiles(deps, grant, fileIds);
+        if (saveCopyAs) {
+          extras.saveCopy = {
+            filename: saveCopyAs,
+            scope: await workbookCopyScope(deps, grant, sessionId),
+          };
+        }
+      } catch (error) {
+        if (error instanceof OfficeWorkbookFileError) return textResult(error.message, true);
+        throw error;
+      }
+      const outcome = await relay.run(
+        owner,
+        workbook.id,
+        code ?? "",
+        // Moving files takes longer than code alone.
+        extras.files || extras.saveCopy ? OFFICE_RUN_MAX_TIMEOUT_MS : OFFICE_RUN_DEFAULT_TIMEOUT_MS,
+        extras,
+      );
       const where = { id: workbook.id, name: workbook.name };
       switch (outcome.kind) {
         case "ok": {
           const { json, truncated } = boundedJson(outcome.value);
+          const copy = outcome.copy ? await savedCopy(outcome.copy) : null;
           return textResult(
             `{"workbook":${JSON.stringify(where)},"result":${json}${
               truncated ? ',"truncated":"the result was cut; return less"' : ""
-            }${outcome.logs.length ? `,"logs":${JSON.stringify(outcome.logs)}` : ""},"ms":${Math.round(outcome.durationMs)}}`,
+            }${outcome.logs.length ? `,"logs":${JSON.stringify(outcome.logs)}` : ""}${
+              copy ? `,"copy":${JSON.stringify(copy)}` : ""
+            },"ms":${Math.round(outcome.durationMs)}}`,
           );
         }
         case "error":
@@ -207,4 +262,22 @@ export function registerExcelTools(input: {
       }
     },
   );
+
+  /** The copy the add-in uploaded, published to this chat, or why there is none. */
+  async function savedCopy(copy: OfficeWorkbookCopy): Promise<Record<string, unknown>> {
+    if ("error" in copy) return { error: `The code ran, but no copy was saved: ${copy.error}` };
+    try {
+      const receipt = await publishWorkbookCopy(deps, { grant, sessionId, fileId: copy.fileId });
+      return {
+        artifactId: receipt.artifactId,
+        filename: receipt.filename,
+        sizeBytes: receipt.sizeBytes,
+        whoCanOpen: receipt.access.whoCanOpen,
+      };
+    } catch (error) {
+      if (error instanceof OfficeWorkbookFileError)
+        return { error: `The code ran, but no copy was saved: ${error.message}` };
+      throw error;
+    }
+  }
 }

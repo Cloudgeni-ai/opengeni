@@ -1,3 +1,5 @@
+export * from "./billing-credit-notifications";
+import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";
 import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
@@ -21,7 +23,12 @@ import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
-import { AzureOpenAIEndpoint } from "./direct-model-provider";
+import {
+  AzureOpenAIEndpoint,
+  CompatibleModelApi,
+  CompatibleModelBaseUrl,
+  CompatibleModelName,
+} from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import {
   isClaudeSubscriptionProviderId,
@@ -3974,6 +3981,78 @@ export const RevokeOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
 );
 export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
   typeof RevokeOrganizationModelProviderConnectionRequest
+>;
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    status: z.enum(["active", "revoked"]),
+    version: primitives.positiveInteger,
+    /** The public HTTPS base URL, usually ending in `/v1`. */
+    baseUrl: z.string().url(),
+    api: CompatibleModelApi,
+    label: primitives.nullableString,
+    /** The endpoint's active models. */
+    models: z.array(OrganizationProviderCustomModel),
+    createdAt: primitives.dateTime,
+    updatedAt: primitives.dateTime,
+  }),
+);
+export type OrganizationCompatibleEndpoint = z.infer<typeof OrganizationCompatibleEndpoint>;
+export const OrganizationCompatibleEndpointsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ endpoints: z.array(OrganizationCompatibleEndpoint) }),
+);
+export type OrganizationCompatibleEndpointsResponse = z.infer<
+  typeof OrganizationCompatibleEndpointsResponse
+>;
+/**
+ * Connect an OpenAI-compatible endpoint with its first model. The API checks
+ * the model with a short test request to the endpoint before saving.
+ */
+export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: primitives.uuid,
+      baseUrl: CompatibleModelBaseUrl,
+      apiKey: primitives.string.trim().min(1).max(8192),
+      model: CompatibleModelName,
+      api: CompatibleModelApi.default("chat"),
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(60)
+        .regex(/^[^\r\n|]+$/)
+        .optional(),
+    })
+    .strict(),
+);
+export type CreateOrganizationCompatibleEndpointRequest = z.input<
+  typeof CreateOrganizationCompatibleEndpointRequest
+>;
+/** Replace an endpoint's key; the API checks it against one of the endpoint's models first. */
+export const ReplaceOrganizationCompatibleEndpointKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger,
+      apiKey: primitives.string.trim().min(1).max(8192),
+    })
+    .strict(),
+);
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = z.infer<
+  typeof ReplaceOrganizationCompatibleEndpointKeyRequest
+>;
+/** Add a model to an endpoint; the API checks it with the endpoint's key first. */
+export const CreateOrganizationCompatibleEndpointModelRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operationId: primitives.uuid, upstreamModelId: CompatibleModelName }).strict(),
+);
+export type CreateOrganizationCompatibleEndpointModelRequest = z.infer<
+  typeof CreateOrganizationCompatibleEndpointModelRequest
 >;
 
 const turnInitiatorIdentityFields = {
@@ -9159,15 +9238,25 @@ export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentio
 
 /**
  * Archive a root chat and its sub-chats for everyone (`archived: true`), or
- * undo that (`archived: false`) within the few seconds after archiving. Once
- * that window ends the chat's remaining work is stopped and its content moves
- * to long-term storage; it stays readable and searchable but can no longer be
- * restored or continued. Needs session control.
+ * bring it back (`archived: false`). A few seconds after archiving, the chat's
+ * remaining work is stopped and its content moves to long-term storage; it
+ * stays readable and searchable. Bringing it back within those seconds undoes
+ * the Archive exactly; later, the chat and the sub-chats archived with it
+ * become live again and stored content is restored in the background
+ * (`retention.archive.restoring` until done). Archive is refused (409
+ * `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless every such sub-chat is listed in
+ * `confirmActiveSubChats`. Needs session control.
  */
 export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
+      /**
+       * Ids of sub-chats still in use that should be archived (and stopped)
+       * too. Only after a refusal named them; ignored when unarchiving.
+       */
+      confirmActiveSubChats: z.array(primitives.uuid).max(1000).optional(),
       /** Ignored; repeating an Archive changes nothing. Kept for older clients. */
       clientEventId: z.string().min(1).max(200).optional(),
       /** Ignored; there is one kind of archive. Kept for older clients. */
@@ -9195,6 +9284,8 @@ export const SessionRetention = /* @__PURE__ */ defineSchema(() =>
         .object({
           state: z.enum(["archiving", "archived"]),
           archivedAt: primitives.nullableString,
+          /** Someone restored the chat; its stored content is being put back. */
+          restoring: z.literal(true).optional(),
         })
         .strict()
         .nullable(),
@@ -10957,7 +11048,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_requires_action: "immediate",
   child_requires_action_resolved: "deferred",
   child_paused: "deferred",
-  child_waiting_capacity: "deferred",
+  // Produced only for a long wait, which the parent must hear about now.
+  child_waiting_capacity: "immediate",
   child_progress: "deferred",
   secret_use_approval_decided: "immediate",
   capability_setup_completed: "immediate",
@@ -11016,8 +11108,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * can act instead of a parent that cannot (new lineage `escalatedFromSessionId`),
  * its resolution follows it there, and it also wakes a parent whose goal is
  * completed.
+ *
+ * 3: `child_waiting_capacity` is produced only for a long wait (reset far
+ * away, unknown, or needing a person), carries `resetsAt`, and wakes the
+ * parent immediately instead of riding its next claim.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 2;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -11148,6 +11244,8 @@ export const ChildWaitingCapacityPayload = /* @__PURE__ */ defineSchema(() =>
       childTurnId: primitives.uuid,
       provider: z.enum(["codex", "xai", "claude"]),
       nextCheckAt: primitives.nullableString,
+      /** When capacity is expected back; null when nothing says. Absent from older rows. */
+      resetsAt: primitives.nullableString.optional(),
     })
     .passthrough(),
 );
@@ -13095,6 +13193,14 @@ const SCHEDULED_TASK_GENERATED_CHAT_FIELDS = [
   "memoryScope",
   "agentAccess",
   "skills",
+  "firstPartyMcpTools",
+  "firstPartyMcpPermissions",
+] as const;
+
+/** Set once when a task is created; see ScheduledTaskAgentConfigInput. */
+const SCHEDULED_TASK_CREATE_ONLY_FIELDS = [
+  "firstPartyMcpTools",
+  "firstPartyMcpPermissions",
 ] as const;
 
 function refineScheduledTaskGeneratedChatFields(
@@ -13191,50 +13297,63 @@ export function knowledgeSourceAgentConfig(
 
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
-    if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["executionTarget"],
-        message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
-      });
-    }
-    if (value.machineTarget && value.sandboxBackend !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["machineTarget"],
-        message: "machineTarget cannot be combined with sandboxBackend",
-      });
-    }
-    if (value.sandboxBackend === "selfhosted") {
-      context.addIssue({
-        code: "custom",
-        path: ["sandboxBackend"],
-        message:
-          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
-      });
-    }
-    if (
-      scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
-      SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-    if (
-      scheduledOccurrencePayloadUtf8Bytes(value) >
-      SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
-        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
-      });
-    }
-    refineScheduledTaskAgentConfig(value, context);
-  }),
+  z
+    .object({
+      ...scheduledTaskAgentConfigShape(true),
+      /**
+       * Opengeni tools and permissions of each chat the task starts, as on
+       * session create. Set once at creation and kept as the task's creator
+       * selection, never in its stored agentConfig. Omitted: an agent's task
+       * keeps its own chat's selection and any other task follows the
+       * defaults. Permissions must be held by the creating credential.
+       */
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      firstPartyMcpPermissions: z.array(Permission).min(1).optional(),
+    })
+    .superRefine((value, context) => {
+      if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["executionTarget"],
+          message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
+        });
+      }
+      if (value.machineTarget && value.sandboxBackend !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["machineTarget"],
+          message: "machineTarget cannot be combined with sandboxBackend",
+        });
+      }
+      if (value.sandboxBackend === "selfhosted") {
+        context.addIssue({
+          code: "custom",
+          path: ["sandboxBackend"],
+          message:
+            "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
+        });
+      }
+      if (
+        scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
+        SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+      if (
+        scheduledOccurrencePayloadUtf8Bytes(value) >
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+          SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
+        });
+      }
+      refineScheduledTaskAgentConfig(value, context);
+    }),
 );
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
@@ -14281,6 +14400,14 @@ export const UpdateScheduledTaskRequest =
             code: "custom",
             path: ["agentConfigPatch"],
             message: "agentConfigPatch cannot be combined with agentConfig replacement",
+          });
+        }
+        for (const field of SCHEDULED_TASK_CREATE_ONLY_FIELDS) {
+          if (value.agentConfig?.[field] === undefined) continue;
+          context.addIssue({
+            code: "custom",
+            path: ["agentConfig", field],
+            message: `${field} is set when a task is created; create the task again to change it`,
           });
         }
         if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
@@ -17913,6 +18040,8 @@ export type InboxItem = z.infer<typeof InboxItem>;
 export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(InboxItem),
+    /** Organization billing notices are not chat items or workspace events. */
+    billingNotifications: z.array(BillingCreditNotification).optional(),
     /** Open items that need the person (questions, approvals, paused goals). */
     needsYouCount: primitives.nonnegativeInteger,
     /** Open, unread, unsnoozed items of any kind. */

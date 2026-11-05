@@ -8,6 +8,7 @@ export {
   formatDurationFacet,
   formatElapsed,
   resolveTurnSummaryFacets,
+  turnSummaryLiveMarkState,
 } from "./timeline/turn-summary-model";
 export type {
   BuiltInTurnSummaryFacetId,
@@ -15,6 +16,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryStatus,
 } from "./timeline/turn-summary-model";
@@ -144,7 +146,9 @@ export {
   SESSION_STATUS_PRESENTATION,
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
+  sessionStatusItemDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus, SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";

@@ -45,7 +45,8 @@ export type ConnectionAccessKind =
   | "openai"
   | "azure_openai"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "openai_compatible";
 
 export interface ConnectionAccessTarget {
   client: OpenGeniBrowserClient;

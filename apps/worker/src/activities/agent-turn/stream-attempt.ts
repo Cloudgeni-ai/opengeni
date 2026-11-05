@@ -14,6 +14,7 @@ import {
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
   getSandboxRecoveryDiscontinuity,
+  readSandboxReducedSave,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -71,6 +72,9 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  queueSandboxSetupNotice,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
   withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
@@ -87,7 +91,7 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -302,11 +306,12 @@ export type TurnStreamAttemptDeps = {
     initialExpiresAt?: Date,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   withProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   withSessionTitleProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   publishCompactionLiveEvents: (events: SessionEvent[]) => Promise<void>;
@@ -659,6 +664,11 @@ export async function runTurnStreamAttempt(
         input.sessionId,
         "explicit_notice",
       );
+      // Repeated each turn while the latest save is a reduced one; a turn
+      // never fails because this optional notice could not be read.
+      const reducedSave = await (async () =>
+        await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
+      const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -667,6 +677,7 @@ export async function runTurnStreamAttempt(
         },
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
+        ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -1216,10 +1227,15 @@ export async function runTurnStreamAttempt(
                         const pinnedCredentialSession = sandboxState.setupBoxSession
                           ? (sandboxState.setupBoxSession as RunCredentialCommandSession)
                           : credentialSession;
-                        await attachRunCredentialRenewal(
+                        const softFailure = await attachRunCredentialRenewal(
                           pinnedCredentialSession,
                           initialRunCredentialMaterial,
                         );
+                        // No turn input is left to add to; the notice joins
+                        // the next plain-text tool result.
+                        if (softFailure) {
+                          queueSandboxSetupNotice(agent, softSetupFailureNotice([softFailure]));
+                        }
                       },
                     }
                   : {}),

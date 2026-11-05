@@ -163,6 +163,9 @@ struct DiarizeOutput<'a> {
     result: &'a diarize::Diarization,
     #[serde(rename = "audioMs")]
     audio_ms: u64,
+    windows: usize,
+    #[serde(rename = "reusedWindows")]
+    reused_windows: usize,
     #[serde(rename = "elapsedMs")]
     elapsed_ms: u64,
 }
@@ -193,13 +196,96 @@ fn run_diarize(args: &Args) -> Result<String> {
         min_turn_seconds: args.get("min-turn")?.unwrap_or(defaults.min_turn_seconds),
         min_gap_seconds: args.get("min-gap")?.unwrap_or(defaults.min_gap_seconds),
     };
-    let result = diarize::diarize(&mut segmentation, &mut embedders, &audio, &options)?;
+    // A growing recording is scanned as it arrives (`--scan-only`), keeping
+    // its windows in `--cache-out`; a later run takes them from `--cache-in`
+    // and only scans what is new.
+    let fingerprint = cache_fingerprint(args, &segmentation, &options)?;
+    let cache = match args.values.get("cache-in") {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => diarize::WindowCache::read(&bytes, fingerprint),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("reading {path}: {error}")),
+        },
+        None => None,
+    };
+    let scanned = diarize::scan(
+        &mut segmentation,
+        &mut embedders,
+        &audio,
+        &options,
+        cache.as_ref(),
+    )?;
+    let (windows, reused) = (scanned.windows(), scanned.reused);
+    if let Some(path) = args.values.get("cache-out") {
+        let kept = diarize::WindowCache::of(&scanned, segmentation.window, audio.len());
+        std::fs::write(path, kept.write(fingerprint, audio.len() as u64))
+            .map_err(|error| format!("writing {path}: {error}"))?;
+    }
+    let audio_ms = (audio.len() * 1000 / SAMPLE_RATE) as u64;
+    if args.values.get("scan-only").map(String::as_str) == Some("true") {
+        return serde_json::to_string(&ScanOutput {
+            audio_ms,
+            windows,
+            reused_windows: reused,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+        .map_err(|e| e.to_string());
+    }
+    let result = diarize::diarize_scanned(&segmentation, &audio, &options, scanned)?;
     let output = DiarizeOutput {
         result: &result,
-        audio_ms: (audio.len() * 1000 / SAMPLE_RATE) as u64,
+        audio_ms,
+        windows,
+        reused_windows: reused,
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
     serde_json::to_string(&output).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct ScanOutput {
+    #[serde(rename = "audioMs")]
+    audio_ms: u64,
+    windows: usize,
+    #[serde(rename = "reusedWindows")]
+    reused_windows: usize,
+    #[serde(rename = "elapsedMs")]
+    elapsed_ms: u64,
+}
+
+/// What a window's scan depends on: both models and the settings that shape
+/// windows and embeddings. A cache made under anything else is not reused.
+fn cache_fingerprint(args: &Args, segmentation: &Segmentation, options: &Options) -> Result<u64> {
+    const VERSION: u64 = 1;
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut add = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    add(&VERSION.to_le_bytes());
+    for name in ["segmentation", "embedding"] {
+        let path = args.model(name)?;
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        add(&(bytes.len() as u64).to_le_bytes());
+        // The ends of a model file tell versions apart without hashing it whole.
+        let edge = bytes.len().min(1 << 20);
+        add(&bytes[..edge]);
+        add(&bytes[bytes.len() - edge..]);
+    }
+    for value in [
+        segmentation.window,
+        segmentation.frame_shift,
+        segmentation.speakers,
+        models::MIN_EMBEDDING_SAMPLES,
+    ] {
+        add(&(value as u64).to_le_bytes());
+    }
+    add(&options.step_seconds.to_le_bytes());
+    add(&options.min_clean_seconds.to_le_bytes());
+    Ok(hash)
 }
 
 #[derive(Deserialize)]

@@ -91,7 +91,7 @@ function runOnBox(options: { clock: number; resolv?: string; host?: string | nul
   };
 }
 
-describe("a cloud computer's clock and resolver are repaired at turn setup", () => {
+describe("a workspace machine's clock and resolver are repaired at turn setup", () => {
   test("a clock set back to 2001 is set to the worker's time", () => {
     const result = runOnBox({ clock: BOX_2001, resolv: "nameserver 169.254.0.22\n" });
     expect(result.clockSet).toBe(`@${WORKER_EPOCH}`);
@@ -166,7 +166,7 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
       }),
     ).toBe(
       [
-        "[Opengeni checked the cloud computer this chat runs on before this turn]",
+        "[Opengeni checked this chat's workspace machine before this turn]",
         "- Its clock said 2001-01-01 00:00 UTC, so Opengeni set it to 2026-11-04 13:46 UTC.",
         "- It could not look up staging.app.opengeni.ai, so Opengeni restored /etc/resolv.conf to the platform name servers (169.254.0.22); the previous file is /etc/resolv.conf.opengeni-replaced.",
       ].join("\n"),
@@ -182,7 +182,7 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
       }),
     ).toBe(
       [
-        "[Opengeni checked the cloud computer this chat runs on before this turn]",
+        "[Opengeni checked this chat's workspace machine before this turn]",
         "- Its clock says 2001-01-01 00:00 UTC, but the time is 2026-11-04 13:46 UTC, and Opengeni could not set it; TLS and git may fail until it is fixed.",
         "- It cannot look up staging.app.opengeni.ai, and Opengeni left /etc/resolv.conf unchanged because it already lists only the platform name server, so the network itself is failing.",
       ].join("\n"),
@@ -254,7 +254,7 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
   });
 });
 
-describe("owned setup repairs only the chat's own cloud computer", () => {
+describe("owned setup repairs only the chat's own workspace machine", () => {
   type Exec = (args: { cmd: string }) => Promise<{ exitCode: number; output: string }>;
 
   /** Production sets activeSandboxBackend only for a Connected Machine; a

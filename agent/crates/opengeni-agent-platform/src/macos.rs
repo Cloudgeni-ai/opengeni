@@ -37,7 +37,8 @@ pub(crate) fn os() -> Os {
 /// falling back to `/bin/sh`). Identical contract to the Linux path — macOS ships
 /// a POSIX shell, so the cross-platform exec path needs no special casing.
 pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+    let shell = crate::system_shell::environment_shell();
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c").arg(parts.join(" "));
     cmd

@@ -8,6 +8,7 @@ import {
   ffmpegReportedMilliseconds,
   parseSilences,
   prepareRecordingTrackAudio,
+  readChunksInOrder,
   recordingAudioContainer,
   RecordingAudioError,
   renderRecordingAudioPiece,
@@ -32,6 +33,45 @@ function split(bytes: Uint8Array, parts: number): Uint8Array[] {
 }
 
 describe("recording audio", () => {
+  test("reads chunks ahead in parallel and yields them in order", async () => {
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const chunks = Array.from({ length: 10 }, (_, index) => index);
+    const read = async (chunk: number) => {
+      inFlight += 1;
+      mostInFlight = Math.max(mostInFlight, inFlight);
+      // Later chunks finish first, so ordering cannot come from completion order.
+      await new Promise((resolve) => setTimeout(resolve, (10 - chunk) * 2));
+      inFlight -= 1;
+      return new Uint8Array([chunk]);
+    };
+    const seen: number[] = [];
+    for await (const { chunk, bytes } of readChunksInOrder(chunks, read, 4)) {
+      expect(bytes?.[0]).toBe(chunk);
+      seen.push(chunk);
+    }
+    expect(seen).toEqual(chunks);
+    expect(mostInFlight).toBe(4);
+  });
+
+  test("an early stop leaves no unhandled read failure", async () => {
+    const read = async (chunk: number) => {
+      if (chunk > 0) throw new Error(`read ${chunk} failed`);
+      return new Uint8Array([chunk]);
+    };
+    for await (const { chunk } of readChunksInOrder([0, 1, 2, 3], read, 4)) {
+      expect(chunk).toBe(0);
+      break;
+    }
+    let caught: unknown;
+    try {
+      for await (const _ of readChunksInOrder([0, 1], read, 2)) void _;
+    } catch (error) {
+      caught = error;
+    }
+    expect(String(caught)).toContain("read 1 failed");
+  });
+
   test("recognises container headers and types", () => {
     expect(startsContainer(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0]))).toBe(true);
     expect(startsContainer(new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70]))).toBe(true);

@@ -25,6 +25,16 @@ In the Opengeni apps, Free provides eligible accounts $10 monthly trial credit. 
 
 - One turn can include several model calls and tool calls. Long goals and large tool schemas cost more.
 - `getBillingUsage` returns usage for accounting (requires billing permission).
+
+Organization owners and admins receive alerts when general available credits reach
+$10 or run out, and when hourly spending is unusually high. Scoped promotional and
+Free-plan funding is separate and may remain usable. Read the threshold with
+`getBillingAlertSettings({ accountId })` and change it with
+`updateBillingAlertSettings({ accountId, lowBalanceThresholdMicros })` (USD
+micro-units; requires billing-management permission). `listBillingCreditNotifications`
+returns the current recipient's retained notices. The [backend contract](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credit-notifications.md)
+describes the spend rule, receipt semantics and top-up integration.
+
 - For per-user budgets and usage meters, see [Usage allowances](/guides/usage-allowances).
 
 ## Keep SDK and server compatible

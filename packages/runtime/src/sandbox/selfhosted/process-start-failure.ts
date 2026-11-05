@@ -1,7 +1,8 @@
 // A machine agent that cannot start a program reports
 // "spawn or apply execution containment for program "<program>": <OS error>",
-// with a null-device note before the OS error when it had to open a missing
-// /dev/null by path. Agents up to 0.1.151 wrote the first command element there,
+// with a note before the OS error when it had to open a missing /dev/null by
+// path, or (0.1.153 and later) when no shell is left to start. Agents up to
+// 0.1.151 wrote the first command element there,
 // unquoted, which for a shell command is the whole script, so that text could
 // reach events, tool output and the person's failure banner. Everything here is
 // pure string work on that one stable marker, so older agents get the same
@@ -17,16 +18,24 @@ const TAIL_LIMIT = 300;
 /** The longest OS error kept from an older agent's message. */
 const CAUSE_LIMIT = 200;
 
-/** The null-device note newer agents add before the OS error. */
-const NULL_DEVICE_NOTE_TEXT = "the null device /dev/null is missing";
-const NULL_DEVICE_NOTE = new RegExp(`\\((${NULL_DEVICE_NOTE_TEXT})\\)`);
+/** The note an agent adds when neither `/bin/sh` nor a dash or bash
+ * fallback can be started. A restart does not bring a shell back. */
+export const MISSING_SHELL_NOTE = "the shell /bin/sh is missing and no dash or bash was found";
+
+/** The notes newer agents add before the OS error when the machine itself
+ * cannot start programs: a missing `/dev/null`, or no shell at all. */
+const MACHINE_NOTE_TEXTS = ["the null device /dev/null is missing", MISSING_SHELL_NOTE] as const;
+const MACHINE_NOTE_ALTERNATIVES = MACHINE_NOTE_TEXTS.map((note) =>
+  note.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+).join("|");
+const MACHINE_NOTE = new RegExp(`\\((${MACHINE_NOTE_ALTERNATIVES})\\)`);
 
 /** A newer agent's quoted program: `program "<name>"`, then the end, `: <OS
- * error>`, or exactly one null-device note. The agent never puts `"` or a
+ * error>`, or exactly one machine note. The agent never puts `"` or a
  * line break in the name and bounds it; any length is still read as a name
  * and cut when kept. */
 const QUOTED_PROGRAM = new RegExp(
-  `^program "([^"\\n]*)"(?=$|: | \\((?:${NULL_DEVICE_NOTE_TEXT})\\)(?:$|: ))`,
+  `^program "([^"\\n]*)"(?=$|: | \\((?:${MACHINE_NOTE_ALTERNATIVES})\\)(?:$|: ))`,
 );
 
 /** What an agent puts before the marker ("not found: ") and wrappers add
@@ -99,8 +108,8 @@ function restAfterMarker(message: string): string | null {
 /**
  * Whether a failed process start says the machine itself cannot start
  * programs, rather than that this one program is missing, not permitted or
- * short of resources: a newer agent named a missing `/dev/null`,
- * or an older agent failed to start its shell for a shell command (it
+ * short of resources: a newer agent named a missing `/dev/null` or a missing
+ * shell, or an older agent failed to start its shell for a shell command (it
  * reported the script, as in the 4 Nov incident). Only these warrant
  * restarting the machine; brief memory or process pressure never does,
  * because several sessions can share one machine.
@@ -111,7 +120,7 @@ export function isMachineProcessStartFailureMessage(message: string): boolean {
   const parsed = parse(rest);
   switch (parsed.kind) {
     case "quoted":
-      return NULL_DEVICE_NOTE.test(parsed.tail);
+      return MACHINE_NOTE.test(parsed.tail);
     case "legacy-program":
       return false;
     case "legacy-text": {
@@ -151,7 +160,7 @@ export function sanitizeProcessStartFailureMessage(message: string): string {
     // that has it is reduced to the final OS error, as for older agents.
     let kept = tail;
     if (SHELL_SYNTAX.test(tail)) {
-      const note = NULL_DEVICE_NOTE.exec(tail)?.[0];
+      const note = MACHINE_NOTE.exec(tail)?.[0];
       const cause = legacyCause(tail);
       kept = `${note ? ` ${note}` : ""}${cause ? `: ${cause}` : ""}`;
     }
@@ -162,10 +171,11 @@ export function sanitizeProcessStartFailureMessage(message: string): string {
   return `${before}${PROCESS_START_FAILURE_MARKER}${name}${cause ? `: ${cause}` : ""}`;
 }
 
-/** The null-device note in a process-start failure, when the agent named it. */
-export function processStartFailureNullDeviceNote(message: string): string | null {
+/** The note in a process-start failure that names what the machine is
+ * missing (`/dev/null`, or every shell), when the agent named it. */
+export function processStartFailureMachineNote(message: string): string | null {
   const rest = restAfterMarker(message);
   if (rest === null) return null;
   const parsed = parse(rest);
-  return parsed.kind === "quoted" ? (NULL_DEVICE_NOTE.exec(parsed.tail)?.[1] ?? null) : null;
+  return parsed.kind === "quoted" ? (MACHINE_NOTE.exec(parsed.tail)?.[1] ?? null) : null;
 }

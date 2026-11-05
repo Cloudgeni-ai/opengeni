@@ -191,6 +191,7 @@ import {
 } from "../timeline/agent-identity";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
   noticeDisplayText,
   noticeIsResolvedApproval,
@@ -3599,6 +3600,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               ? {
                   kind: "waiting",
                   label: workStatus.label,
+                  waitingOn: workStatus.waitingOn,
                   since: workStatus.since,
                   // One quiet line under the row saying what the wait needs,
                   // kept visible when the work is expanded; never a second
@@ -3648,6 +3650,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
               facets={turnSummary?.facets}
+              renderLiveMark={turnSummary?.renderLiveMark}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
                 group.work.liveNoteIds?.length && reportLiveFold
@@ -4964,13 +4967,14 @@ function SessionStatusRow({
   item: {
     status: SessionStatus;
     blocked?: true;
+    archived?: true;
     occurredAt: string;
     resolvedAt?: string;
   };
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const status = item.blocked ? "blocked" : item.status;
+  const status = sessionStatusItemDisplayStatus(item);
   const meta = SESSION_STATUS_META(t)[status];
   return (
     <div

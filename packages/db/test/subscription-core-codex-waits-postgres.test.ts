@@ -508,9 +508,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     });
     expect(armed.waiter.nextCheckAt.getTime()).toBeGreaterThanOrEqual(armedAt + 60_000);
     expect(armed.waiter.nextCheckAt.getTime()).toBeLessThan(resetAt);
+    // An hour-long wait is long, so this top-level chat's person is told at once.
     expect(armed.events.map((event) => event.type)).toEqual([
       "codex.capacity.waiting",
       "session.status.changed",
+      "session.notification.posted",
     ]);
     expect(armed.events[0]!.payload).toMatchObject({
       code: "subscription_capacity_unavailable",
@@ -582,6 +584,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(resumed.events.map((event) => event.type)).toEqual([
       "codex.capacity.resumed",
       "session.status.changed",
+      "session.notification.withdrawn",
     ]);
     expect(await waiterRows(turn)).toEqual([]);
     expect(await rowState(turn)).toMatchObject({
@@ -1005,7 +1008,10 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     });
     expect(removed).toMatchObject({
       action: "superseded",
-      events: [{ type: "codex.capacity.superseded", payload: { reason: "active_turn_changed" } }],
+      events: [
+        { type: "codex.capacity.superseded", payload: { reason: "active_turn_changed" } },
+        { type: "session.notification.withdrawn" },
+      ],
     });
     expect(await waiterRows(orphaned)).toEqual([]);
     expect(
@@ -1091,8 +1097,9 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
     expect(claimed.turn.id).toBe(sent.turnId);
 
-    // A paused chat keeps an ordinary Send inert, as for any other wait: the
-    // parked turn and its waiter stay, and the message waits in the queue.
+    // A paused chat keeps an ordinary Send inert. Pause already released the
+    // parked turn from its wait (no waiter; it stays the active turn, ready for
+    // Resume), and the message waits in the queue behind it.
     const paused = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     if ((await arm(paused, resetAt)).action !== "waiting") throw new Error("arm failed");
     await asOwner((tx) =>
@@ -1108,10 +1115,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     const queued = await send(paused.identity.sessionId, "later");
     expect(queued.turn.metadata).not.toMatchObject({ delivery: "steer" });
     expect(queued.turn.status).toBe("queued");
-    expect(await waiterRows(paused)).toHaveLength(1);
+    expect(await waiterRows(paused)).toEqual([]);
     expect(await rowState(paused)).toMatchObject({
+      session_status: "idle",
       active_turn_id: paused.identity.turnId,
-      turn_status: "waiting_capacity",
+      turn_status: "recovering",
     });
   });
 

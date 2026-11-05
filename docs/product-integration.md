@@ -596,6 +596,13 @@ deployment's non-connector default catalog, and omitting `tools` inherits
 workspace MCP defaults; explicit empty arrays suppress those respective
 selections.
 
+A scheduled task the app creates takes the same two fields in its
+`agentConfig` for the chats it starts; without them its runs get the
+deployment defaults, not the selection of the app's other chats. They are set
+once at creation, so give an older task the app's selection by creating it
+again. Create a user's schedules as that user (`asUser`): an ownerless task has
+nobody to notify, and its runs are not offered `notify_user` or `call_user`.
+
 Creating a workspace does not create a dedicated cluster or permanently
 running sandbox. It adds control-plane state and may require per-workspace
 settings, Connections, and Integration installations. Provisioning hundreds of

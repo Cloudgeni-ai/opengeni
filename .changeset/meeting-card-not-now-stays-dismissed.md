@@ -1,5 +1,0 @@
----
-"@opengeni/desktop": patch
----
-
-Not now on the desktop app's meeting card now ends the question for the whole call. An app that drops the microphone for a while, for example when muted or switching devices, is no longer asked about again. Inside a calendar meeting the question doesn't come back until the meeting ends. Outside one, it comes back only after the app has been off the microphone for five minutes. Not now on a call that started shortly before a calendar meeting also covers that meeting, so its "Join and start recording" reminder no longer appears for a meeting the person is already in. The card no longer holds itself up after Not now. Chromium replays the pointer onto a window shown again, which made the next card never time out. The pointer's position now comes from the main process, so a card holds only once the pointer moves onto it. Escape closes the question like Not now does, and a card window closed from outside counts as Not now. `MeetingPromptCard` takes an optional `pointerMs`.
