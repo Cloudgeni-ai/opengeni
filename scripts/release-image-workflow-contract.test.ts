@@ -1682,7 +1682,12 @@ ${parser}`,
       expect(imagesJob).toContain(identity);
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
-    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    // Every role is published for both architectures from a main push. Batch
+    // and PR builds may build an emulation-heavy role for amd64 only, but only
+    // behind the exact main-push condition that restores both platforms.
+    const bothPlatforms =
+      /platforms: (?:linux\/amd64,linux\/arm64|\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && 'linux\/amd64,linux\/arm64' \|\| 'linux\/amd64' \}\})\n/g;
+    expect(imagesJob.match(bothPlatforms)).toHaveLength(7);
 
     const imageSteps = [
       "api-image",
@@ -1710,12 +1715,12 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "98e43fe1aeaccf440b120045b977220880071f1ba8abac89158aea96b76ed980",
+        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "0a13f844b2c87a5551b41c06b58e246363c2ee21a9f835325b2a987af2c280ea",
+        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
       },
       {
         jobName: "web-image",
@@ -1725,22 +1730,22 @@ ${parser}`,
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "093fba916094be8fa14f95c792637edecae20f8a5ecd459b3a0e4f5395dceb90",
+        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "b2565ef0e8bc9461a8094f77ac3bae0b086cb8aed0c799a25adee67cbb0a66b2",
+        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "86b61f8abbb6a04b6949a45292f6d96ccd14b5b506d292f5b7951e034d09d42e",
+        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "694f2a67944c94e20f791dfad9a25da65e184bd790da9f87a39757657e4a2c80",
+        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
       },
     ]);
 
