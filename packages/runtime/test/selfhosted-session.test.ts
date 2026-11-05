@@ -17,6 +17,7 @@ import {
   timeoutControlResponse,
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import { prepareSecretExec, runWithSecretCarry } from "../src/sandbox/secret-delivery";
 import { createCredentialEnvironment } from "../src/sandbox/credential-profile-delivery";
 import { isSecretReferenceError, type SecretReferenceError } from "@opengeni/contracts";
@@ -578,8 +579,11 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(output).toContain("\n1\n2\n");
     expect(output).toContain("\n3000\n");
     expect(output).toContain("tokens truncated");
+    // A backgrounded result never reads as a finished command, bounded or not.
+    expect(parseExecResponseBanner(bounded).kind).toBe("invalid");
 
     const full = await session.execCommand({ cmd: "seq 1 3000; sleep 600" });
+    expect(parseExecResponseBanner(full).kind).toBe("invalid");
     expect(full).toBe(
       [
         "Command running in background with command ID cmd-1.",

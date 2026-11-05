@@ -11,7 +11,7 @@ their locks are updated.
 
 ```text
 - Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.
-+ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find`, or `Select-String` and `Get-ChildItem -Recurse` in PowerShell. Until you know `rg` exists, make the first search fall back in the same command, for example `rg -n PATTERN || grep -rn PATTERN .`.
++ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find` (`Select-String` in PowerShell). Until you know `rg` exists, choose in the same command, for example `if command -v rg >/dev/null; then rg -n PATTERN; else grep -rn PATTERN .; fi`.
 ```
 
 A configured agent with nothing to wait for or run code in no longer carries
