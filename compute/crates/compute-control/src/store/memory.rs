@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, ready};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use compute_fleet::{HostEpoch, HostId, HostState, Stamp};
@@ -100,6 +100,26 @@ impl Inner {
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
     leader: Arc<AtomicBool>,
+    calls: Arc<Calls>,
+}
+
+/// How often a [`MemoryStore`] was asked for some things, for tests that
+/// count what a caller costs the store.
+#[derive(Debug, Default)]
+struct Calls {
+    sandbox_reads: AtomicU64,
+    sandbox_writes: AtomicU64,
+    /// Reads of each pointer, by name.
+    pointer_reads: Mutex<HashMap<String, u64>>,
+}
+
+/// What [`MemoryStore::calls`] counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Called {
+    /// Reads of one sandbox's row.
+    pub sandbox_reads: u64,
+    /// Inserts and replacements of a sandbox's row.
+    pub sandbox_writes: u64,
 }
 
 /// The leadership of a [`MemoryStore`], given up when dropped.
@@ -117,6 +137,31 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How often it was asked for what [`Called`] counts, so far.
+    #[must_use]
+    pub fn calls(&self) -> Called {
+        Called {
+            sandbox_reads: self.calls.sandbox_reads.load(Ordering::Relaxed),
+            sandbox_writes: self.calls.sandbox_writes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// How often pointer `name` was read, so far.
+    #[must_use]
+    pub fn pointer_reads(&self, name: &str) -> u64 {
+        self.calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn count(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -601,10 +646,12 @@ impl Store for MemoryStore {
     }
 
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.insert_now(row)))
     }
 
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send {
+        Self::count(&self.calls.sandbox_reads);
         ready(Ok(self.sandbox_now(id)))
     }
 
@@ -613,6 +660,7 @@ impl Store for MemoryStore {
         row: &SandboxRow,
         request_id: &str,
     ) -> impl Future<Output = Result<Option<Write>>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.insert_requested_now(row, request_id)))
     }
 
@@ -633,6 +681,7 @@ impl Store for MemoryStore {
     }
 
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.replace_now(row)))
     }
 
@@ -827,6 +876,13 @@ impl Store for MemoryStore {
     }
 
     fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send {
+        *self
+            .calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(name.to_owned())
+            .or_default() += 1;
         ready(Ok(self.lock().pointer(name)))
     }
 

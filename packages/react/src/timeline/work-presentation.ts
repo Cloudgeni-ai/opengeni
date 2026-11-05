@@ -167,7 +167,7 @@ export function readableWorkStatus(
     };
   }
   if (group.work.waiting) {
-    const { untimed, since, waitingOn: _waitingOn, ...waiting } = group.work.waiting;
+    const { untimed, since, ...waiting } = group.work.waiting;
     return { kind: "waiting", ...waiting, ...(untimed ? {} : { since }) };
   }
   const started = Date.parse(group.work.startedAt);

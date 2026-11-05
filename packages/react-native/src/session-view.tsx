@@ -28,7 +28,11 @@ import type {
   TimelineItem,
   ToolCallItem,
 } from "@opengeni/react/session";
-import { isAgentWorkHumanInput, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  isAgentWorkHumanInput,
+  sessionStatusItemDisplayStatus,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
 import { useOpenNativeLink } from "./links";
@@ -873,7 +877,7 @@ function timelineTitle(
     case "startup-phase":
       return labels.activity;
     case "session-status":
-      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
+      return nativeSessionStatusLabel(sessionStatusItemDisplayStatus(item), labels);
     case "human-input":
       return labels.humanInputAsked;
     case "goal":
@@ -1042,11 +1046,9 @@ function SessionStatusRow({
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
-  const label = nativeSessionStatusLabel(
-    item.blocked ? "blocked" : item.status,
-    labels,
-  ).toLocaleLowerCase();
-  const dotColor = sessionStatusColor(item.blocked ? "blocked" : item.status, theme);
+  const status = sessionStatusItemDisplayStatus(item);
+  const label = nativeSessionStatusLabel(status, labels).toLocaleLowerCase();
+  const dotColor = sessionStatusColor(status, theme);
   const relativeTime = formatNativeRelativeTime(item.occurredAt, labels);
 
   return (
@@ -1132,7 +1134,7 @@ function timelineSummary(
     case "startup-phase":
       return nativeTimelineStatusLabel(item.status, labels);
     case "session-status":
-      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
+      return nativeSessionStatusLabel(sessionStatusItemDisplayStatus(item), labels);
     case "human-input":
       return nativeHumanInputSummary(item, labels);
     case "goal":

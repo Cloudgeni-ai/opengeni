@@ -770,6 +770,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionNotificationPostedPayload,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -1263,6 +1264,13 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import {
+  CAPACITY_WAIT_NOTICE_KEY,
+  capacityWaitAttention,
+  capacityWaitNoticeWithdrawal,
+  capacityWaitNotificationPayload,
+  withoutCapacityWaitNotice,
+} from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
 import {
   resolveSessionCodeSearchEnabled,
@@ -1337,6 +1345,8 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
     isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
   });
 export * from "./session-model-settings";
+export * from "./capacity-wait-attention";
+export * from "./capacity-wait-release";
 export * from "./session-queue-commands";
 export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
@@ -27166,7 +27176,12 @@ export async function armSubscriptionCoreCapacityWait(
         provider === "codex"
           ? "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait"
           : "session_lifecycle_outbox.arm_subscription_core_capacity_wait",
-      eventTypes: [vocabulary.waitingEventType, "turn.failed", "session.status.changed"],
+      eventTypes: [
+        vocabulary.waitingEventType,
+        "turn.failed",
+        "session.status.changed",
+        "session.notification.posted",
+      ],
       maxAttempts: 3,
     },
     async (scopedDb) =>
@@ -27279,6 +27294,29 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
+        // A long wait is announced once, as it starts: a worker's parent gets
+        // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const attention = stopped
+          ? null
+          : capacityWaitAttention({
+              waitReason: input.waitReason,
+              earliestResetAt: input.earliestResetAt,
+              healthRetryAt: input.healthRetryAt ?? null,
+              now,
+            });
+        const personNotice =
+          attention && !session.parentSessionId
+            ? SessionNotificationPostedPayload.parse(
+                capacityWaitNotificationPayload({
+                  turnId: input.turnId,
+                  provider,
+                  resetsAt: attention.resetsAt,
+                }),
+              )
+            : null;
+        const waitingMetadata = personNotice
+          ? { ...recoveryMetadata, [CAPACITY_WAIT_NOTICE_KEY]: { key: personNotice.key } }
+          : recoveryMetadata;
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27444,6 +27482,23 @@ export async function armSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(personNotice
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: ++sequence,
+                        type: "session.notification.posted",
+                        payload: personNotice,
+                        turnId: input.turnId,
+                        turnGeneration: turn.executionGeneration,
+                        turnAttemptId: input.attemptId,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27455,7 +27510,7 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: recoveryMetadata,
+            metadata: waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27517,12 +27572,13 @@ export async function armSubscriptionCoreCapacityWait(
                 eq(schema.sessionGoals.status, "active"),
               ),
             );
-        } else {
+        } else if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter!.waiterId,
             provider,
             nextCheckAt,
+            resetsAt: attention.resetsAt,
           });
         }
         if (input.leaseFence) {
@@ -27848,6 +27904,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           } as const;
         }
 
+        const noticeWithdrawal = capacityWaitNoticeWithdrawal(blockedTurn.metadata);
         const events = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -27876,6 +27933,21 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(noticeWithdrawal
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: session.lastSequence + 3,
+                        ...noticeWithdrawal,
+                        turnId: blockedTurn.id,
+                        turnGeneration: blockedTurn.executionGeneration,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27898,7 +27970,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
             status: "recovering",
             activeAttemptId: null,
             metadata: {
-              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ...withoutCapacityWaitNotice(
+                metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ),
               [CODEX_CAPACITY_RECOVERY_KEY]: {
                 ...recovery,
                 resumeGeneration: blockedTurn.executionGeneration + 1,
@@ -27928,7 +28002,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           .set({
             status: "recovering",
             activeTurnId: blockedTurn.id,
-            lastSequence: session.lastSequence + 2,
+            lastSequence: session.lastSequence + events.length,
             updatedAt: now,
           })
           .where(
@@ -28031,6 +28105,19 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       turnId: input.blockedTurn.id,
       turnGeneration: input.blockedTurn.executionGeneration,
       turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const noticeWithdrawal = capacityWaitNoticeWithdrawal(input.blockedTurn.metadata);
+  if (noticeWithdrawal) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + eventValues.length + 1,
+      ...noticeWithdrawal,
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
       occurredAt: input.now,
     });
   }
@@ -89484,6 +89571,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     waiterId: string;
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
+    resetsAt: Date | null;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -89493,6 +89581,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     childTurnId: input.turnId,
     provider: input.provider,
     nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+    resetsAt: input.resetsAt?.toISOString() ?? null,
   };
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childWaitingCapacityDedupeKey({

@@ -113,7 +113,64 @@ describe("a paused chat in the sidebar", () => {
     }
   });
 
-  test("a parent of paused workers shows them paused, and working ones first", () => {
+  test("an idle parent that is not paused never shows its paused workers as its own pause", () => {
+    // Its own work is done and nothing paused it; only the workers it started are paused.
+    const parent = session({
+      id: "owner",
+      pinned: true,
+      treeStats: tree({
+        directChildren: 39,
+        totalDescendants: 39,
+        pausedDescendants: 39,
+        pausedWorkDescendants: 39,
+      }),
+    });
+    const summary = summarizeRailRow(row(parent));
+    expect(summary.kind).toBe("neutral");
+    const markup = renderToStaticMarkup(<RailTrailingMetadata summary={summary} />);
+    expect(markup).not.toContain("data-og-rail-paused");
+
+    const replied = session({ ...parent, unread: true });
+    expect(summarizeRailRow(row(replied))).toMatchObject({ kind: "unread", label: "1 unread" });
+
+    // Its workers' other states still surface on it, as before.
+    const busy = session({
+      ...parent,
+      treeStats: tree({ ...parent.treeStats, runningDescendants: 1, totalDescendants: 40 }),
+    });
+    expect(summarizeRailRow(row(busy))).toMatchObject({ kind: "active", label: "1 working" });
+    const blocked = session({
+      ...parent,
+      treeStats: tree({ ...parent.treeStats, attentionDescendants: 1, totalDescendants: 40 }),
+    });
+    expect(summarizeRailRow(row(blocked))).toMatchObject({
+      kind: "needs_attention",
+      label: "1 needs you",
+    });
+  });
+
+  test("a paused parent shows paused while its pause holds its workers' work", () => {
+    const stats = tree({
+      directChildren: 2,
+      totalDescendants: 2,
+      pausedDescendants: 2,
+      pausedWorkDescendants: 2,
+    });
+    const manager = session({
+      id: "manager",
+      effectiveControl: control("paused"),
+      treeStats: stats,
+    });
+    expect(summarizeRailRow(row(manager))).toMatchObject({ kind: "paused", label: "2 paused" });
+    // Once the workers have nothing left to resume, the parent's pause shows nothing either.
+    const settled = session({
+      ...manager,
+      treeStats: tree({ ...stats, pausedWorkDescendants: 0 }),
+    });
+    expect(summarizeRailRow(row(settled)).kind).toBe("neutral");
+  });
+
+  test("a section header still says what is paused inside it", () => {
     const parent = session({
       id: "manager",
       treeStats: tree({
@@ -124,21 +181,9 @@ describe("a paused chat in the sidebar", () => {
       }),
     });
     expect(summarizeRailNodes([row(parent)])).toMatchObject({ kind: "paused", label: "2 paused" });
-
-    const busy = session({
-      ...parent,
-      treeStats: tree({ ...parent.treeStats, runningDescendants: 1, totalDescendants: 4 }),
-    });
-    expect(summarizeRailNodes([row(busy)])).toMatchObject({ kind: "active", label: "1 working" });
   });
 
-  test("an unread reply outranks paused workers but not the chat's own paused turn", () => {
-    const stats = tree({ directChildren: 1, totalDescendants: 1, pausedWorkDescendants: 1 });
-    const manager = session({ id: "manager", unread: true, treeStats: stats });
-    expect(summarizeRailRow(row(manager))).toMatchObject({
-      kind: "unread",
-      label: "1 unread · 1 paused",
-    });
+  test("the chat's own paused turn outranks its unread reply", () => {
     const parked = session({
       id: "parked",
       unread: true,

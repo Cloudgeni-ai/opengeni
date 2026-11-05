@@ -11036,7 +11036,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_requires_action: "immediate",
   child_requires_action_resolved: "deferred",
   child_paused: "deferred",
-  child_waiting_capacity: "deferred",
+  // Produced only for a long wait, which the parent must hear about now.
+  child_waiting_capacity: "immediate",
   child_progress: "deferred",
   secret_use_approval_decided: "immediate",
   capability_setup_completed: "immediate",
@@ -11095,8 +11096,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * can act instead of a parent that cannot (new lineage `escalatedFromSessionId`),
  * its resolution follows it there, and it also wakes a parent whose goal is
  * completed.
+ *
+ * 3: `child_waiting_capacity` is produced only for a long wait (reset far
+ * away, unknown, or needing a person), carries `resetsAt`, and wakes the
+ * parent immediately instead of riding its next claim.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 2;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -11227,6 +11232,8 @@ export const ChildWaitingCapacityPayload = /* @__PURE__ */ defineSchema(() =>
       childTurnId: primitives.uuid,
       provider: z.enum(["codex", "xai", "claude"]),
       nextCheckAt: primitives.nullableString,
+      /** When capacity is expected back; null when nothing says. Absent from older rows. */
+      resetsAt: primitives.nullableString.optional(),
     })
     .passthrough(),
 );

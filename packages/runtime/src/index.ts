@@ -1,4 +1,9 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+// Nothing was sent: callers render the message, which names the choices.
+export {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
@@ -303,6 +308,17 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+  accountChoicesFromResult,
+  fillAccountParameters,
+  mcpAccountParametersFor,
+  withAccountParameterDefaults,
+  type AccountParameterFill,
+  type McpAccountChoice,
+  type McpAccountParameter,
+} from "./mcp-account-parameters";
 import {
   MCP_INPUT_PENDING_RESULT,
   awaitingMcpInput,
@@ -3398,6 +3414,10 @@ export function mcpToolErrorOutput(error: unknown): {
   structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  // Nothing was sent: the text names the account's values to choose from.
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   // Nothing ran; the output names each failure and, for a missing secret,
@@ -4402,6 +4422,9 @@ export function toolPreflightFailureOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4608,6 +4631,10 @@ function installMcpApprovalPolicy(
         connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
+        accountChoice: (
+          toolName: string,
+          args: unknown,
+        ) => Promise<McpAccountParameterChoiceError | undefined>;
       }
     >();
     for (const server of agent.mcpServers ?? []) {
@@ -4627,6 +4654,7 @@ function installMcpApprovalPolicy(
           inputSchema: descriptor.inputSchema,
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
+          accountChoice: (name, args) => server.accountParameterChoice(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -4719,6 +4747,13 @@ function installMcpApprovalPolicy(
             parsedInput: Parameters<typeof originalNeedsApproval>[1],
             callId: Parameters<typeof originalNeedsApproval>[2],
           ) => {
+            // A call the account's values must first be chosen for is never
+            // sent; containment returns the choice for this call id instead of
+            // asking anyone. Without an id the call itself returns it.
+            const choice = callId
+              ? await identity?.accountChoice(unprefixed, parsedInput)
+              : undefined;
+            if (choice) throw choice;
             if (!connectorActionPolicy) {
               return (
                 recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
@@ -6040,6 +6075,13 @@ class DeferredPreparedMcpServer implements MCPServer {
     return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
   }
 
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -6471,6 +6513,7 @@ export async function prepareAgentTools(
             undefined,
             firstParty,
             eagerToolNames,
+            firstParty || bridge ? [] : mcpAccountParametersFor(config.url),
           ),
           config,
           options,
@@ -8469,7 +8512,29 @@ type McpPublicFailureCode =
   | "mcp_close_failed"
   | "mcp_transport_failed"
   | "mcp_tools_list_failed"
-  | "mcp_tool_call_failed";
+  | "mcp_tool_call_failed"
+  | "mcp_account_parameter_lookup_failed";
+
+/** Bound for looking up a connected account's parameter values; past it the call goes on unfilled. */
+const MCP_ACCOUNT_PARAMETER_LOOKUP_MS = 10_000;
+/** After a lookup that found nothing, calls go on unfilled for this long before it is tried again. */
+const MCP_ACCOUNT_PARAMETER_RETRY_MS = 60_000;
+
+/** A shared promise, abandoned (not cancelled) when this caller's signal aborts. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
+}
 
 function safeMcpServerIdentity(serverId: string): string {
   return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
@@ -9670,6 +9735,13 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly displayTitles = new Map<string, string>();
   /** Unprefixed names of API integration operations; their cards read the request's fields. */
   private readonly apiOperations = new Set<string>();
+  /** Unprefixed tool name -> the account parameters its calls may have filled in. */
+  private readonly accountParameterTools = new Map<string, readonly McpAccountParameter[]>();
+  /** One shared lookup of the account's values per parameter for this attempt. */
+  private readonly accountChoiceLookups = new Map<
+    string,
+    { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number }
+  >();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9725,6 +9797,11 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    /**
+     * Parameters the connected account fixes (mcp-account-parameters.ts).
+     * Applied only by the wrapper around the physical server.
+     */
+    private readonly accountParameters: readonly McpAccountParameter[] = [],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9944,9 +10021,27 @@ export class PrefixedMcpServer implements MCPServer {
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      // Account parameters apply once, around the physical server, and only
+      // when the server lists the tool that looks the account's values up.
+      const listedNames = new Set(tools.map((tool) => tool.name));
+      const accountParameters =
+        this.inner instanceof PrefixedMcpServer
+          ? []
+          : this.accountParameters.filter((parameter) =>
+              listedNames.has(parameter.resolver.toolName),
+            );
+      this.accountParameterTools.clear();
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // A recoverable operation is never filled, so it keeps its own schema.
+          const defaults = configuredMcpOperationRecovery(this, tool.name)
+            ? { inputSchema: tool.inputSchema, filled: [] }
+            : withAccountParameterDefaults(tool.inputSchema, accountParameters);
+          if (defaults.filled.length > 0) {
+            this.accountParameterTools.set(tool.name, defaults.filled);
+            tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
+          }
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
           if (prior !== undefined && prior !== tool.name) {
@@ -10196,6 +10291,14 @@ export class PrefixedMcpServer implements MCPServer {
           : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
+      const accountFill = recordsPhysicalCall
+        ? await this.fillAccountParameters(unprefixed, args ?? {}, options?.signal)
+        : undefined;
+      // Nothing was sent: the model chooses one of the account's values.
+      if (accountFill?.kind === "choose") {
+        throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
+      }
+      const providerArgs = accountFill?.arguments ?? args ?? {};
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
@@ -10231,7 +10334,7 @@ export class PrefixedMcpServer implements MCPServer {
               call: async (callArgs) =>
                 AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
             })
-          : await physicalCall(args ?? {});
+          : await physicalCall(providerArgs);
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -10282,6 +10385,8 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      // Not a provider failure: the choice text is the result, never "unavailable".
+      if (isMcpAccountParameterChoiceError(error)) throw error;
       if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
@@ -10409,6 +10514,99 @@ export class PrefixedMcpServer implements MCPServer {
       return this.inputWaitYield?.beginWait(request);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The choice the model must make before this call can run, or undefined.
+   * Approval hooks ask first, so nobody approves a call that would not be
+   * sent. Never fatal; the lookup is shared with the call itself.
+   */
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    if (this.inner instanceof PrefixedMcpServer)
+      return await this.inner.accountParameterChoice(this.inner.unprefixedToolName(toolName), args);
+    const fill = await this.fillAccountParameters(
+      toolName,
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ).catch(() => undefined);
+    return fill?.kind === "choose"
+      ? new McpAccountParameterChoiceError(fill.parameter, fill.choices)
+      : undefined;
+  }
+
+  /**
+   * Fill this tool's unset account parameters from the connected account.
+   * Any lookup failure sends the call on as the model made it; only the
+   * caller's own abort ends it. A recoverable operation dispatches exactly one
+   * physical call, so it is left as it is.
+   */
+  private async fillAccountParameters(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AccountParameterFill | undefined> {
+    const parameters = this.accountParameterTools.get(toolName);
+    if (!parameters || hasActiveRecoverableMcpOperation()) return undefined;
+    signal?.throwIfAborted();
+    try {
+      return await fillAccountParameters(parameters, args, (parameter) =>
+        abortable(this.accountChoices(parameter), signal),
+      );
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return undefined;
+    }
+  }
+
+  /**
+   * The account's values for a parameter, looked up once per attempt and
+   * shared by concurrent calls. A lookup that found nothing is retried after
+   * a short pause, so a hanging provider delays at most one call per window.
+   */
+  private accountChoices(parameter: McpAccountParameter): Promise<readonly McpAccountChoice[]> {
+    const key = JSON.stringify([parameter.resolver.toolName, parameter.name]);
+    const existing = this.accountChoiceLookups.get(key);
+    if (existing && (existing.retryAfter === undefined || Date.now() < existing.retryAfter))
+      return existing.lookup;
+    const entry: { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number } = {
+      lookup: this.lookUpAccountChoices(parameter),
+    };
+    this.accountChoiceLookups.set(key, entry);
+    void entry.lookup.then((choices) => {
+      if (choices.length === 0) entry.retryAfter = Date.now() + MCP_ACCOUNT_PARAMETER_RETRY_MS;
+    });
+    return entry.lookup;
+  }
+
+  private async lookUpAccountChoices(
+    parameter: McpAccountParameter,
+  ): Promise<readonly McpAccountChoice[]> {
+    const signal = AbortSignal.timeout(MCP_ACCOUNT_PARAMETER_LOOKUP_MS);
+    const { toolName, arguments: resolverArgs } = parameter.resolver;
+    try {
+      const call = async () =>
+        this.inner.callToolResult
+          ? await this.inner.callToolResult(toolName, { ...resolverArgs }, null, { signal })
+          : mcpContentAsResult(
+              await this.inner.callTool(toolName, { ...resolverArgs }, null, { signal }),
+            );
+      const aborted = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      aborted.catch(() => undefined);
+      const result = await Promise.race([call(), aborted]);
+      return accountChoicesFromResult(parameter, unwrapSdkMcpResultProjection(result));
+    } catch (error) {
+      console.warn(
+        "[mcp] account parameter lookup failed; the call goes on as the model made it",
+        mcpErrorFields(error, "mcp_account_parameter_lookup_failed", this.registryId),
+      );
+      return [];
     }
   }
 
