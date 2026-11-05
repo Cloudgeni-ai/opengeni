@@ -4,6 +4,21 @@ export const SANDBOX_DRAIN_EXTENDED_ACTIVITY_TIMEOUT_MS = 65 * 60_000;
 export const SANDBOX_DRAIN_SETTLEMENT_MARGIN_MS = 60_000;
 export const SANDBOX_REAPER_ACTIVITY_HEARTBEAT_TIMEOUT_MS = 20_000;
 export const SANDBOX_REAPER_ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
+// Backoff between FULL drain snapshot attempts after a settled failure of the
+// same lease epoch: 30 s, doubling, capped at 10 min. Retries that only find an
+// earlier snapshot still in flight keep Temporal's short retry interval.
+export const SANDBOX_DRAIN_CAPTURE_RETRY_BASE_DELAY_MS = 30_000;
+export const SANDBOX_DRAIN_CAPTURE_RETRY_MAX_DELAY_MS = 10 * 60_000;
+
+/** Delay before the next full drain snapshot after `failures` consecutive
+ * settled failures of one lease epoch. Zero when nothing has failed. */
+export function sandboxDrainCaptureRetryDelayMs(failures: number): number {
+  if (!Number.isSafeInteger(failures) || failures <= 0) return 0;
+  return Math.min(
+    SANDBOX_DRAIN_CAPTURE_RETRY_MAX_DELAY_MS,
+    SANDBOX_DRAIN_CAPTURE_RETRY_BASE_DELAY_MS * 2 ** Math.min(failures - 1, 16),
+  );
+}
 // Match the DB inventory's fair 500-row bound so one sweep never discovers a
 // due box and then needlessly defers it for another schedule period. Five
 // hundred small StartChild commands remain far below Temporal history limits;

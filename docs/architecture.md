@@ -15,6 +15,12 @@ Organization subscription plans (runtime catalog, period credit and seats):
 `billing-subscription-store.ts` composes the accounting seams in one org-fenced
 transaction. `/v1/billing/subscription/*` and webhook plan writes are default-off
 behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independent.
+Owner-opted automatic top-ups use a separate default-off, tax-inclusive capped
+PaymentIntent journal; see [automatic credit top-ups](automatic-credit-top-ups.md)
+for API, recovery, notification integration and receipt-versus-invoice boundaries.
+Database funding writes live in `packages/db/src/credit-ledger.ts` and provider
+customer reads in `billing-customer.ts`; the root preserves their exports while
+automatic top-ups import these focused modules without a root-barrel cycle.
 New Free monthly grants share signup credit's live model coverage and use explicit
 grant allocations, ahead of other promotions. Pro/Max and existing unrestricted
 periods remain general credit. Expiry removes only the monthly grant's own unused
@@ -916,7 +922,19 @@ A new session may name only a sandbox backend the deployment serves
 configured; `local` and `docker` run on the host and are served only as the
 default. Every create path applies it (REST/SDK, `session_create`, forks,
 schedule save and run admission) because the worker builds whatever provider
-a session row names. Shared children and existing rows keep their backend.
+a session row names. Shared children and existing rows keep their backend,
+except that a host backend the deployment does not serve is refused again
+before any box, hook or credential. Session code rebinds settings to the
+session's backend (`{...settings, sandboxBackend}`), so the rule reads
+`Settings.deploymentSandboxBackend`, which `getSettings` fixes once and every
+spread keeps (`hostSandboxBackendRefused`). The worker fails such a turn at
+start with the terminal `sandbox_backend_not_served`; `resolveSessionSandboxRuntime`
+answers every API-direct surface (Channel A terminal, files, browser and
+computer, and viewers) with 409; and `createSandboxClientForBackend` refuses
+the `local` or `docker` client for any other caller, whatever the host image
+contains. A stored host-backend lease that is still draining on such a
+deployment stays draining (fail closed) rather than being stopped through a
+refused client.
 
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
@@ -1041,6 +1059,15 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 That budget bounds a drain attempt's wait, not its capture: a slower capture still
 publishes late, and a worker never runs two drain captures of one lease epoch at
 once (see `docs/run-lifecycle.md`).
+The provider's own hard snapshot timeout for a drain is the separate
+`OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, and at
+least twice the drain wait), so a snapshot slower than the wait can finish instead
+of being cut off by Modal at the wait. After a settled failure, the next full drain
+snapshot of the same lease epoch waits 30 s, doubling up to 10 minutes; a backoff
+never runs past the start of the mandatory pre-deadline save window, and there is
+none inside it. The count lives on the lease (`drain_capture_failures`, migration
+1253): failures since the box's last successful save, reset by a published save
+or a new epoch.
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
@@ -1089,12 +1116,15 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 ### 3.10 Client/server compatibility policy
 
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
-The `@opengeni/sdk` major is the API compatibility major. Within a major the
-public surface (SDK-reachable `/v1` routes and their shapes, the session event
-envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
-routes) evolves additively and both sides are tolerant readers. Breaking
-changes need a deprecation, at least 90 days on the managed service, and a new
-major. `bun run check:public-api` enforces it in CI.
+Existing integrations keep working across every production update. The
+public surface (SDK-reachable `/v1` routes and their shapes, including every
+route a published SDK calls, the session event envelope and types,
+`@opengeni/sdk`/`@opengeni/react` exports, public ingress routes, and their
+documented behaviour) only evolves additively, and both sides are tolerant
+readers. A major release or deprecation period never permits a break; an
+incompatible design ships as a new version beside the old one, with
+version-specific adapters over shared application logic. `bun run
+check:public-api` and the major-changeset guard enforce it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
 negotiates at runtime.
@@ -1424,7 +1454,11 @@ The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
 (`session.control.steer_requested`, `session.queue.changed`,
 `system.update.pending`), re-reads the same predicate on each one, and rechecks
-every 10 seconds in case a live event is lost. When a Steer waits it does two
+every 10 seconds in case a live event is lost. Admission's own Steer read runs
+alongside its slower checks, so when the watch has already fired, a negative
+admission read is read again before the watch is re-armed as withdrawn, and a
+re-armed watch reads at once (events that arrived while it was tripped were
+not acted on). When a Steer waits it does two
 things. A model request that is still generating is cut short: its abort
 signal fires with `ModelPreemption`, and the transport ends the stream with a
 `response_done` (`providerData.opengeniPreempted`) that keeps only the
@@ -1647,8 +1681,8 @@ immutable receipts, distinct causal claims and live personal-grant admission:
 [lifecycle](run-lifecycle.md).
 
 `session_turns.initiating_human_subject_id` alone never authorizes:
-`artifacts:publish`/archive/restore require exact mutation fences; pure service
-work fails closed. [Lifecycle](run-lifecycle.md).
+`artifacts:publish`/archive/restore require exact mutation fences, which pure
+service work passes like any run. [Lifecycle](run-lifecycle.md).
 
 All model/Codemode calls share current authorized catalogs, execution fences and
 approvals across backends/loading paths.
@@ -1728,8 +1762,7 @@ Opt-in credential profiles (workspace, plus session additions children inherit)
 name variables whose references the attempt's resolver turns into values for
 each command's own environment at the same boundary
 (`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
-written to config or kept on the box, and the values are masked like any other
-resolved value.
+written to config or kept on the box.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -1839,6 +1872,14 @@ Canonical: [`knowledge.md`](knowledge.md),
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
 ### 5.7 Usage, limits, and billing
+
+Connected subscriptions serve app-origin work on qualifying paid plans, with
+no usage fee. API-origin work refuses them at admission and before model calls;
+omitted API models skip subscription defaults. Origin is inherited by children,
+goals and schedules, independently of the own-key fee configuration. A zero
+own-key fee disables both its debit and its paid-credit gate. Existing internal
+legacy funding terms remain unchanged. See [billing origin](billing-origin.md)
+for the canonical admission seams, refusal codes and configured-fee behavior.
 
 Model-scoped promotions retain offer identity and initial eligibility on each grant.
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
@@ -2183,7 +2224,11 @@ See [`session-mcp-servers.md`](session-mcp-servers.md).
 `@opengeni/tool-gateway` owns catalogs, validation, authorization, approvals, and
 execution. Identity-derived paths/aliases represent
 `{serverId, toolName}`, never authority. Historical hashes require current
-authorization; namespace/tool-prefix and exact collisions block publication.
+authorization. Catalog building never fails a turn over one tool: repeated
+identities keep the first, a taken model name leaves the later tool out,
+colliding paths get identity-suffixed paths, and invalid definitions are
+skipped, each with a structured `tool_catalog_degraded` warning. Runtime MCP
+listing also collapses repeated tool names per server.
 Event metadata preserves identity and approvals. Local tools use the
 final combined attempt environment.
 
@@ -2359,23 +2404,17 @@ Lightpanda is semantic-only.
 policy for DOM reads, editable-value confirmation and accessibility reads.
 Chromium DOM snapshots find protected nodes in child documents and flattened
 shadow roots; out-of-process frames are read through their own sessions.
-Snapshots stay inside the controller. Known values are masked before semantic
-normalization and on result delivery, including digit-grouped numeric secrets
-and three-digit CVCs. Protection discovery or masking failure withholds output.
-Only primary password/card-field values are remembered; hidden metadata and
-expiry options are protected in place. Card values do not age out of memory.
-After a browser tab encounters payment fields or known card data, its screenshots,
-live frames and recordings are refused (semantic controls and unrelated tabs
-remain usable). This state is shared across controllers for that tab in the
-browserd process; it is not
-a claim of pixel-level redaction or arbitrary canvas/OCR protection.
-Transient pixels between DOM checks and desktop captures of the browser are
-outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
-through the matching extension method allowlist.
-The extension advertises that read-only capability in its existing handshake;
-an agent needing it refuses an older extension as `extension_outdated`, which
-starts Chrome's existing update check. Older agents ignore the additive field,
-so extension-first rollout remains compatible.
+Snapshots stay inside the controller. Only standard markup protects a field
+(`type=password`, the password, one-time-code and `cc-*` autocomplete tokens,
+`type=hidden` and explicit private attributes); it stays present, labelled and
+fillable while its value is left out. Nothing is guessed from names or labels,
+no value is remembered, and a failed snapshot reads the page without marks
+rather than withholding output. Screenshots, live frames, recordings and
+clipboard copies are never refused (docs/secrets.md, "Agent-visible content").
+Attached Chrome admits the read-only snapshot through the matching extension
+method allowlist. The extension still advertises its former privacy capability
+in its handshake, so older agents keep accepting it; newer agents no longer
+require it.
 
 Computer cursor badges carry the source chat's display title and a bounded PNG
 of its existing sidebar avatar. The API resolves image access as the caller and
@@ -2824,8 +2863,11 @@ never rewrites durable home policy.
 
 Repository skill discovery skips definite path misses. A typed unreachable
 Connected Machine (offline or control timeout) degrades that run's repository
-index to an "unavailable" notice instead of blocking the model. Other failures
-reach turn settlement; rotation resumes through the durable lifecycle wake.
+index to an "unavailable" notice instead of blocking the model. A failure that
+shows the workspace answered but one search path or skill folder was unusable
+skips only that entry with a reason on every backend; box, route, fence,
+transport, cancellation and unrecognized failures reach turn settlement; rotation resumes through the
+durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement
@@ -2997,20 +3039,13 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Known secret values (what an attempt's references resolve to and the
-  credentials Opengeni injects) are replaced by their references in tool
-  results, model input and stored conversation text before storage and before
-  the model sees them (docs/secrets.md, Masking). Other conversation, source,
-  tool, and error text is not regex-redacted, with one narrow exception: tool
-  results and their stored copies also mask high-precision secret shapes (URL
-  passwords, connection-string passwords, Azure keys, PEM private keys and
-  well-known token formats), capture each value into the root session's Task
-  vault and write its reference, or a `[masked <kind>]` marker when capture is
-  not possible. Known-value and shape masking supersede the 5 August 2026
-  "keep content exact" decision for these two cases, approved on 26 October
-  2026. A workspace admin can remove a known secret or a built-in secret
-  shape from chosen sessions' stored history afterwards; see
-  docs/secrets.md, "Removing secrets from stored history".
+  Agents use them by reference, resolved only where a tool runs. Model
+  context is append-only and agent-visible content is never rewritten or
+  masked for secrecy; no heuristic guesses whether text is secret
+  (docs/secrets.md, "Agent-visible content"). A workspace admin can remove a
+  known secret or a built-in secret shape from chosen sessions' stored
+  history with the explicit scrub; see docs/secrets.md, "Removing secrets
+  from stored history".
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
@@ -3132,6 +3167,7 @@ Topics: [`README.md`](README.md).
 | Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
+| Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |

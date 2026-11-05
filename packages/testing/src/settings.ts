@@ -93,6 +93,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     subscriptionPlansEnabled: false,
+    billingAutoTopUpEnabled: false,
     // Off in fixtures; bring-your-own-key fee tests opt in.
     byokPlatformFeeBps: 0,
     verifiedSignupTrialCreditsEnabled: false,
@@ -473,6 +474,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxIdleCommandContainmentMs: 1_800_000,
     sandboxSnapshotIntervalMs: 900_000,
     sandboxSnapshotTimeoutMs: 60_000,
+    sandboxDrainProviderSnapshotTimeoutMs: 600_000,
     sandboxRotationLeadMs: 3_600_000,
     sandboxRotationBatchSize: 1,
     sandboxLeaseTtlMs: 90_000,

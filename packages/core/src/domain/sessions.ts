@@ -6,6 +6,7 @@ import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageSentByPerson,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
@@ -17,6 +18,7 @@ import {
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
+import { unattendedRequestGoal } from "./unattended-request-goal";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
@@ -56,6 +58,8 @@ import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
+  requireDeveloperSetupDelegatablePermissions,
+  developerSetupCredentialRestricted,
   withDeveloperSetupCredentialRestriction,
 } from "../developer-setup-credential-ceiling";
 
@@ -196,6 +200,7 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  sameTurnSender,
   readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
@@ -1928,13 +1933,16 @@ export async function assertWorkspaceModelPolicyAllows(
     chargesCredits: policyChargesCreditsForModel(settings, canonicalModel),
   });
   if (!verdict.allowed) {
+    const message =
+      verdict.reason === "credits"
+        ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
+        : verdict.reason === "provider"
+          ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+          : `model "${canonicalModel}" is not allowed by this workspace's model policy`;
+    // Typed, so a refused new chat can say which rule in words a person reads.
     throw new HTTPException(422, {
-      message:
-        verdict.reason === "credits"
-          ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
-          : verdict.reason === "provider"
-            ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-            : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
+      message,
+      cause: new ModelPolicyRefusedError(canonicalModel, verdict.reason, message),
     });
   }
 }
@@ -2900,7 +2908,7 @@ async function createSessionForRequestInFileScope(
     instructions: payload.instructions,
     workspaceSettings: workspace.settings,
     parent: parentSession,
-    goal: payload.goal !== undefined,
+    goal: payload.goal != null,
   });
   const agentConfig = agentResolution.config;
   if (agentResolution.instructions !== undefined) {
@@ -2967,6 +2975,9 @@ async function createSessionForRequestInFileScope(
             initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
             deferInitialTurn: payload.startMode === "realtime",
             agentConfig,
+            // The replay compares whether anyone answers the agent, so it
+            // needs the retry's own setting.
+            ...(payload.unattended === true ? { unattended: true } : {}),
           }),
       );
       if (initializedReplay) {
@@ -3154,6 +3165,7 @@ async function createSessionForRequestInFileScope(
               workspaceId,
               subjectId: grant.subjectId,
               workspaceSettings: workspace.settings,
+              billingOrigin,
             }),
           );
   const inheritedModel =
@@ -3182,7 +3194,18 @@ async function createSessionForRequestInFileScope(
     };
     settings = effectiveCatalogSettings;
   }
-  let effectiveGoal = payload.goal;
+  // A headless single request gets its goal here, from the create itself,
+  // instead of a model call. It is dropped below, never rejected, when the
+  // session cannot carry a goal.
+  const automaticGoal = unattendedRequestGoal({
+    unattended: payload.unattended,
+    goal: payload.goal,
+    initialMessage: payload.initialMessage,
+    hasParent: parentSession !== null,
+    creator: agentConfigCreator,
+    agentConfig,
+  });
+  let effectiveGoal = payload.goal ?? automaticGoal;
   if (parentSession && payload.goal) {
     try {
       effectiveGoal = resolveChildGoalFromAcceptedSnapshot(
@@ -3591,7 +3614,12 @@ async function createSessionForRequestInFileScope(
           : {}),
       });
       if (!admissibleWorkspaceModel(selections, model)) {
-        throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+        // Typed as unavailable (it is not selectable for this caller), so the
+        // composer names it instead of showing this developer text.
+        throw new HTTPException(422, {
+          message: `model is not selectable: ${model}`,
+          cause: new ModelUnavailableError(model),
+        });
       }
     }
   });
@@ -3729,10 +3757,12 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
-    throw new HTTPException(422, {
-      message:
-        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
-    });
+    if (effectiveGoal === automaticGoal) effectiveGoal = undefined;
+    else
+      throw new HTTPException(422, {
+        message:
+          "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+      });
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
@@ -3830,7 +3860,9 @@ async function createSessionForRequestInFileScope(
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
-    if (missingGoalTools.length > 0) {
+    if (missingGoalTools.length > 0 && effectiveGoal === automaticGoal) {
+      effectiveGoal = undefined;
+    } else if (missingGoalTools.length > 0) {
       throw new HTTPException(422, {
         message: `goal-bearing sessions require first-party MCP tools: ${missingGoalTools.join(", ")}`,
       });
@@ -4719,7 +4751,8 @@ async function acceptSessionUserMessageInFileScope(
         frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
-    // causal human, just as the locked prompt transaction does.
+    // causal human when its own sender resubmits it, just as the locked
+    // prompt transaction does. Anyone else's edit is their own message.
     if (delivery === "send" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
@@ -4735,7 +4768,7 @@ async function acceptSessionUserMessageInFileScope(
       if (draft?.revision === input.expectedDraftRevision && draft.sourceTurnId) {
         const sourceTurn = await getSessionTurn(db, workspaceId, draft.sourceTurnId);
         if (sourceTurn?.sessionId === sessionId) {
-          frozenAdmissionInitiator = {
+          const sourceInitiator = {
             initiator: sourceTurn.initiator,
             context: sourceTurn.initiatorContext,
             initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
@@ -4744,6 +4777,9 @@ async function acceptSessionUserMessageInFileScope(
               sourceTurn.id,
             ),
           };
+          if (sameTurnSender(sourceInitiator, frozenAdmissionInitiator)) {
+            frozenAdmissionInitiator = sourceInitiator;
+          }
         }
       }
     }
@@ -5361,6 +5397,7 @@ function toolPolicyAuditSnapshot(
   tools: ToolRef[],
   firstPartyMcpTools: FirstPartyMcpToolName[],
   policy = session.toolPolicy,
+  firstPartyMcpPermissions?: readonly Permission[],
 ) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
@@ -5405,6 +5442,9 @@ function toolPolicyAuditSnapshot(
     toolCount: allToolRefs.length,
     firstPartyMcpTools: [...firstPartyMcpTools].sort(),
     firstPartyMcpToolCount: firstPartyMcpTools.length,
+    ...(firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: [...firstPartyMcpPermissions].sort() }
+      : {}),
     truncated:
       allToolRefs.length > toolRefs.length ||
       (policy.excludedMcpServerIds?.length ?? 0) > maxToolPolicyAuditRefs,
@@ -5483,6 +5523,43 @@ export async function updateSessionToolPolicy(
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  // A new permission set never out-ranks the caller: the same delegation
+  // rules as creating a session with that set. Parent, agent-narrowing and
+  // goal checks run under the session lock below.
+  const requestedFirstPartyMcpPermissions = request.firstPartyMcpPermissions
+    ? [...new Set(request.firstPartyMcpPermissions)]
+    : null;
+  if (requestedFirstPartyMcpPermissions) {
+    requireDeveloperSetupDelegatablePermissions(
+      developerSetupCredentialRestricted({
+        grant,
+        trustedMetadata: [existingSession.metadata],
+      }),
+      requestedFirstPartyMcpPermissions,
+    );
+    requireExplicitPermissionDelegation(grant, requestedFirstPartyMcpPermissions);
+    for (const permission of requestedFirstPartyMcpPermissions) {
+      if (!hasPermission(grant.permissions, permission)) {
+        throw new HTTPException(403, {
+          message: `cannot grant first-party MCP permission beyond the calling grant: ${permission}`,
+        });
+      }
+    }
+  }
+  const sessionGoal = requestedFirstPartyMcpPermissions
+    ? await getSessionGoal(deps.db, grant.workspaceId, sessionId)
+    : null;
+  if (
+    requestedFirstPartyMcpPermissions &&
+    sessionGoal !== null &&
+    sessionGoal.status !== "completed" &&
+    !hasPermission(requestedFirstPartyMcpPermissions, "goals:manage")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
+  }
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -5783,6 +5860,45 @@ export async function updateSessionToolPolicy(
         }
       }
 
+      const currentFirstPartyMcpPermissions = [
+        ...(session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS),
+      ];
+      if (requestedFirstPartyMcpPermissions && session.parentSessionId) {
+        const parent = await context.getLockedSession(session.parentSessionId);
+        if (!parent) {
+          throw new HTTPException(409, { message: "parent session is no longer available" });
+        }
+        const parentPermissions =
+          parent.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(parentPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `child first-party MCP permissions may only narrow the parent session grant: ${widened}`,
+          });
+        }
+      }
+      if (requestedFirstPartyMcpPermissions && agentAttemptCaller) {
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(currentFirstPartyMcpPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `an agent may only narrow its session first-party permissions: ${widened}`,
+          });
+        }
+      }
+      // An equal set (in any order) keeps the stored value, so restating the
+      // default never pins it.
+      const permissionsChanged =
+        requestedFirstPartyMcpPermissions !== null &&
+        stableJson([...requestedFirstPartyMcpPermissions].sort()) !==
+          stableJson([...currentFirstPartyMcpPermissions].sort());
+      const nextFirstPartyMcpPermissions = permissionsChanged
+        ? requestedFirstPartyMcpPermissions!
+        : currentFirstPartyMcpPermissions;
+
       const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
       // JSON.stringify would turn an identical retry into a second mutation
@@ -5800,7 +5916,7 @@ export async function updateSessionToolPolicy(
           firstPartyMcpTools: nextFirstPartyMcpTools,
           policy: nextPolicy,
         });
-      if (unchanged) {
+      if (unchanged && !permissionsChanged) {
         return { events: [] };
       }
 
@@ -5815,12 +5931,14 @@ export async function updateSessionToolPolicy(
                 session.tools,
                 [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
+                currentFirstPartyMcpPermissions,
               ),
               after: toolPolicyAuditSnapshot(
                 session,
                 nextTools,
                 nextFirstPartyMcpTools,
                 nextPolicy,
+                nextFirstPartyMcpPermissions,
               ),
               version: nextVersion,
               effectiveFrom: "next_attempt",
@@ -5833,6 +5951,7 @@ export async function updateSessionToolPolicy(
           toolPolicy: nextPolicy,
           toolPolicyVersion: nextVersion,
           expectedToolPolicyVersion: request.expectedVersion,
+          ...(permissionsChanged ? { firstPartyMcpPermissions: nextFirstPartyMcpPermissions } : {}),
         },
       };
     },

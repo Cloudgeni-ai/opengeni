@@ -105,6 +105,14 @@ fn period_end(period: u32) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(units.checked_mul(unit.as_secs())?))
 }
 
+/// How long from `at` until the next period begins.
+#[must_use]
+pub fn until_next_period(at: SystemTime) -> Duration {
+    period_end(period_of(at))
+        .and_then(|end| end.duration_since(at).ok())
+        .unwrap_or(HOUR)
+}
+
 /// Whether an object of period `period` no pointer names may be deleted by
 /// a sweep that began at `began`: its period ended at least [`CLOCK_SKEW`]
 /// before.

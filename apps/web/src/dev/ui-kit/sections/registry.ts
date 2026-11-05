@@ -103,6 +103,7 @@ export const SECTION_KEYS = [
   // Status
   "status-badge",
   "usage-meter",
+  "subscription-accounts",
   "feedback",
   // Forms
   "form-dialog",
@@ -141,6 +142,7 @@ export const SECTION_KEYS = [
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
+  "page-meeting-reminders",
   "page-dictation",
   "page-knowledge",
   "page-org-people",
@@ -644,6 +646,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./usage-meter"),
   },
   {
+    key: "subscription-accounts",
+    group: "Status",
+    title: "Subscription accounts",
+    purpose:
+      "Claude, ChatGPT and SuperGrok accounts with their plan and every usage window the provider reports.",
+    usedOn: "Session header account menu, Models settings rows",
+    load: () => import("./subscription-accounts"),
+  },
+  {
     key: "feedback",
     group: "Status",
     title: "Feedback",
@@ -1060,6 +1071,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Record a meeting, then read its transcript and name who spoke.",
     usedOn: "Main rail",
     load: () => import("./page-meetings"),
+  },
+  {
+    key: "page-meeting-reminders",
+    group: "Pages",
+    title: "Meeting reminders",
+    purpose:
+      "A minute before a calendar meeting, the desktop app offers to join it and start recording: the switch, and the one-time offer to connect a calendar.",
+    usedOn: "Desktop app: Settings → Computer use, and Meetings",
+    load: () => import("./page-meeting-reminders"),
   },
   {
     key: "page-dictation",

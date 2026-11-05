@@ -16,6 +16,8 @@ import {
 const RESET_5H = "2026-10-22T21:00:00.000Z";
 const RESET_WEEK = "2026-10-26T12:00:00.000Z";
 const OBSERVED = "2026-10-22T16:50:00.000Z";
+// Read the menu just after the reading, before any window resets.
+const NOW = Date.parse(OBSERVED) + 60_000;
 
 const facts = [
   { id: "a", label: "Team 1", email: "a@example.test", used: [36, 62] },
@@ -30,8 +32,16 @@ function codexAccount(fact: (typeof facts)[number]): CodexAccount {
     email: fact.email,
     plan: "Pro",
     status: "active",
-    fiveHour: { percent: fact.used[0], remaining: 100 - fact.used[0], resetAt: RESET_5H },
-    weekly: { percent: fact.used[1], remaining: 100 - fact.used[1], resetAt: RESET_WEEK },
+    fiveHour: {
+      percent: fact.used[0],
+      remaining: 100 - fact.used[0],
+      resetAt: RESET_5H,
+    },
+    weekly: {
+      percent: fact.used[1],
+      remaining: 100 - fact.used[1],
+      resetAt: RESET_WEEK,
+    },
     usageCheckedAt: OBSERVED,
   } as CodexAccount;
 }
@@ -51,8 +61,18 @@ function claudeOption(fact: (typeof facts)[number]): ModelAccountChoiceOption {
     usage: {
       observedAt: OBSERVED,
       windows: [
-        { id: "five_hour", usedPercent: fact.used[0], resetsAt: RESET_5H, status: "ok" },
-        { id: "seven_day", usedPercent: fact.used[1], resetsAt: RESET_WEEK, status: "ok" },
+        {
+          id: "five_hour",
+          usedPercent: fact.used[0],
+          resetsAt: RESET_5H,
+          status: "ok",
+        },
+        {
+          id: "seven_day",
+          usedPercent: fact.used[1],
+          resetsAt: RESET_WEEK,
+          status: "ok",
+        },
       ],
       exhaustedUntil: null,
       exhaustedKind: null,
@@ -102,10 +122,18 @@ function claude(choice: Partial<SessionModelAccountChoiceResponse> = {}) {
           reasoningEffort: "high",
           latencyMode: "standard",
         },
-        binding: { provider: "claude", connectionId: null, choice: "automatic" },
+        binding: {
+          provider: "claude",
+          connectionId: null,
+          choice: "automatic",
+        },
         bindings: [{ provider: "claude", connectionId: null, choice: "automatic" }],
         accounts: facts.map(claudeOption),
-        personal: { connectionsAllowed: false, fallbackAllowed: false, fallbackOptIn: false },
+        personal: {
+          connectionsAllowed: false,
+          fallbackAllowed: false,
+          fallbackOptIn: false,
+        },
         ...choice,
       },
     },
@@ -113,24 +141,37 @@ function claude(choice: Partial<SessionModelAccountChoiceResponse> = {}) {
   );
 }
 
-const neutral = (value: unknown) => JSON.stringify(value).replaceAll(/Claude|Codex/g, "X");
+const neutral = (value: unknown) => JSON.stringify(value).replaceAll(/Claude|ChatGPT|Codex/g, "X");
 
 describe("Codex and Claude sources", () => {
   test("the same accounts and usage produce the same menu", () => {
-    const fromCodex = subscriptionAccountMenuContent(codex());
-    const fromClaude = subscriptionAccountMenuContent(claude());
+    const fromCodex = subscriptionAccountMenuContent(codex(), NOW);
+    const fromClaude = subscriptionAccountMenuContent(claude(), NOW);
     expect(neutral(fromCodex)).toBe(neutral(fromClaude));
     expect(fromCodex.selectionLabel).toBe("Current account");
-    expect(fromCodex.usage.windows?.map((window) => [window.label, window.usedPercent])).toEqual([
-      ["5h", 36],
-      ["Week", 62],
+    expect(fromCodex.usage.windows?.map((window) => [window.label, window.leftPercent])).toEqual([
+      ["5h", 64],
+      ["Week", 38],
     ]);
-    expect(fromCodex.accounts[1]?.usageSummary).toBe("5h 74% · Week 21% used");
+    expect(
+      fromCodex.accounts[1]?.windows?.map((window) => [window.label, window.leftPercent]),
+    ).toEqual([
+      ["5h", 26],
+      ["Week", 79],
+    ]);
+    // Both accounts share a plan, so it is named once above the list.
+    expect(fromCodex.plan).toBe("ChatGPT Pro");
+    expect(fromCodex.accounts.map((account) => account.plan)).toEqual([null, null]);
   });
 
   test("an explicit choice reads the same from both sources", () => {
     const fromCodex = subscriptionAccountMenuContent(
-      codex({ pinnedAccountId: "b", currentSelection: null, currentAccount: null }),
+      codex({
+        pinnedAccountId: "b",
+        currentSelection: null,
+        currentAccount: null,
+      }),
+      NOW,
     );
     const fromClaude = subscriptionAccountMenuContent(
       claude({
@@ -138,6 +179,7 @@ describe("Codex and Claude sources", () => {
         binding: { provider: "claude", connectionId: "b", choice: "explicit" },
         bindings: [{ provider: "claude", connectionId: "b", choice: "explicit" }],
       }),
+      NOW,
     );
     expect(neutral(fromCodex)).toBe(neutral(fromClaude));
     expect(fromCodex.selectionLabel).toBe("Chosen account");
@@ -203,18 +245,32 @@ describe("Codex usage", () => {
 
   test("a cooling-down account says until when", () => {
     const usage = codexUsage(
-      { ...base, fiveHour: null, weekly: null, exhaustedUntil: RESET_5H } as CodexAccount,
+      {
+        ...base,
+        fiveHour: null,
+        weekly: null,
+        exhaustedUntil: RESET_5H,
+      } as CodexAccount,
       undefined,
       Date.parse(RESET_5H) - 1,
     );
-    expect(usage).toMatchObject({ windows: [], exhaustedUntil: RESET_5H, exhaustedKind: "quota" });
+    expect(usage).toMatchObject({
+      windows: [],
+      exhaustedUntil: RESET_5H,
+      exhaustedKind: "quota",
+    });
     expect(codexUsage({ ...base, fiveHour: null, weekly: null } as CodexAccount, undefined)).toBe(
       null,
     );
     // An ended cooldown is not a limit.
     expect(
       codexUsage(
-        { ...base, fiveHour: null, weekly: null, exhaustedUntil: RESET_5H } as CodexAccount,
+        {
+          ...base,
+          fiveHour: null,
+          weekly: null,
+          exhaustedUntil: RESET_5H,
+        } as CodexAccount,
         undefined,
         Date.parse(RESET_5H) + 1,
       ),
@@ -227,7 +283,11 @@ describe("Codex usage", () => {
       chatgptAccountId: "acct-123",
       status: "active",
     } as CodexAccount;
-    const state = codex({ accounts: [bare], currentSelection: null, currentAccount: null });
+    const state = codex({
+      accounts: [bare],
+      currentSelection: null,
+      currentAccount: null,
+    });
     expect(subscriptionAccountMenuContent(state).accounts[0]?.label).toBe("acct-123");
     const named = codex({
       accounts: [{ ...bare, email: "z@example.test" }],

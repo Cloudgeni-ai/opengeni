@@ -10,6 +10,7 @@ import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/perso
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
@@ -1214,6 +1215,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       const causalHumanSubjectId =
         taskAuthoritySubjectId ?? xaiAuthoritySubjectId ?? claudeAuthoritySubjectId;
+      // A chat started for a task nobody owns has no person to notify or
+      // call, so it is not offered those tools. Its session keeps this exact
+      // list instead of following the defaults again at each turn.
+      const unreachableHuman = generatedTarget && !causalHumanSubjectId;
+      if (unreachableHuman)
+        firstPartyMcpTools = firstPartyMcpTools.filter(
+          (tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool] !== "notifications",
+        );
       if (
         xaiAuthoritySubjectId &&
         claudeAuthoritySubjectId &&
@@ -1262,6 +1271,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         },
       );
       if (admissionDenial) {
+        if (admissionDenial === "subscription_api_unavailable") {
+          return await refuseAdmission(
+            "scheduled_model_unavailable",
+            false,
+            "Connected subscriptions are unavailable for API use; choose a credit-billed model.",
+          );
+        }
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
         // A run receipt records API work without credits, an own key
@@ -1387,7 +1403,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               toolPolicy: {
                 mode: "explicit" as const,
                 inheritedFromSessionId: null,
-                ...(!creatorPolicy?.firstPartyMcpTools
+                ...(!creatorPolicy?.firstPartyMcpTools && !unreachableHuman
                   ? {
                       firstPartyMode: "workspace_default" as const,
                       ...(scheduledSlackBotConnectionId(task.agentConfig)

@@ -5,12 +5,16 @@
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 
 import { DESKTOP_IPC } from "../../contract";
-import type { MeetingDetection } from "./index";
+import { onPageLeft } from "../page-left";
+import { recordingMeeting, type MeetingDetection } from "./index";
 
 /**
  * Answer the meeting detection calls with `detection`. `allow` throws for a
  * sender that may not record, such as a page on another origin or a subframe.
- * A page stops recording and taking choices when it navigates away or closes.
+ * A page stops recording and taking choices once it has gone to another
+ * document, shown an error page, lost its renderer or closed. A navigation that
+ * starts but is cancelled, such as a link the app opens in the browser instead,
+ * leaves the page as it was.
  */
 export function handleMeetingDetectionIpc(input: {
   ipcMain: Pick<IpcMain, "handle" | "on">;
@@ -28,9 +32,7 @@ export function handleMeetingDetectionIpc(input: {
       pages.delete(page);
       detection.pageGone(page);
     });
-    page.on("did-start-navigation", (details) => {
-      if (details.isMainFrame && !details.isSameDocument) detection.pageGone(page);
-    });
+    onPageLeft(page, () => detection.pageGone(page));
   };
   detection.onChange(() => {
     for (const page of pages) {
@@ -45,21 +47,21 @@ export function handleMeetingDetectionIpc(input: {
       return run(arg);
     });
   };
-  const on = (channel: string, run: (page: WebContents, arg: unknown) => void) => {
-    ipcMain.on(channel, (event, arg: unknown) => {
+  const on = (channel: string, run: (page: WebContents, arg: unknown, more: unknown) => void) => {
+    ipcMain.on(channel, (event, arg: unknown, more: unknown) => {
       try {
         allow(event);
       } catch {
         return;
       }
       watch(event.sender);
-      run(event.sender, arg);
+      run(event.sender, arg, more);
     });
   };
   handle(DESKTOP_IPC.meetingDetectionStatus, () => detection.status());
   handle(DESKTOP_IPC.meetingDetectionUpdate, (change) => detection.update(change));
-  on(DESKTOP_IPC.meetingDetectionRecording, (page, recording) =>
-    detection.setRecording(page, recording === true),
+  on(DESKTOP_IPC.meetingDetectionRecording, (page, recording, meeting) =>
+    detection.setRecording(page, recording === true, recordingMeeting(meeting)),
   );
   on(DESKTOP_IPC.meetingDetectionListen, (page, listening) =>
     detection.listen(page, listening === true),

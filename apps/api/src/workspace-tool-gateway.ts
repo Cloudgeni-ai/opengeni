@@ -98,7 +98,7 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import { buildOpenGeniMcpServer, resolveSlackBotToolAvailability } from "./mcp/server";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
 import {
   withSiteSecretContext,
@@ -941,7 +941,15 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     });
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
-      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
+      ? [
+          // Read alongside the other first-party servers, not before them.
+          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
+            inMemoryMcpRegistration(
+              "opengeni",
+              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+            ),
+          ),
+        ]
       : []),
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]

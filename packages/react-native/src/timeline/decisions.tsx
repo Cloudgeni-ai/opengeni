@@ -910,6 +910,9 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
   const [details, setDetails] = useState<Record<string, boolean>>({});
+  // Why a decision was refused, such as an action only its account's owner
+  // can approve: shown on the card, which stays open to decide again.
+  const [failures, setFailures] = useState<Record<string, string>>({});
   // Answers in progress, each tied to the question it answers: a server that
   // asks again on the same call starts a fresh answer and a live card.
   const [answers, setAnswers] = useState<
@@ -927,9 +930,17 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
     if (inFlight.current.has(key)) return;
     inFlight.current.add(key);
     setPending((current) => ({ ...current, [key]: decision }));
+    setFailures((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     try {
       await (answer ? onDecide(id, decision, answer) : onDecide(id, decision));
       setSettled((current) => ({ ...current, [key]: decision }));
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : String(error);
+      setFailures((current) => ({ ...current, [key]: message }));
     } finally {
       inFlight.current.delete(key);
       setPending((current) => {
@@ -1067,6 +1078,11 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                       </Text>
                     ) : null}
                   </>
+                ) : null}
+                {failures[key] ? (
+                  <Text accessibilityRole="alert" style={{ ...small, color: c["status-failed"] }}>
+                    {failures[key]}
+                  </Text>
                 ) : null}
                 {note && !answering ? (
                   <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text>

@@ -887,6 +887,45 @@ for (const code of ["debugger_unavailable", "driver_rejected"] as const) {
   });
 }
 
+test("an action whose attachment the extension released before any input runs on a new attachment", async () => {
+  // Between the observation and the click, another extension's frame ended
+  // the tab's debugging. The extension already dropped that attachment and
+  // refuses the click's first read, before the detach reaches browserd.
+  const { bridge, connection, driver } = await fixture();
+  try {
+    const observation = await driver.observe("7");
+    let refused: unknown = null;
+    bridge.beforeCommandReply = async (method) => {
+      if (refused !== null) return;
+      refused = method;
+      throw new AttachedBrowserBridgeError(
+        "debugger_unavailable",
+        "The attachment this command was sent for has ended",
+        false,
+      );
+    };
+    const receipt = await controllerFor(driver, observation).run({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId,
+      action: { type: "pointer", action: "click", x: 10, y: 10 },
+    });
+    expect(String(refused).startsWith("Input.")).toBe(false);
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    expect(bridge.commands.some((c) => c.method === "Input.dispatchMouseEvent")).toBe(true);
+  } finally {
+    connection.close();
+  }
+});
+
 test("input Chrome ends a fenced attachment under is outcome unknown, and the tab attaches again", async () => {
   const bridge = new FencedBridge();
   const { connection, driver } = await fixture(bridge);
@@ -1237,7 +1276,7 @@ for (const holds of [true, false])
           if (
             payload.method === "Runtime.callFunctionOn" &&
             params.objectId === "field-42" &&
-            String(params.functionDeclaration).includes("site-added grouping")
+            String(params.functionDeclaration).includes("groups digits as they are typed")
           ) {
             this.commands.push(payload);
             const expected = String((params.arguments as Array<{ value: unknown }>)[0]?.value);
@@ -1398,8 +1437,8 @@ test("Chrome's frame refusal for an attachment it is ending reads again on a new
     const after = await driver.observe("7");
     expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
-    // Input refused the same way before anything was sent is a definite
-    // failure, and the tab attaches again for the next call.
+    // An action refused the same way before anything was sent runs on a new
+    // attachment, like a read.
     const endedAgain = bridge.detachSilently("7");
     setTimeout(() => {
       bridge.event("7", "OpenGeni.debuggerDetached", {
@@ -1419,11 +1458,8 @@ test("Chrome's frame refusal for an attachment it is ending reads again on a new
       expectedFrameId: after.frameId,
       action: { type: "pointer", action: "click", x: 10, y: 10 },
     });
-    expect(receipt.state).toBe("failed");
-    expect(receipt.error).toMatchObject({
-      code: "resource_unavailable",
-      message: "Browser tab debugging disconnected; observe the tab again",
-    });
+    expect(receipt.state).toBe("completed");
+    expect(bridge.commands.some((c) => c.method === "Input.dispatchMouseEvent")).toBe(true);
     await expect(driver.observe("7")).resolves.toMatchObject({ target: { id: "7" } });
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(3);
   } finally {

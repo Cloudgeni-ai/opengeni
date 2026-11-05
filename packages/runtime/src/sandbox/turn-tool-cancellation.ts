@@ -1329,7 +1329,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       };
       const invokeExec: FunctionToolInvoke = async (_runContext, input) =>
         nativeCommandBanner(await invokeExecNative(input));
-      const invokeWrite: FunctionToolInvoke | null =
+      // `signal` stops only this runner's own eager reads when the turn is
+      // cancelled. The registered shell's control reads (the writer drain's
+      // exit proof) must never carry it: after a cancellation it is always
+      // aborted, and a command that exited on its own, whose wrapper already
+      // removed its identity marker, could then never be proven settled.
+      const lifecycleWrite = (signal?: AbortSignal): FunctionToolInvoke | null =>
         session.writeStdin || session.writeStdinForProcessControl
           ? async (_runContext, input) => {
               const parsed = parsedObject(input);
@@ -1338,7 +1343,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               }
               const directArgs = {
                 sessionId: parsed.session_id,
-                signal: this.observationCancellation.signal,
+                ...(signal ? { signal } : {}),
                 ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
                 ...(typeof parsed.yield_time_ms === "number"
                   ? { yieldTimeMs: parsed.yield_time_ms }
@@ -1361,6 +1366,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return await session.writeStdin!(directArgs);
             }
           : null;
+      const invokeWrite = lifecycleWrite(this.observationCancellation.signal);
+      const controlWrite = lifecycleWrite();
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
       if (this.cancelled) throw cancellationError(this.reason);
@@ -1445,7 +1452,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             interactive,
             runContext: lifecycleRunContext,
             execInvoke: invokeExec,
-            writeInvoke: invokeWrite,
+            writeInvoke: controlWrite,
             processSession,
             typedHandleLoss: hasTypedExecHandleLoss(session, retainedProcess.providerSessionId),
             identity: null,
@@ -1581,7 +1588,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         interactive,
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
-        writeInvoke: invokeWrite,
+        writeInvoke: controlWrite,
         processSession: retainedProcessSession(session, sessionId),
         typedHandleLoss: hasTypedExecHandleLoss(session, sessionId),
         identity: null,

@@ -30,6 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   Recording,
   RecordingNote,
@@ -118,8 +119,10 @@ import {
 } from "./meeting-transcript";
 import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
-import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
+import { MeetingAsk, type MeetingAskRequest, type MeetingAskResult } from "./meeting-ask";
 import { meetingMentionResolver } from "./meeting-mentions";
+import { useAnnounceMeetingOnScreen } from "./meeting-on-screen";
+import { useUiEventTarget } from "../app/lib/ui-events";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
@@ -128,7 +131,7 @@ import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function isNotFound(error: Error | null): boolean {
@@ -646,7 +649,9 @@ function FailedTranscriptActions({
     about?.funding !== "deployment"
       ? fixes.onConnectModels
       : undefined;
-  const billing = !switchTo && transcriptNeedsCredits(code) ? fixes.onOpenBilling : undefined;
+  const upgrade = code === "subscription_plan_required";
+  const billing =
+    !switchTo && (transcriptNeedsCredits(code) || upgrade) ? fixes.onOpenBilling : undefined;
   return (
     <span className="flex flex-wrap gap-2">
       {switchTo ? (
@@ -672,7 +677,7 @@ function FailedTranscriptActions({
       ) : billing ? (
         <Button type="button" size="sm" onClick={billing}>
           <CreditCardIcon aria-hidden="true" />
-          {msg("meetings.detailPage.addCredits")}
+          {msg(upgrade ? "meetings.detailPage.upgradeToPro" : "meetings.detailPage.addCredits")}
         </Button>
       ) : connect ? (
         <Button type="button" size="sm" onClick={connect}>
@@ -1054,6 +1059,23 @@ function MeetingDetailPageForRecording({
     setOpeningTab(openingMeetingTab(notes.notes));
   }
   const tab = chosenTab ?? openingTab;
+  // The ⌘K menu's "Ask about this meeting": the Ask field shows on Summary and
+  // Transcript, so a question from the Notepad tab moves to Summary first.
+  const [askRequest, setAskRequest] = useState<MeetingAskRequest | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const askFromMenu = useCallback((question: string | null) => {
+    if (tabRef.current === "notepad") setChosenTab("summary");
+    setAskRequest((current) => ({ question, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  const recordingOnScreenHere =
+    recording?.state === "capturing" &&
+    ["recording", "paused"].includes(meetingHereStatus(recorder, recordingId, online) ?? "");
+  useAnnounceMeetingOnScreen(
+    useUiEventTarget("document"),
+    recordingId,
+    onAsk && recording && !recordingOnScreenHere ? askFromMenu : null,
+  );
   const slots = useMemo(() => speakerColorSlots(transcript.segments), [transcript.segments]);
   const mentionTracks = recording?.tracks;
   const mentions = useMemo(
@@ -1918,7 +1940,11 @@ function MeetingDetailPageForRecording({
               </>
             )}
             {askable && onAsk && tab !== "notepad" ? (
-              <MeetingAsk onAsk={(question) => onAsk(recording.id, question)} />
+              <MeetingAsk
+                onAsk={(question) => onAsk(recording.id, question)}
+                request={askRequest}
+                onRequestTaken={() => setAskRequest(null)}
+              />
             ) : null}
           </div>
         ) : (

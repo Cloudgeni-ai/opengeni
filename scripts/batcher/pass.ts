@@ -764,6 +764,7 @@ async function build(
   members: QueuedPull[],
   pending: number[][],
   blame: string[] = [],
+  aheadOfBisection?: true,
 ) {
   const { gh } = ctx;
   const base = await gh.mainSha();
@@ -821,6 +822,7 @@ async function build(
       members: built,
       pending,
       ...(blame.length ? { blame } : {}),
+      ...(aheadOfBisection ? { aheadOfBisection } : {}),
     };
     const tip = await gh.createCommit(built.at(-1)!.tree, [head], renderManifest(manifest));
     await gh.createBranch(`${BATCH_PREFIX}${id}`, tip);
@@ -851,7 +853,7 @@ async function act(ctx: Context, action: Action) {
     case "regenerate":
       return regenerateGenerated(ctx, action.number);
     case "build":
-      return build(ctx, action.members, action.pending, action.blame);
+      return build(ctx, action.members, action.pending, action.blame, action.aheadOfBisection);
     case "hold":
       await noteVersionHold(ctx, action);
       return;

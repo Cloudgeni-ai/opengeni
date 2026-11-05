@@ -2117,8 +2117,7 @@ describe("capability catalog helpers", () => {
     const copy = capabilityErrorToast(refused, "Couldn't remove Skill");
     expect(copy).toEqual({
       title: "Couldn't remove Skill",
-      description:
-        "You don't have permission to do this. Ask an admin for access. Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+      description: "You don't have permission to do this. Ask an admin for access.",
     });
     expect(
       capabilityErrorToast(new Error("This Skill is awaiting review."), "Couldn't enable")

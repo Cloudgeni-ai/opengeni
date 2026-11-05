@@ -14,6 +14,7 @@ import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
+  effectiveSandboxDrainProviderSnapshotTimeoutMs,
   effectiveSandboxLifecycle,
   effectiveModalIdleTimeoutSeconds,
   configuredStaticUsageLimits,
@@ -2785,6 +2786,28 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     );
     expect(settings.sandboxSnapshotTimeoutMs).toBe(60_000);
     expect(settings.sandboxDrainSnapshotTimeoutMs).toBe(30 * 60_000);
+  });
+
+  test("a drain's provider snapshot timeout is separate from, and never below, its wait", () => {
+    const defaults = getSettings();
+    expect(defaults.sandboxDrainProviderSnapshotTimeoutMs).toBe(600_000);
+    expect(effectiveSandboxDrainProviderSnapshotTimeoutMs(defaults, 60_000)).toBe(600_000);
+    // Staging's 10-minute wait still leaves the provider room to finish late.
+    expect(effectiveSandboxDrainProviderSnapshotTimeoutMs(defaults, 600_000)).toBe(1_200_000);
+    expect(effectiveSandboxDrainProviderSnapshotTimeoutMs(defaults, 20 * 60_000)).toBe(40 * 60_000);
+    expect(effectiveSandboxDrainProviderSnapshotTimeoutMs(defaults, 30 * 60_000)).toBe(
+      60 * 60_000 - 10_000,
+    );
+    const configured = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS: String(20 * 60_000) },
+      () => getSettings(),
+    );
+    expect(effectiveSandboxDrainProviderSnapshotTimeoutMs(configured, 60_000)).toBe(20 * 60_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS: String(60 * 60_000) }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
   });
 
   test("an explicit drain budget must fit dispatch, capture, and handoff inside the wait ceiling", () => {

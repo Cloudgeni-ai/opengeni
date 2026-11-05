@@ -39,6 +39,7 @@ import {
   type TerminateBoxFn,
 } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
+import * as dbModule from "@opengeni/db";
 
 const observability = {
   info() {},
@@ -277,6 +278,96 @@ function drainInput(
 }
 
 describe("drain retry while an earlier capture is settling", () => {
+  test("a drain that cannot save the box releases the turns waiting on its replacement", async () => {
+    if (!available) return;
+    // A Modal box lost /bin/sh and a turn asked to replace it. The save
+    // fails, so the box stays draining (the drain policy is unchanged); the
+    // turns waiting on it are released to stop with clear copy.
+    expect(
+      typeof (dbModule as Partial<typeof dbModule>).releaseSandboxProcessStartReplacementWaiters,
+    ).toBe("function");
+    const release = spyOn(dbModule, "releaseSandboxProcessStartReplacementWaiters");
+    try {
+      const epoch = 6;
+      const instanceId = "sb-no-shell-save-fails";
+      const ids = await drainingModalLease(epoch, instanceId);
+      // Rejects only once the drain awaits it, so the rejection is never unhandled.
+      const failingCapture = {
+        then: (_resolve: unknown, reject: (error: Error) => void) =>
+          reject(new Error("modal snapshot failed")),
+      } as unknown as Promise<Uint8Array>;
+      const { client: provider } = pendingModalClient(failingCapture);
+      const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+        // The real provider drain: its capture is what fails.
+        terminateBox: async (
+          settings,
+          lease,
+          obs,
+          persistArchive,
+          requestId,
+          disposition,
+          ...rest
+        ) =>
+          await terminateProviderBox(
+            settings,
+            lease,
+            obs,
+            persistArchive,
+            (() => provider) as never,
+            undefined,
+            requestId,
+            disposition,
+            ...rest,
+          ),
+        probeDrainableProvider: async () => "ready",
+      });
+      await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+        "modal snapshot failed",
+      );
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(release.mock.calls[0]?.[1]).toEqual({
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        leaseEpoch: epoch,
+      });
+      const lease = await readLease(db, ids.workspaceId, ids.groupId);
+      expect(lease).toMatchObject({ liveness: "draining", leaseEpoch: epoch, instanceId });
+      // The next drain waits out the backoff after that failed save without
+      // saving again; turns that started waiting since are released too.
+      await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+        "next attempt in",
+      );
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(release.mock.calls[1]?.[1]).toEqual(release.mock.calls[0]?.[1]);
+    } finally {
+      release.mockRestore();
+    }
+  }, 60_000);
+
+  test("a drain that fails after the save releases no one", async () => {
+    if (!available) return;
+    // Termination or publication failed after the box was saved: the next
+    // sweep finishes the replacement, so no turn is told its files were not saved.
+    const release = spyOn(dbModule, "releaseSandboxProcessStartReplacementWaiters");
+    try {
+      const epoch = 6;
+      const instanceId = "sb-no-shell-stop-fails";
+      const ids = await drainingModalLease(epoch, instanceId);
+      const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+        terminateBox: async () => {
+          throw new Error("modal terminate failed");
+        },
+        probeDrainableProvider: async () => "ready",
+      });
+      await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+        "modal terminate failed",
+      );
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      release.mockRestore();
+    }
+  }, 60_000);
+
   test.each(["late success", "late failure"])(
     "a retry neither replaces the claim nor captures again until the earlier capture settles (%s)",
     async (outcome) => {

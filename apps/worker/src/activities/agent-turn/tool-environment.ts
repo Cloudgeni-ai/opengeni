@@ -2,6 +2,13 @@ import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
+  PERSONAL_SLACK_SEND_TOOL_NAME,
+  personalSlackSendTargets,
+  slackBotSendHasPerson,
+  strictestDecision,
+  withSlackBotSendApproval,
+} from "./slack-bot-send-approval";
+import {
   firstPartyToolsForAttendance,
   sessionStartedUnattended,
   sessionUnattendedNow,
@@ -24,6 +31,9 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
+  readPreparedBotMessage,
+  resolveAttemptConnectorToolDecision,
+  getSessionChainRoot,
   resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -31,6 +41,7 @@ import {
   getSessionTitleOperation,
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
+  sessionHasToolRouterHistory,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -68,7 +79,6 @@ import {
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
-  environmentsEncryptionKeyBytes,
   resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
@@ -101,12 +111,14 @@ import {
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
+import { turnToolRouterExpected } from "./tool-router-expectation";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
@@ -151,16 +163,7 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import {
-  attemptSecretResolver,
-  taskVaultSecretCaptureEnabled,
-  type AttemptVaultAccess,
-} from "./secret-resolver";
-import {
-  attachSessionTreeSecretValues,
-  attachTaskVaultSecretCapture,
-  currentAttemptSecretValues,
-} from "./secret-values";
+import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
 
 /**
  * The largest personal SKILL.md the Skill index reads for showing in full: a
@@ -249,6 +252,8 @@ export type PrepareTurnToolRuntimeDeps = {
   /** Present when this turn resolves host-managed run credentials. */
   runCredentialRenewals?: RenewalState | undefined;
   runMcpCredentials?: RunMcpCredentials;
+  /** The accepted turn's frozen effective learning modes (instructions rendering only). */
+  learningModes?: AgentLearningDefaults | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -585,6 +590,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     agentConfig: session.agent,
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
+    nestedAgentDepth: session.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
+    learning: deps.learningModes,
   });
   const needsTitle = shouldRequestMissingSessionTitle({
     agentConfig: session.agent,
@@ -610,7 +618,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
+  const appActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
@@ -675,6 +683,49 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           approvalId,
         }),
       cards: eventing.appActionApprovalCards,
+    },
+  );
+  // A bot send where a person can answer follows the person's own Slack send
+  // permission; scheduled and unattended runs, and workers of them, keep
+  // sending at once.
+  const connectorActionPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(
+    appActionPolicy,
+    {
+      interactive: async () =>
+        await slackBotSendHasPerson({
+          scheduled: scheduledTurnMcpServerIds(turn) !== null,
+          unattended,
+          chainRoot: async () => {
+            const root = await getSessionChainRoot(db, input.workspaceId, input.sessionId);
+            return root
+              ? {
+                  rootUnattended: root.rootUnattended,
+                  rootTurnScheduled:
+                    root.rootTurnMetadata !== null &&
+                    scheduledTurnMcpServerIds({ metadata: root.rootTurnMetadata }) !== null,
+                }
+              : null;
+          },
+        }),
+      personalSlackSendDecision: async () =>
+        strictestDecision(
+          await Promise.all(
+            personalSlackSendTargets(turn.personalConnectionDelegations, runSettings).map(
+              async (target) =>
+                await resolveAttemptConnectorToolDecision(db, connectorActionIdentity, {
+                  ...target,
+                  toolName: PERSONAL_SLACK_SEND_TOOL_NAME,
+                }),
+            ),
+          ),
+        ),
+      preparedMessage: async (messageId) =>
+        await readPreparedBotMessage(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          id: messageId,
+        }),
     },
   );
   const bundledSkills =
@@ -1063,6 +1114,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...codeSearchTools,
     ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
+  // Frozen per turn: router history, the prepared refs, the first-party
+  // selection and the function tools. Decides whether anything is deferred.
+  const toolRouterInHistory = session.agent
+    ? await sessionHasToolRouterHistory(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : false;
+  const toolRouterExpected = turnToolRouterExpected({
+    agentConfig: session.agent,
+    routerInHistory: toolRouterInHistory,
+    toolRefs: githubRestMcp.tools,
+    mcpServers: githubRestMcp.settings.mcpServers,
+    remoteFirstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
+    functionToolNames: attemptToolDefinitions.map((tool) => tool.modelName),
+    preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
+    mediaTools: toolFamilies.media,
+  });
+  // With nothing else deferred, the deferred title tool alone would bring the
+  // search router back on every titled turn; Opengeni titles the session itself.
+  // Without a router to install the title tool sits in the request for free.
+  const routerInstallable =
+    toolRouterInHistory ||
+    (lazyToolTransport === "codex_native"
+      ? runSettings.codexToolSearchEnabled
+      : runSettings.lazyToolSearchEnabled);
+  const remoteFirstPartyMcpTools =
+    toolRouterExpected || !routerInstallable
+      ? titleToolPlan.remoteFirstPartyMcpTools
+      : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1151,33 +1233,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
-  const maskingPrincipal = {
-    kind: "attempt",
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId: turn.id,
-    attemptId: input.attemptId,
-    executionGeneration: attempt.executionGeneration,
-  } as const;
-  const maskingKey = environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null;
-  // Best effort: values this session tree used before are masked too.
-  attachSessionTreeSecretValues({
-    memory: currentAttemptSecretValues(),
-    db,
-    encryptionKey: maskingKey,
-    principal: maskingPrincipal,
-    observability,
-  });
-  // Secrets that show up in tool output are saved to the task vault.
-  attachTaskVaultSecretCapture({
-    memory: currentAttemptSecretValues(),
-    db,
-    encryptionKey: maskingKey,
-    principal: maskingPrincipal,
-    enabled: taskVaultSecretCaptureEnabled(session.agent, session.firstPartyMcpPermissions),
-    observability,
-  });
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
@@ -1317,7 +1372,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(effectiveFirstPartyPermissions
           ? { firstPartyPermissions: effectiveFirstPartyPermissions }
           : {}),
-        firstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
+        firstPartyTools: remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
@@ -1411,7 +1466,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
-    promptToolAvailability,
+    promptToolAvailability:
+      promptToolAvailability && !toolRouterExpected
+        ? { ...promptToolAvailability, toolSearchAbsent: true as const }
+        : promptToolAvailability,
+    toolRouterInHistory,
+    toolRouterExpected,
     skillCatalog,
   };
 }

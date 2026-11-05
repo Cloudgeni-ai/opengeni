@@ -7,7 +7,6 @@ import {
   type ModelRequest,
 } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { maskSecretValues } from "@opengeni/contracts";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
@@ -979,21 +978,6 @@ describe("Claude searches outside the Claude transport", () => {
     expect(projectHostedSearchEvidence(kept[0]!)).toMatchObject({ role: "user" });
   });
 
-  test("a search keeps its session's form when secret masking copies it", () => {
-    const kept = projectHistoryForProvider([item, cited], "anthropic-messages", {
-      searchRecordForm: "runtime",
-    });
-    // Masking happens between the filters and the transport, and rebuilds
-    // any item holding a known secret value.
-    const masked = maskSecretValues(kept, [{ value: "opengeni release notes", label: "[secret]" }]);
-    expect(masked[0]).not.toBe(kept[0]);
-    for (const api of ["responses", "chat"] as const) {
-      const projected = projectHistoryForProvider(masked, api);
-      expect(projected[0]).toMatchObject({ type: "message", role: "user" });
-      expect(JSON.stringify(projected)).not.toContain("opengeni release notes");
-    }
-  });
-
   test("the compaction transcript names the query and sources without encrypted pages", () => {
     const rendered = renderCompactionPromptInputForChat([item]);
     expect(rendered).toContain("opengeni release notes");
@@ -1076,6 +1060,29 @@ describe("Claude citation tags in a reply", () => {
       ),
     );
     expect(argumentsOf(response.output as any[]).reply).toBe("Fact: quoted.");
+  });
+
+  test("a goal_complete reply is the final answer, so its tags become links too", () => {
+    const evidence = `Checked ${cite("1-1", "kept")}.`;
+    const response = anthropicResponse(
+      message(
+        "msg_1",
+        [
+          call,
+          results,
+          toolUse("opengeni__goal_complete", {
+            evidence,
+            reply: `Done: ${cite("1-1", "Version 2 adds search.")}`,
+          }),
+        ],
+        "tool_use",
+      ),
+    );
+    expect(argumentsOf(response.output as any[])).toEqual({
+      // Evidence is ledger text, not the answer: it keeps its exact text.
+      evidence,
+      reply: "Done: [Version 2 adds search.](https://example.com/notes)",
+    });
   });
 
   test("other tool arguments keep their exact text", () => {

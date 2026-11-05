@@ -34,6 +34,12 @@ const SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION: u32 = 254;
 enum ManagedSystemdDefinition {
     CompatibleOwned,
     CurrentOwned,
+    /// An unchanged unit an earlier release generated for managers predating
+    /// `DelegateSubgroup`; it is replaced by the current compatible unit.
+    PreviousCompatibleOwned,
+    /// An unchanged unit an earlier release generated with the supervisor
+    /// subgroup; it is replaced by the current unit.
+    PreviousCurrentOwned,
     Unowned,
 }
 
@@ -166,9 +172,11 @@ fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
     })
 }
 
-/// Warns when the live systemd unit cannot give this process its operation
+/// Refreshes an unchanged unit an earlier release generated (its restart
+/// policy let systemd stop restarting the agent after five quick kills), and
+/// warns when the live systemd unit cannot give this process its operation
 /// cgroup: a custom unit, or a generated unit that systemd did not place in the
-/// `supervisor` subgroup. It never rewrites the unit.
+/// `supervisor` subgroup. A custom unit is never rewritten.
 #[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 pub fn inspect_managed_service_definition() -> Result<(), String> {
     #[cfg(target_os = "linux")]
@@ -192,15 +200,26 @@ fn inspect_managed_systemd_definition() -> Result<(), String> {
     let spec = spec_for(install_scope)?;
     let existing = std::fs::read_to_string(&unit_path)
         .map_err(|error| format!("read {}: {error}", unit_path.display()))?;
-    match managed_systemd_definition(&existing, &spec) {
+    let definition = managed_systemd_definition(&existing, &spec);
+    if let Some(replacement) = refreshed_systemd_definition(definition, &spec) {
+        if let Err(error) = refresh_previous_systemd_unit(install_scope, &unit_path, &replacement) {
+            tracing::warn!(
+                %error,
+                path = %unit_path.display(),
+                "could not update the generated systemd unit; it keeps its earlier restart policy until `opengeni-agent service install --restart`"
+            );
+        }
+    }
+    match definition {
         ManagedSystemdDefinition::Unowned => {
             tracing::warn!(
                 path = %unit_path.display(),
                 "the active systemd unit is custom; leaving it untouched. Run `opengeni-agent service install --restart` to adopt the generated containment topology"
             );
         }
-        ManagedSystemdDefinition::CompatibleOwned => {}
-        ManagedSystemdDefinition::CurrentOwned => {
+        ManagedSystemdDefinition::CompatibleOwned
+        | ManagedSystemdDefinition::PreviousCompatibleOwned => {}
+        ManagedSystemdDefinition::CurrentOwned | ManagedSystemdDefinition::PreviousCurrentOwned => {
             if cgroup_location != ManagedSystemdCgroup::Supervisor {
                 tracing::warn!(
                     path = %unit_path.display(),
@@ -211,6 +230,97 @@ fn inspect_managed_systemd_definition() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Replaces an unchanged earlier generated unit with the current one of the
+/// same shape and reloads the manager. Only the restart policy differs, which
+/// systemd applies on reload, so the running agent is not restarted. A failed
+/// reload leaves the new, valid unit on disk for the next reload to apply. The
+/// reload runs on its own thread so a stuck manager never holds up startup.
+#[cfg(target_os = "linux")]
+fn refresh_previous_systemd_unit(
+    install_scope: ServiceScope,
+    unit_path: &Path,
+    replacement: &str,
+) -> Result<(), String> {
+    replace_unit_file(unit_path, replacement)?;
+    let reload: &[&str] = match install_scope {
+        ServiceScope::User => &["--user", "daemon-reload"],
+        ServiceScope::System => &["daemon-reload"],
+    };
+    let path = unit_path.display().to_string();
+    let spawned = std::thread::Builder::new()
+        .name("systemd-unit-reload".into())
+        .spawn(move || match systemctl(reload) {
+            Ok(()) => info!(
+                path = %path,
+                "updated the generated systemd unit so the agent keeps restarting however often it is stopped"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                path = %path,
+                "updated the generated systemd unit, but systemd could not reload it yet; it applies on the next reload"
+            ),
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(
+            %error,
+            path = %unit_path.display(),
+            "updated the generated systemd unit, but could not start its reload; it applies on the next reload"
+        );
+    }
+    Ok(())
+}
+
+/// Atomically replaces `unit_path` with `contents`: written and flushed to a
+/// hidden file in the same directory, renamed over the unit, then the
+/// directory is flushed, so a crash leaves either the old or the new unit,
+/// never an empty one. A failure removes the staged file and leaves the unit
+/// as it was.
+#[cfg(any(target_os = "linux", test))]
+fn replace_unit_file(unit_path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    let file_name = unit_path.file_name().map_or_else(
+        || service::ids::SYSTEMD_UNIT.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let staged = unit_path.with_file_name(format!(".{file_name}.opengeni-update"));
+    let written = std::fs::File::create(&staged).and_then(|mut file| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("write {}: {error}", staged.display()));
+    }
+    if let Err(error) = std::fs::rename(&staged, unit_path) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("replace {}: {error}", unit_path.display()));
+    }
+    if let Some(dir) = unit_path.parent() {
+        // Best effort: the rename itself already succeeded.
+        let _ = std::fs::File::open(dir).and_then(|dir| dir.sync_all());
+    }
+    Ok(())
+}
+
+/// The unit that replaces an unchanged earlier generated one, keeping its
+/// cgroup shape (switching shape would need a restart); `None` for anything
+/// else, which is left as it is.
+#[cfg(any(target_os = "linux", test))]
+fn refreshed_systemd_definition(
+    definition: ManagedSystemdDefinition,
+    spec: &ServiceSpec,
+) -> Option<String> {
+    match definition {
+        ManagedSystemdDefinition::PreviousCurrentOwned => Some(service::render_systemd_unit(spec)),
+        ManagedSystemdDefinition::PreviousCompatibleOwned => Some(
+            service::render_systemd_unit_without_supervisor_subgroup(spec),
+        ),
+        ManagedSystemdDefinition::CurrentOwned
+        | ManagedSystemdDefinition::CompatibleOwned
+        | ManagedSystemdDefinition::Unowned => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -309,6 +419,10 @@ fn managed_systemd_definition(existing: &str, spec: &ServiceSpec) -> ManagedSyst
         spec,
     )) {
         ManagedSystemdDefinition::CompatibleOwned
+    } else if matches(service::render_previous_systemd_unit(spec)) {
+        ManagedSystemdDefinition::PreviousCurrentOwned
+    } else if matches(service::render_previous_systemd_unit_without_supervisor_subgroup(spec)) {
+        ManagedSystemdDefinition::PreviousCompatibleOwned
     } else {
         ManagedSystemdDefinition::Unowned
     }
@@ -1499,6 +1613,92 @@ mod tests {
             ManagedSystemdDefinition::Unowned,
             "a marker alone must never adopt a custom unit"
         );
+    }
+
+    #[test]
+    fn an_unchanged_earlier_unit_is_refreshed_to_keep_restarting_the_agent() {
+        // Units released up to 0.1.150 let systemd stop restarting the agent
+        // after five starts in a minute. Upgrading replaces exactly those
+        // generated units with the current one of the same cgroup shape.
+        let spec = ServiceSpec {
+            binary_path: PathBuf::from("/home/u/.local/bin/opengeni-agent"),
+            args: vec!["run".into()],
+            scope: ServiceScope::User,
+            environment_path: Some("/usr/bin:/bin".into()),
+        };
+        for (previous, expected, replacement) in [
+            (
+                service::render_previous_systemd_unit(&spec),
+                ManagedSystemdDefinition::PreviousCurrentOwned,
+                service::render_systemd_unit(&spec),
+            ),
+            (
+                service::render_previous_systemd_unit_without_supervisor_subgroup(&spec),
+                ManagedSystemdDefinition::PreviousCompatibleOwned,
+                service::render_systemd_unit_without_supervisor_subgroup(&spec),
+            ),
+        ] {
+            assert!(previous.contains("\nStartLimitBurst=5\n"));
+            for existing in [
+                previous.clone(),
+                previous.replace(
+                    "\nDescription=Opengeni self-hosted agent\n",
+                    "\nDescription=OpenGeni self-hosted agent\n",
+                ),
+            ] {
+                let definition = managed_systemd_definition(&existing, &spec);
+                assert_eq!(definition, expected);
+                let refreshed = refreshed_systemd_definition(definition, &spec)
+                    .expect("an unchanged earlier unit is refreshed");
+                assert_eq!(refreshed, replacement);
+                assert!(refreshed.contains("\nStartLimitIntervalSec=0\n"));
+                assert!(!refreshed.contains("StartLimitBurst="));
+            }
+            // An operator's edit to an earlier unit is never replaced.
+            let edited = previous.replace("RestartSec=5", "RestartSec=1");
+            assert_eq!(
+                managed_systemd_definition(&edited, &spec),
+                ManagedSystemdDefinition::Unowned
+            );
+            assert_eq!(
+                refreshed_systemd_definition(ManagedSystemdDefinition::Unowned, &spec),
+                None
+            );
+        }
+        for current in [
+            ManagedSystemdDefinition::CurrentOwned,
+            ManagedSystemdDefinition::CompatibleOwned,
+        ] {
+            assert_eq!(refreshed_systemd_definition(current, &spec), None);
+        }
+    }
+
+    #[test]
+    fn a_refreshed_unit_replaces_the_file_whole_and_leaves_nothing_staged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let unit = dir.path().join(service::ids::SYSTEMD_UNIT);
+        std::fs::write(&unit, "[Unit]\nStartLimitBurst=5\n").expect("seed unit");
+        replace_unit_file(&unit, "[Unit]\nStartLimitIntervalSec=0\n").expect("replace");
+        assert_eq!(
+            std::fs::read_to_string(&unit).expect("read unit"),
+            "[Unit]\nStartLimitIntervalSec=0\n"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from(service::ids::SYSTEMD_UNIT)]
+        );
+
+        // A unit that cannot be replaced is reported and leaves no staged file.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("dir in the unit's place");
+        std::fs::write(blocked.join("keep"), "").expect("non-empty dir");
+        assert!(replace_unit_file(&blocked, "[Unit]\n").is_err());
+        assert!(!dir.path().join(".blocked.opengeni-update").exists());
+        assert!(blocked.join("keep").exists());
     }
 
     #[test]

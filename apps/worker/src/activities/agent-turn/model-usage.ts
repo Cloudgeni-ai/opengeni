@@ -915,10 +915,20 @@ export function applyCodexCacheTelemetry(
   provider: string,
   normalizedUsage: ModelCallUsageNormalization,
 ): void {
+  const { telemetry } = normalizedUsage;
   recordModelCacheTokens(observability, provider, {
-    cachedTokens: normalizedUsage.telemetry.cachedTokens,
-    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
-    promptTokens: normalizedUsage.telemetry.inputTokens,
+    cachedTokens: telemetry.cachedTokens,
+    cacheWriteTokens: telemetry.cacheWriteTokens,
+    promptTokens: telemetry.inputTokens,
+    // A Responses terminal event without a usage object reaches here as the
+    // SDK's all-zero usage with empty details; it reported nothing. Malformed
+    // counts were reported, so they stay a missing cache field.
+    usageReported: !(
+      normalizedUsage.rejectedFields.length === 0 &&
+      telemetry.cachedTokens === null &&
+      !telemetry.inputTokens &&
+      !telemetry.outputTokens
+    ),
   });
 }
 

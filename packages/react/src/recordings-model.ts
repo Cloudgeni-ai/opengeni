@@ -175,6 +175,7 @@ const PROVIDER_FAILURES = new Set([
   "provider_unauthorized",
   "provider_quota_exceeded",
   "policy_blocked",
+  "subscription_api_unavailable",
 ]);
 /** Failures of the model: another model, even the same provider's, may work. */
 const MODEL_FAILURES = new Set([
@@ -211,6 +212,8 @@ export function transcriptFixModel(
           : 2;
   const candidates = models.filter((entry) => {
     if (!entry.available || !entry.capabilities.batch) return false;
+    if (code === "subscription_api_unavailable" && entry.funding === "workspace_subscription")
+      return false;
     if (failed && entry.providerId === failed.providerId) {
       if (!MODEL_FAILURES.has(code) || entry.model === failed.model) return false;
     }
@@ -259,6 +262,10 @@ export function transcriptErrorText(
   } | null,
 ): string {
   switch (code) {
+    case "subscription_plan_required":
+      return msg("lib.format.subscriptionUpgradeRequiredHeadline");
+    case "subscription_api_unavailable":
+      return msg("meetings.recordings.errorSubscriptionApiUnavailable");
     case "missing_provider_key": {
       if (!model) return msg("meetings.recordings.errorMissingProviderKey");
       const names = { modelName: model.modelName, providerName: model.providerName };

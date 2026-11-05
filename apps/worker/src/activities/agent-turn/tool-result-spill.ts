@@ -15,8 +15,6 @@ import {
   getFile,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
-  captureToolOutputSecretShapes,
-  maskToolOutputForStorage,
   prepareGeneratedWorkspaceFile,
   type Database,
 } from "@opengeni/db";
@@ -89,10 +87,7 @@ export class ToolResultSpill {
     if (!objectStorage) {
       throw new Error("Oversized tool-result spill requires configured object storage");
     }
-    // The spilled file is stored tool output too: secret-shaped values are
-    // captured, then they and known secret values are masked.
-    await captureToolOutputSecretShapes(input.result, "tool_result_spill");
-    const result = maskToolOutputForStorage(input.result, "tool_result_spill");
+    const result = input.result;
     const bytes = Buffer.from(JSON.stringify(result) ?? "null");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const identity = toolResultSpillIdentity({

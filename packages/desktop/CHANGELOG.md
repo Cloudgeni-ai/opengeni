@@ -1,5 +1,115 @@
 # @opengeni/desktop
 
+## 6.10.0
+
+### Patch Changes
+
+- c19768e: Not now on the desktop app's meeting card now ends the question for the whole call. An app that drops the microphone for a while, for example when muted or switching devices, is no longer asked about again. Inside a calendar meeting the question doesn't come back until the meeting ends. Outside one, it comes back only after the app has been off the microphone for five minutes. Not now on a call that started shortly before a calendar meeting also covers that meeting, so its "Join and start recording" reminder no longer appears for a meeting the person is already in. The card no longer holds itself up after Not now. Chromium replays the pointer onto a window shown again, which made the next card never time out. The pointer's position now comes from the main process, so a card holds only once the pointer moves onto it. Escape closes the question like Not now does, and a card window closed from outside counts as Not now. `MeetingPromptCard` takes an optional `pointerMs`.
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+- 15763a2: Stop recording on the desktop meeting card now stops the recording in the account where it started, even while the window shows another account. Before, the stop could go to the account on screen, which ignored it, and the meeting kept recording. If a recording hasn't stopped a few seconds after Stop, the app shows its account, asks it again and logs this. Meeting detection, system audio and dictation now forget a page only when it really leaves its document (a committed navigation, an error page or a lost renderer), not when a navigation starts and is cancelled, such as a link opened in the browser. With several accounts, the stop card names the account that records and the account menu marks it.
+
+  API: `MeetingDetection` and `createMeetingDetection` take optional `revealPage`, `describePage`, `recordingChanged` and `stopConfirmMs`. `MeetingDetection` adds `isRecording()`. The stop prompt has an optional `where`, `MeetingWords` an optional `callEndedIn` and `DesktopAccount` an optional `recording`. Code that declares a `Required<MeetingWords>` object must now include `callEndedIn`.
+
+- f2b5205: Picking the wrong account no longer forces a sign-in. In the phone app, picking a signed-out account opens its sign-in over the account in use, so Cancel goes back. The account menus mark signed-out accounts. When the account in use is signed out, the sign-in screen lists the other accounts, so one tap returns to a signed-in one. In the desktop app, Cancel on the sign-in page returns to the account you came from, not the first signed-in one.
+- Updated dependencies [b72f388]
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [fb37d99]
+- Updated dependencies [f619179]
+- Updated dependencies [6900fce]
+- Updated dependencies [15763a2]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/agent-host@6.10.0
+  - @opengeni/sdk@6.10.0
+
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/agent-host@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [feaecf8]
+  - @opengeni/sdk@6.8.0
+  - @opengeni/agent-host@6.8.0
+
+## 6.7.0
+
+### Minor Changes
+
+- cb37e4d: A meeting being recorded shows in the desktop app's menu bar (the tray on Windows and Linux). While one records, the icon becomes a recording badge (a dictation under way still shows its own icon first), and the menu starts with the meeting: whether it records or is paused, for how long, its name (or when it started), and the account it records in when the window shows another. "Open Live Transcript" brings that account up and opens the meeting; "Stop Recording" stops it. Nothing about meetings shows while none records. `DesktopMeetingDetection.setRecording()` takes an optional `DesktopRecordingMeeting` (title, recorded time, paused), and `DesktopMeetingRequest` adds `{ kind: "open" }`, sent only to a page that described its recording. The meeting recorder in `@opengeni/react` describes its recording and opens it on `open`. `MeetingDetection` adds `recording()`, `onRecording()`, `openRecording()` and `stopRecording()`.
+
+### Patch Changes
+
+- cf35731: Only the owner of a personal (Only me) login can approve an action that runs on it. An approval runs on the accounts its message froze, so before this any member, workspace API key or Slack click by someone else could make an action happen as another person. The owner's personal API key and `asUser` tokens count as the owner. Approving such an action as anyone else now answers 403 with `details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` and a message naming who can approve (the SDK adds `isApprovalRequiresAccountOwnerError` and `APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE`); declining stays open to anyone who can control the chat, and actions on workspace logins keep their ordinary rules. A tool review adds the optional `approvedBy` ("you" or "account_owner") and `accountOwnerLabel` fields, and the review card says who can approve, or tells the owner in a shared chat that the decision is theirs. Slack cards for anyone else offer only Decline, and the desktop and mobile apps show or route a refused approval instead of failing.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [cf35731]
+  - @opengeni/sdk@6.7.0
+  - @opengeni/agent-host@6.7.0
+
+## 6.6.0
+
+### Minor Changes
+
+- 2c76a2a: Each desktop dictation shortcut can pick its own speech-to-text model, such as one for English and another for Norwegian. The client config lists the models a dictation can use (`voiceInput.models`), a dictation recording may name its `providerId` and `model`, and it is then heard by exactly that model with no fallback to another provider. Escape no longer cancels a dictation, on the desktop or in the composer: only the Cancel button and the cancel shortcut do, so a stray Escape never loses speech or is taken from the app being typed in. The dictation window no longer draws a drop shadow around its pill.
+
+### Patch Changes
+
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [3cb05f9]
+  - @opengeni/sdk@6.6.0
+  - @opengeni/agent-host@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- a977392: Dictation shows in the menu bar (the tray on Windows and Linux). While a dictation starts, listens, transcribes or has failed, the icon changes to match (a microphone, a record button, moving sound bars, a warning sign; a brief check when the text is delivered), and the tooltip and the first menu line say how it is going. The menu starts each dictation shortcut, showing its keys, and copies the last dictation again; while dictating it offers Finish and Cancel, and after a failure Retry (when possible) and Dismiss. The menu bar item now stays while dictation is on, even when this computer isn't connected. `Dictation` adds `activity()`, `onActivity()`, `menu()` and `menuAction()`.
+
+### Patch Changes
+
+- 8811409: The dictation pill and the meeting card no longer stop appearing after their page's process is killed or hangs, for example when the system reclaims memory. A window whose page is gone, hangs, fails to render or doesn't answer within five seconds is thrown away and built again (once) showing the current state, and the failure is logged instead of being swallowed. `DictationHud` and `MeetingPromptCard` take an optional `log`.
+- Updated dependencies [7a9c492]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/sdk@6.5.0
+  - @opengeni/agent-host@6.5.0
+
 ## 6.4.0
 
 ### Minor Changes

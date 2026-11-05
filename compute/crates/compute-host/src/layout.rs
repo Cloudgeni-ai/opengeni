@@ -381,6 +381,21 @@ pub(crate) fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Makes the disk at `path` at least `length` bytes long and returns how
+/// long it is. Its new end is a hole, which takes no disk until the guest
+/// writes there; the length lasts a crash, as the record that vouches for
+/// it, written next, must.
+pub(crate) fn lengthen(path: &Path, length: u64) -> io::Result<u64> {
+    let disk = fs::OpenOptions::new().write(true).open(path)?;
+    let found = disk.metadata()?.len();
+    if found >= length {
+        return Ok(found);
+    }
+    disk.set_len(length)?;
+    disk.sync_all()?;
+    Ok(length)
+}
+
 /// Flushes a written file's data to disk.
 pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
     failpoint(path, "sync")?;

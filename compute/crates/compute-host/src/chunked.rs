@@ -25,7 +25,10 @@
 //! Chunks no pointer refers to any more are deleted by a sweep
 //! ([`Chunked::sweep`]); an archive publishes its pointer within the
 //! window that keeps a sweep from deleting what it reused (see
-//! [`compute_storage::fresh`]).
+//! [`compute_storage::fresh`]). A sweep's fence stops an archive in flight;
+//! what it stored it carries into each new hour meanwhile, so the next try
+//! finds it instead of uploading it again, however long the archive took
+//! (see [`ChunkStore::keeping`]).
 //!
 //! An archive reuses what the sandbox's earlier copy holds at the same
 //! offsets, and for a disk made from a stored image, what the image holds:
@@ -39,14 +42,14 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::copy::{self, Head, MemoryHead};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
-use compute_storage::store::{Begun, ChunkStore, Publication, Rewrite};
+use compute_storage::store::{Begun, ChunkStore, Held, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
 use tokio::sync::{Mutex, Semaphore};
@@ -56,13 +59,13 @@ use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{
-    Archive, Claimed, FetchInto, FetchedMemory, Owned, OwnerEpoch, Prefilled, Receipt, SavedFiles,
-    Stamp, Store,
+    Archive, Claimed, FetchInto, FetchedMemory, MadeAt, Owned, OwnerEpoch, Prefilled, Receipt,
+    SavedFiles, Stamp, Store,
 };
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 use confirmed::{Confirmed, ImageChunks};
-use files::{Earlier, Reusable};
+use files::{Earlier, reusable};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -78,13 +81,30 @@ const VERIFY_CHECKS: usize = 64;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
+/// How long what a sandbox's stopped archive stored is held for its next
+/// try once nothing runs: tries follow within minutes, and an hour after
+/// it was last carried a sweep may take it anyway.
+const HELD_IDLE: Duration = Duration::from_secs(3_600);
+
+/// Each sandbox's archive's held chunks, and when a try last began.
+type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 
 /// One chunk-sized piece of a stored file: where it is, and the chunk
 /// holding it (`None` for zeros).
 type Piece = (Range<u64>, Option<ChunkRef>);
 
+/// The format a copy is written in: [`copy::VERSION_PACKS`] when its new
+/// chunks are in packs, [`copy::VERSION`] otherwise (ADR 31).
+fn copy_version(packing: bool) -> u32 {
+    if packing {
+        copy::VERSION_PACKS
+    } else {
+        copy::VERSION
+    }
+}
+
 /// The head of a stored copy (see [`compute_storage::copy`]), in a format
-/// this build reads; it writes only [`copy::VERSION`].
+/// this build reads.
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
     Head::parse(bytes).map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))
 }
@@ -105,6 +125,9 @@ pub struct Chunked {
     compress: Arc<Semaphore>,
     /// A wake's transfers are foreground: background ones give way.
     lanes: Arc<Lanes>,
+    /// What each sandbox's archive stored that it has not published yet,
+    /// held across its tries, and when a try last began.
+    in_flight: Arc<InFlight>,
 }
 
 /// What identifies one version of a local file: if any of it changes, the
@@ -253,6 +276,7 @@ impl Chunked {
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
             compress: Arc::new(Semaphore::new(Threads::for_host().compress)),
             lanes: Arc::default(),
+            in_flight: Arc::default(),
         }
     }
 
@@ -318,7 +342,7 @@ impl Chunked {
     pub async fn sweep(&self, delete: bool) -> Result<Report, StorageError> {
         compute_storage::sweep::sweep(
             &self.chunks,
-            |pointer| async move { self.names(&pointer).await },
+            &copy::Copies(&self.chunks),
             delete,
             std::time::SystemTime::UNIX_EPOCH,
         )
@@ -329,6 +353,7 @@ impl Chunked {
     /// `pointer` keeps. Anything unreadable fails, so a sweep stops before
     /// deleting what it could not account for; only a damaged or missing
     /// working-set pack does not, since a wake without it is just slower.
+    #[cfg(test)]
     async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
         copy::names(&self.chunks, pointer).await
     }
@@ -493,7 +518,13 @@ impl Chunked {
         op: &'static str,
         references: impl IntoIterator<Item = ChunkRef>,
     ) -> Result<bool, EngineError> {
-        let checks: Vec<Result<bool, EngineError>> = stream::iter(references)
+        // One look at an object proves every chunk in it: a pack's chunks
+        // are asked about once.
+        let mut objects = HashMap::new();
+        for reference in references {
+            objects.entry(reference.key()).or_insert(reference);
+        }
+        let checks: Vec<Result<bool, EngineError>> = stream::iter(objects.into_values())
             .map(|reference| async move {
                 let _permit = self
                     .transfers
@@ -623,6 +654,7 @@ impl Chunked {
                 state,
                 memory,
                 runtime: stored.runtime.clone(),
+                vcpus: stored.vcpus,
             });
         };
         let chunks = refs
@@ -644,6 +676,7 @@ impl Chunked {
             manifest: manifest_bytes,
             prefilled,
             runtime: stored.runtime.clone(),
+            vcpus: stored.vcpus,
         })
     }
 
@@ -714,8 +747,39 @@ impl Chunked {
     }
 }
 
-impl Store for Chunked {
-    async fn archive(
+impl Chunked {
+    /// The same store, holding in `held` every chunk it stores.
+    fn holding(&self, held: &Arc<Held>) -> Self {
+        Self {
+            chunks: self.chunks.clone().holding(Arc::clone(held)),
+            ..self.clone()
+        }
+    }
+
+    /// What sandbox `id`'s archive stored and has not published, held from
+    /// its earlier tries. Forgets what no try has held for [`HELD_IDLE`].
+    fn held(&self, id: Id) -> Arc<Held> {
+        let now = self.chunks.now();
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        in_flight.retain(|_, (held, began)| {
+            Arc::strong_count(held) > 1
+                || now
+                    .duration_since(*began)
+                    .is_ok_and(|idle| idle < HELD_IDLE)
+        });
+        let (held, began) = in_flight
+            .entry(id)
+            .or_insert_with(|| (Arc::new(Held::new()), now));
+        *began = now;
+        Arc::clone(held)
+    }
+
+    /// One try of archiving sandbox `id`, storing its chunks through a
+    /// store holding them ([`Self::holding`]).
+    async fn archive_once(
         &self,
         id: Id,
         save: Stamp,
@@ -741,11 +805,14 @@ impl Store for Chunked {
             state: state_before,
             memory: memory_before,
         } = self.before(id, files, now).await;
+        // Decided once, so the head names the format its references are in.
+        let packing = self.chunks.writes_packs();
         let disk = self.put_file(
             files.disk.path(),
             files.disk.open(),
             disk_before,
             None,
+            packing,
             cancel,
         );
         let memory = async {
@@ -760,6 +827,7 @@ impl Store for Chunked {
                     File::open(&image.state),
                     state_before,
                     None,
+                    packing,
                     cancel
                 ),
                 self.put_file(
@@ -767,6 +835,7 @@ impl Store for Chunked {
                     File::open(&image.memory),
                     memory_before,
                     image.chunks.clone(),
+                    packing,
                     cancel,
                 ),
             );
@@ -775,6 +844,7 @@ impl Store for Chunked {
                     state,
                     memory,
                     runtime: image.runtime.clone(),
+                    vcpus: image.vcpus,
                 })),
                 _ => None,
             })
@@ -796,7 +866,7 @@ impl Store for Chunked {
             return Ok(Archive::Cancelled);
         }
         let head = Head {
-            version: copy::VERSION,
+            version: copy_version(packing),
             disk,
             memory,
             profile,
@@ -820,6 +890,35 @@ impl Store for Chunked {
         self.confirmed
             .confirm_sandbox(id, receipt.clone(), confirmed);
         Ok(Archive::Stored(receipt))
+    }
+}
+
+impl Store for Chunked {
+    async fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> Result<Archive, EngineError> {
+        // What a try stores is carried into each new hour while it runs, and
+        // held for the next try when this one fails, as one a sweep's fence
+        // stopped does: that try then finds it rather than uploading it
+        // again.
+        let held = self.held(id);
+        let holding = self.holding(&held);
+        let once = Box::pin(holding.archive_once(id, save, files, cancel));
+        let (archived, kept) = self.chunks.keeping(&held, once).await;
+        if kept.copied_bytes > 0 {
+            crate::observe::notes::bytes("copied", kept.copied_bytes);
+        }
+        if archived.is_ok() {
+            self.in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+        }
+        archived
     }
 
     async fn verify(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
@@ -901,16 +1000,30 @@ impl Store for Chunked {
             Err(error) => return Err(storage_error(OP, error)),
         };
         let head = parse_head(OP, &bytes)?;
-        let disk = self
-            .chunks
-            .get_manifest(&head.disk)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        // The memory manifest's length is the memory's the image was saved
+        // with.
+        let memory = async {
+            match &head.memory {
+                Some(stored) => self
+                    .chunks
+                    .get_manifest(&stored.memory)
+                    .await
+                    .map(|manifest| MadeAt {
+                        vcpus: stored.vcpus,
+                        memory_bytes: Some(manifest.disk_len),
+                    }),
+                None => Ok(MadeAt::default()),
+            }
+        };
+        let (disk, made_at) = tokio::join!(self.chunks.get_manifest(&head.disk), memory);
+        let disk = disk.map_err(|error| storage_error(OP, error))?;
+        let made_at = made_at.map_err(|error| storage_error(OP, error))?;
         Ok(Owned::Done(Some(Claimed {
             save: stamp.save,
             receipt: receipt_of(&bytes),
             memory: head.memory.is_some(),
             disk_bytes: disk.disk_len,
+            made_at,
         })))
     }
 
@@ -1070,38 +1183,6 @@ struct Before {
     memory: Earlier,
 }
 
-/// What an archive may reuse of a file, by offset: what its own earlier
-/// copy `own` holds there, confirmed to be stored if `own_confirmed`, and
-/// what the confirmed `image` holds there if it differs. A chunk of the
-/// earlier copy that the image holds at the same offset is confirmed with
-/// the image.
-fn reusable(
-    own: HashMap<u64, ChunkRef>,
-    own_confirmed: bool,
-    image: Option<&HashMap<u64, ChunkRef>>,
-) -> Earlier {
-    let mut earlier: Earlier = HashMap::with_capacity(own.len().max(image.map_or(0, HashMap::len)));
-    for (&offset, reference) in image.into_iter().flatten() {
-        earlier.entry(offset).or_default().push(Reusable {
-            reference: reference.clone(),
-            confirmed: true,
-        });
-    }
-    for (offset, reference) in own {
-        let held = earlier.entry(offset).or_default();
-        if held.iter().any(|reusable| reusable.reference == reference) {
-            continue;
-        }
-        // After the image's, so a range that matches both names the
-        // confirmed one.
-        held.push(Reusable {
-            reference,
-            confirmed: own_confirmed,
-        });
-    }
-    earlier
-}
-
 /// The chunk at each chunk-sized position of a memory manifest (`None` for
 /// zeros), or `None` if the manifest is not laid out in whole chunks at
 /// chunk boundaries, as [`Chunked`] stores memory.
@@ -1170,6 +1251,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
 
 mod confirmed;
 mod files;
+mod packed;
 mod rootfs;
 pub(crate) use rootfs::file_id;
 #[cfg(test)]

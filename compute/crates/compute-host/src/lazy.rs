@@ -174,7 +174,19 @@ struct Inflight {
     id: u64,
     fetch: Shared<BoxFuture<'static, Fetched>>,
     waiters: usize,
-    task: tokio::task::AbortHandle,
+    /// The request's task, aborted once no chunk it fetches is waited for
+    /// or in flight any more: one read may fetch several chunks of a pack.
+    _task: Arc<Abort>,
+}
+
+/// Aborts a task when dropped.
+#[derive(Debug)]
+struct Abort(tokio::task::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// One caller waiting for an [`Inflight`] request; the last one to go
@@ -196,7 +208,8 @@ impl Drop for Waiting<'_> {
         };
         entry.waiters -= 1;
         if entry.waiters == 0 {
-            entry.task.abort();
+            // Its task is aborted once nothing else it fetches is in
+            // flight.
             inflight.remove(self.key);
         }
     }
@@ -303,7 +316,8 @@ impl Fetcher {
 
     /// The plain bytes of `reference`, checked against its hashes.
     async fn get(&self, reference: &ChunkRef, background: bool) -> Fetched {
-        let key = reference.key();
+        // Chunks of one pack share its key.
+        let key = reference.id();
         let cached = || lock(&self.cache).chunks.get(&key).cloned();
         if let Some(chunk) = cached() {
             return Ok(chunk);
@@ -374,7 +388,7 @@ impl Fetcher {
             }
             fetched
         });
-        let abort = task.abort_handle();
+        let abort = Arc::new(Abort(task.abort_handle()));
         let fetch = async move {
             task.await.unwrap_or_else(|error| {
                 Err(Arc::new(compute_storage::Error::Transfer(format!(
@@ -388,7 +402,95 @@ impl Fetcher {
             id,
             fetch,
             waiters: 0,
-            task: abort,
+            _task: abort,
+        }
+    }
+
+    /// Starts fetching `run`, chunks that follow one another in one pack
+    /// (a demand fetch and its readahead), with one ranged read, as far as
+    /// none of them is cached or in flight already; each is then waited for
+    /// with [`Self::get`] as any other. Fewer than two such chunks are left
+    /// to [`Self::get`] alone.
+    fn start_run(&self, run: &[ChunkRef]) {
+        let keys: Vec<String> = run.iter().map(ChunkRef::id).collect();
+        let cache = lock(&self.cache);
+        let mut inflight = lock(&self.inflight);
+        let fresh = keys
+            .iter()
+            .take_while(|key| !cache.chunks.contains_key(*key) && !inflight.contains_key(*key))
+            .count();
+        drop(cache);
+        if fresh < 2 {
+            return;
+        }
+        let (run, keys) = (run[..fresh].to_vec(), keys[..fresh].to_vec());
+        let ids: Vec<u64> = keys
+            .iter()
+            .map(|_| self.requests.fetch_add(1, Ordering::Relaxed))
+            .collect();
+        let (chunks, all) = (self.chunks.clone(), Arc::clone(&self.all));
+        let (inflight_map, cache) = (Arc::clone(&self.inflight), Arc::clone(&self.cache));
+        let (task_keys, task_ids) = (keys.clone(), ids.clone());
+        let task = tokio::spawn(async move {
+            let fetched: Result<Vec<Arc<Vec<u8>>>, Arc<compute_storage::Error>> =
+                match all.acquire_owned().await {
+                    Ok(_slot) => {
+                        match tokio::time::timeout(FETCH_DEADLINE, chunks.get_chunks(&run)).await {
+                            Ok(fetched) => fetched
+                                .map(|plains| plains.into_iter().map(Arc::new).collect())
+                                .map_err(Arc::new),
+                            Err(_) => Err(Arc::new(compute_storage::Error::Transfer(format!(
+                                "no answer within {FETCH_DEADLINE:?}"
+                            )))),
+                        }
+                    }
+                    Err(error) => Err(Arc::new(compute_storage::Error::Transfer(
+                        error.to_string(),
+                    ))),
+                };
+            if let Ok(plains) = &fetched {
+                let now = tokio::time::Instant::now();
+                let mut evicted = Vec::new();
+                let mut cache = lock(&cache);
+                for (key, plain) in task_keys.iter().zip(plains) {
+                    evicted.extend(cache.insert(key.clone(), Arc::clone(plain), now));
+                }
+                drop(cache);
+                drop(evicted);
+            }
+            let mut inflight = lock(&inflight_map);
+            for (key, id) in task_keys.iter().zip(&task_ids) {
+                if inflight.get(key).is_some_and(|entry| entry.id == *id) {
+                    inflight.remove(key);
+                }
+            }
+            fetched
+        });
+        let abort = Arc::new(Abort(task.abort_handle()));
+        let fetch = async move {
+            task.await.unwrap_or_else(|error| {
+                Err(Arc::new(compute_storage::Error::Transfer(format!(
+                    "chunk request ended: {error}"
+                ))))
+            })
+        }
+        .boxed()
+        .shared();
+        for (place, (key, id)) in keys.into_iter().zip(ids).enumerate() {
+            let fetch = fetch
+                .clone()
+                .map(move |fetched| fetched.map(|plains| Arc::clone(&plains[place])))
+                .boxed()
+                .shared();
+            inflight.insert(
+                key,
+                Inflight {
+                    id,
+                    fetch,
+                    waiters: 0,
+                    _task: Arc::clone(&abort),
+                },
+            );
         }
     }
 }
@@ -775,6 +877,9 @@ async fn fill(
                 Some(request) if request.urgent => {
                     urgent.push_back(request);
                     let last = (request.index + READAHEAD_CHUNKS).min(count.saturating_sub(1));
+                    if let Some(run) = run_from(&hydration, request.index, last) {
+                        fetcher.start_run(&run);
+                    }
                     for index in request.index + 1..=last {
                         asked.push_back(Request { index, urgent: false });
                     }
@@ -810,6 +915,30 @@ async fn fill(
             return;
         }
     }
+}
+
+/// The chunks from `first` up to `last` that are stored one after another
+/// in one pack and not here yet, if more than one: what one read fetches.
+fn run_from(hydration: &Hydration, first: usize, last: usize) -> Option<Vec<ChunkRef>> {
+    let mut run: Vec<ChunkRef> = Vec::new();
+    for index in first..=last {
+        if hydration.present[index].load(Ordering::Acquire)
+            || hydration.filled.covers(chunk_range(index, hydration.len))
+        {
+            break;
+        }
+        let Some(reference) = hydration.refs[index].as_ref() else {
+            break;
+        };
+        if run
+            .last()
+            .is_some_and(|previous| !compute_storage::pack::follows(previous, reference))
+        {
+            break;
+        }
+        run.push(reference.clone());
+    }
+    (run.len() > 1).then_some(run)
 }
 
 /// Fetches chunk `index` and stores it, retrying failures that may pass

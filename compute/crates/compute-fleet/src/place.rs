@@ -87,7 +87,8 @@ pub struct Capacity {
     /// Processor time in millicores it can still promise to sandboxes
     /// that wake.
     pub free_cpu_millis: u64,
-    /// Disk in MiB it can still promise.
+    /// Disk in MiB it can still promise, what it frees by disk relief
+    /// among it.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
     pub ready: Vec<(ShapeKey, u32)>,

@@ -29,7 +29,12 @@ export {
 // unchanged.
 
 import type { Settings } from "@opengeni/config";
-import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+import {
+  collectSandboxEnvironment,
+  deploymentSandboxBackend,
+  hostSandboxBackendRefused,
+  parseExposedPorts,
+} from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
 export {
   sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
@@ -55,6 +60,10 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  workspaceSizeFromArchiveDescriptor,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 
@@ -85,6 +94,7 @@ import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
@@ -151,6 +161,8 @@ export {
   type CapabilityDescriptor,
 } from "./capabilities";
 export {
+  SANDBOX_BACKEND_NOT_SERVED_CODE,
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
   SandboxExactResumeReplacedError,
@@ -189,6 +201,11 @@ export {
   type ProviderSandboxFailure,
   type ProviderSandboxFailureKind,
 } from "./provider-errors";
+export {
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+  loadE2BServiceBusyError,
+} from "./provider-capacity";
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,
@@ -519,6 +536,7 @@ export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
@@ -584,6 +602,17 @@ export {
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
 export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  processStartFailureNullDeviceNote,
+} from "./selfhosted/process-start-failure";
+export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
+export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
   NO_WAKE_HEADER,
@@ -596,6 +625,9 @@ export {
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
+  CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE,
+  CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE,
+  type SelfhostedFaultContext,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
   FAULT_FIELD_WHAT_PRESERVED,
@@ -815,6 +847,23 @@ export function createSandboxClient(
 }
 
 /**
+ * Refuse a host-backed box (`local`, `docker`) unless the deployment serves it,
+ * which for a host backend means it is the deployment's configured default
+ * (`sandboxBackendServed`, the same rule session creation applies). The
+ * deployment default is read from `settings.deploymentSandboxBackend`, which
+ * survives the per-session `{...settings, sandboxBackend}` rebinds, so a
+ * session's stored backend can never serve itself. A host box runs as
+ * processes on this worker or API host, so whether it is allowed is a
+ * deployment choice, never a consequence of what happens to be installed on
+ * the host image. Remote providers keep their own credential validation.
+ */
+export function assertHostSandboxBackendServed(settings: Settings, backend: SandboxBackend): void {
+  if (hostSandboxBackendRefused(settings, backend)) {
+    throw new SandboxBackendNotServedError(backend, deploymentSandboxBackend(settings));
+  }
+}
+
+/**
  * Construct the raw provider SandboxClient for an EXPLICIT backend, independent
  * of settings.sandboxBackend. This is the resume-by-id builder the per-turn
  * resume path (and the API-direct control plane) call: a lease's box was created
@@ -822,7 +871,9 @@ export function createSandboxClient(
  * resume_backend_id), and the client that reattaches to it must be built for
  * THAT backend, not the process's currently-configured default. When the backend
  * equals settings.sandboxBackend this is identical to createSandboxClient
- * (behavior-preserved). Returns undefined for "none".
+ * (behavior-preserved). Returns undefined for "none". A host backend (`local`,
+ * `docker`) that is not the default of `settings` is refused before anything is
+ * built (assertHostSandboxBackendServed).
  */
 export function createSandboxClientForBackend(
   backend: SandboxBackend,
@@ -837,6 +888,7 @@ export function createSandboxClientForBackend(
   if (registration.backend === "none") {
     return undefined;
   }
+  assertHostSandboxBackendServed(settings, registration.backend);
   registration.validateCredentials(settings); // fail-fast, typed
 
   const exposedPorts = parseExposedPorts(settings.dockerExposedPorts);

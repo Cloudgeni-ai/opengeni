@@ -1031,6 +1031,182 @@ describe("connections table and helpers", () => {
   });
 });
 
+describe("personal GitHub refresh on stored connections", () => {
+  // GitHub answers form-encoded unless JSON is requested and reports a
+  // rejected grant as HTTP 200 with an error field.
+  function githubTokenTransport(outcome: "token" | "bad_refresh_token") {
+    return {
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const fields: Record<string, string> =
+          outcome === "token"
+            ? {
+                access_token: "ghu_refreshed",
+                expires_in: "28800",
+                refresh_token: "ghr_rotated",
+                refresh_token_expires_in: "15811200",
+                scope: "repo",
+                token_type: "bearer",
+              }
+            : { error: "bad_refresh_token", error_description: "incorrect" };
+        if (new Headers(init?.headers).get("accept")?.includes("application/json")) {
+          return Response.json(
+            Object.fromEntries(
+              Object.entries(fields).map(([k, v]) => [k, /^\d+$/.test(v) ? Number(v) : v]),
+            ),
+          );
+        }
+        return new Response(new URLSearchParams(fields).toString(), {
+          headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+        });
+      }) as unknown as typeof fetch,
+      dnsLookup: async () => [{ address: "140.82.121.3", family: 4 as const }],
+    };
+  }
+
+  const clientId = "Ov23personal-client";
+  const personalSettings = {
+    ...settings,
+    githubPersonalOauthEnabled: true,
+    githubPersonalOauthClientId: clientId,
+    githubPersonalOauthClientSecret: "personal-client-secret",
+  } as Settings;
+
+  async function expiredPersonalGitHubConnection() {
+    const userId = `github-owner-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "GitHub owner",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    )!;
+    await grantWorkspaceAccess(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId,
+      permissions: ["workspace:admin"],
+    });
+    const metadata = {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      githubUserId: "59779138",
+      githubLogin: "octocat",
+      oauthEnvironment: personalSettings.environment,
+      oauthClientMarker: createHash("sha256").update(clientId).digest("hex").slice(0, 32),
+      credentialBindingId: crypto.randomUUID(),
+      connectedAt: "2026-11-02T09:19:18.000Z",
+      lastVerifiedAt: "2026-11-02T09:19:18.000Z",
+      disconnectedAt: null,
+      refreshTokenExpiresAt: "2027-05-02T09:19:18.000Z",
+    };
+    const created = await persistProviderOAuthConnection(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId,
+      visibleToSubjectId: subjectId,
+      providerDomain: "github.com",
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: enc({
+        access_token: "ghu_expired",
+        refresh_token: "ghr_current",
+        token_type: "Bearer",
+        token_endpoint: "https://github.com/login/oauth/access_token",
+        client_id: clientId,
+        token_endpoint_auth_method: "client_secret_post",
+        scope_parameter_supported: false,
+      }),
+      grantedScopes: ["repo"],
+      expiresAt: new Date(Date.now() - 60_000),
+      metadata,
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      createdBySubjectId: subjectId,
+      requireLiveUserAuthority: true,
+      requiredLiveUserPermission: "connections:write",
+      allowCanonicalPersonalWorkspaceOwner: false,
+    });
+    return { connectionId: created!.id, workspaceId: grant.workspaceId, subjectId };
+  }
+
+  async function storedRow(connectionId: string) {
+    const [row] = await admin<
+      {
+        status: string;
+        authority_generation: string;
+        last_refresh_at: Date | null;
+        expires_at: Date | null;
+        last_error: string | null;
+      }[]
+    >`select status, authority_generation, last_refresh_at, expires_at, last_error
+      from connections where id = ${connectionId}`;
+    return row!;
+  }
+
+  function resolveOnce(
+    stored: Awaited<ReturnType<typeof expiredPersonalGitHubConnection>>,
+    outcome: "token" | "bad_refresh_token",
+  ) {
+    return buildConnectionTokenResolver(db, personalSettings, undefined, {
+      refreshTransport: githubTokenTransport(outcome),
+    })({
+      workspaceId: stored.workspaceId,
+      subjectId: stored.subjectId,
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/user",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: stored.connectionId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: ["repo"],
+      },
+    });
+  }
+
+  test("an expired token refreshes and keeps its authority generation", async () => {
+    if (!available) return;
+    const stored = await expiredPersonalGitHubConnection();
+    const before = await storedRow(stored.connectionId);
+
+    const result = await resolveOnce(stored, "token");
+
+    expect(result).toMatchObject({
+      status: "ok",
+      headers: { authorization: "Bearer ghu_refreshed" },
+    });
+    const after = await storedRow(stored.connectionId);
+    expect(after.status).toBe("active");
+    expect(after.last_refresh_at).not.toBeNull();
+    expect(after.expires_at!.getTime()).toBeGreaterThan(Date.now());
+    expect(after.authority_generation).toBe(before.authority_generation);
+  });
+
+  test("a refresh GitHub rejects moves the stored connection to needs_reauth", async () => {
+    if (!available) return;
+    const stored = await expiredPersonalGitHubConnection();
+
+    const result = await resolveOnce(stored, "bad_refresh_token");
+
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    const after = await storedRow(stored.connectionId);
+    expect(after.status).toBe("needs_reauth");
+    expect(after.last_error).toBe("connection refresh refused by the provider (bad_refresh_token)");
+    const metadata = await getConnectionMetadata(
+      db,
+      stored.workspaceId,
+      stored.connectionId,
+      stored.subjectId,
+    );
+    expect(metadata?.status).toBe("needs_reauth");
+  });
+});
+
 describe("buildConnectionTokenResolver", () => {
   test("fails closed before credential lookup for repository-scoped provider bindings", async () => {
     const { deps, counts } = resolverDeps();

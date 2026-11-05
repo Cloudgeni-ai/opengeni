@@ -1563,7 +1563,17 @@ export function useComposer(
     return release;
   }, []);
 
-  /** Save the draft now. The caller holds the draft slot. */
+  /**
+   * Save the draft now. The caller holds the draft slot.
+   *
+   * A save refused as made against an old revision re-reads the draft before
+   * it counts as a conflict. The same content, or content this page wrote itself (a save
+   * whose reply was lost, or one that landed after the composer remounted),
+   * is not another tab: the save just moves to the current revision. An
+   * explicit choice (Send, Keep mine) saves the person's content over
+   * whatever is there. Only an autosave that meets someone else's edit
+   * stops and offers Keep mine / Use other draft.
+   */
   const saveDraftInSlot = useCallback(
     async (
       payload: SaveComposerDraftRequest,
@@ -1571,28 +1581,62 @@ export function useComposer(
       // Receives this call's own failure (never a later autosave's), so a send
       // blocked by it keeps its real cause.
       onFailure?: (problem: Error) => void,
+      intent: "autosave" | "explicit" = "autosave",
     ): Promise<boolean> => {
       const owned = () =>
         targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
       if (!sessionId || !durableDrafts || !owned()) return false;
       const current = draftRef.current;
       if (!current) return false;
-      const request = { ...payload, expectedRevision: current.revision };
+      let request = { ...payload, expectedRevision: current.revision };
       if (draftSignature(request) === lastSavedSignature.current) return true;
-      setDraftSaving(true);
-      try {
-        const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
-        if (!owned()) return false;
-        adoptDraftBase(saved);
-        return true;
-      } catch (cause) {
+      const writesKey = `${workspaceId}\u0000${sessionId}`;
+      const fail = (problem: Error): false => {
         if (owned()) {
-          const problem = asError(cause);
+          // The conflict choice says what happened; a generic "conflicts with
+          // the current state" line under it would only repeat it vaguely.
           if (isDraftConflictError(problem)) setDraftConflict(problem);
-          setError(problem);
+          else setError(problem);
           onFailure?.(problem);
         }
         return false;
+      };
+      setDraftSaving(true);
+      try {
+        for (let reread = 0; ; reread += 1) {
+          let problem: Error;
+          try {
+            rememberDraftWrite(writesKey, draftContentKey(request));
+            const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+            if (!owned()) return false;
+            adoptDraftBase(saved);
+            return true;
+          } catch (cause) {
+            problem = asError(cause);
+          }
+          if (!owned()) return false;
+          if (!isDraftConflictError(problem) || reread >= DRAFT_CONFLICT_REREADS) {
+            return fail(problem);
+          }
+          let remote: ComposerDraft;
+          try {
+            remote = await client.getComposerDraft(workspaceId, sessionId);
+          } catch (cause) {
+            return fail(asError(cause));
+          }
+          if (!owned()) return false;
+          const remoteContent = draftContentKey(draftPayload(remote));
+          if (remoteContent === draftContentKey(request)) {
+            adoptDraftBase(remote);
+            return true;
+          }
+          if (intent !== "explicit" && !recentDraftWrites.get(writesKey)?.includes(remoteContent)) {
+            return fail(problem);
+          }
+          draftRef.current = remote;
+          setDraft(remote);
+          request = { ...request, expectedRevision: remote.revision };
+        }
       } finally {
         if (owned()) setDraftSaving(false);
       }
@@ -1604,6 +1648,7 @@ export function useComposer(
     async (
       payload: SaveComposerDraftRequest,
       onFailure?: (problem: Error) => void,
+      intent: "autosave" | "explicit" = "autosave",
     ): Promise<boolean> => {
       const owner = { targetKey, generation: targetGeneration.current };
       if (!sessionId || !durableDrafts || targetKeyRef.current !== owner.targetKey) {
@@ -1611,7 +1656,7 @@ export function useComposer(
       }
       const release = await acquireDraftSlot();
       try {
-        return await saveDraftInSlot(payload, owner, onFailure);
+        return await saveDraftInSlot(payload, owner, onFailure, intent);
       } finally {
         release();
       }
@@ -1869,6 +1914,7 @@ export function useComposer(
               (problem) => {
                 persistFailure = problem;
               },
+              "explicit",
             ))
           ) {
             // An update that blocks the draft save holds the send like any
@@ -2432,10 +2478,12 @@ export function useComposer(
         if (payload) {
           releaseDraftSlot = await acquireDraftSlot();
           if (
-            !(await saveDraftInSlot(payload, {
-              targetKey: ownedTargetKey,
-              generation: ownedGeneration,
-            }))
+            !(await saveDraftInSlot(
+              payload,
+              { targetKey: ownedTargetKey, generation: ownedGeneration },
+              undefined,
+              "explicit",
+            ))
           ) {
             return false;
           }
@@ -3199,7 +3247,13 @@ export function useComposer(
       setDraftConflict(null);
       setError(null);
       const payload = currentDraftPayload();
-      if (payload) await persistPayload({ ...payload, expectedRevision: remote.revision });
+      if (payload) {
+        await persistPayload(
+          { ...payload, expectedRevision: remote.revision },
+          undefined,
+          "explicit",
+        );
+      }
     },
     [
       applyDraft,
@@ -3534,19 +3588,44 @@ function draftSignature(payload: SaveComposerDraftRequest): string {
   return JSON.stringify(content);
 }
 
+/** Re-reads a save makes after "draft changed" before giving up on it. */
+const DRAFT_CONFLICT_REREADS = 3;
+
+/**
+ * The draft content this page recently wrote, per chat. It outlives a
+ * composer remount, so a save that lands after the composer re-read the
+ * draft is still recognised as this page's own write.
+ */
+const recentDraftWrites = new Map<string, string[]>();
+
+function rememberDraftWrite(chatKey: string, content: string): void {
+  const writes = (recentDraftWrites.get(chatKey) ?? []).filter((entry) => entry !== content);
+  writes.push(content);
+  recentDraftWrites.set(chatKey, writes.slice(-8));
+}
+
+/** Draft content as the server stores it, for comparing a save with a read. */
+function draftContentKey(payload: SaveComposerDraftRequest): string {
+  const { expectedRevision: _revision, resources, ...content } = payload;
+  return JSON.stringify({ ...content, resources: resources.map(resourceIdentity) });
+}
+
+function resourceIdentity(resource: ResourceRef): string {
+  // Reconnect reconciliation can restore the canonical server form while
+  // the still-mounted upload card supplies the same ready file without its
+  // default mount. Treat those two wire shapes as one selected attachment.
+  return resource.kind === "file"
+    ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
+    : JSON.stringify(resource);
+}
+
 function mergeResources(base: ResourceRef[], additions: ResourceRef[]): ResourceRef[] {
   const seen = new Set<string>();
   return [...base, ...additions].filter((resource) => {
-    // Reconnect reconciliation can restore the canonical server form while
-    // the still-mounted upload card supplies the same ready file without its
-    // default mount. Treat those two wire shapes as one selected attachment;
-    // preserving the first representation keeps custom mounts and ordering
+    // Preserving the first representation keeps custom mounts and ordering
     // intact while preventing the draft and command paths from seeing
     // different duplicate counts after server normalization.
-    const key =
-      resource.kind === "file"
-        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
-        : JSON.stringify(resource);
+    const key = resourceIdentity(resource);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

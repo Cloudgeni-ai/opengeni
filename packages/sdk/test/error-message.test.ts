@@ -20,6 +20,22 @@ test("neutral formatter is available through the core and browser entry points",
 });
 
 describe("brand-neutral error presentation", () => {
+  test("API subscription refusals explain model selection rather than permission or purchase", () => {
+    const error = new OpenGeniApiError(
+      403,
+      JSON.stringify({
+        error: {
+          code: "forbidden",
+          message: "Connected subscriptions are unavailable through the API.",
+          details: { code: "subscription_api_unavailable" },
+        },
+      }),
+    );
+    expect(formatErrorMessage(error)).toBe(
+      "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.",
+    );
+    expect(error.details?.action).toBeUndefined();
+  });
   test("seat refusals preserve only the bounded upgrade action and do not suggest buying credits", () => {
     for (const action of [
       { type: "upgrade", href: "/billing", extra: { ignored: true } },
@@ -50,7 +66,7 @@ describe("brand-neutral error presentation", () => {
       expect(error.retryable).toBe(false);
       expect(error.outcomeUnknown).toBe(false);
       expect(formatErrorMessage(error)).toBe(
-        "Your organization has reached its seat limit. Upgrade the plan to add people. Reference: seat-refusal.",
+        "Your organization has reached its seat limit. Upgrade the plan to add people.",
       );
     }
   });
@@ -92,7 +108,7 @@ describe("brand-neutral error presentation", () => {
         { mutation: true },
       );
       expect(error.details?.action).toEqual(action);
-      expect(formatErrorMessage(error)).toBe(`${text} Reference: credit-refusal.`);
+      expect(formatErrorMessage(error)).toBe(text);
     }
   });
 
@@ -115,24 +131,24 @@ describe("brand-neutral error presentation", () => {
         ),
       );
     expect(refusal({ upgradePlan: "pro", upgradePlanLabel: "Pro" })).toBe(
-      "Upgrade to Pro to add more people. Reference: seat-refusal.",
+      "Upgrade to Pro to add more people.",
     );
     expect(refusal({ upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
-      "Upgrade to Max to add more people. Reference: seat-refusal.",
+      "Upgrade to Max to add more people.",
     );
     expect(refusal({ upgradePlan: "enterprise", upgradePlanLabel: "Enterprise" })).toBe(
-      "Talk to us about Enterprise to add more people. Reference: seat-refusal.",
+      "Talk to us about Enterprise to add more people.",
     );
     expect(refusal({ upgradePlanLabel: " " })).toBe(
-      "Your organization has reached its seat limit. Upgrade the plan to add people. Reference: seat-refusal.",
+      "Your organization has reached its seat limit. Upgrade the plan to add people.",
     );
     // An invitee can't upgrade someone else's organization.
     expect(refusal({ askOwner: true })).toBe(
-      "This organization is full. Ask an organization owner to upgrade. Reference: seat-refusal.",
+      "This organization is full. Ask an organization owner to upgrade.",
     );
     // An admin who can invite but not manage billing is told which plan to ask for.
     expect(refusal({ askOwner: true, upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
-      "Ask an organization owner to upgrade to Max. Reference: seat-refusal.",
+      "Ask an organization owner to upgrade to Max.",
     );
   });
 
@@ -152,7 +168,7 @@ describe("brand-neutral error presentation", () => {
       expect(error.details?.code).toBe(code);
     }
   });
-  test("keeps API diagnostics and references without displaying API prose", () => {
+  test("keeps API diagnostics and the reference without displaying either for a refusal", () => {
     const body = JSON.stringify({
       error: {
         code: "permission_denied",
@@ -162,10 +178,9 @@ describe("brand-neutral error presentation", () => {
       },
     });
     const error = new OpenGeniApiError(403, body, { mutation: true });
-    expect(formatErrorMessage(error)).toBe(
-      "You don’t have permission to do that. Reference: acme-denied-403.",
-    );
+    expect(formatErrorMessage(error)).toBe("You don’t have permission to do that.");
     expect(error.message).toContain("Opengeni rejected this operation.");
+    expect(error.correlationId).toBe("acme-denied-403");
     expect(error.body).toBe(body);
     expect(error.details).toEqual({ missingPermission: "sessions:control" });
     expect(error.code).toBe("permission_denied");
@@ -178,7 +193,7 @@ describe("brand-neutral error presentation", () => {
       new OpenGeniApiError(409, "", { correlationId: "setup-1" }),
     );
     expect(formatErrorMessage(setup)).toBe(
-      "Private conversations are unavailable. Ask an administrator to enable them. Reference: setup-1.",
+      "Private conversations are unavailable. Ask an administrator to enable them.",
     );
     expect(setup.message).toContain("@opengeni/sdk");
     expect(setup.code).toBe("OPENGENI_SETUP_REQUIRED");
@@ -202,6 +217,17 @@ describe("brand-neutral error presentation", () => {
       retryable: false,
       outcomeUnknown: false,
     });
+  });
+
+  test("an unexpected failure keeps its reference for support", () => {
+    const error = new OpenGeniApiError(
+      500,
+      JSON.stringify({ error: { message: "database unavailable", requestId: "server-500" } }),
+      { mutation: false },
+    );
+    expect(formatErrorMessage(error)).toBe(
+      "The service is temporarily unavailable. Try again later. Reference: server-500.",
+    );
   });
 
   test("unknown outcomes require reconciliation rather than a blind retry", () => {

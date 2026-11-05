@@ -1,6 +1,18 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import {
+  isSandboxProcessStartFailure,
+  SANDBOX_MACHINE_RESTARTING_CODE,
+  SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
+  SandboxMachineBackError,
+  SandboxMachineReplacingError,
+  SandboxMachineRestartingError,
+  SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
+  SandboxSetupAgentUnavailableError,
+} from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -55,11 +67,17 @@ import {
   type AnthropicRequestSize,
   ToolCallError,
   findInferenceRegionRestrictedError,
+  SandboxBackendNotServedError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
+import {
+  ComputeControlError,
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+} from "@opengeni/runtime/sandbox";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
@@ -171,6 +189,12 @@ export function providerRecoveryJitterMs(delayMs: number, sample: number): numbe
 }
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+/** No sandbox host can take a new or woken sandbox right now. */
+export const SANDBOX_CAPACITY_UNAVAILABLE_CODE = "sandbox_capacity_unavailable";
+/** Any other failure answered by (or reaching) the sandbox control service. */
+export const SANDBOX_SERVICE_UNAVAILABLE_CODE = "sandbox_service_unavailable";
+/** The sandbox control service refused the request (configuration, auth, invalid input). */
+export const SANDBOX_SERVICE_REFUSED_CODE = "sandbox_service_refused";
 
 function findRetainedAttachmentUnavailableError(
   error: unknown,
@@ -291,6 +315,8 @@ export function providerRecoveryResult(input: {
               input.failureCode === "provider_unavailable" ||
               input.failureCode === "upstream_connectivity_unavailable" ||
               input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_MACHINE_RESTARTING_CODE ||
+              input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
               input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
               input.failureCode === "mcp_transport_timeout" ||
               input.failureCode === "mcp_transport_unavailable" ||
@@ -305,14 +331,18 @@ export function providerRecoveryResult(input: {
                   )
                 ]!,
               )
-            : PROVIDER_BACKPRESSURE_DELAY_MS;
+            : // Includes sandbox_capacity_unavailable: a full sandbox fleet
+              // frees up as other boxes sleep or end, not within seconds.
+              PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
     input.failureCode === "provider_rate_limited" ||
     input.failureCode === "provider_unavailable" ||
     input.failureCode === "upstream_connectivity_unavailable" ||
-    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE
+    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE ||
+    input.failureCode === SANDBOX_CAPACITY_UNAVAILABLE_CODE ||
+    input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
@@ -1598,7 +1628,11 @@ export function isTransientProviderError(error: unknown): boolean {
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  // A statusless error is typically a provider error event in the middle of a
+  // streamed response. One that tells the caller to retry (for example an
+  // OpenAI-compatible server that produced a malformed tool call) is a bad
+  // generation, not a request fault.
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout|\bplease (?:retry|try again)\b/i.test(
     message,
   );
 }
@@ -1651,6 +1685,215 @@ export function isFunctionToolProviderFailure(error: unknown): boolean {
 }
 
 export const TOOL_PROVIDER_REFUSED_CODE = "tool_provider_refused";
+
+type SandboxServiceFailure = {
+  code:
+    | typeof SANDBOX_CAPACITY_UNAVAILABLE_CODE
+    | typeof SANDBOX_SERVICE_UNAVAILABLE_CODE
+    | typeof SANDBOX_SERVICE_REFUSED_CODE;
+  retryable: boolean;
+  message: string;
+  /** An uncertain mutation outcome in the same failure: it vetoes any retry. */
+  uncertain?: string;
+};
+
+/** Sibling or wrapper outcomes that forbid an automatic replay of the turn. */
+function isUncertainMutationOutcome(node: unknown): boolean {
+  return (
+    isRoutingMutationOutcomeUnknownError(node) ||
+    isRoutingMutationOutputRejectedError(node) ||
+    isRawProviderCommandOutcomeUnknown(node) ||
+    isModalCommandStartOutcomeUnknownError(node) ||
+    isProviderCommandObservationUnavailableError(node)
+  );
+}
+
+/**
+ * A sandbox service's typed failure at any wrapper depth: `cause` chains, the
+ * agents SDK's ToolCallError (`.error`) when a lazily provisioned sandbox fails
+ * inside a tool call, and AggregateError members. Compute's ComputeControlError
+ * and a provider SDK's typed capacity error (E2B ServiceBusyError) count; a
+ * capacity refusal wins over any other sandbox service failure in the graph.
+ * Retry authority follows the error's own kind, and an uncertain mutation
+ * outcome anywhere in the same graph vetoes it, as for every other recovery.
+ */
+function findSandboxServiceFailure(error: unknown): SandboxServiceFailure | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const compute = nodes.filter((node): node is ComputeControlError => {
+    return node instanceof ComputeControlError;
+  });
+  const computeCapacity = compute.find((node) => node.kind === "no_capacity");
+  const providerCapacity = nodes.find(isSandboxProviderCapacityError);
+  const found = computeCapacity ?? providerCapacity ?? compute[0];
+  if (!found) return null;
+  const message = found instanceof Error ? found.message : String(found);
+  const capacity = found === computeCapacity || found === providerCapacity;
+  const retryable = found instanceof ComputeControlError ? found.retryable : true;
+  if (!capacity && !retryable) {
+    return { code: SANDBOX_SERVICE_REFUSED_CODE, retryable: false, message };
+  }
+  const code = capacity ? SANDBOX_CAPACITY_UNAVAILABLE_CODE : SANDBOX_SERVICE_UNAVAILABLE_CODE;
+  return { code, retryable, message, ...uncertainMutationOutcome(graph, nodes) };
+}
+
+/** The first uncertain mutation outcome in the graph; an unreadable graph is uncertain too. */
+function uncertainMutationOutcome(
+  graph: Map<object, Set<object>> | null,
+  nodes: unknown[],
+): { uncertain?: string } {
+  if (!graph) return { uncertain: "the failure's cause graph could not be read" };
+  const node = nodes.find(isUncertainMutationOutcome);
+  if (node === undefined) return {};
+  return { uncertain: node instanceof Error ? node.message : String(node) };
+}
+
+/**
+ * Platform sandbox setup failed only because the machine agent did not answer
+ * (see SandboxSetupAgentUnavailableError). No model-requested command reached
+ * the box, so the same turn retries with the bounded sandbox-setup recovery
+ * budget. An uncertain mutation outcome in the same failure, or an unreadable
+ * graph, still forbids the replay.
+ */
+function sandboxSetupAgentUnavailableFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const setup = nodes.find((node) => node instanceof SandboxSetupAgentUnavailableError);
+  if (!setup) return null;
+  const { uncertain } = uncertainMutationOutcome(graph, nodes);
+  if (uncertain !== undefined) return null;
+  return {
+    error:
+      "The sandbox's agent did not answer while the sandbox was being set up, and nothing the model asked for ran. The same turn will retry after a short delay.",
+    code: "sandbox_command_start_unavailable",
+    retryable: true,
+    detail: setup.message,
+  };
+}
+
+/**
+ * The sandbox could not start programs (see SandboxMachineRestartingError and
+ * SandboxProcessStartFailedError). A restarted box retries the same turn; any
+ * other process-start failure, typed or only marked in a wrapper's text, stops
+ * the turn with short copy, never the agent's raw message or command text.
+ */
+function sandboxProcessStartFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
+  const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
+  if (restarting instanceof SandboxMachineRestartingError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      return {
+        error: restarting.message,
+        code: SANDBOX_MACHINE_RESTARTING_CODE,
+        retryable: true,
+      };
+    }
+  }
+  const failed = nodes.find((node) => node instanceof SandboxProcessStartFailedError);
+  if (failed instanceof SandboxProcessStartFailedError) {
+    return {
+      error: failed.message,
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: failed.detail,
+    };
+  }
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
+    return {
+      error:
+        "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
+    };
+  }
+  return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
+}
+
+const SANDBOX_FAILURE_SUBJECT = {
+  [SANDBOX_CAPACITY_UNAVAILABLE_CODE]: "No sandbox capacity is available right now",
+  [SANDBOX_SERVICE_UNAVAILABLE_CODE]: "The sandbox service is temporarily unavailable",
+  [SANDBOX_SERVICE_REFUSED_CODE]: "The sandbox service refused to provide a sandbox for this turn",
+} as const;
+
+function sandboxServiceFailurePayload(failure: SandboxServiceFailure) {
+  const retryable = failure.retryable && failure.uncertain === undefined;
+  return {
+    error: `${SANDBOX_FAILURE_SUBJECT[failure.code]}. ${
+      retryable
+        ? "The same turn will retry after a short delay."
+        : failure.uncertain !== undefined
+          ? "This turn stopped without retrying because an earlier sandbox action may already have taken effect."
+          : "This turn stopped without retrying."
+    }`,
+    code: failure.code,
+    retryable,
+    // Diagnostic only: the person-facing text never appends sandbox service text.
+    detail:
+      failure.uncertain !== undefined
+        ? `${failure.uncertain} (${failure.message})`
+        : failure.message,
+  };
+}
+
+/** Classifier results that name the chat model or its provider. */
+const MODEL_PROVIDER_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "provider_unavailable",
+  "provider_rate_limited",
+  "provider_quota_exhausted",
+]);
+
+/**
+ * A sandbox provider SDK's HTTP failure (for example a Daytona or E2B 5xx or
+ * 429, wrapped by the agents SDK as SandboxProviderError) concerns the sandbox,
+ * not the chat model. Keep the classifier's retry authority; change only the
+ * label and copy so the model is never blamed.
+ */
+function withSandboxProviderAttribution(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (!failure.code || !MODEL_PROVIDER_FAILURE_CODES.has(failure.code)) return failure;
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [];
+  const provider = nodes.find(isSandboxProviderError);
+  if (!provider) return failure;
+  return sandboxServiceFailurePayload({
+    code: SANDBOX_SERVICE_UNAVAILABLE_CODE,
+    retryable: failure.retryable === true,
+    message: provider instanceof Error ? provider.message : String(provider),
+    ...uncertainMutationOutcome(graph, nodes),
+  });
+}
 
 /** A refusal raised by a Claude subscription (OAuth) transport, at any wrapper depth. */
 export function isClaudeSubscriptionTransportError(error: unknown): boolean {
@@ -1754,7 +1997,10 @@ export function agentRunFailurePayload(
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   return withProviderCondition(
     error,
-    withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+    withSandboxProviderAttribution(
+      error,
+      withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+    ),
   );
 }
 
@@ -1777,6 +2023,20 @@ function withProviderWebPageExplained(
     error: `The model provider's address answered with a web page (HTTP ${page[1]}) instead of an API response. Check the provider's base URL in its settings.`,
     ...(title && !failure.detail ? { detail: `Page title: ${title}` } : {}),
   };
+}
+
+/** The typed host-backend refusal anywhere in an error's cause chain. */
+export function findSandboxBackendNotServedError(
+  error: unknown,
+): SandboxBackendNotServedError | null {
+  const seen = new Set<unknown>();
+  for (let current = error; current && typeof current === "object";) {
+    if (current instanceof SandboxBackendNotServedError) return current;
+    if (seen.has(current) || seen.size >= 16) return null;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 /**
@@ -1881,6 +2141,17 @@ function classifyAgentRunFailurePayload(
       code: regionRestricted.code,
       retryable: false,
       model: regionRestricted.modelName,
+    };
+  }
+  // The deployment does not serve the session's host sandbox backend. Nothing
+  // was built, and every retry gives the same answer, however the
+  // provisioning path wrapped it.
+  const backendNotServed = findSandboxBackendNotServedError(error);
+  if (backendNotServed) {
+    return {
+      error: backendNotServed.message,
+      code: backendNotServed.code,
+      retryable: false,
     };
   }
   // A checkpoint (compaction) request only summarizes history: it runs no
@@ -2071,6 +2342,16 @@ function baseAgentRunFailurePayload(
       ...(Object.keys(database).length > 0 ? { database } : {}),
     };
   }
+  // The sandbox control service's own typed failure (for example compute's
+  // 503 no_capacity while creating or waking a box) concerns the sandbox,
+  // never the chat model. Its HTTP status would otherwise read as a model
+  // provider 5xx below. Retry authority follows the error's own kind.
+  const sandboxService = findSandboxServiceFailure(error);
+  if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
+  const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
+  if (setupAgentUnavailable) return setupAgentUnavailable;
+  const processStart = sandboxProcessStartFailure(error);
+  if (processStart) return processStart;
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }

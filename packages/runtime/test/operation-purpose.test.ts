@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
 import { runBeforeAgentStartHooks, type SandboxLifecycleHook } from "../src/index";
+import { ChannelANotFoundError } from "../src/sandbox/channel-a";
 import {
   instrumentSandboxClientSessionOperations,
   instrumentSandboxSessionOperations,
@@ -64,6 +67,57 @@ describe("sandbox setup operation purposes", () => {
     await expect(
       withSandboxOperationPurpose("file_resources", () => session.exec()),
     ).rejects.toThrow("boom");
+    expect(observations.map((o) => o.outcome)).toEqual(["failed"]);
+  });
+
+  test("a read-only probe's definite path miss reports not_found, not failed, and still throws", async () => {
+    const observations: SandboxSetupOperationObservation[] = [];
+    const misses: unknown[] = [
+      new ChannelANotFoundError("no such directory"),
+      new SandboxFilesystemNotFoundError("no such file"),
+      new SandboxWorkspaceReadNotFoundError("path not found: .claude/skills"),
+      Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+    ];
+    let next = 0;
+    const session = {
+      async listDir() {
+        throw misses[next++];
+      },
+      async readFile() {
+        throw new SandboxFilesystemNotFoundError("SKILL.md");
+      },
+      async exec() {
+        // A command cannot prove that a probed path is absent.
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    };
+    instrumentSandboxSessionOperations(session, "modal", (o) => observations.push(o));
+    await withSandboxOperationPurpose("repository_skills", async () => {
+      for (const miss of misses) await expect(session.listDir()).rejects.toBe(miss);
+      await expect(session.readFile()).rejects.toThrow("SKILL.md");
+      await expect(session.exec()).rejects.toThrow("ENOENT");
+    });
+    expect(observations.map((o) => `${o.op}:${o.outcome}`)).toEqual([
+      "listDir:not_found",
+      "listDir:not_found",
+      "listDir:not_found",
+      "listDir:not_found",
+      "readFile:not_found",
+      "exec:failed",
+    ]);
+  });
+
+  test("a probe failure that is not a definite path miss still reports failed", async () => {
+    const observations: SandboxSetupOperationObservation[] = [];
+    const session = {
+      async listDir() {
+        throw new Error("Modal sandbox sb-1 not found (has been terminated)");
+      },
+    };
+    instrumentSandboxSessionOperations(session, "modal", (o) => observations.push(o));
+    await expect(
+      withSandboxOperationPurpose("repository_skills", () => session.listDir()),
+    ).rejects.toThrow("terminated");
     expect(observations.map((o) => o.outcome)).toEqual(["failed"]);
   });
 

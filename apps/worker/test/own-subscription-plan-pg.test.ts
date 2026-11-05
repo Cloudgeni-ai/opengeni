@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
 import { SUBSCRIPTION_PLAN_REQUIRED_CODE } from "@opengeni/contracts";
-import { checkOwnSubscriptionPlan, ownSubscriptionPlanAllows } from "@opengeni/core";
+import {
+  admitModelCall,
+  checkOwnSubscriptionPlan,
+  ownSubscriptionPlanAllows,
+} from "@opengeni/core";
 import {
   createDb,
   ensureManagedAccessForUser,
@@ -94,6 +98,25 @@ test("Free is refused with the upgrade code; Pro and above are allowed while in 
     expect(await ownSubscriptionPlanAllows(client.db, settings, paid)).toBe(
       price(key) === null || price(key)! >= 20_000_000,
     );
+    expect(await checkOwnSubscriptionPlan({ db: client.db, settings }, paid, "api")).toMatchObject({
+      allowed: false,
+      code: "subscription_api_unavailable",
+    });
+    expect(
+      await admitModelCall(
+        { db: client.db, settings },
+        {
+          accountId: paid,
+          workspaceId: crypto.randomUUID(),
+          model: "codex/gpt-6-luna",
+          chargesOpenGeniCredits: false,
+          countsTowardTokenCap: false,
+          subjectId: null,
+          billingOrigin: "api",
+          ownSubscription: true,
+        },
+      ),
+    ).toMatchObject({ allowed: false, denial: "subscription_api_unavailable" });
   }
 
   const trialing = await organization();

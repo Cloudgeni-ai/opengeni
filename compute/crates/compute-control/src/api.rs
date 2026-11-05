@@ -10,6 +10,17 @@
 //! - `GET /v1/sandboxes/{id}/state` asks its host how it is now: its level
 //!   and any step under way.
 //! - `POST /v1/sandboxes/{id}/wake`, `/sleep` and `/move`.
+//! - `POST /v1/sandboxes/{id}/resize` gives it a new shape (`vcpus`,
+//!   `memory_mib`, `memory_request_mib`, `cpu_request_millis`, `disk_mib`;
+//!   each omitted keeps its own), keeping its files. It is moved to do so:
+//!   handed off as `/move` does, with `awake` too, and its next wake takes
+//!   it up at the new shape, where a host has room for it. A new `vcpus`
+//!   or `memory_mib` ends its running programs, as it boots afresh from
+//!   its disk; new requests or a longer disk keep them. Its disk may only
+//!   grow.
+//! - `POST /v1/sandboxes/{id}/restart` boots it afresh from its disk,
+//!   keeping its files and shape: handed off as a resize does, even awake,
+//!   its next wake boots it from its disk, ending its running programs.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
 //! - `POST /v1/sandboxes/{id}/templates`, `GET /v1/templates` and `GET` and
@@ -42,7 +53,7 @@ use crate::keys::Keys;
 pub use crate::keys::key_digest;
 use crate::link::LinkKeys;
 use crate::metrics::{Metrics, Outcome, track};
-use crate::service::{Drained, Failure, Service, TEMPLATE_PREFIX, request_digest};
+use crate::service::{Drained, Failure, Resize, Service, TEMPLATE_PREFIX, request_digest};
 use crate::store::{AgentRef, SandboxRow, Spec, Store};
 
 pub mod templates;
@@ -347,6 +358,27 @@ pub struct MoveBody {
     pub awake: bool,
 }
 
+/// A resize: each field omitted keeps the sandbox's own.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResizeBody {
+    #[serde(default)]
+    pub vcpus: Option<u8>,
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
+    #[serde(default)]
+    pub memory_request_mib: Option<u32>,
+    #[serde(default)]
+    pub cpu_request_millis: Option<u32>,
+    /// Only as long as its disk is or longer.
+    #[serde(default)]
+    pub disk_mib: Option<u32>,
+    /// Resize it even while it is awake, as a move with `awake` does.
+    /// Without it, a sandbox something keeps awake is refused as busy.
+    #[serde(default)]
+    pub awake: bool,
+}
+
 /// A drain.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -377,6 +409,9 @@ pub struct HostView {
     /// Processor time in millicores a wake can still reserve on it.
     pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
+    /// Disk in MiB it frees for a sandbox without losing anything, by
+    /// disk relief (ADR 30); placement counts it as free.
+    pub disk_reclaimable_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
 }
@@ -597,6 +632,38 @@ async fn move_to<S: Store>(
     Ok(Json(SandboxView::of(service, row)))
 }
 
+async fn resize<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ResizeBody>,
+) -> Result<Json<SandboxView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let service = &api.0.service;
+    let shape = Resize {
+        vcpus: body.vcpus,
+        memory_mib: body.memory_mib,
+        memory_request_mib: body.memory_request_mib,
+        cpu_request_millis: body.cpu_request_millis,
+        disk_mib: body.disk_mib,
+    };
+    let row = service
+        .resize(&team, parse_id(&id)?, shape, body.awake)
+        .await?;
+    Ok(Json(SandboxView::of(service, row)))
+}
+
+async fn restart<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<SandboxView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let service = &api.0.service;
+    let row = service.restart(&team, parse_id(&id)?).await?;
+    Ok(Json(SandboxView::of(service, row)))
+}
+
 async fn connect<S: Store>(
     State(api): State<Api<S>>,
     Path((id, port)): Path<(String, u32)>,
@@ -676,6 +743,7 @@ async fn hosts<S: Store>(
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,
+            disk_reclaimable_mib: known.capacity.disk_reclaimable_mib,
             sandboxes: known.capacity.sandboxes,
             awake: known.capacity.awake,
         })
@@ -725,6 +793,8 @@ pub fn router<S: Store>(
         .route("/v1/sandboxes/{id}/wake", post(wake::<S>))
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))
         .route("/v1/sandboxes/{id}/move", post(move_to::<S>))
+        .route("/v1/sandboxes/{id}/resize", post(resize::<S>))
+        .route("/v1/sandboxes/{id}/restart", post(restart::<S>))
         .route("/v1/sandboxes/{id}/connect/{port}", get(connect::<S>))
         .route(
             "/v1/sandboxes/{id}/templates",

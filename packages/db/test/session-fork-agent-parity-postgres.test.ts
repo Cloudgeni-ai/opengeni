@@ -68,6 +68,10 @@ const COPIED = [
   // The fork's first request repeats the source's history, so it keeps the
   // source's search-record form (docs/web-search.md).
   "search_records_as_input",
+  // The agent a chat was started for and the revision in its prompt
+  // (migration 1244, docs/agents.md): a fork is a chat with the same agent.
+  "agent_id",
+  "agent_prompt_revision",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -391,6 +395,7 @@ async function configuredSource(org: Org) {
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
     search_records_as_input = true,
+    agent_id = ${crypto.randomUUID()}, agent_prompt_revision = 1,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
   return session.id;
@@ -510,6 +515,8 @@ describe("a fork is the same agent as its source", () => {
       "instructions",
       "max_nested_agent_depth_override",
       "search_records_as_input",
+      "agent_id",
+      "agent_prompt_revision",
     ]) {
       expect({ column, value: source[column] }).not.toEqual({ column, value: blank[column] });
     }

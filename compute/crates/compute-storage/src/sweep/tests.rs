@@ -10,7 +10,10 @@ use super::*;
 use crate::chunk::EncodedChunk;
 use crate::fake::{Bucket, Fake, Object, Rng};
 use crate::fresh::{CLOCK_SKEW, Clock, FIRST_HOUR, LEGACY_SWEEP_AFTER, day_of, period_of};
-use crate::store::{Begun, Put, Rewrite, TEST_EPOCH, next_save, unstamped};
+use crate::store::{Begun, Held, Publication, Put, Rewrite, TEST_EPOCH, next_save, unstamped};
+
+mod incremental;
+mod packs;
 
 const SECOND: Duration = Duration::from_secs(1);
 const MINUTE: Duration = Duration::from_secs(60);
@@ -39,8 +42,21 @@ fn skewed_clock(offset_ms: i64) -> Clock {
 }
 
 /// Test pointers hold the keys they name as a JSON list.
-async fn listed_names(bytes: Vec<u8>) -> Result<Vec<String>> {
-    Ok(serde_json::from_slice(&bytes)?)
+struct Lists;
+
+impl Names for Lists {
+    type Within = ();
+
+    fn named(&self, pointer: &[u8]) -> Result<Named<()>> {
+        Ok(Named {
+            keys: serde_json::from_slice(pointer)?,
+            within: Vec::new(),
+        })
+    }
+
+    fn within(&self, (): &()) -> impl Future<Output = Result<Option<Vec<String>>>> + Send {
+        std::future::ready(Ok(Some(Vec::new())))
+    }
 }
 
 fn pointer(keys: &[String]) -> Vec<u8> {
@@ -63,6 +79,9 @@ fn present(fake: &Fake, key: &str) -> bool {
     fake.bytes(&format!("p/{key}")).is_some()
 }
 
+/// A sweep with no record lists every period it may delete from: unnamed
+/// objects there go; named ones stay, and so do recent ones, whose period
+/// it does not list yet.
 #[tokio::test(start_paused = true)]
 async fn old_unnamed_objects_go_and_named_or_recent_ones_stay() {
     let fake = Fake::new(paused_clock());
@@ -78,17 +97,18 @@ async fn old_unnamed_objects_go_and_named_or_recent_ones_stay() {
     tokio::time::advance(2 * DAY).await;
     let recent = put(&store, &chunk(4)).await;
 
-    let looked = sweep(&store, listed_names, false, SystemTime::UNIX_EPOCH)
+    let looked = sweep(&store, &Lists, false, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(
-        (looked.pointers, looked.named, looked.stored, looked.recent),
-        (1, 1, 4, 1)
+        (looked.pointers, looked.named, looked.stored, looked.audit),
+        (1, 1, 3, true),
+        "the recent object's hour is not listed: {looked:?}"
     );
     assert_eq!((looked.unnamed, looked.deleted, looked.unknown), (2, 0, 0));
     assert_eq!(fake.names().len(), 5, "a look deletes nothing");
 
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((swept.unnamed, swept.deleted), (2, 2));
@@ -113,17 +133,25 @@ async fn an_hours_object_stays_until_its_hour_ended_the_skew_before() {
     assert_eq!(hour, period_of(store.now()));
     // To 09:59:59: the hour ended less than the skew before.
     tokio::time::advance((30 * MINUTE + CLOCK_SKEW).checked_sub(SECOND).unwrap()).await;
-    let late = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let late = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
-    assert_eq!((late.recent, late.deleted), (1, 0));
+    assert_eq!(
+        (late.stored, late.deleted),
+        (0, 0),
+        "not listed yet: {late:?}"
+    );
     assert!(present(&fake, &key_of(&written)));
-    // 10:00: the hour ended the skew before.
+    // 10:00: the hour ended the skew before, so this sweep lists it.
     tokio::time::advance(SECOND).await;
-    let next = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let next = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
-    assert_eq!((next.recent, next.deleted), (0, 1));
+    assert_eq!(
+        (next.audit, next.listed, next.deleted),
+        (false, 1, 1),
+        "{next:?}"
+    );
     assert!(!present(&fake, &key_of(&written)));
 }
 
@@ -148,7 +176,7 @@ async fn what_a_clock_behind_by_the_skew_writes_stays_through_a_sweep_just_after
             "an hour before"
         );
         written.push(put);
-        let swept = sweep(&sweeper, listed_names, true, SystemTime::UNIX_EPOCH)
+        let swept = sweep(&sweeper, &Lists, true, SystemTime::UNIX_EPOCH)
             .await
             .unwrap();
         assert_eq!(swept.deleted, 0, "at minute {minute}: {swept:?}");
@@ -174,17 +202,17 @@ async fn an_earlier_releases_day_named_object_goes_once_its_day_ended_the_skew_b
     let recent = put(&store, &chunk(2)).await;
     // To 00:59:59: the day ended less than the skew before.
     tokio::time::advance((30 * MINUTE).checked_sub(SECOND).unwrap()).await;
-    let late = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let late = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
-    assert_eq!((late.recent, late.deleted), (2, 0), "{late:?}");
+    assert_eq!((late.stored, late.deleted), (0, 0), "{late:?}");
     assert!(present(&fake, &key));
     // 01:00: the day ended the skew before; the hour of 00:00 not yet.
     tokio::time::advance(SECOND).await;
-    let next = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let next = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
-    assert_eq!((next.recent, next.deleted), (1, 1), "{next:?}");
+    assert_eq!((next.stored, next.deleted), (1, 1), "{next:?}");
     assert!(!present(&fake, &key));
     assert!(present(&fake, &key_of(&recent)));
 }
@@ -251,13 +279,14 @@ async fn what_a_store_stored_an_hour_before_it_copies_instead_of_uploading() {
         store.get_chunk(&next.reference).await.unwrap(),
         store.get_chunk(&first.reference).await.unwrap()
     );
-    // Carried on from the copy the hour after; within an hour, found.
+    // Carried on from the copy the hour after; within an hour, found
+    // there, and checked rather than sent again.
     tokio::time::advance(HOUR).await;
     assert!(put(&store, &content).await.copied);
     let again = put(&store, &content).await;
     assert!(!again.new && !again.copied, "found this hour");
     assert_eq!(*fake.copies.lock().unwrap(), 2);
-    assert_eq!(*fake.puts.lock().unwrap(), uploads + 1, "the find's create");
+    assert_eq!(*fake.puts.lock().unwrap(), uploads, "nothing sent");
 }
 
 /// When what the store stored an hour before is gone, a sweep having taken
@@ -270,7 +299,7 @@ async fn what_a_sweep_took_meanwhile_is_uploaded_again() {
     let first = put(&store, &content).await;
     // 10:00: the hour of 08:00 ended the skew before.
     tokio::time::advance(HOUR + CLOCK_SKEW).await;
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(swept.deleted, 1);
@@ -283,39 +312,82 @@ async fn what_a_sweep_took_meanwhile_is_uploaded_again() {
     store.get_chunk(&next.reference).await.unwrap();
 }
 
+/// On S3 an archive's tries read no chunk back: a try again the same
+/// hour, carrying into the next hour, the try after a fence, and copying
+/// as a try reaches each chunk all check chunks by their size and tag.
+#[tokio::test(start_paused = true)]
+async fn tries_and_copies_on_s3_read_no_chunk_back() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake_s3(&fake, "p");
+    let contents: Vec<_> = (0..8).map(chunk).collect();
+    let held = Arc::new(Held::new());
+    let holding = store.clone().holding(Arc::clone(&held));
+    for content in &contents {
+        assert!(put(&holding, content).await.new);
+    }
+    for content in &contents {
+        assert!(!put(&holding, content).await.new, "found this hour");
+    }
+    tokio::time::advance(HOUR).await;
+    assert_eq!(store.keep(&held).await.copied, 8);
+    for content in &contents {
+        let found = put(&holding, content).await;
+        assert!(!found.new && !found.copied, "carried already");
+    }
+    tokio::time::advance(HOUR).await;
+    for content in &contents {
+        assert!(put(&holding, content).await.copied);
+    }
+    assert_eq!(*fake.copies.lock().unwrap(), 16);
+    assert_eq!(*fake.gets.lock().unwrap(), 0, "no chunk read back");
+    assert!(*fake.heads.lock().unwrap() >= 8 * 4);
+}
+
 /// Archives `contents` as sandbox `name` until a publication lands, at most
 /// `tries` times: each chunk uploaded takes `upload` to send, one copied or
-/// found stored takes no time. The attempt that published, if any.
+/// found stored takes no time. With `keep`, what the tries store is
+/// carried into each new hour while they run. The attempt that published,
+/// if any.
 async fn archive_until_published(
     store: &ChunkStore,
     name: &str,
     contents: &[EncodedChunk],
     upload: Duration,
-    tries: usize,
+    (tries, keep): (usize, bool),
 ) -> Option<usize> {
-    for attempt in 1..=tries {
-        let publication = store.begin_test(name).await.unwrap();
-        let mut keys = Vec::new();
-        for chunk in contents {
-            let put = store.put_chunk(chunk).await.unwrap();
-            if put.new && !put.copied {
-                tokio::time::sleep(upload).await;
+    let held = Arc::new(Held::new());
+    let holding = store.clone().holding(Arc::clone(&held));
+    let tries = async {
+        for attempt in 1..=tries {
+            let publication = holding.begin_test(name).await.unwrap();
+            let mut keys = Vec::new();
+            for chunk in contents {
+                let put = holding.put_chunk(chunk).await.unwrap();
+                if put.new && !put.copied {
+                    tokio::time::sleep(upload).await;
+                }
+                keys.push(put.reference.key());
             }
-            keys.push(put.reference.key());
+            match holding.publish(publication, pointer(&keys)).await {
+                Ok(()) => return Some(attempt),
+                Err(Error::Superseded) => {}
+                Err(error) => panic!("{error}"),
+            }
         }
-        match store.publish(publication, pointer(&keys)).await {
-            Ok(()) => return Some(attempt),
-            Err(Error::Superseded) => {}
-            Err(error) => panic!("{error}"),
-        }
+        None
+    };
+    if keep {
+        store.keeping(&held, tries).await.0
+    } else {
+        tries.await
     }
-    None
 }
 
-/// Two hours of uploads beside a sweep at 17 minutes past every hour, by a
-/// store remembering up to `remembered` chunks: the attempt that
-/// published, and the uploads and copies it took.
-async fn long_archive(remembered: usize) -> (Option<usize>, u32, u32) {
+/// `chunks` chunks of 20 minutes' upload each beside a sweep at 17 minutes
+/// past every hour, by a store remembering up to `remembered` chunks,
+/// carrying what it stored into each new hour with `keep`: the attempt
+/// that published, and the uploads and copies it took.
+async fn long_archive(chunks: u8, remembered: usize, keep: bool) -> (Option<usize>, u32, u32) {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p").remembering(remembered);
     let sweeper = tokio::spawn({
@@ -323,15 +395,15 @@ async fn long_archive(remembered: usize) -> (Option<usize>, u32, u32) {
         async move {
             tokio::time::sleep(17 * MINUTE).await;
             loop {
-                sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+                sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
                     .await
                     .unwrap();
                 tokio::time::sleep(HOUR).await;
             }
         }
     });
-    let contents: Vec<_> = (0..6).map(chunk).collect();
-    let published = archive_until_published(&store, "a", &contents, 20 * MINUTE, 8).await;
+    let contents: Vec<_> = (0..chunks).map(chunk).collect();
+    let published = archive_until_published(&store, "a", &contents, 20 * MINUTE, (8, keep)).await;
     sweeper.abort();
     if published.is_some() {
         let named: Vec<String> =
@@ -347,21 +419,39 @@ async fn long_archive(remembered: usize) -> (Option<usize>, u32, u32) {
 /// by a fence, but what it stored carries over: started again, it copies
 /// what it stored in an earlier hour, uploads again only what a sweep took
 /// meanwhile, and publishes. Without the copies it uploads everything again
-/// each time and never publishes. Copies made as the archive reaches each
-/// chunk keep up only so far: past about two hours of uploads, what it
-/// uploads again delays the copies until a sweep took those chunks too.
+/// each time and never publishes.
 #[tokio::test(start_paused = true)]
 async fn an_archive_longer_than_the_time_between_sweeps_still_publishes() {
-    let (published, uploads, copies) = long_archive(1_024).await;
+    let (published, uploads, copies) = long_archive(6, 1_024, false).await;
     let attempts = published.expect("published");
     assert!(attempts > 1, "stopped by a fence first");
     assert!(copies > 0);
     assert!(uploads < 2 * 6, "{uploads} uploads of 6 chunks");
 
-    let (published, uploads, copies) = long_archive(0).await;
+    let (published, uploads, copies) = long_archive(6, 0, false).await;
     assert_eq!(published, None, "{uploads} uploads");
     assert_eq!(copies, 0);
     assert!(uploads >= 8 * 5, "{uploads} uploads");
+}
+
+/// Six hours of uploads beside hourly sweeps: what the archive stored is
+/// carried into each new hour while it runs, so no sweep takes any of it,
+/// and the try after the last fence finds all of it and publishes, having
+/// uploaded each chunk once. Copied only as each try reaches a chunk, what
+/// it uploads again delays the copies until sweeps took those chunks too,
+/// and it never publishes.
+#[tokio::test(start_paused = true)]
+async fn an_archive_of_six_hours_publishes_beside_hourly_sweeps() {
+    let (published, uploads, copies) = long_archive(18, 1_024, true).await;
+    assert!(
+        published.expect("published") > 1,
+        "stopped by a fence first"
+    );
+    assert_eq!(uploads, 18, "each chunk uploaded once");
+    assert!(copies > 18, "{copies} copies");
+
+    let (published, uploads, _) = long_archive(18, 1_024, false).await;
+    assert_eq!(published, None, "{uploads} uploads");
 }
 
 /// An archive's first pointer is an empty one stored when it begins; it
@@ -375,7 +465,7 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     let stored = fake.bytes("p/pointers/v3/a").unwrap();
     assert!(unstamped(&stored).unwrap().1.is_empty());
     assert_eq!(store.get_pointer("a").await.unwrap(), None);
-    let looked = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let looked = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((looked.pointers, looked.named), (1, 0));
@@ -393,7 +483,7 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     let late = store.begin("a", next_save()).await.unwrap();
     assert!(matches!(late, Begun::Deleted), "{late:?}");
 
-    let young = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let young = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(young.tombstones, 1);
@@ -403,7 +493,7 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
         "not stored again"
     );
     tokio::time::advance(30 * DAY).await;
-    let old = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let old = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(old.tombstones, 1);
@@ -432,7 +522,7 @@ async fn a_first_archive_held_up_past_a_delete_and_a_sweep_finds_the_sandbox_del
     let tombstone = fake.bytes("p/pointers/v3/a").expect("a tombstone");
 
     tokio::time::advance(2 * DAY).await;
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(swept.tombstones, 1, "{swept:?}");
@@ -472,7 +562,7 @@ async fn a_publication_held_up_past_a_sweep_never_lands() {
     }
     *fake.stall.lock().unwrap() = None;
     tokio::time::advance(2 * DAY).await;
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(swept.deleted, 1, "{swept:?}");
@@ -512,7 +602,7 @@ async fn an_earlier_hours_object_found_by_name_is_not_safe_to_reuse() {
     *fake.stall.lock().unwrap() = Some(("chunks/", HOUR));
     let sweeping = tokio::spawn({
         let store = store.clone();
-        async move { sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH).await }
+        async move { sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH).await }
     });
     while *fake.held.lock().unwrap() == 0 {
         tokio::task::yield_now().await;
@@ -555,7 +645,7 @@ async fn a_delete_held_up_in_flight_takes_nothing_written_since() {
     *fake.stall.lock().unwrap() = Some(("chunks/", 3 * DAY));
     let sweeping = tokio::spawn({
         let store = store.clone();
-        async move { sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH).await }
+        async move { sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH).await }
     });
     give_up_once_held(&fake, sweeping).await;
 
@@ -574,7 +664,8 @@ async fn a_delete_held_up_in_flight_takes_nothing_written_since() {
 
 /// Objects of the old layout are never written again: one no pointer
 /// names goes once it was last stored more than a week (and two clock
-/// disagreements) before the sweep began. Keys of no known layout stay.
+/// disagreements) before the sweep began, the old layout being listed
+/// again by each sweep until then. Keys of no known layout stay.
 #[tokio::test(start_paused = true)]
 async fn old_layout_objects_go_after_a_week_and_unknown_keys_stay() {
     let fake = Fake::new(paused_clock());
@@ -593,6 +684,8 @@ async fn old_layout_objects_go_after_a_week_and_unknown_keys_stay() {
         Bytes::from_static(b"{}"),
     );
     fake.put_raw("p/chunks/v9/odd", Bytes::from_static(b"?"));
+    let odd_in_an_hour = format!("p/chunks/v2/{}/odd", period_of(store.now()));
+    fake.put_raw(&odd_in_an_hour, Bytes::from_static(b"?"));
     let publication = store.begin_test("a").await.unwrap();
     store
         .publish(publication, pointer(&[named.object_key()]))
@@ -601,18 +694,23 @@ async fn old_layout_objects_go_after_a_week_and_unknown_keys_stay() {
     store.get_chunk(&named.reference).await.unwrap();
 
     tokio::time::advance(LEGACY_SWEEP_AFTER.checked_sub(SECOND).unwrap()).await;
-    let young = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let young = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((young.recent, young.unknown, young.deleted), (2, 1, 0));
     tokio::time::advance(2 * SECOND).await;
-    let old = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let old = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
-    assert_eq!((old.named, old.unknown, old.deleted), (1, 1, 2));
+    assert_eq!(
+        (old.audit, old.named, old.deleted),
+        (false, 1, 2),
+        "{old:?}"
+    );
     assert!(present(&fake, &named.object_key()));
     assert!(!present(&fake, &unnamed.object_key()));
     assert!(fake.bytes("p/chunks/v9/odd").is_some());
+    assert!(fake.bytes(&odd_in_an_hour).is_some());
 }
 
 /// Only pointers from before they moved name objects of the old layout,
@@ -630,11 +728,11 @@ async fn old_layout_objects_stay_for_a_week_after_the_pointers_moved() {
     );
     tokio::time::advance(LEGACY_SWEEP_AFTER + DAY).await;
     let moved = store.now() - DAY;
-    let kept = sweep(&store, listed_names, true, moved).await.unwrap();
+    let kept = sweep(&store, &Lists, true, moved).await.unwrap();
     assert_eq!((kept.recent, kept.deleted), (1, 0), "moved only a day ago");
     assert!(present(&fake, &unnamed.object_key()));
     tokio::time::advance(LEGACY_SWEEP_AFTER).await;
-    let swept = sweep(&store, listed_names, true, moved).await.unwrap();
+    let swept = sweep(&store, &Lists, true, moved).await.unwrap();
     assert_eq!((swept.unnamed, swept.deleted), (1, 1));
     assert!(!present(&fake, &unnamed.object_key()));
 }
@@ -676,7 +774,7 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     let current = pointer(&[key_of(&newer)]);
     store.publish(archive, current.clone()).await.unwrap();
     tokio::time::advance(2 * DAY).await;
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!(swept.deleted, 2, "{swept:?}");
@@ -796,7 +894,7 @@ async fn a_sweep_that_cannot_read_a_pointer_deletes_nothing() {
         .await
         .unwrap();
     tokio::time::advance(2 * DAY).await;
-    let refused = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH).await;
+    let refused = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH).await;
     assert!(matches!(refused, Err(Error::Json(_))), "{refused:?}");
     assert_eq!(fake.names().len(), 2);
 }
@@ -812,7 +910,7 @@ async fn a_sweep_deletes_on_any_store() {
     // Seen from far enough ahead, the chunk is old.
     let later = SystemTime::now() + 30 * DAY;
     let store = store.with_clock(Clock::from_fn(move || later));
-    let swept = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+    let swept = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((swept.unnamed, swept.deleted), (1, 1));
@@ -866,7 +964,12 @@ struct Outcome {
     reused: usize,
     /// Chunks an archive copied from what its store stored an hour before.
     copied: usize,
+    /// Chunks an archive in flight carried into a new hour.
+    carried: usize,
     deleted: usize,
+    /// Deleted as what a pointer named before and none names now, without
+    /// listing their period again.
+    retired: usize,
     /// Deletes of what a stored pointer named, and pointers published
     /// naming what was gone.
     violations: Vec<String>,
@@ -898,6 +1001,9 @@ struct Run {
     upload: Duration,
     /// How many chunks each archive's store remembers, to copy.
     remembered: usize,
+    /// Whether an archive carries what it stored into each new hour while
+    /// its tries run.
+    keep: bool,
 }
 
 impl Run {
@@ -905,6 +1011,7 @@ impl Run {
         fenced: true,
         upload: Duration::from_secs(5 * 60),
         remembered: 1_024,
+        keep: true,
     };
 }
 
@@ -938,15 +1045,54 @@ async fn store_picks(
 /// How many times an archive superseded by a fence starts again.
 const TRIES: usize = 4;
 
+/// Publishes `keys` as sandbox `name`, on condition if `run` is fenced,
+/// counting in `outcome` what happened and any key named that is gone:
+/// whether it landed.
+async fn publish_keys(
+    store: &ChunkStore,
+    publication: Publication,
+    name: &str,
+    keys: &[String],
+    run: Run,
+    fake: &Fake,
+    outcome: &Mutex<Outcome>,
+) -> bool {
+    let published = if run.fenced {
+        store.publish(publication, pointer(keys)).await
+    } else {
+        store
+            .put_pointer_unfenced(name, next_save(), pointer(keys))
+            .await
+    };
+    let mut outcome = outcome.lock().unwrap();
+    match published {
+        Ok(()) => {
+            outcome.published += 1;
+            for key in keys {
+                if !present(fake, key) {
+                    outcome.violations.push(format!("{name} names {key}"));
+                }
+            }
+            true
+        }
+        Err(Error::Superseded) => {
+            outcome.superseded += 1;
+            false
+        }
+        Err(error) => panic!("{error}"),
+    }
+}
+
 /// Six archives at a time over about a week, each archiving one of its
 /// two sandboxes again and again: reusing part of what its last copy
 /// named, storing (or finding stored the same hour) up to three of sixteen
 /// chunks, each taking up to `run.upload` to upload, and now and then held
 /// up for up to two days before it publishes; starting again when a fence
-/// stopped it, as a host does; sometimes deleting a copy. One sweep after
-/// another runs beside them, about hourly. Each archive and the sweep read
-/// their own clock, off the store's by up to the allowed disagreement, and
-/// every request waits up to three seconds, as the seed picks.
+/// stopped it, as a host does, carrying what its tries stored into each new
+/// hour meanwhile; sometimes deleting a copy. One sweep after another runs
+/// beside them, about hourly. Each archive and the sweep read their own
+/// clock, off the store's by up to the allowed disagreement, and every
+/// request waits up to three seconds, as the seed picks.
 async fn simulate(seed: u64, run: Run) -> Outcome {
     let fake = Fake::new(paused_clock());
     fake.with_latency(seed, 3 * SECOND);
@@ -981,43 +1127,38 @@ async fn simulate(seed: u64, run: Run) -> Outcome {
                 } else {
                     10 * MINUTE
                 };
-                for attempt in 1..=TRIES {
-                    let publication = store.begin_test(&name).await.unwrap();
-                    let mut keys = kept.clone();
-                    let stored = store_picks(&store, contents, &picks, &mut rng, run, outcome);
-                    keys.extend(stored.await);
-                    keys.sort();
-                    keys.dedup();
-                    if attempt == 1 {
-                        tokio::time::sleep(within(&mut rng, held)).await;
-                    }
-                    let published = if run.fenced {
-                        store.publish(publication, pointer(&keys)).await
-                    } else {
-                        store
-                            .put_pointer_unfenced(&name, next_save(), pointer(&keys))
-                            .await
-                    };
-                    match published {
-                        Ok(()) => {
-                            let mut outcome = outcome.lock().unwrap();
-                            outcome.published += 1;
-                            for key in &keys {
-                                if !present(fake, key) {
-                                    outcome.violations.push(format!("{name} names {key}"));
-                                }
-                            }
-                            drop(outcome);
-                            last[slot] = keys;
-                            break;
+                let carried = Arc::new(Held::new());
+                let holding = store.clone().holding(Arc::clone(&carried));
+                let tries = async {
+                    for attempt in 1..=TRIES {
+                        let publication = holding.begin_test(&name).await.unwrap();
+                        let mut keys = kept.clone();
+                        let stored =
+                            store_picks(&holding, contents, &picks, &mut rng, run, outcome);
+                        keys.extend(stored.await);
+                        keys.sort();
+                        keys.dedup();
+                        if attempt == 1 {
+                            tokio::time::sleep(within(&mut rng, held)).await;
                         }
-                        Err(Error::Superseded) => {
-                            let mut outcome = outcome.lock().unwrap();
-                            outcome.superseded += 1;
-                            outcome.gave_up += usize::from(attempt == TRIES);
+                        let landed =
+                            publish_keys(&holding, publication, &name, &keys, run, fake, outcome);
+                        if landed.await {
+                            return Some(keys);
                         }
-                        Err(error) => panic!("{error}"),
+                        outcome.lock().unwrap().gave_up += usize::from(attempt == TRIES);
                     }
+                    None
+                };
+                let published = if run.keep {
+                    let (published, kept) = store.keeping(&carried, tries).await;
+                    outcome.lock().unwrap().carried += kept.copied;
+                    published
+                } else {
+                    tries.await
+                };
+                if let Some(keys) = published {
+                    last[slot] = keys;
                 }
                 if rng.below(4) == 0 {
                     store.delete_pointer(&name, TEST_EPOCH).await.unwrap();
@@ -1032,10 +1173,12 @@ async fn simulate(seed: u64, run: Run) -> Outcome {
         let store = ChunkStore::over_fake(&fake, "p").with_clock(skewed_clock(skew(&mut rng)));
         for _ in 0..200 {
             tokio::time::sleep(within(&mut rng, 2 * HOUR)).await;
-            let report = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+            let report = sweep(&store, &Lists, true, SystemTime::UNIX_EPOCH)
                 .await
                 .unwrap();
-            outcome.lock().unwrap().deleted += report.deleted;
+            let mut outcome = outcome.lock().unwrap();
+            outcome.deleted += report.deleted;
+            outcome.retired += report.retired;
         }
     };
     let writers = futures::future::join_all((0..6).map(writer));
@@ -1065,8 +1208,10 @@ async fn sweeps_never_take_what_archives_in_flight_will_name() {
         total.reused += outcome.reused;
         total.copied += outcome.copied;
         total.deleted += outcome.deleted;
+        total.retired += outcome.retired;
     }
     assert!(total.deleted > 100, "sweeps deleted only {}", total.deleted);
+    assert!(total.retired > 10, "{total:?}");
     assert!(
         total.superseded > 50 && total.published > 1_000 && total.reused > 100,
         "{total:?}"
@@ -1088,32 +1233,47 @@ async fn simulated(seeds: u64, run: Run) -> Outcome {
         total.superseded += outcome.superseded;
         total.gave_up += outcome.gave_up;
         total.copied += outcome.copied;
+        total.carried += outcome.carried;
     }
     total
 }
 
 /// Archives whose chunks take up to an hour each to upload, a few hours in
 /// all, beside sweeps about hourly: a fence stops many, and started again
-/// they copy what they stored an hour before and publish. Without copies,
-/// many more give up, uploading everything again on every try.
+/// they find what they carried into the new hour and publish; none gives
+/// up. Copying only as a try reaches each chunk, some give up, and without
+/// copies many more do, uploading everything again on every try.
 #[tokio::test(start_paused = true)]
 async fn long_archives_publish_beside_hourly_sweeps() {
     let long = Run {
         upload: HOUR,
         ..Run::FENCED
     };
-    let with = simulated(40, long).await;
-    let without = simulated(
+    let kept = simulated(40, long).await;
+    assert_eq!(kept.gave_up, 0, "{kept:?}");
+    assert!(kept.carried > 1_000 && kept.superseded > 1_000, "{kept:?}");
+    let copied = simulated(
         40,
         Run {
+            keep: false,
+            ..long
+        },
+    )
+    .await;
+    let neither = simulated(
+        40,
+        Run {
+            keep: false,
             remembered: 0,
             ..long
         },
     )
     .await;
-    assert!(with.copied > 1_000, "{with:?}");
-    assert!(with.gave_up * 4 < without.gave_up, "{with:?} {without:?}");
-    assert!(with.gave_up * 50 < with.published, "{with:?}");
+    assert!(copied.gave_up > 0, "{copied:?}");
+    assert!(
+        copied.gave_up * 4 < neither.gave_up,
+        "{copied:?} {neither:?}"
+    );
 }
 
 /// The simulation has teeth: archives held up past a sweep that publish

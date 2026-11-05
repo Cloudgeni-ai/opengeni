@@ -106,6 +106,11 @@ export type RuntimeMetricsHooks = {
     outcome: "completed" | "failed";
     durationSeconds: number;
   }) => void;
+  /**
+   * A provider's 400 invalid-request answer to a model call, by the request
+   * path it names (indices collapsed) and its error code. Monitoring only.
+   */
+  onModelInvalidRequest?: (input: { provider: string; path: string; code: string }) => void;
   onSandboxCreate?: (input: {
     backend: string;
     imageSource: "logical" | "provider_immutable";

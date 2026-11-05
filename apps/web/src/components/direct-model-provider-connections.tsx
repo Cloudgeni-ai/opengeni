@@ -3,6 +3,7 @@ import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   DIRECT_MODEL_PROVIDER_LABELS,
@@ -44,7 +45,7 @@ export function DirectModelProviderConnections({
       await client.deleteConnection(workspaceId, connection.id);
       refresh();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not disconnect");
+      toast.error(userErrorText(e, "Could not disconnect"));
     } finally {
       setBusy(false);
     }

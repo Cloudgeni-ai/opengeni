@@ -498,7 +498,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     }
   });
 
-  test("password login with a reference; the reply is redacted and the value arrives exactly", async () => {
+  test("password login with a reference; the password field keeps its value out of the reply and the value arrives exactly", async () => {
     const browser = await ProductBrowser.open(`${site.url}/password`);
     await passwordLogin(browser, "alice", "{{secret:Fake Alice/password}}");
     await expectLoggedIn(browser, "alice", "password");
@@ -656,7 +656,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     await browser.shot("otp-split-success");
   }, 90_000);
 
-  test("a page that echoes the typed value gets a redacted receipt", async () => {
+  test("a page that echoes the typed value shows it in the receipt, as the page does", async () => {
     const page = `<!doctype html><title>Echo</title>
       <input aria-label="Field"><p id="echo" aria-live="polite"></p>
       <script>document.querySelector('input').addEventListener('input', (event) => {
@@ -668,10 +668,10 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       locator: { kind: "role", role: "textbox", name: "Field" },
       value: "{{secret:Echo/value}}",
     });
-    expect(JSON.stringify(receipt)).not.toContain(ECHO_CANARY);
-    expect(texts(receipt)).toContain("You typed [secret]");
-    // The page itself shows the value; a later plain observation is not
-    // redacted, so end the session here without observing again.
+    // The action carried only the reference; what the page shows is what
+    // the agent sees, unchanged (docs/secrets.md, "Agent-visible content").
+    expect(texts(receipt)).toContain(`You typed ${ECHO_CANARY}`);
+    expect(JSON.stringify(receipt)).not.toContain("[secret]");
     await browser.end();
   }, 60_000);
 
@@ -815,7 +815,15 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       }
     }
     expect(codes.size).toBe(3);
-    const needles = needlesFor([...plaintexts].map(([label, value]) => ({ label, value })));
+    // The echo page prints the value it was given, so its reply and that
+    // operation's journal receipt hold it as the page showed it. Every other
+    // value was typed into a field that standard markup keeps out of page
+    // reads, or went only through the side map.
+    const needles = needlesFor(
+      [...plaintexts]
+        .filter(([label]) => label !== "echo canary")
+        .map(([label, value]) => ({ label, value })),
+    );
     const hits: Hit[] = [];
     const codeHits: Array<{ location: string; label: string }> = [];
     const scanCodes = (location: string, body: string) => {
@@ -849,9 +857,9 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       // Controller-private passkey sync replies (key material by design; never agent-facing).
       passkeySyncRepliesExcluded: passkeySyncReplies.length,
       journalFilesScanned: journalFiles.length,
-      // Replies where browserd replaced a side-map value with "[secret]"
-      // (e.g. the TOTP code shown as the value of a text box).
-      redactedResponses: responses.filter((body) => body.includes("[secret]")).length,
+      // Replies holding a "[secret]" placeholder: nothing rewrites what the
+      // page shows (docs/secrets.md, "Agent-visible content").
+      placeholderResponses: responses.filter((body) => body.includes("[secret]")).length,
       knownValues: [...plaintexts.keys(), ...codes.keys()],
       hits,
       codeHits,
@@ -865,7 +873,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     }
     expect(responses.length).toBeGreaterThan(20);
     expect(journalFiles.length).toBeGreaterThan(0);
-    expect(report.redactedResponses).toBeGreaterThan(0);
+    expect(report.placeholderResponses).toBe(0);
     expect(hits).toEqual([]);
     expect(codeHits).toEqual([]);
   });

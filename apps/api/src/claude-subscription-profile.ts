@@ -1,3 +1,4 @@
+import { CLAUDE_OAUTH_PROFILE_URL, claudeSubscriptionPlanId } from "@opengeni/config";
 import { readResponseJsonBounded } from "@opengeni/network";
 import { z } from "zod";
 
@@ -16,6 +17,8 @@ const Profile = z
     organization: z
       .object({
         organization_type: z.string().trim().min(1).max(128).optional(),
+        // "default_claude_max_20x": which Max tier (Max or Ultra) the plan is.
+        rate_limit_tier: z.unknown().optional(),
       })
       .passthrough()
       .optional(),
@@ -36,13 +39,12 @@ export function parseClaudeSubscriptionProfile(value: unknown): ClaudeSubscripti
   return {
     accountUuid: account.uuid,
     email: account.email ?? account.email_address ?? null,
-    plan:
-      organization?.organization_type ??
-      (account.has_claude_max === true
-        ? "claude_max"
-        : account.has_claude_pro === true
-          ? "claude_pro"
-          : null),
+    plan: claudeSubscriptionPlanId({
+      organizationType: organization?.organization_type,
+      rateLimitTier: organization?.rate_limit_tier,
+      hasClaudeMax: account.has_claude_max,
+      hasClaudePro: account.has_claude_pro,
+    }),
   };
 }
 
@@ -55,7 +57,7 @@ export async function fetchClaudeSubscriptionProfile(
   if (!scopes.includes("user:profile")) return null;
   try {
     const signal = AbortSignal.timeout(10_000);
-    const response = await fetchImpl("https://api.anthropic.com/api/oauth/profile", {
+    const response = await fetchImpl(CLAUDE_OAUTH_PROFILE_URL, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       redirect: "error",
       signal,

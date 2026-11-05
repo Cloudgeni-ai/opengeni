@@ -1503,6 +1503,44 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a delayed subscription plan refusal offers upgrading, not adding credits", async () => {
+    const fixture = createMeetingsFixture();
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const recording = await fixture.client.getRecording(workspaceId, id);
+        return {
+          ...recording,
+          transcript: { ...recording.transcript!, errorCode: "subscription_plan_required" },
+        };
+      },
+    } as typeof fixture.client;
+    let opened = 0;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {
+          opened++;
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Upgrade to Pro to use your own subscription.");
+      const buttons = [...view.container.querySelectorAll("button")];
+      expect(buttons.some((button) => button.textContent?.trim() === "Add credits")).toBe(false);
+      const upgrade = buttons.find((button) => button.textContent?.trim() === "Upgrade to Pro")!;
+      expect(upgrade).toBeDefined();
+      await act(async () => upgrade.click());
+      expect(opened).toBe(1);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   /** The fixture's failed meeting, refused for credits on the deployment's model. */
   async function creditRefusal(withSubscription: boolean) {
     const fixture = createMeetingsFixture();

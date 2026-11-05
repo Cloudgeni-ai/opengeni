@@ -1,4 +1,10 @@
-import { sandboxImageAllowlist, type Settings } from "@opengeni/config";
+import {
+  deploymentSandboxBackend,
+  hostSandboxBackendRefused,
+  sandboxImageAllowlist,
+  UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE,
+  type Settings,
+} from "@opengeni/config";
 import {
   resolveWorkspaceDefaultSandboxImage,
   type AccessGrant,
@@ -344,6 +350,17 @@ export async function resolveSessionSandboxRuntime(
   /** Who drives the attach; pass the route grant whenever one exists. */
   authority: SessionAttachRigAuthority,
 ): Promise<SessionSandboxRuntime> {
+  // Every API surface that can build or attach a session's box (Channel A
+  // terminal/files/browser/computer, viewers, rematerialization) resolves its
+  // runtime here first. A stored row on a host backend this deployment does not
+  // serve gets a plain 409 before any box, hook or credential exists.
+  const builtBackend = managedSessionGroupBackend(
+    deploymentSandboxBackend(settings),
+    session.sandboxBackend,
+  );
+  if (builtBackend && hostSandboxBackendRefused(settings, builtBackend)) {
+    throw new HTTPException(409, { message: UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE });
+  }
   const rigVersion =
     session.rigId && session.rigVersionId
       ? await resolveSessionRigVersion(

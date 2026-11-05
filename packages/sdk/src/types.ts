@@ -867,12 +867,14 @@ export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
       excludedMcpServerIds?: string[] | undefined;
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     }
   | {
       mode: "explicit";
       tools: ToolRef[];
       firstPartyMcpTools: FirstPartyMcpToolName[];
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     };
 
@@ -2099,6 +2101,8 @@ export type Session = {
         waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
+        /** Paused descendants whose work is parked for Resume. Absent from older servers. */
+        pausedWorkDescendants?: number | undefined;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         unreadFailedDescendants?: number | undefined;
@@ -4127,7 +4131,13 @@ export type CreateSessionRequest = {
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
-  goal?: GoalSpec | undefined;
+  /**
+   * The session goal. When omitted on a top-level `unattended: true` create
+   * with an `initialMessage`, Opengeni sets a goal that stands for that
+   * message, so the run keeps going until the agent completes or pauses it.
+   * `null` creates the session without a goal.
+   */
+  goal?: GoalSpec | null | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
   // double-submit/retry of the same logical create collapse to one session.
@@ -4767,6 +4777,7 @@ export type ClaudeUsageWindow = {
     | "seven_day"
     | "seven_day_opus"
     | "seven_day_sonnet"
+    | "seven_day_fable"
     | "seven_day_overage_included"
     | "overage";
   usedPercent: number | null;
@@ -5618,6 +5629,11 @@ export type CodexConnectPoll =
       plan?: string | null;
       accountId?: string;
       isActive?: boolean;
+      /**
+       * Opengeni's Codex models this account offers, read once from its live
+       * model list at connect time. Absent when that read failed.
+       */
+      models?: Array<{ id: string; label: string }>;
     };
 
 /**
@@ -7406,6 +7422,13 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set for the person linking when they may link this Slack account as a
+   * member of the organization, without workspace access, once they confirm
+   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
+   * account when Slack says who it is.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {
@@ -7782,6 +7805,8 @@ export type SessionSystemUpdatePayload =
         eventType: "sandbox.command.output.delta";
         commandId: string;
       };
+      /** Bounded start and end of the output (absent for lost commands and older results). */
+      output?: string | undefined;
       [key: string]: unknown;
     }
   | ({
@@ -8114,6 +8139,15 @@ export type ScheduledTaskAgentConfigInput = {
   memoryScope?: SessionMemoryScope | undefined;
   agentAccess?: SessionAgentAccess | undefined;
   skills?: ScheduledTaskSkill[] | undefined;
+  /**
+   * Opengeni tools and permissions of each chat the task starts, as on
+   * session create. Set once at creation (an update that names them is
+   * refused); omitted, an agent's task keeps its own chat's selection and any
+   * other task follows the defaults. Permissions must be held by the creating
+   * credential. Only a task that starts its own chats can carry them.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -10390,6 +10424,10 @@ export type {
   SubscriptionPlan,
   SubscriptionPlanCatalog,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -11536,6 +11574,7 @@ export type UpdateSessionMcpToolPermissionsRequest = {
 export type AgentCapabilityId =
   | "webSearch"
   | "humanInput"
+  | "notifications"
   | "skills"
   | "goals"
   | "subagents"
@@ -11547,7 +11586,8 @@ export type AgentCapabilityId =
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
-  | "workspaceAdmin";
+  | "workspaceAdmin"
+  | "privacyFacts";
 
 /** `read` reads installed Skills; `manage` also changes them. */
 export type AgentSkillsCapability = "read" | "manage" | false;
@@ -11555,6 +11595,7 @@ export type AgentSkillsCapability = "read" | "manage" | false;
 export type AgentCapabilityToggles = {
   webSearch?: boolean | undefined;
   humanInput?: boolean | undefined;
+  notifications?: boolean | undefined;
   skills?: AgentSkillsCapability | undefined;
   goals?: boolean | undefined;
   subagents?: boolean | undefined;
@@ -11567,6 +11608,7 @@ export type AgentCapabilityToggles = {
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
   workspaceAdmin?: boolean | undefined;
+  privacyFacts?: boolean | undefined;
 };
 
 /**
@@ -11603,6 +11645,7 @@ export type WorkspaceAgentDefaults = {
 export type ResolvedAgentCapabilities = {
   webSearch: boolean;
   humanInput: boolean;
+  notifications: boolean;
   skills: AgentSkillsCapability;
   goals: boolean;
   subagents: boolean;
@@ -11615,6 +11658,7 @@ export type ResolvedAgentCapabilities = {
   workspaceFiles: boolean;
   workspaceConnectors: boolean;
   workspaceAdmin: boolean;
+  privacyFacts: boolean;
 };
 
 export type ResolvedAgentConfig = {

@@ -45,6 +45,10 @@ pub struct SavedImage {
     /// The runtime that made it, if known ([`compute_engine::Engine::runtime`]),
     /// kept with the copy so a fetched image still says.
     pub runtime: Option<String>,
+    /// How many virtual processors the VM it was saved from had, if known,
+    /// kept with the copy so a new owner can tell whether it fits the
+    /// shape it is given (see [`Claimed::made_at`]).
+    pub vcpus: Option<u8>,
 }
 
 /// A file in a VM's jail. Its VMM can put a link to a host file or a pipe
@@ -153,6 +157,32 @@ pub struct Claimed {
     /// The length of the disk it holds, which the new owner books and
     /// grows the sandbox's disk from.
     pub disk_bytes: u64,
+    /// The machine its memory image was saved from, if it holds one.
+    pub made_at: MadeAt,
+}
+
+/// The machine a memory image was saved from, which restoring it brings
+/// back whatever the sandbox is given now: a sandbox given another shape
+/// boots from its disk instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MadeAt {
+    /// Its virtual processors; `None` for a copy stored before they were
+    /// recorded, taken to be the sandbox's.
+    pub vcpus: Option<u8>,
+    /// Its memory's length in bytes.
+    pub memory_bytes: Option<u64>,
+}
+
+impl MadeAt {
+    /// Whether an image made here differs from a VM of `config`. Only
+    /// what it says counts: an unknown field is taken to match.
+    #[must_use]
+    pub fn differs(self, config: &crate::protocol::SandboxConfig) -> bool {
+        self.vcpus.is_some_and(|vcpus| vcpus != config.vcpus)
+            || self
+                .memory_bytes
+                .is_some_and(|bytes| bytes != u64::from(config.memory_mib) << 20)
+    }
 }
 
 /// Where a fetch puts what it brings back.
@@ -183,6 +213,8 @@ pub enum FetchedMemory {
         memory: PathBuf,
         /// The runtime that made the image, as archived.
         runtime: Option<String>,
+        /// The virtual processors it was saved with, as archived.
+        vcpus: Option<u8>,
     },
     /// The state, in the scratch directory; memory stays in the store, to be
     /// paged in as the guest touches it.
@@ -198,6 +230,8 @@ pub enum FetchedMemory {
         prefilled: Option<Prefilled>,
         /// The runtime that made the image, as archived.
         runtime: Option<String>,
+        /// The virtual processors it was saved with, as archived.
+        vcpus: Option<u8>,
     },
 }
 
@@ -446,6 +480,9 @@ impl Directory {
 const CONTENTS: &str = "contents";
 /// The stored file naming the runtime that made the memory image.
 const RUNTIME: &str = "runtime";
+/// The stored file saying how many virtual processors the memory image
+/// was saved with.
+const VCPUS: &str = "vcpus";
 
 /// The contents list for `files` (name and path) as stored in `dir`, with
 /// `made` telling apart copies of the same bytes.
@@ -463,6 +500,16 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update_reader(fs::File::open(path)?)?;
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// The virtual processors a stored [`VCPUS`] file says.
+fn read_vcpus(path: &Path) -> std::io::Result<u8> {
+    fs::read_to_string(path)?.trim().parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the stored vcpus is not a number",
+        )
+    })
 }
 
 /// Whether the copy in `dir` is the one `receipt` names, with every file
@@ -555,6 +602,7 @@ impl Store for Directory {
             .memory
             .as_ref()
             .and_then(|memory| memory.runtime.clone());
+        let vcpus = files.memory.as_ref().and_then(|memory| memory.vcpus);
         if let Some(memory) = &files.memory {
             pairs.push((memory.state.clone(), "state"));
             pairs.push((memory.memory.clone(), "memory"));
@@ -591,6 +639,10 @@ impl Store for Directory {
             if let Some(runtime) = &runtime {
                 fs::write(staging.join(RUNTIME), runtime)?;
                 names.push(RUNTIME);
+            }
+            if let Some(vcpus) = vcpus {
+                fs::write(staging.join(VCPUS), vcpus.to_string())?;
+                names.push(VCPUS);
             }
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -657,10 +709,18 @@ impl Store for Directory {
             } else {
                 None
             };
+            let vcpus = if listed.contains_key(VCPUS) {
+                let copy = into.scratch.join(VCPUS);
+                copy_checked(&stored, VCPUS, &copy, &listed)?;
+                Some(read_vcpus(&copy)?)
+            } else {
+                None
+            };
             Ok(FetchedMemory::Local {
                 state,
                 memory,
                 runtime,
+                vcpus,
             })
         })
         .await
@@ -685,16 +745,29 @@ impl Store for Directory {
                 }
                 Err(error) => return Err(error),
             };
-            let memory = listed.lines().any(|line| {
-                line.split_once(' ')
-                    .is_some_and(|(name, _)| name == "memory")
-            });
+            let names: Vec<&str> = listed
+                .lines()
+                .filter_map(|line| line.split_once(' ').map(|(name, _)| name))
+                .collect();
+            let memory = names.contains(&"memory");
             let disk_bytes = fs::metadata(stored.join("disk"))?.len();
+            let made_at = if memory {
+                MadeAt {
+                    vcpus: names
+                        .contains(&VCPUS)
+                        .then(|| read_vcpus(&stored.join(VCPUS)))
+                        .transpose()?,
+                    memory_bytes: Some(fs::metadata(stored.join("memory"))?.len()),
+                }
+            } else {
+                MadeAt::default()
+            };
             Ok(Owned::Done(Some(Claimed {
                 save: 0,
                 receipt: Receipt(blake3::hash(listed.as_bytes()).to_hex().to_string()),
                 memory,
                 disk_bytes,
+                made_at,
             })))
         })
         .await
@@ -825,6 +898,7 @@ mod tests {
                 memory: dir.path().join("memory"),
                 chunks: None,
                 runtime: None,
+                vcpus: None,
             }),
             profile: None,
             image: None,
@@ -873,6 +947,7 @@ mod tests {
                 memory: dir.path().join("memory"),
                 chunks: None,
                 runtime: Some("Firecracker v1.0.0 on a test processor".into()),
+                vcpus: Some(2),
             }),
             profile: None,
             image: None,

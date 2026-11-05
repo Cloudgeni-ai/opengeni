@@ -23,7 +23,7 @@ use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep};
 
-use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
+use super::{Delays, Lab, NEVER, PAUSE_SOON, id, vm_name};
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
@@ -308,6 +308,150 @@ async fn an_adopted_sandbox_keeps_the_length_of_the_disk_it_was_handed_off_with(
     two.assert_clean();
 }
 
+/// Has `lab` adopt sandbox `id` under `owner_epoch` at the shape `config`
+/// gives, as after a resize, with the copy vouched for as whole or not.
+async fn adopt_as(
+    lab: &Lab,
+    id: Id,
+    owner_epoch: u64,
+    config: SandboxConfig,
+    whole: bool,
+) -> Reply {
+    lab.client
+        .call(&Request::Adopt {
+            id,
+            config,
+            owner_epoch,
+            whole,
+        })
+        .await
+        .unwrap()
+}
+
+/// A sandbox one host saved, programs and files, and handed off.
+async fn saved_and_handed_off(one: &Lab, sandbox: Id) {
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(hand_off(one, sandbox, 1).await, Reply::Done);
+}
+
+/// A sandbox resized to other processors or memory is taken up from its
+/// files: its memory image would bring back the machine it was saved
+/// from. Its programs end and its files stay, and the image is gone from
+/// the store too, so no later adopt restores it. The service sends such
+/// an adopt as not whole; the image's recorded shape decides even when an
+/// adopt says it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_at_another_machine_shape_boots_from_the_files() {
+    for (n, vcpus, memory_mib) in [(20, 2, 256), (21, 1, 512)] {
+        let (one, two, shelf) = hosts().await;
+        let sandbox = id(n);
+        saved_and_handed_off(&one, sandbox).await;
+        let resized = SandboxConfig {
+            vcpus,
+            memory_mib,
+            ..config(NEVER)
+        };
+        assert_eq!(adopt_as(&two, sandbox, 2, resized, true).await, Reply::Done);
+        assert!(!two.current(sandbox).await.memory_saved);
+        assert!(!shelf.join(sandbox.to_string()).join("memory").exists());
+        assert_eq!(
+            two.run(sandbox, &["get", "disk"]).await,
+            ["", "on-disk"],
+            "its programs ended, its files stayed"
+        );
+        assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+        assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+        one.assert_clean();
+        two.assert_clean();
+    }
+}
+
+/// A sandbox resized only in what it asks to be guaranteed, or given a
+/// longer disk, keeps its memory image: it wakes with its programs, its
+/// disk made as long as it asks, and its guest told before it runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_with_new_requests_or_a_longer_disk_keeps_the_programs_and_grows_the_disk() {
+    const MIB: u64 = 1 << 20;
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(22);
+    saved_and_handed_off(&one, sandbox).await;
+    let base = std::fs::metadata(two.root.join("base.img")).unwrap().len();
+    let longer = u32::try_from(base / MIB + 4).unwrap();
+    let resized = SandboxConfig {
+        memory_request_mib: Some(128),
+        cpu_request_millis: Some(500),
+        disk_mib: Some(longer),
+        ..config(NEVER)
+    };
+    assert_eq!(adopt_as(&two, sandbox, 2, resized, true).await, Reply::Done);
+    assert!(two.current(sandbox).await.memory_saved);
+    let wanted = u64::from(longer) * MIB;
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], wanted);
+    // The fake guest reads its whole disk, now longer: the rest is zeros.
+    let ran = two.run(sandbox, &["get", "disk"]).await;
+    let ran: Vec<&str> = ran.iter().map(|s| s.trim_end_matches('\0')).collect();
+    assert_eq!(ran, ["kept", "on-disk"], "programs and files moved with it");
+    assert_eq!(two.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(two.world.boots.load(Ordering::Relaxed), 0);
+    let disk = std::fs::metadata(two.sandbox_dir(sandbox).join("root/disk.ext4")).unwrap();
+    assert_eq!(disk.len(), wanted);
+    let resized = two.world.drives_resized.lock().unwrap().clone();
+    assert_eq!(resized.len(), 1, "{resized:?}");
+    assert_eq!(resized[0].1, [wanted], "told before it runs");
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A copy stored before memory images recorded their processors says only
+/// how long its memory is. A sandbox resized to other processors alone
+/// still boots from its files at the new count, since the service sends
+/// that adopt as not whole; one given other memory does even from an
+/// adopt that says it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_that_does_not_say_its_processors_boots_from_its_files_when_resized() {
+    for (n, vcpus, memory_mib, whole) in [(23, 2, 256, false), (24, 1, 512, true)] {
+        let (one, two, shelf) = hosts().await;
+        let sandbox = id(n);
+        saved_and_handed_off(&one, sandbox).await;
+        // As an older release stored it.
+        let stored = shelf.join(sandbox.to_string());
+        std::fs::remove_file(stored.join("vcpus")).unwrap();
+        let contents = std::fs::read_to_string(stored.join("contents")).unwrap();
+        let older: String = contents
+            .lines()
+            .filter(|line| !line.starts_with("vcpus "))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        assert_ne!(older, contents, "it says its processors");
+        std::fs::write(stored.join("contents"), older).unwrap();
+
+        let resized = SandboxConfig {
+            vcpus,
+            memory_mib,
+            ..config(NEVER)
+        };
+        assert_eq!(
+            adopt_as(&two, sandbox, 2, resized, whole).await,
+            Reply::Done
+        );
+        assert!(!two.current(sandbox).await.memory_saved);
+        assert!(!shelf.join(sandbox.to_string()).join("memory").exists());
+        assert_eq!(
+            two.run(sandbox, &["get", "disk"]).await,
+            ["", "on-disk"],
+            "its programs ended, its files stayed"
+        );
+        assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+        assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+        assert_eq!(two.record(sandbox)["config"]["vcpus"], vcpus);
+        one.assert_clean();
+        two.assert_clean();
+    }
+}
+
 /// A guest's memory keeps the latest restore notice it applied, and moves
 /// with the sandbox; the new host's record of it starts afresh, with a
 /// fence lower than the old host's. Its notices still come after the old
@@ -553,6 +697,115 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
         );
     }
     assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A host whose agent restarts after its lease ran out finds its VMs held
+/// frozen by the guard, their VMMs unable to answer. It lists them under
+/// the owner epochs their records name, so it can register, and carries
+/// out the service's rulings on them before anything could thaw them:
+/// the VMs of those dropped or adopted again are ended, the store's copies
+/// kept, and the one kept is taken back, its guest still running, once
+/// the guard thaws it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_restarted_with_frozen_vms_lists_them_and_carries_out_the_rulings() {
+    let (one, two, shelf) = hosts().await;
+    let (kept, moved, refetched, unlisted) = (id(11), id(12), id(13), id(14));
+    let all = [kept, moved, refetched, unlisted];
+    for sandbox in all {
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &[&format!("set {sandbox}")]).await;
+        one.sleep_to(sandbox, LevelName::Archived).await;
+    }
+    for sandbox in all {
+        one.wait_level(sandbox, LevelName::Archived).await;
+        // Running again, with its copy in the store.
+        assert_eq!(one.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
+    let owner = one.current(kept).await.owner_epoch;
+    let (root, world) = one.stop().await;
+    let started = world.boots.load(Ordering::Relaxed) + world.restores.load(Ordering::Relaxed);
+    // The lease ran out while no agent ran: the guard froze every VM.
+    world.held_frozen.lock().unwrap().extend(all.map(vm_name));
+
+    let one = Lab::start_stored(root, world, Directory::new(&shelf)).await;
+    let status = one.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    let listed: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    let mut expected: Vec<(Id, Option<u64>)> =
+        all.iter().map(|sandbox| (*sandbox, Some(owner))).collect();
+    expected.sort_by_key(|(sandbox, _)| *sandbox);
+    assert_eq!(listed, expected, "listed for the service to rule on");
+    let live = |lab: &Lab, sandbox: Id| lab.world.live.lock().unwrap().contains(&vm_name(sandbox));
+    assert!(
+        all.iter().all(|sandbox| live(&one, *sandbox)),
+        "left as they are"
+    );
+
+    one.handle
+        .reconcile(vec![
+            ruling(kept, Verdict::Keep { owner_epoch: 3 }),
+            ruling(moved, Verdict::Drop),
+            ruling(
+                refetched,
+                Verdict::Refetch {
+                    owner_epoch: 4,
+                    whole: true,
+                },
+            ),
+        ])
+        .await
+        .unwrap();
+    // Answered only once every VM not kept has ended, as the deadline
+    // that thaws the rest is written only then.
+    for sandbox in [moved, refetched, unlisted] {
+        assert!(!live(&one, sandbox), "{sandbox} still runs");
+    }
+    assert!(live(&one, kept), "the kept VM is left as it is");
+    let status = one.status().await;
+    let blocked: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    assert_eq!(blocked, [(kept, Some(3))], "kept under its new epoch");
+    let held: Vec<(Id, u64, LevelName)> = status
+        .sandboxes
+        .iter()
+        .map(|sandbox| (sandbox.id, sandbox.owner_epoch, sandbox.level))
+        .collect();
+    assert_eq!(held, [(refetched, 4, LevelName::Remote)]);
+
+    // Thawed, the kept VM is taken back with its guest as it was.
+    one.world.held_frozen.lock().unwrap().clear();
+    one.wait_until("the kept VM to be taken back", |status| {
+        status.blocked.is_empty()
+            && status.sandboxes.iter().any(|sandbox| {
+                (sandbox.id, sandbox.owner_epoch, sandbox.level) == (kept, 3, LevelName::Running)
+            })
+    })
+    .await;
+    assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    assert_eq!(
+        one.world.boots.load(Ordering::Relaxed) + one.world.restores.load(Ordering::Relaxed),
+        started,
+        "nothing started again"
+    );
+    assert_eq!(
+        one.run(refetched, &["get"]).await,
+        [refetched.to_string()],
+        "adopted again from the store"
+    );
+    // What was dropped is still in the store for whoever gets it next.
+    for sandbox in [moved, unlisted] {
+        assert_eq!(adopt(&two, sandbox, 5).await, Reply::Done);
+        assert_eq!(two.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
     one.assert_clean();
     two.assert_clean();
 }

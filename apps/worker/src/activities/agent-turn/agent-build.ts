@@ -7,7 +7,6 @@ import {
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
-  sessionHasToolRouterHistory,
   SUBSCRIPTION_CORE_XAI,
   turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
@@ -20,10 +19,13 @@ import {
   type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
+  CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
+  modelToolTextBudgetBytes,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime";
+import { claimPendingBackgroundCommandResults } from "@opengeni/db/session-background-commands";
 import {
   serviceTierForLatencyMode,
   WORKSPACE_GATEWAY_PROVIDER_ID,
@@ -101,7 +103,6 @@ import {
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
-import { currentAttemptSecretValues } from "./secret-values";
 import {
   decisionModelProcessingResidency,
   gateImageGenerationOption,
@@ -184,6 +185,10 @@ export type BuildTurnAgentDeps = {
    * sessions without an agent configuration. Rendering input only.
    */
   promptToolAvailability?: AgentPromptToolAvailability | undefined;
+  /** Durable router use, read once with the tool runtime. */
+  toolRouterInHistory: boolean;
+  /** False when nothing this attempt attaches is deferred (see turnToolRouterExpected). */
+  toolRouterExpected: boolean;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -246,6 +251,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     preparationIndependentToolNames,
     codeSearchAvailable,
     promptToolAvailability,
+    toolRouterInHistory,
+    toolRouterExpected,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -696,6 +703,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
+    // A configured agent with no Skill gets no empty index (it would only say
+    // there are none); an earlier non-empty index is still replaced.
+    omitWhenEmpty: session.agent != null && deps.skillCatalog.length === 0,
   });
   // Governance changes between turns and with who starts a turn. It reaches
   // the model as a durable history item before the first turn that sees a new
@@ -762,16 +772,18 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           effort: turnExecutionPolicy.reasoningEffort,
         })
       : turnExecutionPolicy.reasoningEffort;
-  const toolRouterInHistory = session.agent
-    ? await sessionHasToolRouterHistory(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-      })
-    : false;
+  // Codemode runs from a shell: a configured session with no sandbox or
+  // Connected Machine this turn gets neither the client nor its guidance,
+  // unless `run_on` can open a Codemode-enabled shell on another machine.
+  const codemodeToken =
+    session.agent &&
+    (activeSandboxBackend ?? groupBoxBackend) === "none" &&
+    !resolveAgentToolFamilies(session.agent).allowsFirstPartyTool("run_on")
+      ? undefined
+      : sandboxCodemodeToken;
   // Managed boxes fetch the release's Codemode client in one setup command.
   const codemodeClientDownload =
-    activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+    activeSandboxBackend !== "selfhosted" && codemodeToken
       ? await withSandboxStartupPhases(
           {
             observability,
@@ -846,7 +858,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
-        ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(session.agent
+          ? {
+              agentConfig: session.agent,
+              toolRouterInHistory,
+              ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
+            }
+          : {}),
         ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability
           ? { agentPromptToolAvailability: promptToolAvailability }
@@ -858,6 +876,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        // Frozen at create: only a child session has a parent agent to answer.
+        subSession: session.nestedAgentDepth > 0,
         // Frozen at create: what the model is told and which tools it has.
         ...(sessionStartedUnattended(session) ? { unattended: true } : {}),
         // The current setting: approvals and questions are refused, not awaited.
@@ -897,8 +917,38 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           sessionId: input.sessionId,
           resolver: attemptResolver,
         }),
-        // Every tool result is masked with the attempt's known secret values.
-        secretValueMemory: currentAttemptSecretValues() ?? null,
+        // Commands that finish while the model works arrive with its next
+        // plain-text tool result instead of waiting for a read or a later turn.
+        ...(eventing.modelRunSettings.sandboxBackend !== "none"
+          ? {
+              commandCompletionDelivery: new CommandCompletionDelivery({
+                take: async ({ maxBytes }) =>
+                  await claimPendingBackgroundCommandResults(db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    maxBytes,
+                  }),
+                maxTextBytes: () =>
+                  modelToolTextBudgetBytes(
+                    eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                  ),
+                signal: cancellationSignal,
+                onDelivered: (appended) => {
+                  (eventing.commandCompletionNotices ??= new Set()).add(appended);
+                },
+                onError: (error) =>
+                  observability.warn("Finished background commands were not attached", {
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+              }),
+            }
+          : {}),
+        // A setup notice (a repository folder moved aside) follows the tool
+        // result the model reads; the timeline shows the tool's own output.
+        onSandboxSetupNoticeDelivered: (appended: string) => {
+          (eventing.commandCompletionNotices ??= new Set()).add(appended);
+        },
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
@@ -917,14 +967,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(codemodeToken ? { codemodeAvailable: true } : {}),
         ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.
-        ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+        ...(activeSandboxBackend !== "selfhosted" && codemodeToken
           ? {
-              codemodeTokenSeed: sandboxCodemodeToken,
+              codemodeTokenSeed: codemodeToken,
               codemodeTokenSessionId: input.sessionId,
               ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }

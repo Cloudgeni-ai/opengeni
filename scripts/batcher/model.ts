@@ -175,6 +175,11 @@ export interface Manifest {
    * retry there almost never passes. Absent outside a bisection.
    */
   blame?: string[];
+  /**
+   * A priority batch built ahead of a bisection's next group. The next batch
+   * after it is that group, so priority PRs and a bisection take turns.
+   */
+  aheadOfBisection?: true;
 }
 
 export interface BatchRun {
@@ -230,6 +235,7 @@ export type Action =
       members: QueuedPull[];
       pending: number[][];
       blame?: string[];
+      aheadOfBisection?: true;
     }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
@@ -324,10 +330,14 @@ export function readyAt(pull: QueuedPull): number {
  * once it is green and current with main, and nothing else builds before it
  * lands, so a release operator gets a stable main. Then priority PRs go
  * first, and ready PRs in queue order fill the rest of their batch, so
- * priority PRs that arrive one at a time do not each take a round alone; while
- * a failed batch is being split, they go without the fill, so its halves are
- * not pushed back. Those halves come next; then ready PRs in queue order. CI
- * and batcher changes run alone. A priority PR already in a failed batch's
+ * priority PRs that arrive one at a time do not each take a round alone; the
+ * fill leaves out the PRs a failed batch's split still holds. While a failed
+ * batch is being split, priority batches and its halves take turns: after a
+ * priority batch went ahead of a half, that half goes next, so a steady stream
+ * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
+ * CI and batcher changes run alone; while a failed batch is being split, the
+ * oldest one outside its halves takes turns with them when no priority PR
+ * waits. A priority PR already in a failed batch's
  * halves keeps its place there: building every priority PR again would retest
  * the batch that just failed, unsplit, on every pass.
  */
@@ -337,6 +347,7 @@ export function nextBatch(
   now: number,
   settings: Settings,
   blame: string[] = [],
+  halvesFirst = false,
 ): Action | null {
   const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
   // The batcher never renumbers a Version PR, so green and current is enough.
@@ -369,25 +380,54 @@ export function nextBatch(
 
   const bisecting = new Set(pending.flat());
   const urgent = ready.filter((p) => p.priority && !bisecting.has(p.number));
-  if (urgent.length) {
+  if (urgent.length && !(halvesFirst && pending.length)) {
+    const ahead = pending.length ? { aheadOfBisection: true as const } : {};
     const first = urgent[0]!;
-    if (alone(first)) return { kind: "build", members: [first], pending };
+    if (alone(first)) return { kind: "build", members: [first], pending, ...ahead };
     // The oldest ready PRs fill the rest without waiting for the batching
-    // window, after the priority PRs.
-    const fill = pending.length ? [] : ready.filter((p) => !p.priority);
+    // window, after the priority PRs. PRs a failed batch's split still holds
+    // stay out: their halves keep their own runs.
+    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
     const members = compatible(
       [...urgent, ...fill].filter((p) => !alone(p)),
       settings,
     );
-    return { kind: "build", members, pending };
+    return { kind: "build", members, pending, ...ahead };
   }
 
-  for (let index = 0; index < pending.length; index++) {
+  // A CI or batcher change outside the halves runs alone, so no priority fill
+  // can carry it, and new failures can keep a bisection going for as long as PRs
+  // keep arriving. When no priority PR is waiting, the oldest such change takes
+  // the turn a priority batch would: it goes ahead of the next half, and that
+  // half goes after it, so the two take turns.
+  const starved =
+    pending.length && !halvesFirst
+      ? ready.find((p) => alone(p) && !bisecting.has(p.number))
+      : undefined;
+  // It carries what the bisection blamed, so the half after it keeps it.
+  if (starved)
+    return {
+      kind: "build",
+      members: [starved],
+      pending,
+      aheadOfBisection: true,
+      ...(blame.length ? { blame } : {}),
+    };
+
+  // A half holding a priority PR runs before the other halves; the halves are
+  // independent, so their order only decides which PRs land sooner.
+  const holdsPriority = (group: number[]) =>
+    group.some((n) => ready.find((p) => p.number === n)?.priority);
+  const order = [
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [index] : [])),
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [] : [index])),
+  ];
+  for (const index of order) {
     const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
       (p): p is QueuedPull => p !== undefined,
     );
     if (!group.length) continue;
-    const rest = pending.slice(index + 1);
+    const rest = pending.filter((_, other) => other !== index);
     // Only a group of the bisection is judged against what it blamed; a
     // priority or Version PR in between drops it, which costs only retries.
     const carried = blame.length ? { blame } : {};
@@ -403,10 +443,13 @@ export function nextBatch(
         ...carried,
       };
     }
+    // A group larger than a batch runs its first maxBatch PRs; the others stay
+    // next in line as their own group instead of dropping out of the retest.
+    const overflow = group.slice(settings.maxBatch).map((p) => p.number);
     return {
       kind: "build",
       members: group.slice(0, settings.maxBatch),
-      pending: rest,
+      pending: overflow.length ? [overflow, ...rest] : rest,
       ...carried,
     };
   }
@@ -470,6 +513,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   let pulls = observation.pulls;
   let pending: number[][] = [];
   let blame: string[] = [];
+  // A finished priority batch that went ahead of a bisection hands the next
+  // turn to the bisection.
+  let halvesFirst = false;
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
   for (const pull of pulls)
@@ -536,6 +582,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         actions.push({ kind: "retry", batch, runs: result.runs });
         return actions;
       } else if (result.kind === "passed") {
+        halvesFirst = manifest.aheadOfBisection === true;
         actions.push({ kind: "land", batch });
         const landed = new Set(numbers);
         pulls = pulls.filter((p) => !landed.has(p.number));
@@ -548,7 +595,10 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
             : "its CI failed",
         });
-        blame = blamed(blame, result.runs);
+        // What a batch built ahead of a bisection failed in says nothing about
+        // the bisection's halves.
+        if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
+        halvesFirst = manifest.aheadOfBisection === true;
         if (numbers.length === 1) {
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
           actions.push({
@@ -562,12 +612,27 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so
           // a broken fill delays them one round and a broken one is found in one.
+          // The fill is halved too once it has at least two PRs and at least as
+          // many as the priority group: it is then at least as likely to hold
+          // what broke the batch, and testing it whole again would usually only
+          // fail once more (with a retry when no blame is carried) before the
+          // same split.
           const urgent = numbers.filter((n) => byNumber.get(n)?.priority);
-          const [first, second] =
-            urgent.length && urgent.length < numbers.length
-              ? [urgent, numbers.filter((n) => !urgent.includes(n))]
+          const fill = numbers.filter((n) => !urgent.includes(n));
+          const halves =
+            urgent.length && fill.length
+              ? [
+                  urgent,
+                  ...(fill.length >= 2 && fill.length >= urgent.length ? split(fill) : [fill]),
+                ]
               : split(numbers);
-          pending = [first, second, ...manifest.pending];
+          // A batch that went ahead of a bisection queues its halves behind
+          // that bisection's halves, so new failures cannot keep pushing older
+          // halves back. Its blame belongs to its own halves, not the older ones.
+          if (manifest.aheadOfBisection === true) {
+            pending = [...manifest.pending, ...halves];
+            blame = [];
+          } else pending = [...halves, ...manifest.pending];
         }
       }
     }
@@ -579,6 +644,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     now,
     settings,
     blame,
+    halvesFirst,
   );
   if (next) actions.push(next);
   return actions;
@@ -614,7 +680,8 @@ export function parseManifest(message: string): Manifest | null {
       !Array.isArray(value.pending) ||
       value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n))) ||
       (value.blame !== undefined &&
-        (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string")))
+        (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string"))) ||
+      (value.aheadOfBisection !== undefined && value.aheadOfBisection !== true)
     )
       return null;
     return value;

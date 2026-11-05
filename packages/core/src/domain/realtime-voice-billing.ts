@@ -38,6 +38,8 @@ import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import { TranscriptionBillingRefusedError } from "../transcription";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 import { errorMessage } from "@opengeni/contracts/values";
+import { HTTPException } from "hono/http-exception";
+import { checkOwnSubscriptionPlan } from "../billing/limits";
 
 /** Credit debit type and usage source for deployment-funded live voice. */
 export const REALTIME_VOICE_DEBIT_TYPE = "voice_realtime_debit";
@@ -342,7 +344,7 @@ export function createRealtimeVoiceBilling(deps: {
     /**
      * Throws RealtimeVoiceUnavailableError when the deployment cannot offer
      * the model and TranscriptionBillingRefusedError for a credit refusal.
-     * Workspace-funded models are always admitted here.
+     * Connected subscriptions require a paid app plan, but never fee credit.
      */
     async admit(input: {
       accountId: string;
@@ -364,6 +366,19 @@ export function createRealtimeVoiceBilling(deps: {
         !realtimeVoiceRegionAllowed({ ...deps.settings, requiredModelGeography: "eu" }, input.model)
       ) {
         throw sideFeatureRegionRestrictedError("realtime_voice");
+      }
+      if (input.model === CODEX_REALTIME_MODEL_ID || input.model === SUPERGROK_REALTIME_MODEL_ID) {
+        const decision = await checkOwnSubscriptionPlan(
+          deps,
+          input.accountId,
+          input.attribution.kind === "unknown" ? undefined : input.attribution.billingOrigin,
+        );
+        if (!decision.allowed) {
+          throw new HTTPException(decision.code === "subscription_api_unavailable" ? 403 : 402, {
+            message: decision.message,
+            cause: decision,
+          });
+        }
       }
       const voice = deploymentRealtimeVoice(deps.settings, input.model);
       if (!voice) return;

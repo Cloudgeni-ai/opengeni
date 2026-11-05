@@ -6,7 +6,8 @@
 //! keeps it from sweeps (a sweep already reads such a copy). Like an
 //! archive, a store begins its pointer before it stores anything and
 //! publishes only if no sweep took stock meanwhile; otherwise it starts
-//! again. An image belongs to no host: every store of it uses the same
+//! again, finding what it stored, which it carries into each new hour
+//! meanwhile. An image belongs to no host: every store of it uses the same
 //! [`IMAGE_STAMP`], so the second store of an image finds it done and
 //! uploads nothing. A fetch checks every chunk, then the whole file
 //! against the id.
@@ -14,12 +15,13 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
-use compute_storage::store::Begun;
+use compute_storage::store::{Begun, Held};
 
-use super::{Chunked, Head, OwnerEpoch, Stamp, copy, parse_head, storage_error};
+use super::{Chunked, Head, OwnerEpoch, Stamp, copy_version, parse_head, storage_error};
 use crate::protocol::ImageId;
 
 /// The stamp every image pointer is published under. Images are named by
@@ -59,6 +61,15 @@ const TRIES: u32 = 3;
 impl Chunked {
     /// Stores the image at `path` and returns its id.
     pub async fn put_rootfs(&self, path: &Path) -> Result<ImageId, EngineError> {
+        let held = Arc::new(Held::new());
+        let holding = self.holding(&held);
+        self.chunks
+            .keeping(&held, holding.store_rootfs(path))
+            .await
+            .0
+    }
+
+    async fn store_rootfs(&self, path: &Path) -> Result<ImageId, EngineError> {
         const OP: &str = "store image";
         let digest = file_id(path).await?;
         for _ in 0..TRIES {
@@ -79,18 +90,20 @@ impl Chunked {
                     ));
                 }
             };
+            let packing = self.chunks.writes_packs();
             let disk = self
                 .put_file(
                     path,
                     File::open(path),
                     HashMap::new(),
                     None,
+                    packing,
                     &CancellationToken::new(),
                 )
                 .await?
                 .ok_or_else(|| EngineError::new(ErrorKind::Fatal, OP, "not stored"))?;
             let head = Head {
-                version: copy::VERSION,
+                version: copy_version(packing),
                 disk,
                 memory: None,
                 profile: None,

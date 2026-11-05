@@ -14,6 +14,11 @@
 //! [`compute_core::Host::disk_awaits_reading`]): it waits for the next
 //! reading, about a second away, which decides it.
 //!
+//! So does work that fits only once disk relief frees what the host keeps
+//! without needing it (ADR 30; see [`super::relief`]): it books what it
+//! waits for ([`compute_core::Input::Wants`]), which has the core free
+//! that, and the readings after decide it.
+//!
 //! A guest also frees space while its VM runs, since its disk takes
 //! discards: the space comes back to the host's disk, but stays the
 //! guest's to take again. A guest may free and write at any moment, and
@@ -28,11 +33,10 @@
 //! new end a hole its guest's file system grows into, and it is booked at
 //! that length like any disk.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Input, Level, SandboxId};
+use compute_core::{DiskSpace, Input, Level, Outcome, SandboxId, Step};
 use compute_engine::{Engine, VmSpec, Writes};
 use tokio::task::JoinSet;
 
@@ -40,7 +44,7 @@ use crate::disk_growth::{self, Headroom};
 use crate::layout::{Paths, copy_size, vm_spec};
 use crate::protocol::SandboxConfig;
 use crate::state::Record;
-use crate::store::{OwnerEpoch, Store};
+use crate::store::{Claimed, OwnerEpoch, Store};
 
 use super::{HostAgent, HostError, Reply};
 use crate::protocol::{Id, ImageId};
@@ -74,19 +78,15 @@ const DIRTIED_SLACK: u64 = 256 << 10;
 /// all its disk may take, for that reading.
 const SETTLE_WITHIN: Duration = Duration::from_millis(100);
 
-/// Makes the disk at `path` at least `length` bytes long and returns how
-/// long it is. Its new end is a hole, which takes no disk until the guest
-/// writes there; the length lasts a crash, as the record that vouches for
-/// it, written next, must.
-pub(super) fn lengthen(path: &Path, length: u64) -> io::Result<u64> {
-    let disk = std::fs::OpenOptions::new().write(true).open(path)?;
-    let found = disk.metadata()?.len();
-    if found >= length {
-        return Ok(found);
+pub(super) use crate::layout::lengthen;
+
+/// Ends what work named `key` waited for disk relief to free, if it did
+/// (see [`Input::Wants`]): it goes on, booking what it writes, or ends.
+pub(super) fn unwanted(key: SandboxId) -> Input {
+    Input::Wants {
+        key,
+        disk: DiskSpace::default(),
     }
-    disk.set_len(length)?;
-    disk.sync_all()?;
-    Ok(length)
 }
 
 /// The disk of a ready sandbox a create claims, which the claim makes as
@@ -140,6 +140,10 @@ pub(super) enum AfterReading {
     /// An adopt whose first wake may not fit, with whether it is from the
     /// copy's files alone; its id is reserved meanwhile.
     Adopt(Id, Box<SandboxConfig>, OwnerEpoch, bool, Reply<()>),
+    /// An adopt that claimed the store's copy, as `Claimed` says, whose
+    /// first wake with the copy's disk fits only once disk relief is in
+    /// (see [`HostAgent::copy_claimed`]); its id is reserved meanwhile.
+    Claimed(Box<Record>, Box<Claimed>, Reply<()>),
     /// The fetch of an image whose file is `length` bytes long.
     Fetch(ImageId, u64),
     /// A request, under `generation` if one is named, that sandbox `id`
@@ -151,13 +155,13 @@ pub(super) enum AfterReading {
     HandOff(Id, OwnerEpoch, bool, Reply<()>),
 }
 
-/// What each sandbox with a VM had written, read just before the disk
-/// reading of a sample, with whether its memory image was still being
-/// filled; see [`HostAgent::disk_readings`].
+/// What each VM had written, read just before the disk reading of a
+/// sample, with whether its memory image was still being filled and the
+/// headroom of disks at rest; see [`HostAgent::disk_readings`].
 #[derive(Debug, Default)]
 pub(super) struct BeforeReading {
     writes: Vec<(SandboxId, Option<Writes>)>,
-    hydrating: Vec<Input>,
+    inputs: Vec<Input>,
 }
 
 /// When a new sandbox fits; see [`HostAgent::room_for`].
@@ -170,6 +174,66 @@ pub(super) enum Room {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Measures a disk only while no step or guest can change it. Callers
+    /// establish that it is local and not running (including a pause that
+    /// just finished). A missing or unreadable file keeps the whole bound.
+    fn resting_disk(&self, id: SandboxId) -> Option<Input> {
+        let slot = self.slots.get(&id)?;
+        if slot.op.is_some() || slot.destroy || self.tearing_down.contains_key(&id) {
+            return None;
+        }
+        let record = self.records.get(Id(id))?;
+        let bytes = self
+            .headroom(id, &slot.paths.disk)
+            .map_or_else(|| self.record_size(&record).disk, |headroom| headroom.left);
+        Some(Input::DiskGrowth { sandbox: id, bytes })
+    }
+
+    /// At rest, a disk needs no running-VMM race allowance. Measure before
+    /// admission, and after Add/Pause in the same core batch, so a wake
+    /// arriving before the next sample uses the file, not its whole bound.
+    pub(super) fn disk_inputs(&self, inputs: impl IntoIterator<Item = Input>) -> Vec<Input> {
+        let mut batch = Vec::new();
+        for input in inputs {
+            let id = match &input {
+                Input::Touch { sandbox, .. } | Input::Hold { sandbox, .. }
+                    if self.core.sandbox(*sandbox).is_some_and(|view| {
+                        view.step.is_none()
+                            && !matches!(view.state.level, Level::Running | Level::Remote)
+                    }) =>
+                {
+                    Some(*sandbox)
+                }
+                Input::Add { sandbox, state, .. }
+                    if !matches!(state.level, Level::Running | Level::Remote) =>
+                {
+                    Some(*sandbox)
+                }
+                Input::Finished {
+                    sandbox,
+                    outcome: Outcome::Done,
+                    ..
+                } if self
+                    .core
+                    .sandbox(*sandbox)
+                    .is_some_and(|view| view.step == Some(Step::Pause)) =>
+                {
+                    Some(*sandbox)
+                }
+                _ => None,
+            };
+            let reading = id.and_then(|id| self.resting_disk(id));
+            if matches!(input, Input::Add { .. } | Input::Finished { .. }) {
+                batch.push(input);
+                batch.extend(reading);
+            } else {
+                batch.extend(reading);
+                batch.push(input);
+            }
+        }
+        batch
+    }
+
     /// The disk of ready sandbox `record`, for a claim of it.
     pub(super) fn claimed_disk(&self, record: &Record) -> ClaimedDisk {
         let paths = Paths::of(&self.root, record);
@@ -211,10 +275,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
+                if self.core.sandbox(*id).is_some_and(|view| {
+                    view.step.is_none()
+                        && matches!(view.state.level, Level::Saved | Level::Archived)
+                }) {
+                    before.inputs.extend(self.resting_disk(*id));
+                }
                 continue;
             };
             before.writes.push((*id, self.vm_writes(*id, &live.vm)));
-            before.hydrating.push(Input::Hydrating {
+            before.inputs.push(Input::Hydrating {
                 sandbox: *id,
                 hydrating: live.memory.hydrating(),
             });
@@ -244,7 +314,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// or do not return within [`SETTLE_WITHIN`], books all it may take,
     /// its whole bound, for this reading.
     pub(super) async fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
-        let mut readings = before.hydrating;
+        let mut readings = before.inputs;
         let mut read = Vec::new();
         let mut settling = JoinSet::new();
         for (id, first) in before.writes {
@@ -367,6 +437,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// Books `disk` that work named `key` waits for disk relief to free
+    /// (see [`Input::Wants`]), so the core frees it and nothing else takes
+    /// it.
+    pub(super) fn want_disk(&mut self, key: SandboxId, disk: DiskSpace) {
+        self.input(Input::Wants { key, disk });
+    }
+
     /// Has `work` wait for the next disk reading.
     pub(super) fn after_reading(&mut self, work: AfterReading) {
         if let AfterReading::Create(id, ..) | AfterReading::Adopt(id, ..) = &work {
@@ -379,13 +456,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn resume_after_reading(&mut self) {
         for work in std::mem::take(&mut self.after_reading) {
             match work {
+                // What each waited for is booked again if it still waits:
+                // its own counts as free for its check either way.
                 AfterReading::Create(id, config, owner, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     self.create_fresh(id, *config, owner, reply);
                 }
                 AfterReading::Adopt(id, config, owner, from_files, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     self.adopt(id, *config, owner, from_files, reply);
+                }
+                AfterReading::Claimed(record, claimed, reply) => {
+                    self.copy_claimed(*record, *claimed, reply);
                 }
                 AfterReading::Fetch(image, length) => self.image_sized(image, Ok(Some(length))),
                 AfterReading::Sleep(id, generation, level, reply) => {
@@ -412,7 +496,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 AfterReading::Adopt(id, _, _, _, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     let _ = reply.send(Err(error.clone()));
+                }
+                AfterReading::Claimed(record, _, reply) => {
+                    // Its first wake and what it waited for are unbooked.
+                    let (id, ordinal) = (record.id, record.ordinal);
+                    self.prepared(id, ordinal, Err(error.clone()), reply, None, None);
                 }
                 AfterReading::Fetch(image, _) => self.fetch_ended(image, &Err(error.clone())),
                 AfterReading::Sleep(.., reply) | AfterReading::HandOff(.., reply) => {

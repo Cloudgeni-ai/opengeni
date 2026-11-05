@@ -55,6 +55,33 @@ additions. The final `knowledge_index_claim` replacement pins
 `pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
 accounting sources. Upgrade consumers before enabling producer writes.
 
+## Removing content masking (1259)
+
+This release stops masking secret values and secret-shaped text in tool
+results, model input and storage (docs/secrets.md, "Agent-visible content").
+`1259_drop_audit_events_secret_used_index.sql` is rolling: it drops the index
+only masking used; a previous-release worker that still loads earlier secret
+uses during the rollout falls back to the workspace audit index.
+
+Each active chat takes about one prompt-cache miss on its first request after
+the upgrade, because the model input is no longer re-masked; later requests
+repeat earlier items byte for byte.
+
+After the rollout, run the one-off tool-name fix with a maintenance
+connection (superuser or `BYPASSRLS`):
+
+```sh
+OPENGENI_MAINTENANCE_DATABASE_URL=... bun run db:repair-invalid-tool-names           # dry run: counts
+OPENGENI_MAINTENANCE_DATABASE_URL=... bun run db:repair-invalid-tool-names --apply   # writes
+```
+
+It gives every stored tool name a provider would reject (a masked name, or a
+dotted `server.tool` call stored as written) one valid name per session in
+model history and saved run states, and changes nothing else. Earlier releases
+repaired these names on every request; this release no longer does, so a chat
+holding one fails with a provider 400 until the fix runs. Rerunning it is a
+no-op.
+
 ## Receiving chat execution context (0608)
 
 `0608_receiver_execution_context.sql` requires maintenance. Stop every API,
@@ -2487,15 +2514,25 @@ tag resolves anonymously, and records the digest as `images.desktop` in the
 `canary-images-<source-sha>` receipt. A deployment that takes its images from
 that receipt should set Helm `desktop.imageRef` to
 `ghcr.io/cloudgeni-ai/opengeni-desktop@<images.desktop.digest>` in the same change.
+Packaged charts do this themselves: `scripts/package-release-chart.ts` requires
+`--desktop-image-ref` and writes it into the packaged `values.yaml` as the default
+`desktop.imageRef`. The release candidate builds `docker/desktop.Dockerfile` from
+the release source as `opengeni-desktop:<candidate tag>` next to the BOM images,
+proves anonymous pull, and fails unless the packaged chart pins exactly that
+digest. The canary chart pins the `canary-sha-<source-sha>` desktop image from
+main CI and fails when that SHA has none. So a published chart's default desktop
+box is always built from the chart's own source.
 `.github/workflows/publish-desktop-image.yml` is dispatch-only. It publishes
 `opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>` through
 the `public-release` OIDC identity, verifies the tag's immutable digest and
 source label after registry logout, pulls anonymously, and runs the installed
 artifact runtime doctor while rejecting `.unavailable`. Use it to refresh the
-default pin below. The workflow retains publication evidence.
+source fallback pin below, which only unpackaged checkouts and runs without the
+chart use. The workflow retains publication evidence.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
-a public, digest-pinned desktop image in both runtime config and Helm. Override
+a public, digest-pinned desktop image in both runtime config and Helm; the
+source `values.yaml` pin and `DEFAULT_MODAL_IMAGE_REF` must stay equal. Override
 Helm `desktop.imageRef` only with another compatible digest
 (`registry/opengeni-desktop@sha256:…`). The chart fails closed when
 `OPENGENI_SANDBOX_BACKEND=modal` and `OPENGENI_SANDBOX_DESKTOP_ENABLED=true`
@@ -3253,7 +3290,7 @@ The runtime secret must provide values such as:
   OpenRouter rail; keep it in the runtime Secret, never catalog JSON
 - optional `OPENGENI_OPPER_API_KEY` for the deployment-managed reviewed Opper
   rail (EU-pinned `opper/…` routes billed in Opengeni credits at Opper's
-  reported cost +5%; default Claude Opus 5.5 EU); keep it in the runtime Secret,
+  reported cost plus the configured credit margin; default Claude Opus 5.5 EU); keep it in the runtime Secret,
   never catalog JSON
 - optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
   `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
@@ -3276,8 +3313,11 @@ The runtime secret must provide values such as:
 - `OPENGENI_BYOK_PLATFORM_FEE_BPS` (default `500`, 5%) is the platform fee on
   calls served by a person's own API key, charged only with
   `OPENGENI_BILLING_MODE=stripe` and only from paid credit; `0` turns it off.
+  Production and staging have it paused at `0` as of November 2, 2026; this
+  also disables the paid-credit admission check for own keys.
   Own subscriptions pay no fee; with subscription plans enabled they need a
-  paid plan of at least $20/month. See
+  paid plan of at least $20/month and are for app-origin work, never customer
+  API-origin work. Existing internal legacy billing terms are unchanged. See
   [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
@@ -3547,7 +3587,8 @@ OPENGENI_WEB_TINYFISH_API_KEY=...            # free key; TinyFish is the default
 
 Set them on both the API and the worker (the API projects the effective tool
 list; the worker runs the tools). With credit billing active, priced calls are
-billed at provider cost + 5%. [Web search](web-search.md) owns the provider
+billed at provider cost plus the configured credit margin (zero when
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0`). [Web search](web-search.md) owns the provider
 table, failover, URL rules, prices and the evaluation script.
 
 ## Terraform Registry MCP Docs
@@ -4138,7 +4179,7 @@ Minimum production dashboards should cover:
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `environment`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. Durable recovery is a separate control-worker projection: `opengeni_session_recovery_backlog{state}` counts recovering sessions with no active attempt (including ones in recorded backoff), `opengeni_session_recovery_scheduled{state}` counts those still inside their recorded Retry-After/connectivity backoff, and `opengeni_session_recovery_oldest_overdue_seconds{state}` drives `OpenGeniSessionRecoveryBacklogStale`; see [`run-lifecycle.md`](run-lifecycle.md). In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
 - Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
-- Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome,tool}`, `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` (`tool` is a first-party catalog name or `external`), `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, the shared subscription core shadow (`opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`, `..._parity_failures_total{provider,reason}`, `..._violations_total{provider,requirement}`, `..._inputs_total{provider,input}`, `..._skips_total{provider,reason}`, `..._duration_seconds{provider}`; see [subscription-accounts.md](subscription-accounts.md#shadow-comparison)), `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, `opengeni_sandbox_orphans_terminated_total`, and the Modal orphan sweep's provider inventory `opengeni_modal_sandbox_inventory{state=running|unleased|lease_missing_instance}` (inventory domain `modal_provider`, published only after a complete app listing). `opengeni_sandbox_leases_interaction_only{idle_bucket}` (inventory domain `interaction_idle`) counts warm leases held only by Browser/Computer sessions by time since their last interaction activity: interaction holders never expire by timestamp; once every Browser/Computer session on a box has been unused for the sandbox idle grace they are saved or released and the box drains (`opengeni_sandbox_idle_interaction_release_total{outcome}`, see [run-lifecycle.md](run-lifecycle.md)). Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
+- Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_model_invalid_requests_total{provider,path,code}` (a provider 400 by the request path it names with indices collapsed, such as `input[].tools[].name`; monitoring only, never the message), `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome,tool}`, `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` (`tool` is a first-party catalog name or `external`), `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, the shared subscription core shadow (`opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`, `..._parity_failures_total{provider,reason}`, `..._violations_total{provider,requirement}`, `..._inputs_total{provider,input}`, `..._skips_total{provider,reason}`, `..._duration_seconds{provider}`; see [subscription-accounts.md](subscription-accounts.md#shadow-comparison)), `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, `opengeni_sandbox_orphans_terminated_total`, and the Modal orphan sweep's provider inventory `opengeni_modal_sandbox_inventory{state=running|unleased|lease_missing_instance}` (inventory domain `modal_provider`, published only after a complete app listing). `opengeni_sandbox_leases_interaction_only{idle_bucket}` (inventory domain `interaction_idle`) counts warm leases held only by Browser/Computer sessions by time since their last interaction activity: interaction holders never expire by timestamp; once every Browser/Computer session on a box has been unused for the sandbox idle grace they are saved or released and the box drains (`opengeni_sandbox_idle_interaction_release_total{outcome}`, see [run-lifecycle.md](run-lifecycle.md)). Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
 - Product failures users hit (all labels are closed sets; no account, workspace, user, session, provider URL, or tool name is ever a label):
   - `opengeni_http_request_rejections_total{method,route,status,code,reason,component}` counts every API response with status >= 400. `code` is the public `ErrorEnvelope.code`; `reason` is `permission:<catalog permission>` when the refusal names a missing permission, else the typed `details.code`, else `control:<code>` for a Connected Machine control failure, else `unclassified`. The API `HTTP request completed` log line carries the same `rejectionCode`/`rejectionReason` plus a one-way `rejectionFingerprint` (`m_<10 hex>`) of the message with identifiers, quoted values, and numbers normalized away; `bun run scripts/resolve-rejection-fingerprint.ts m_...` maps it back to the source literal. Message text never reaches logs or metrics.
   - `opengeni_interaction_operations_total{resource,operation,mode,outcome,reason}` now covers every Browser/Computer control route (observe, state, DOM read, screenshot, tab list/open/select/close, attach, plus failures of act/create/lifecycle/auth routes); `outcome="denied"` is a 401/403 refusal and `reason` is a receipt `InteractionError` code or an HTTP-derived refusal (`permission_denied`, `access_denied`, `not_found`, `conflict`, `control_<code>`, ...).

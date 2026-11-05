@@ -67,6 +67,10 @@ pub(crate) struct Fake {
     pub(crate) puts: Mutex<u32>,
     /// Copies within the bucket, through `object_store`.
     pub(crate) copies: Mutex<u32>,
+    /// Reads of a whole object, and of only its size and tag, through
+    /// `object_store`.
+    pub(crate) gets: Mutex<u32>,
+    pub(crate) heads: Mutex<u32>,
     /// Answers this many of the next requests through the XML API with
     /// 503, as Cloud Storage does while it scales up to a client's rate.
     pub(crate) unavailable: Mutex<u32>,
@@ -91,6 +95,17 @@ pub(crate) struct Fake {
     /// always store, as on a store that keeps no single order of writes
     /// (Garage).
     pub(crate) ignores_conditions: Mutex<bool>,
+    /// The prefixes listed through `object_store`, in order, by delimiter
+    /// or not.
+    pub(crate) listed: Mutex<Vec<String>>,
+    /// When set, the next this many reads and listings through
+    /// `object_store` of a name or prefix containing the text fail, as
+    /// requests to a store that times out do.
+    pub(crate) failing: Mutex<Option<(&'static str, u32)>>,
+    /// When set, the next listing through `object_store` of a prefix
+    /// containing the text fails after this many objects, as one a store
+    /// drops partway through does.
+    pub(crate) cut: Mutex<Option<(&'static str, usize)>>,
 }
 
 impl Fake {
@@ -147,6 +162,21 @@ impl Fake {
         });
         if let Some(pause) = pause {
             tokio::time::sleep(pause).await;
+        }
+    }
+
+    /// Fails a request for `name` if [`Self::failing`] says so.
+    fn fail(&self, name: &str) -> object_store::Result<()> {
+        let mut failing = self.failing.lock().unwrap();
+        match &mut *failing {
+            Some((part, left)) if *left > 0 && name.contains(*part) => {
+                *left -= 1;
+                Err(object_store::Error::Generic {
+                    store: "fake",
+                    source: "timed out".into(),
+                })
+            }
+            _ => Ok(()),
         }
     }
 
@@ -393,18 +423,36 @@ impl ObjectStore for Bucket {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        if options.range.is_some() {
-            return Err(object_store::Error::NotImplemented);
+        *if options.head {
+            &self.0.heads
+        } else {
+            &self.0.gets
         }
+        .lock()
+        .unwrap() += 1;
         self.0.wait().await;
+        self.0.fail(location.as_ref())?;
         let object = self
             .0
             .object(location.as_ref())
             .ok_or_else(|| not_found(location))?;
         let meta = self.0.meta(location.as_ref(), &object);
-        let bytes = object.bytes;
+        let len = object.bytes.len() as u64;
+        let range = match &options.range {
+            None => 0..len,
+            Some(range) => range
+                .as_range(len)
+                .map_err(|error| object_store::Error::Generic {
+                    store: "fake",
+                    source: Box::new(error),
+                })?,
+        };
+        let bytes = object.bytes.slice(
+            usize::try_from(range.start).unwrap_or(usize::MAX)
+                ..usize::try_from(range.end).unwrap_or(usize::MAX),
+        );
         Ok(GetResult {
-            range: 0..bytes.len() as u64,
+            range,
             payload: GetResultPayload::Stream(Box::pin(stream::once(async move { Ok(bytes) }))),
             meta,
             attributes: Attributes::default(),
@@ -428,7 +476,12 @@ impl ObjectStore for Bucket {
         Box::pin(
             stream::once(async move {
                 fake.wait().await;
-                let listed: Vec<_> = fake
+                let at = prefix.clone().unwrap_or_default();
+                fake.listed.lock().unwrap().push(at.clone());
+                if let Err(error) = fake.fail(&at) {
+                    return stream::iter(vec![Err(error)]);
+                }
+                let mut listed: Vec<_> = fake
                     .objects
                     .lock()
                     .unwrap()
@@ -440,14 +493,52 @@ impl ObjectStore for Bucket {
                     })
                     .map(|(name, object)| Ok(fake.meta(name, object)))
                     .collect();
+                let cut = {
+                    let mut cut = fake.cut.lock().unwrap();
+                    cut.filter(|(part, _)| at.contains(part))
+                        .and_then(|_| cut.take())
+                };
+                if let Some((_, after)) = cut {
+                    listed.truncate(after);
+                    listed.push(Err(object_store::Error::Generic {
+                        store: "fake",
+                        source: "connection reset".into(),
+                    }));
+                }
                 stream::iter(listed)
             })
             .flatten(),
         )
     }
 
-    async fn list_with_delimiter(&self, _: Option<&Path>) -> object_store::Result<ListResult> {
-        Err(object_store::Error::NotImplemented)
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.0.wait().await;
+        let prefix = prefix
+            .map(|prefix| format!("{prefix}/"))
+            .unwrap_or_default();
+        self.0.listed.lock().unwrap().push(prefix.clone());
+        self.0.fail(&prefix)?;
+        let objects = self.0.objects.lock().unwrap();
+        let mut common_prefixes: Vec<Path> = Vec::new();
+        let mut listed = Vec::new();
+        for (name, object) in objects.iter() {
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((part, _)) => {
+                    let common = Path::from(format!("{prefix}{part}"));
+                    if common_prefixes.last() != Some(&common) {
+                        common_prefixes.push(common);
+                    }
+                }
+                None => listed.push(self.0.meta(name, object)),
+            }
+        }
+        Ok(ListResult {
+            common_prefixes,
+            objects: listed,
+        })
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {

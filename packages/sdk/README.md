@@ -25,6 +25,15 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI
+subscriptions are available in the Opengeni apps on paid plans, not through the
+API. Omit the model to use an eligible credit-billed default; explicitly selecting
+a connected subscription returns `403` with `subscription_api_unavailable`.
+See [billing origin](../../docs/billing-origin.md) for the internal legacy-account
+exception.
+
 ## Task usage limits
 
 `createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an
@@ -1798,11 +1807,15 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Clients and servers are compatible within the same **major** version of this
-SDK; evolution is additive within a major and both sides are tolerant readers.
-Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. A breaking change ships only in a new major, announced in
-the changelog. Full policy: `docs/design/api-compatibility-policy.md`.
+Server updates do not break existing integrations. The API only grows: routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned SDK version keeps working against the managed service.
+Upgrade when you want new features. Replacements for older designs ship beside
+them, and `@deprecated` members keep working. Clients should ignore unknown
+response fields, enum values and event types. Official server builds expose
+`serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
+`docs/design/api-compatibility-policy.md`.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
 
 ## Proxy through your own API
 

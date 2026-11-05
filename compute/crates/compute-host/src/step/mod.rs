@@ -38,7 +38,7 @@ use compute_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::image::{Images, Parts, Suspect, Verified};
+use crate::image::{Images, Made, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_if_present};
 #[cfg(target_os = "linux")]
 use crate::lazy::Fetcher;
@@ -65,7 +65,8 @@ use files::{
     pager_dir, pager_learned, wake_profile,
 };
 pub(crate) use files::{
-    clear_checkpoint, clear_local, images_of, mark_archived, paged, recover_images, take_written,
+    clear_checkpoint, clear_local, images_of, local_copy, mark_archived, paged, recover_images,
+    take_written,
 };
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected, recorded_base};
 use live::{lose_base, record_base, withdraw_base};
@@ -793,6 +794,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
         let memory_len = self.spec.memory_bytes();
+        let vcpus = self.record.config.vcpus;
         let paths = self.paths.clone();
         let id = self.id;
         let published = blocking(move || {
@@ -814,8 +816,13 @@ impl<E: Engine, S: Store> Job<E, S> {
                     len: memory_len,
                 },
             };
-            let made_by = (!runtime.is_empty()).then_some(runtime.as_str());
-            let published = images.publish_made_by(parts, made_by);
+            // The disk is as the guest knew it when it was paused.
+            let made = Made {
+                runtime: (!runtime.is_empty()).then_some(runtime.as_str()),
+                vcpus: Some(vcpus),
+                disk_len: std::fs::metadata(&paths.disk).ok().map(|found| found.len()),
+            };
+            let published = images.publish_made_by(parts, made);
             match (&published, process) {
                 (Err(_), _) => {
                     let _ = remove_if_present(&files.state);
@@ -842,7 +849,8 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// The sandbox's current local image, checked. A missing one is lost
-    /// memory and the record says so; a bad one goes to quarantine.
+    /// memory and the record says so; a bad one goes to quarantine; one
+    /// saved at another shape is given up (see `refuse_made_elsewhere`).
     async fn saved_image(&mut self, images: &Images) -> Result<Verified, Outcome> {
         const OP: &str = "restore";
         let checked = {
@@ -850,7 +858,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             blocking(move || images.current_verified()).await
         };
         match checked {
-            Ok(Ok(Some(image))) => Ok(image),
+            Ok(Ok(Some(image))) => self.refuse_made_elsewhere(&image).await.map(|()| image),
             Ok(Ok(None)) => {
                 notes::alarm(Alarm::CopyLost, &"the recorded memory image is missing");
                 let _ = self.commit(Change::new().image(false)).await;

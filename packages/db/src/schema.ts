@@ -60,6 +60,7 @@ import {
   boolean,
   check,
   customType,
+  date,
   foreignKey,
   index,
   integer,
@@ -76,16 +77,13 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import {
-  conversationLosslessJsonb,
-  conversationLosslessOrderedJson,
-  conversationLosslessText,
-  conversationRunStateText,
   losslessCodecVersion,
   losslessJsonb,
   losslessOrderedJson,
   losslessText,
 } from "./lossless-columns";
 
+export * from "./agents-schema";
 export * from "./automation-templates-schema";
 export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
@@ -5286,7 +5284,7 @@ export const sessions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
-    initialMessage: conversationLosslessText("initial_message").notNull(),
+    initialMessage: losslessText("initial_message").notNull(),
     initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
     // Model-visible application context frozen with the winning create. The
     // initial turn copies it into the canonical user message so an idempotent
@@ -5592,6 +5590,15 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
+    // Migration 1244: the agent (agents.id) this chat was started for. No
+    // foreign key; recheck the agent on use. Set once from NULL, never
+    // changed (sessions_agent_id_immutable); forks copy it, child workers
+    // never set it. Unrelated to agentConfig and agentAccess.
+    agentId: uuid("agent_id"),
+    // The agent revision whose Instructions are in this chat's system prompt.
+    // NULL is a legacy chat (instructions already in `instructions`): never
+    // add the agent layer to it.
+    agentPromptRevision: integer("agent_prompt_revision"),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
@@ -5742,6 +5749,16 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+    // Migration 1245 (concurrent): an agent's chats, newest first.
+    agent: index("sessions_agent_idx")
+      .on(table.workspaceId, table.agentId, table.createdAt.desc())
+      .where(sql`${table.agentId} is not null`),
+    // Migration 1244 (NOT VALID; enforced for new and changed rows).
+    agentPromptRevisionValid: check(
+      "sessions_agent_prompt_revision_check",
+      sql`${table.agentPromptRevision} is null
+        or (${table.agentPromptRevision} > 0 and ${table.agentId} is not null)`,
     ),
     initialModelContextValid: check(
       "sessions_initial_model_context_check",
@@ -6136,12 +6153,9 @@ export const sessionRealtimeEntries = pgTable(
     // result/error to the same ordinary turn. It never denotes a child/fork
     // session.
     turnId: uuid("turn_id"),
-    text: conversationLosslessText("text"),
+    text: losslessText("text"),
     textCodecVersion: losslessCodecVersion("text_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     // Application context for an exact provider-in delegation or finalized
     // transcript. It is materialized as ordinary user-role message content.
@@ -7800,7 +7814,7 @@ export const sessionTurns = pgTable(
     // turns, and is projected conservatively as visible queue work.
     promptRouting: text("prompt_routing"),
     position: bigint("position", { mode: "number" }).notNull(),
-    prompt: conversationLosslessText("prompt").notNull(),
+    prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     annotations: jsonb("annotations").$type<TimelineAnnotation[]>().notNull().default([]),
     // Application context for this exact user message. It is copied into the
@@ -9420,12 +9434,9 @@ export const sessionSystemUpdates = pgTable(
     classification: text("classification").notNull().default("info"),
     sourceId: text("source_id").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
-    summary: conversationLosslessText("summary").notNull(),
+    summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
@@ -9545,12 +9556,9 @@ export const sessionSystemUpdateOutbox = pgTable(
     kind: text("kind").notNull(),
     classification: text("classification").notNull(),
     sourceId: text("source_id").notNull(),
-    summary: conversationLosslessText("summary").notNull(),
+    summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
@@ -9947,7 +9955,7 @@ export const sessionEvents = pgTable(
     duplicateReason: text("duplicate_reason"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
-    payload: conversationLosslessJsonb("payload").$type<unknown>().notNull().default({}),
+    payload: losslessJsonb("payload").$type<unknown>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientEventId: text("client_event_id"),
     producerId: text("producer_id"),
@@ -10189,7 +10197,7 @@ export const agentRunStates = pgTable("agent_run_states", {
     onDelete: "set null",
   }),
   stateVersion: integer("state_version").notNull(),
-  serializedRunState: conversationRunStateText("serialized_run_state").notNull(),
+  serializedRunState: losslessText("serialized_run_state").notNull(),
   serializedRunStateCodecVersion: losslessCodecVersion("serialized_run_state_codec_version"),
   pendingApprovals: losslessJsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
   pendingApprovalsCodecVersion: losslessCodecVersion("pending_approvals_codec_version"),
@@ -10324,9 +10332,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: conversationLosslessOrderedJson("item_ordered")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    item: losslessOrderedJson("item_ordered").$type<Record<string, unknown>>().notNull(),
     itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
@@ -10711,6 +10717,18 @@ export const sandboxLeases = pgTable(
     // Periodic capture cadence survives a failed claim's release and worker
     // restarts. This is not evidence that a recovery archive was published.
     archiveCaptureLastAttemptAt: timestamp("archive_capture_last_attempt_at", {
+      withTimezone: true,
+    }),
+    // Consecutive settled drain snapshot failures of one lease epoch (migration
+    // 1253). Valid only while drain_capture_failure_epoch equals lease_epoch,
+    // so a new box starts from zero without every epoch writer resetting it.
+    // Drives the drain retry backoff and the snapshot-failure alerts.
+    drainCaptureFailures: integer("drain_capture_failures").notNull().default(0),
+    drainCaptureFailureEpoch: integer("drain_capture_failure_epoch"),
+    drainCaptureFirstFailedAt: timestamp("drain_capture_first_failed_at", {
+      withTimezone: true,
+    }),
+    drainCaptureLastFailedAt: timestamp("drain_capture_last_failed_at", {
       withTimezone: true,
     }),
     // The reaper's idle checkpoint sweep last tried this box, whatever the
@@ -13654,6 +13672,77 @@ export const billingSubscriptionOperations = pgTable(
   }),
 );
 
+export const billingAutoTopUpSettings = pgTable("billing_auto_top_up_settings", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  thresholdMicros: bigint("threshold_micros", { mode: "number" }).notNull().default(10000000),
+  amountMicros: bigint("amount_micros", { mode: "number" }).notNull().default(25000000),
+  monthlyCapMicros: bigint("monthly_cap_micros", { mode: "number" }).notNull().default(100000000),
+  consentSubject: text("consent_subject"),
+  consentVersion: text("consent_version"),
+  consentAt: timestamp("consent_at", { withTimezone: true }),
+  provider: text("provider"),
+  customerId: text("customer_id"),
+  paymentMethodId: text("payment_method_id"),
+  paymentMethodBrand: text("payment_method_brand"),
+  paymentMethodLast4: text("payment_method_last4"),
+  setupKey: uuid("setup_key"),
+  setupSubject: text("setup_subject"),
+  failureReason: text("failure_reason"),
+  capRequiredMicros: bigint("cap_required_micros", { mode: "number" }),
+  revision: uuid("revision").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+export const billingAutoTopUpMutations = pgTable(
+  "billing_auto_top_up_mutations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    actorSubject: text("actor_subject").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => ({ pk: primaryKey({ columns: [table.accountId, table.operationKey] }) }),
+);
+export const billingAutoTopUpOperations = pgTable(
+  "billing_auto_top_up_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    state: text("state").notNull().default("pending"),
+    reservationMonth: date("reservation_month").notNull(),
+    creditMicros: bigint("credit_micros", { mode: "number" }).notNull(),
+    chargeMicros: bigint("charge_micros", { mode: "number" }).notNull(),
+    intent: jsonb("intent").$type<import("./billing-auto-top-up").AutoTopUpIntent>().notNull(),
+    paymentIntentId: text("payment_intent_id").unique(),
+    confirmationStartedAt: timestamp("confirmation_started_at", { withTimezone: true }),
+    chargedAt: timestamp("charged_at", { withTimezone: true }),
+    failureReason: text("failure_reason"),
+    notificationDeliveredAt: timestamp("notification_delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.operationKey] }),
+    pending: uniqueIndex("billing_auto_top_up_one_pending")
+      .on(table.accountId)
+      .where(sql`${table.state} = 'pending'`),
+    month: index("billing_auto_top_up_month").on(table.accountId, table.reservationMonth),
+  }),
+);
+
 export const organizationPlans = pgTable("organization_plans", {
   accountId: uuid("account_id")
     .primaryKey()
@@ -14023,10 +14112,6 @@ export const auditEvents = pgTable(
       table.workspaceId,
       table.occurredAt,
     ),
-    // Earlier secret uses of a session tree, for known-value masking (1023).
-    secretUsed: index("audit_events_secret_used_idx")
-      .on(table.workspaceId, table.occurredAt)
-      .where(sql`${table.action} = 'vault.secret.used'`),
   }),
 );
 

@@ -521,6 +521,10 @@ import type {
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -7707,6 +7711,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Link the Slack account as a member of the organization, without workspace
+   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   */
+  async linkSlackUserAsOrganizationMember(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/link`,
+      request,
+    );
+  }
+
   async cancelSlackUserLinkAccess(
     workspaceId: string,
     requestId: string,
@@ -11921,6 +11941,25 @@ export class OpenGeniClient {
     options: { accountId?: string } = {},
   ): Promise<BillingSubscriptionCatalog> {
     return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
+  }
+
+  async getBillingAutoTopUp(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("GET", "/v1/billing/auto-top-up", undefined, options);
+  }
+
+  /** Owner-only. enabled:true explicitly consents to recurring off-session threshold charges. */
+  async updateBillingAutoTopUp(
+    request: UpdateBillingAutoTopUpRequest,
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("PUT", "/v1/billing/auto-top-up", request);
+  }
+
+  async createBillingAutoTopUpSetupSession(
+    request: CreateBillingAutoTopUpSetupSessionRequest,
+  ): Promise<CreateBillingAutoTopUpSetupSessionResponse> {
+    return await this.requestJson("POST", "/v1/billing/auto-top-up/setup", request);
   }
 
   async createSubscriptionCheckout(

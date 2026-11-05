@@ -23,7 +23,7 @@ describe("the request text a Slack chat shows", () => {
     expect(slackReadableRequestText(`<@${BOT}> ask <@U0SAM> about it`, BOT, names)).toEqual({
       text: "ask @Sam about it",
       modelContext:
-        "People mentioned in this Slack message, shown by name; mention them in Slack with the id:\n- @Sam is <@U0SAM>",
+        "People mentioned, by name; to mention one in Slack, use the id:\n- @Sam is <@U0SAM>",
     });
   });
 

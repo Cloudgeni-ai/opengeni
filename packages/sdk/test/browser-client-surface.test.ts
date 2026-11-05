@@ -9,6 +9,15 @@ import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
 
+// Backend-first automatic top-ups ship before their separately owned billing UI.
+// Remove each exact classification when its browser consumer lands; the equality
+// check below still rejects unclassified additions and stale unused entries.
+const pendingBillingAutoTopUpMethods = [
+  "getBillingAutoTopUp",
+  "updateBillingAutoTopUp",
+  "createBillingAutoTopUpSetupSession",
+];
+
 // These methods predate the browser-specific entry. Keep the list explicit so
 // removing legacy surface tightens the boundary, while adding a browser-unused
 // method to the eager client fails review until it moves to a focused subpath.
@@ -273,6 +282,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...pendingBillingAutoTopUpMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),

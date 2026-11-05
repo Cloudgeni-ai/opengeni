@@ -56,6 +56,7 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
+  modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
@@ -64,13 +65,13 @@ import {
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
-  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
   environmentsEncryptionKeyBytes,
@@ -99,6 +100,7 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelPreparationPhase,
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
@@ -122,6 +124,7 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
+import type { WorkspaceMutationOptions } from "./sandbox-runtime";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -205,6 +208,8 @@ import {
   requireAgentStreamFinalOutput,
 } from "./quiescence";
 import {
+  goalCompleteReplyMessage,
+  goalCompleteReplyDecision,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -234,7 +239,6 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
-import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 import {
   requestIdleCompactionAfterCompletedTurn,
@@ -283,6 +287,7 @@ export type TurnStreamAttemptDeps = {
       outcome: "completed" | "failed";
       durationSeconds: number;
     }) => void,
+    options?: WorkspaceMutationOptions,
   ) => Promise<T>;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
@@ -843,6 +848,8 @@ export async function runTurnStreamAttempt(
   let latestAssistantMessageText: string | null = null;
   // Waits refused because they would leave a person's message unanswered.
   let inputWaitReplyRefusals = 0;
+  // Goal completions with a reply refused because sibling results would go unseen.
+  let goalCompleteReplyRefusals = 0;
   // The accepted wait's verbatim reply was handled once (published, or found
   // to repeat the latest message), across every stream of this activity.
   let waitReplyPublished = false;
@@ -907,14 +914,28 @@ export async function runTurnStreamAttempt(
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
-    if (pendingSteer.value) {
+    // The Steer read ran alongside the slower checks, so the watch may have
+    // seen a Steer committed after it. Such a watch is not proof of a
+    // withdrawn Steer: read again before re-arming it, or the request would
+    // go out unpreemptible and the Steer would wait a whole further step.
+    const steerPending =
+      pendingSteer.value ||
+      (checkSteer &&
+        steerWatch?.signal().aborted === true &&
+        (await hasPendingSteerForTurn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })));
+    if (steerPending) {
       // The request has not left the worker. The SDK finishes the run at
       // this boundary after delivering every event of the completed step.
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
-    // The watch noticed a Steer that no longer waits (withdrawn, or the
-    // automation run that steered was paused) before this boundary. Listen
+    // The watch noticed a Steer that, read again just now, no longer waits
+    // (withdrawn, or the automation run that steered was paused). Listen
     // again, or every later request would be cut short at once.
     if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };
@@ -1064,7 +1085,6 @@ export async function runTurnStreamAttempt(
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
-    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1127,17 +1147,9 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          // Final guard: no known secret value reaches the provider, whatever
-          // path brought it into the model input (docs/secrets.md, Masking).
-          ...(attemptSecretValues
-            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
-            : {}),
           // Settled by turn input above; the same for every model call of the run.
           searchRecordForm: searchRecords.form,
-          onModelVisibleContext: async (rawSnapshot) => {
-            const snapshot = attemptSecretValues
-              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
-              : rawSnapshot;
+          onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1235,16 +1247,12 @@ export async function runTurnStreamAttempt(
               eventing.modelRunSettings,
             ),
           },
-          onModelPreparationPhase: (measurement) => {
-            recordTurnStartupPhase(observability, {
-              phase: `model_prepare_${measurement.phase}`,
+          onModelPreparationPhase: (measurement) =>
+            recordModelPreparationPhase(observability, {
               provider: turnExecutionPolicy.providerId,
               backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: measurement.outcome,
-              durationSeconds: measurement.durationSeconds,
-              ...(measurement.count === undefined ? {} : { count: measurement.count }),
-            });
-          },
+              measurement,
+            }),
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
@@ -1295,6 +1303,16 @@ export async function runTurnStreamAttempt(
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
       eventing.inputWaitReplyGuard = async (request) => {
+        if (request.kind === "goal_complete") {
+          const decision = goalCompleteReplyDecision({
+            refusalsSoFar: goalCompleteReplyRefusals,
+            toolCallCount: modelResponseClientToolCallCount(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
+          });
+          if (typeof decision === "string") goalCompleteReplyRefusals += 1;
+          return decision;
+        }
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
@@ -1732,7 +1750,18 @@ export async function runTurnStreamAttempt(
                     toolOutputTransform: (output) =>
                       retainedToolImagesEventOutput(output, retainedToolImages),
                   }
-                : { messagePhases },
+                : eventing.commandCompletionNotices && eventing.commandCompletionNotices.size > 0
+                  ? {
+                      // The model reads finished commands after this tool's
+                      // result; the timeline shows the tool's own output.
+                      messagePhases,
+                      toolOutputTransform: (output) =>
+                        withoutAppendedCommandCompletions(
+                          output,
+                          eventing.commandCompletionNotices ?? new Set(),
+                        ),
+                    }
+                  : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>
@@ -1884,7 +1913,10 @@ export async function runTurnStreamAttempt(
             // own text, so an approval pause or a retried activity cannot lose
             // it. Settlement and later activities then find it as the turn's
             // latest message and do not publish it again.
-            const acceptedReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+            // A goal completion's reply is the turn's final output instead:
+            // settlement publishes it once, with the turn's completion.
+            const gate = eventing.preparedTools?.inputWaitYield;
+            const acceptedReply = gate?.finalReply === null ? (gate?.reply ?? null) : null;
             if (acceptedReply !== null && !waitReplyPublished) {
               waitReplyPublished = true;
               const message = inputWaitReplyMessage({
@@ -2452,13 +2484,22 @@ export async function runTurnStreamAttempt(
       control.activityStatus = "idle";
       return claimedResult({ status: "idle" });
     }
-    const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const streamFinalOutput = String(
-      requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
-    );
+    // A goal completion that carried a reply ends the turn at the tool
+    // boundary like a wait, but that reply is the turn's final answer: it
+    // settles exactly like an answered turn, never as a wait.
+    const completionReply =
+      eventing.preparedTools?.inputWaitYield?.yielded === true
+        ? (eventing.preparedTools.inputWaitYield.finalReply ?? null)
+        : null;
+    const inputWaitYielded =
+      eventing.preparedTools?.inputWaitYield?.yielded === true && completionReply === null;
+    const streamFinalOutput =
+      completionReply ??
+      String(requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded));
     // A copied web-search record is not a reply: treat it as empty so the
     // turn asks for a real answer instead of publishing the copy.
-    const suppressedEcho = isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const suppressedEcho =
+      completionReply === null && isHostedSearchEvidenceEchoText(streamFinalOutput);
     const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
@@ -2560,7 +2601,15 @@ export async function runTurnStreamAttempt(
         events: [
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
-            : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+            : [
+                {
+                  type: "agent.message.completed" as const,
+                  payload:
+                    completionReply === null
+                      ? { text: finalOutput }
+                      : goalCompleteReplyMessage(finalOutput, input.attemptId),
+                },
+              ]),
           ...(waitReplyMessage
             ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
             : []),

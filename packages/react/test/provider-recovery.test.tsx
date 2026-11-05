@@ -13,6 +13,9 @@ import { buildTimeline } from "../src/timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { summarizeSessionFailure } from "../src/app/lib/events";
+import { failedSessionCopy } from "../src/app/lib/failed-session-copy";
+import { turnFailureClass } from "../src/app/lib/turn-failure-analytics";
 
 const englishText = createOpenGeniText();
 
@@ -286,4 +289,148 @@ test("internal MCP outage notice waits automatically without a finite attempt bu
     expect(view.container.textContent).not.toContain("of 5");
     await view.unmount();
   }
+});
+
+test("a sandbox capacity wait and its spent budget name the sandbox, never the model", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_capacity_unavailable",
+      error:
+        "No sandbox capacity is available right now. The same turn will retry after a short delay.",
+      subject: "No sandbox capacity is available right now",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error:
+        "The sandbox service is temporarily unavailable. The same turn will retry after a short delay.",
+      subject: "The sandbox service is temporarily unavailable",
+    },
+  ];
+  for (const { code, error, subject } of cases) {
+    const detail = "compute control service POST /v1/sandboxes: no host can take it now";
+    const live = parseProviderRecovery({
+      reason: code,
+      code,
+      error,
+      detail,
+      retryable: true,
+      continueDelayMs: 60_000,
+      providerRecoveryCount: 2,
+      maxProviderRecoveryCount: 5,
+    });
+    expect(live).toMatchObject({ code, attempt: 2, maxAttempts: 5, modelRoute: false });
+    expect(providerRecoveryRetryingText(englishText, live!)).toBe(
+      `${subject} — retrying (attempt 2 of 5)…`,
+    );
+
+    const exhausted = {
+      error: `${subject}. Retried 5 times without success. Try again in a few minutes.`,
+      code,
+      detail,
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: 5,
+      maxProviderRecoveryCount: 5,
+      lastRetryableError: error,
+    };
+    const terminal = `${subject}. Opengeni retried 5 times without success. Try again in a few minutes.`;
+    expect(presentFailure(englishText, exhausted).reason).toBe(terminal);
+    const timeline = buildTimeline(englishText, [event("turn.failed", exhausted)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: terminal });
+
+    const summary = summarizeSessionFailure([event("turn.failed", exhausted)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toStartWith(subject);
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(banner.unavailableModel).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
+  }
+});
+
+test("a sandbox failure that stops shows only its authored copy, never the service text", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_service_refused",
+      error:
+        "The sandbox service refused to provide a sandbox for this turn. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes: a valid X-API-Key is needed",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error: "The sandbox service is temporarily unavailable. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes/sbx/wake: busy",
+    },
+    {
+      code: "sandbox_capacity_unavailable",
+      error: "No sandbox capacity is available right now. This turn stopped without retrying.",
+      // Even model-credential-looking service text must not reach the person.
+      detail: "compute control service POST /v1/sandboxes: invalid api key",
+    },
+  ];
+  for (const { code, error, detail } of cases) {
+    const payload = { error, code, detail, retryable: false };
+    expect(parseProviderRecovery(payload)).toBeNull();
+    const presented = presentFailure(englishText, payload);
+    expect(presented.reason).toBe(error);
+    expect(presented.diagnostic).toBe(false);
+    const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+
+    const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toBe(error);
+    expect(banner.reason).not.toContain("compute control service");
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
+  }
+});
+
+test("a workspace machine that can't start programs reads as plain words while restarting and once stopped", async () => {
+  // Exact worker shapes: the retryable recovery while the box restarts, and
+  // the terminal failure once a restart did not help.
+  const restarting = parseProviderRecovery({
+    error:
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
+    code: "sandbox_machine_restarting",
+    retryable: true,
+    providerRecoveryCount: 1,
+    maxProviderRecoveryCount: 5,
+  });
+  expect(restarting).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(englishText, restarting!)).toBe(
+    "The workspace machine couldn't start programs, so it was restarted…",
+  );
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={restarting} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("The turn continues automatically as soon as it's back.");
+    expect(text).not.toContain("sandbox");
+    // Restarted once per turn: no attempt budget to count.
+    expect(text).not.toContain("attempt");
+  } finally {
+    await view.unmount();
+  }
+
+  const error =
+    "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";
+  const payload = {
+    error,
+    code: "sandbox_process_start_failed",
+    retryable: false,
+    detail:
+      "not found: start the program for a shell command: No such file or directory (os error 2)",
+  };
+  expect(parseProviderRecovery(payload)).toBeNull();
+  // The agent's own text stays on the event for operators, never in the copy.
+  const presented = presentFailure(englishText, payload);
+  expect(presented).toMatchObject({ reason: error, diagnostic: false });
+  const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+  expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+  const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+  const banner = failedSessionCopy(summary, false, false, true);
+  expect(banner.reason).toBe(error);
+  expect(banner.reason).not.toContain("node -e");
+  expect(turnFailureClass(summary)).toBe("sandbox");
 });
