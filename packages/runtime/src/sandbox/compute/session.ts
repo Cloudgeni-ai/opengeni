@@ -47,7 +47,9 @@ import {
 import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import {
+  WORKSPACE_RESTORE_BACKUP_PREFIX,
   WORKSPACE_RESTORE_SCRATCH_GLOBS,
+  WORKSPACE_RESTORE_STAGING_PREFIX,
   workspaceTarExcludeArgs,
 } from "../workspace-tar-excludes";
 import { archiveRestoreScript } from "../providers/opensandbox-adapter";
@@ -795,8 +797,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       });
     }
     const archivePath = `${COMPUTE_PRIVATE_ROOT}/restore-${randomUUID()}.tar`;
-    const stagingPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-restore-${randomUUID()}`;
-    const backupPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-old-${randomUUID()}`;
+    const stagingPath = `${COMPUTE_WORKSPACE_ROOT}/${WORKSPACE_RESTORE_STAGING_PREFIX}${randomUUID()}`;
+    const backupPath = `${COMPUTE_WORKSPACE_ROOT}/${WORKSPACE_RESTORE_BACKUP_PREFIX}${randomUUID()}`;
     await this.run(`mkdir -p -- ${shellQuote(COMPUTE_PRIVATE_ROOT)}`, "archive staging");
     await this.writeChunked(archivePath, bytes);
     const excluded = [...this.state.manifest.ephemeralPersistencePaths()].sort().join("\n");

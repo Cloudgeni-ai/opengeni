@@ -14,7 +14,11 @@ import {
   type WorkspaceTreeFingerprint,
 } from "@opengeni/contracts";
 import { withSandboxProviderCapture } from "./provider-operation-gate";
-import { escapeWorkspaceGlobPattern, workspaceTarExcludeArgs } from "./workspace-tar-excludes";
+import {
+  escapeWorkspaceGlobPattern,
+  workspaceTarExcludeArgs,
+  workspaceTopLevelExcludeGlobs,
+} from "./workspace-tar-excludes";
 import type { VerifiedHostWorkspaceArchive } from "./archive-spool";
 import {
   captureHostWorkspaceArchive,
@@ -411,28 +415,12 @@ function workspaceFingerprintExcludes(session: WorkspaceSession): string[] {
 
 /** Top-level globs the session's archive leaves out (see
  * `WorkspaceSession.workspaceArchiveExcludedGlobs`). Every remote fingerprint,
- * content manifest and size walk leaves out the same ones: a folder the
- * archive skips but the fingerprint counts makes a restore unverifiable. Only
- * a plain top-level name pattern qualifies. */
+ * content manifest and size walk leaves out the same ones, checked by the
+ * same `workspaceTopLevelExcludeGlobs` as the archive: a folder the archive
+ * skips but the fingerprint counts makes a restore unverifiable. */
 function workspaceFingerprintExcludeGlobs(session: WorkspaceSession): string[] {
-  let globs: readonly unknown[] | undefined;
-  try {
-    globs = session.workspaceArchiveExcludedGlobs?.();
-  } catch {
-    globs = undefined;
-  }
-  return [
-    ...new Set(
-      (Array.isArray(globs) ? globs : []).filter(
-        (glob): glob is string =>
-          typeof glob === "string" &&
-          glob.length > 0 &&
-          !/[/\\\u0000-\u001f]/u.test(glob) &&
-          glob !== "." &&
-          glob !== "..",
-      ),
-    ),
-  ].sort();
+  const globs = session.workspaceArchiveExcludedGlobs?.();
+  return globs === undefined ? [] : workspaceTopLevelExcludeGlobs(globs);
 }
 
 /** Workspace-relative paths a session never persists (its manifest's

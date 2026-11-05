@@ -7,9 +7,13 @@ import { ComputeSandboxSession } from "../src/sandbox/compute/session";
 import { OpenSandboxSession } from "../src/sandbox/providers/opensandbox-adapter";
 import {
   fingerprintSandboxWorkspace,
+  probeRemoteWorkspaceSize,
   readRemoteWorkspaceContentManifest,
 } from "../src/sandbox/workspace-archive";
-import { workspaceTarExcludeArgs } from "../src/sandbox/workspace-tar-excludes";
+import {
+  workspaceTarExcludeArgs,
+  workspaceTopLevelExcludeGlobs,
+} from "../src/sandbox/workspace-tar-excludes";
 
 // Compute and OpenSandbox build their own workspace tar. It must leave out
 // exactly what the workspace fingerprint (and the Agents SDK's tar) leaves
@@ -51,7 +55,8 @@ function localRunner(workspace: string, privateRoot: string) {
     value
       .replaceAll("/tmp/opengeni-private", privateRoot)
       .replaceAll("'/workspace'", `'${workspace}'`)
-      .replaceAll("cd /workspace\n", `cd ${workspace}\n`);
+      .replaceAll("cd /workspace\n", `cd ${workspace}\n`)
+      .replaceAll("cd /workspace 2>", `cd ${workspace} 2>`);
   return {
     scripts: [] as string[],
     run(cmd: string) {
@@ -194,6 +199,14 @@ describe("backend workspace tar exclusions", () => {
       expect(await readRemoteWorkspaceContentManifest(after)).toEqual(
         await readRemoteWorkspaceContentManifest(before),
       );
+      // The size walk (the metric a failed save's size is compared with)
+      // measures the same files as the archive holds.
+      const sourceSize = await probeRemoteWorkspaceSize(before);
+      expect(sourceSize).not.toBeNull();
+      expect(await probeRemoteWorkspaceSize(after)).toEqual(sourceSize);
+      expect(sourceSize).not.toEqual(
+        await probeRemoteWorkspaceSize(fingerprintSession({}, source)),
+      );
     });
   }
 
@@ -219,5 +232,18 @@ describe("backend workspace tar exclusions", () => {
       "'--exclude=./.opengeni-old-*'",
       "'--exclude=./target'",
     ]);
+  });
+
+  // The archive and the fingerprint apply one check to the top-level globs.
+  // An entry that isn't a plain top-level name throws on both sides instead
+  // of being dropped by one of them, which would make them disagree.
+  test("an invalid top-level glob throws for the archive and the fingerprint alike", async () => {
+    for (const glob of [".cache/*", "a\\b", "", ".", "..", "x\ny"]) {
+      expect(() => workspaceTopLevelExcludeGlobs([glob])).toThrow(TypeError);
+      expect(() => workspaceTarExcludeArgs([], [glob])).toThrow(TypeError);
+      const session = fingerprintSession({ workspaceArchiveExcludedGlobs: () => [glob] }, "/");
+      await expect(fingerprintSandboxWorkspace(session)).rejects.toThrow(TypeError);
+    }
+    expect(workspaceTopLevelExcludeGlobs(["b*", "a*", "b*"])).toEqual(["a*", "b*"]);
   });
 });

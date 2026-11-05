@@ -59,7 +59,9 @@ import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import {
+  WORKSPACE_RESTORE_BACKUP_PREFIX,
   WORKSPACE_RESTORE_SCRATCH_GLOBS,
+  WORKSPACE_RESTORE_STAGING_PREFIX,
   workspaceTarExcludeArgs,
 } from "../workspace-tar-excludes";
 import {
@@ -413,7 +415,7 @@ archive, root, staging, backup, max_members, max_bytes, excluded_raw = sys.argv[
 max_members = int(max_members)
 max_bytes = int(max_bytes)
 excluded = [p for p in excluded_raw.split("\n") if p]
-reserved_prefixes = (".opengeni-restore-", ".opengeni-old-")
+reserved_prefixes = (${JSON.stringify(WORKSPACE_RESTORE_STAGING_PREFIX)}, ${JSON.stringify(WORKSPACE_RESTORE_BACKUP_PREFIX)})
 
 def logical(name):
     name = name.replace("\\", "/")
@@ -484,8 +486,8 @@ with tarfile.open(archive, "r:*") as tf:
 
 if not os.path.isdir(root):
     raise ValueError("workspace root does not exist")
-staging = workspace_child(staging, ".opengeni-restore-")
-backup = workspace_child(backup, ".opengeni-old-")
+staging = workspace_child(staging, ${JSON.stringify(WORKSPACE_RESTORE_STAGING_PREFIX)})
+backup = workspace_child(backup, ${JSON.stringify(WORKSPACE_RESTORE_BACKUP_PREFIX)})
 shutil.rmtree(backup, ignore_errors=True)
 os.makedirs(backup, mode=0o700, exist_ok=False)
 moved_old = []
@@ -1586,8 +1588,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       });
     }
     const archivePath = `${PRIVATE_ROOT}/restore-${randomUUID()}.tar`;
-    const stagingPath = `${WORKSPACE_ROOT}/.opengeni-restore-${randomUUID()}`;
-    const backupPath = `${WORKSPACE_ROOT}/.opengeni-old-${randomUUID()}`;
+    const stagingPath = `${WORKSPACE_ROOT}/${WORKSPACE_RESTORE_STAGING_PREFIX}${randomUUID()}`;
+    const backupPath = `${WORKSPACE_ROOT}/${WORKSPACE_RESTORE_BACKUP_PREFIX}${randomUUID()}`;
     await this.writeFile({
       path: archivePath,
       content: bytes,
