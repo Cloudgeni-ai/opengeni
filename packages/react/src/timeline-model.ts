@@ -28,6 +28,7 @@ export {
   isPreparingWork,
   timelineTurnsWithOutput,
   readableWorkDefaultOpen,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
   rollingActivityItem,
@@ -188,3 +189,4 @@ export {
   agentWorkHumanInputSummary,
   isAgentWorkHumanInput,
 } from "./timeline/agent-work-human-input";
+export { automationRunLine, isAutomationRunBatch } from "./components/machine-input-display";

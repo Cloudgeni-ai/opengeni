@@ -86,6 +86,10 @@
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"
     },
+    "./no-reply": {
+      "types": "./src/no-reply.ts",
+      "default": "./src/no-reply.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"

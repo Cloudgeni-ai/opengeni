@@ -13,6 +13,7 @@ export default defineConfig({
     "src/values.ts",
     "src/json-safe.ts",
     "src/claude-cite-tags.ts",
+    "src/no-reply.ts",
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
     "src/session-usage-limit-refusal.ts",
