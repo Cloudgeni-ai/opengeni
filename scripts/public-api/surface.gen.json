@@ -28338,6 +28338,7 @@
         "$": "object",
         "$.archive": "object! null",
         "$.archive.archivedAt": "string! null",
+        "$.archive.restoring": "const?=[\"true\"]",
         "$.archive.state": "enum!=[\"\\\"archived\\\"\",\"\\\"archiving\\\"\"]",
         "$.keepLive": "boolean!"
       }
@@ -31796,6 +31797,8 @@
         "$": "object",
         "$.archived": "boolean!",
         "$.clientEventId": "string?",
+        "$.confirmActiveSubChats": "array?",
+        "$.confirmActiveSubChats[]": "string",
         "$.confirmPause": "boolean?",
         "$.expectedVersion": "integer?",
         "$.mode": "enum?=[\"\\\"hide_for_me\\\"\",\"\\\"pause_and_archive\\\"\"]"

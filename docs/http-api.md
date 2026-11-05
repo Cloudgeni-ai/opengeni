@@ -65,10 +65,13 @@ the archive state); messages to an archived session return 409
 `GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
 deployment archives idle sessions. `PUT
 /v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
-`{ "archived": true }` archives a chat for everyone (`sessions:control`); within
-ten seconds `{ "archived": false }` undoes it, after that the archive is final
-(409 `session_archive_final`), and 409 `session_archive_blocked` lists what keeps
-a chat live. See
+`{ "archived": true }` archives a chat for everyone (`sessions:control`), and
+`{ "archived": false }` brings it back: exactly within ten seconds, and later
+by restoring its stored content in the background (`retention.archive.restoring`
+until done; 409 `session_archive_busy` while it is being stored, 409
+`session_archive_restore_root` for a sub-chat). 409 `session_archive_blocked`
+lists what keeps a chat live, including sub-chats still in use
+(`active_sub_chat`), which `confirmActiveSubChats` archives too. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).
 
 Session create accepts `unattended: true` for a session no person will follow

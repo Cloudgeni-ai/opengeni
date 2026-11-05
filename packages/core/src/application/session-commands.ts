@@ -30,7 +30,7 @@ import {
   requireSessionArchiveMemberAuthority,
   retireArchivedChatWaits,
   requestSessionArchive,
-  undoSessionArchive,
+  unarchiveSession,
   getSessionGoal,
   setSessionGoalStatusWithEvent,
   sessionWorkstreamHasActiveWork,
@@ -1035,23 +1035,35 @@ function scheduleHumanControlPostCommit(
 }
 
 /**
- * Archive a chat for everyone, or undo that within its window. Archiving marks
- * the chat and its sub-chats archived at once and schedules
- * {@link stopArchivedSessionWork} for when the undo window ends; the archiver
- * then stores them. Undo returns the chat exactly as it was, since nothing
- * else changes before the window ends. Both need session control.
+ * Archive a chat for everyone, or bring it back. Archiving marks the chat and
+ * its sub-chats archived at once and schedules {@link stopArchivedSessionWork}
+ * for when the undo window ends; the archiver then stores them. It refuses
+ * while a sub-chat is still in use unless the caller confirmed that sub-chat
+ * (`confirmActiveSubChats`). Unarchiving within the window returns the chat
+ * exactly as it was; after it, the chat is live again and anything already in
+ * long-term storage is restored in the background. Both need session control.
  */
 export async function archiveHumanSessionWorkstream(
   deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0] & {
-    workflowClient: Pick<SessionWorkflowClient, "scheduleSessionArchive">;
+    workflowClient: Pick<
+      SessionWorkflowClient,
+      "scheduleSessionArchive" | "scheduleSessionArchiveRestore"
+    >;
   },
   context: HumanSessionCommandContext,
   input: {
     archived: boolean;
+    /** Sub-chats in use the caller saw and chose to archive too. */
+    confirmActiveSubChats?: readonly string[];
     /** Verified owning-user proof, for a Personal workspace (see requireSessionArchiveMemberAuthority). */
     personalWorkspaceOwnerException?: boolean;
   },
-): Promise<{ changed: boolean; undoUntil: string | null } | null> {
+): Promise<{
+  changed: boolean;
+  undoUntil: string | null;
+  /** Chats whose stored content is being restored. */
+  restoringSessionIds?: string[];
+} | null> {
   await authorizeHumanSessionCommand(deps, context, "session.control");
   await requireSessionArchiveMemberAuthority(deps.db, {
     workspaceId: context.workspaceId,
@@ -1064,10 +1076,27 @@ export async function archiveHumanSessionWorkstream(
     sessionId: context.sessionId,
   };
   if (!input.archived) {
-    const undone = await undoSessionArchive(deps.db, scope);
-    return undone === null ? null : { changed: undone, undoUntil: null };
+    const requestedAt = new Date();
+    const result = await unarchiveSession(deps.db, scope, requestedAt);
+    if (result === null) return null;
+    if (result.restoringSessionIds.length > 0) {
+      // Durable: putting the content back must not depend on this process.
+      await deps.workflowClient.scheduleSessionArchiveRestore?.({
+        ...scope,
+        requestedAt: requestedAt.toISOString(),
+      });
+    }
+    return {
+      changed: result.outcome !== "not_archived",
+      undoUntil: null,
+      restoringSessionIds: result.restoringSessionIds,
+    };
   }
-  const request = await requestSessionArchive(deps.db, { ...scope, subjectId: context.subjectId });
+  const request = await requestSessionArchive(deps.db, {
+    ...scope,
+    subjectId: context.subjectId,
+    ...(input.confirmActiveSubChats ? { confirmActiveSubChats: input.confirmActiveSubChats } : {}),
+  });
   if (!request) return null;
   if (!request.alreadyArchived) {
     // Durable: stopping work and storing must not depend on this process.

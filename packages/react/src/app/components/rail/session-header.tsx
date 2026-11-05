@@ -281,8 +281,8 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  // Archiving is one-way, so an archived chat offers no archive action, and
-  // only people who can control the chat archive it.
+  // An archived chat is restored from its own notice, so it offers no
+  // archive action, and only people who can control the chat archive it.
   const canArchive =
     Boolean(onArchive) &&
     session.parentSessionId === null &&

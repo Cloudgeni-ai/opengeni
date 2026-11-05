@@ -5347,6 +5347,12 @@ export const sessions = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Who archived the chat; null when the idle archiver did. */
     archiveRequestedBy: text("archive_requested_by"),
+    /**
+     * When someone last asked to restore the chat's stored content (migration
+     * 1261). A stored chat with this set is waiting to be restored; once live
+     * again it marks the restore, which counts as activity for the idle period.
+     */
+    contentRestoreRequestedAt: timestamp("content_restore_requested_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     // Repositories a person removed from the session (migration 1140); see
     // SessionRemovedRepository. Read with parseSessionRemovedRepositories.

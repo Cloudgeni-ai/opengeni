@@ -91,12 +91,29 @@ sets `sessions.archived_at` and `archive_requested_by` on the root chat and its
 sub-chats. From then on the chat is listed as archived for everyone
 (`archiveStatus=archived`), and new messages, steers and agent sends to it are
 refused. `{ "archived": false }` within ten seconds (a few seconds' grace for
-the request itself) undoes it exactly; after that it answers 409
-`session_archive_final`. Archive answers 409 `session_archive_blocked`, with
-`blockers` and a message saying what to change, while keep-live, a repeating
-automation, or a site sign-in keeps the chat live. One-time automations do not
-block: they are retired when the window ends. The older `mode`, `confirmPause`,
-`expectedVersion` and `clientEventId` fields are accepted and ignored.
+the request itself) undoes it exactly; after that it restores the chat (see
+"Restoring an archived chat"). Archive answers 409 `session_archive_blocked`,
+with `blockers` and a message saying what to change, while keep-live, a
+repeating automation, or a site sign-in keeps the chat live. One-time
+automations do not block: they are retired when the window ends. The older
+`mode`, `confirmPause`, `expectedVersion` and `clientEventId` fields are
+accepted and ignored.
+
+Archive also refuses while a sub-chat is still in use, because archiving the
+root stops every sub-chat with it. A sub-chat is in use when it is running
+(an active turn, queued work or a running background command), waiting for
+input or a person's answer, working on an active goal, or was messaged
+directly by a person in the last 14 days (a prompt sent through the web app,
+Slack, the API and the like; an agent's message does not count). Then the
+409 `session_archive_blocked` lists one blocker per such sub-chat,
+`{ "kind": "active_sub_chat", "sessionId", "title", "reason": "running" |
+"waiting" | "goal" | "messaged" }`, and the message names them with how many.
+Repeating the request with `confirmActiveSubChats` listing every one of those
+ids archives them with the chat; a list that misses one is refused again with
+all of them named. Finished sub-chats that only agents used never block.
+Keeping a live sub-chat under an archived root is not offered: an archived
+root hides its whole tree from the list, a sub-chat's results go to its
+parent, and moving sub-chats to a new root would rewrite who they belong to.
 
 When the Undo window ends, a delayed workflow stops the chat (one-time
 automations retired, goals paused, running work cancelled) and stores it with
@@ -192,16 +209,55 @@ unchanged. Small per-turn audit snapshots also stay, as do a scheduled run's
 delivered occurrence updates (immutable schedule evidence) and the history
 items they delivered.
 
-Archiving is one-way: there is no restore to an executable state. Start a new
-session to continue the work. A late machine input for an archived session (a
-child result, schedule or media completion) is settled like input to a
-cancelled session.
+An archived session can be restored (below), or its work continued in a new
+session. A late machine input for an archived session (a child result,
+schedule or media completion) is settled like input to a cancelled session,
+and is not replayed by a restore.
 
 Purging leaves holes in an archived session's event sequence. Event streams
 report them as covered: each SSE frame's `id` (its covered-through sequence)
 extends to just before the next stored event, or to the session's last
 sequence, so stream clients never try to backfill an intentional hole. Raw
 event pages simply skip the missing sequences.
+
+### Restoring an archived chat
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
+`{ "archived": false }` restores a root chat at any time (session control).
+Within the Undo window it is the exact undo. After it, the chat and the
+sub-chats this same Archive took (those whose `archived_at` equals the
+root's) come back:
+
+- a chat whose content was not stored yet is live again at once;
+- a stored chat gets `content_restore_requested_at` and stays read-only, with
+  `retention.archive.restoring: true`, while the
+  `sessionArchiveRestoreWorkflow` puts its content back. For each chat the
+  worker downloads the bundle, verifies its size and SHA-256 against the
+  manifest, its header against the session and each table's rows against the
+  footer counts, then, in one transaction, returns the session to live and
+  re-inserts the purged rows exactly as they were (rows still present are
+  kept). Only that transaction may leave the archived state: it marks itself
+  with the transaction-local `opengeni.session_content_restore` setting, which
+  the session guard checks. Either every row is back and the chat is live, or
+  nothing changed and the workflow retries.
+
+The stored objects of a restored chat are queued for deletion in the same
+transaction, and a later Archive stores it again under new keys. A restored
+chat counts as active for the idle period, so the idle archiver does not take
+it back on its next pass. If the workflow is lost, the maintenance pass
+finishes any restore requested more than five minutes earlier.
+
+Restoring a sub-chat on its own answers 409 `session_archive_restore_root`
+with the `rootSessionId` to restore instead; a chat that is being stored right
+now answers 409 `session_archive_busy` (try again a minute later). A sub-chat
+that was stored on its own before the root was archived stays stored.
+
+What a restore does not bring back: purged event types (streamed text and
+output fragments, model-request telemetry, update bookkeeping, startup
+phases, credential selection and late-rejected events), which only a running
+turn or a debugger reads; work the stop step cancelled; goals it paused
+(they stay paused, so the agent does not start again on its own); and
+one-time automations it retired.
 
 ### Keep-live
 
@@ -214,11 +270,16 @@ session is archived.
 ### In the web app
 
 - Archive (in a chat's row, menu, header and the command menu) takes the chat
-  out of the list at once and shows a notice with Undo for ten seconds. After
-  that it says the chat moves to long-term storage and can't be restored.
+  out of the list at once and shows a notice with Undo for ten seconds, saying
+  the chat moves to long-term storage and can be restored from Archived. When
+  sub-chats are still in use, nothing is archived: a notice says how many and
+  names them, and "Archive all" archives them with the chat.
 - An archived chat opens normally with a notice above its timeline that it is
-  archived and a "Continue in a new chat" button, which opens a new chat with a
-  message pointing at it; the composer is not shown.
+  archived, a "Restore chat" button for a root chat the person can archive,
+  and a "Continue in a new chat" button, which opens a new chat with a message
+  pointing at it; the composer is not shown. While a restore runs, the notice
+  says the content is coming back, and the chat opens for new messages once
+  it is live.
 - The chat's Agent tab has a "Keep this chat active" switch (keep-live) under
   Storage, shown only when the deployment archives idle sessions
   (`ClientConfig.sessionArchive`, present when archiving is enabled and object
