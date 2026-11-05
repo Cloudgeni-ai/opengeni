@@ -14,6 +14,7 @@ import {
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
   getSandboxRecoveryDiscontinuity,
+  readSandboxReducedSave,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -87,7 +88,7 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -659,6 +660,11 @@ export async function runTurnStreamAttempt(
         input.sessionId,
         "explicit_notice",
       );
+      // Repeated each turn while the latest save is a reduced one; a turn
+      // never fails because this optional notice could not be read.
+      const reducedSave = await (async () =>
+        await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
+      const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -667,6 +673,7 @@ export async function runTurnStreamAttempt(
         },
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
+        ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),

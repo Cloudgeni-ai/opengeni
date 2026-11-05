@@ -1921,6 +1921,27 @@ export function recordSandboxDrainCaptureFailure(
   );
 }
 
+/** What a drain did once full snapshots of a lease epoch kept failing:
+ * `reduced_saved` published a save without rebuildable folders,
+ * `reduced_failed` tried one and it failed, `reduced_unavailable` could not
+ * try one (nothing to leave out, or what remains is too large), and
+ * `abandoned` stopped the box without a new save. */
+export function recordSandboxDrainCaptureFallback(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "reduced_saved" | "reduced_failed" | "reduced_unavailable" | "abandoned";
+  },
+): void {
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_fallback_total",
+      help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
+      labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
+    }),
+  );
+}
+
 const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
   1e6, 1e7, 1e8, 5e8, 1e9, 2e9, 5e9, 1e10, 2e10, 5e10,
 ];

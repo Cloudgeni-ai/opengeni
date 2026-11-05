@@ -48795,6 +48795,14 @@ type ProviderLossRecord = {
    * lifetime, or the compute control plane's own answer) the loss may at most
    * restore a checkpoint, never continue on an empty workspace. */
   deathProof?: ProviderDeathProof;
+  /** The drain stopped the box itself after its saves kept failing (it did
+   * not vanish). The people in the chat were told when it stopped, so the
+   * later restore of the save made at `unsavedSince` does not announce the
+   * loss a second time. */
+  captureAbandoned?: true;
+  /** With `captureAbandoned`: the time of the last good save the stop notice
+   * named, or null when there was none. Absent on records that predate it. */
+  unsavedSince?: string | null;
 };
 
 type ProviderDeathProof = {
@@ -49578,6 +49586,21 @@ async function acquireLeaseOnce(
             // Re-armed: whatever group end was requested did not happen.
             await tx.execute(sql`
               update sandbox_leases set group_end_requested_at = null, updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (Number(row.drain_capture_failures ?? 0) > 0) {
+            // Re-armed: the drain ended without a save, so its failures no
+            // longer describe the next one. A later drain starts with a full
+            // snapshot and no backoff, and only failures of that drain can
+            // lead to a reduced save or a stop (sandboxDrainCaptureFallback).
+            await tx.execute(sql`
+              update sandbox_leases set
+                drain_capture_failures = 0,
+                drain_capture_failure_epoch = null,
+                drain_capture_first_failed_at = null,
+                drain_capture_last_failed_at = null,
+                updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -52981,7 +53004,9 @@ export async function commitWarmingToWarm(
         // this commit, when that restore is verified, so a restore that fails,
         // retries or ends on an empty workspace never claims their files came
         // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity.
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
         const restoredFrom =
           automaticVerified &&
           rematerialization !== undefined &&
@@ -52990,7 +53015,7 @@ export async function commitWarmingToWarm(
             ? (automatic as Record<string, unknown>).capturedAt
             : undefined;
         const restoredNotice =
-          typeof restoredFrom === "string"
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
             ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
                 mode: "checkpoint" as const,
@@ -53033,6 +53058,18 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/** The drain's stop notice already told the people in the chat that changes
+ * after exactly this save were not kept. A restore of any other save, or a
+ * loss without that notice, is announced on its own. */
+function stopNoticeNamedSave(
+  loss: ProviderLossRecord | undefined,
+  restoredCapturedAt: string,
+): boolean {
+  if (loss?.captureAbandoned !== true || typeof loss.unsavedSince !== "string") return false;
+  const named = Date.parse(loss.unsavedSince);
+  return Number.isFinite(named) && named === Date.parse(restoredCapturedAt);
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -55019,13 +55056,16 @@ async function linkedLostProviderCommandSessionIdsTx(
 async function lockLostProviderCommandSessionsTx(
   tx: Database,
   input: LostProviderBlockerScope,
+  alsoLockSessionIds: readonly string[] = [],
 ): Promise<Set<string>> {
   const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
-  if (sessionIds.length) {
+  // One call, so every session row is taken in the same sorted order.
+  const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
+  if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
       controlLock: "share",
-      sessionIds,
+      sessionIds: toLock,
     });
   }
   return new Set(sessionIds);
@@ -58884,6 +58924,12 @@ export async function reArmDrainingLease(
           liveness = 'warm',
           -- Re-armed: whatever group end was requested did not happen.
           group_end_requested_at = null,
+          -- The drain ended without a save; its failures do not carry over to
+          -- the next drain (see sandboxDrainCaptureFallback).
+          drain_capture_failures = 0,
+          drain_capture_failure_epoch = null,
+          drain_capture_first_failed_at = null,
+          drain_capture_last_failed_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -58943,6 +58989,14 @@ export async function confirmDrainCold(
      * this commit. Only then may a crashed worker's orphaned request on it be
      * settled; a selfhosted machine or backend-less lease is never stopped. */
     providerStopped?: boolean;
+    /** With `providerMissingBeforeCapture`: the drain stopped the box itself
+     * after its saves kept failing. Its failed capture can never publish late. */
+    captureAbandoned?: boolean;
+    /** With `captureAbandoned`: the `sandbox.box.terminated` record telling
+     * the people in the chat which changes were not saved (since the last
+     * good save, `unsavedSince`). Appended in the same commit as the loss, so
+     * a later restore of exactly that save never announces it again. */
+    captureAbandonedNotice?: { unsavedSince: string | null; payload: Record<string, unknown> };
   },
 ): Promise<{
   wentCold: boolean;
@@ -59073,10 +59127,44 @@ export async function confirmDrainCold(
         // lease lock, matching the canonical session -> blocker -> lease lock
         // order used by retained-process settlement. Revalidate the lease after
         // locking the entire exact provider-owned blocker set.
+        // A box the drain stopped itself tells every member session in this
+        // commit (below). Appending locks the workspace and those session rows,
+        // so take them here, before any blocker or the lease, in the canonical
+        // order; the append then finds them already held.
+        const abandonedNoticeSessionIds =
+          input.captureAbandoned === true && input.captureAbandonedNotice
+            ? await withCompleteSandboxGroupScope(tx, async () =>
+                (
+                  await tx
+                    .select({ id: schema.sessions.id })
+                    .from(schema.sessions)
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, input.workspaceId),
+                        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+                      ),
+                    )
+                    .orderBy(asc(schema.sessions.id))
+                ).map((session) => session.id),
+              )
+            : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          lockedCommandSessions =
+            abandonedNoticeSessionIds.length > 0
+              ? await withCompleteSandboxGroupScope(tx, () =>
+                  lockLostProviderCommandSessionsTx(tx, blockerScope, abandonedNoticeSessionIds),
+                )
+              : await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        } else if (abandonedNoticeSessionIds.length > 0) {
+          await withCompleteSandboxGroupScope(tx, () =>
+            lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: abandonedNoticeSessionIds,
+            }),
+          );
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
@@ -59154,6 +59242,7 @@ export async function confirmDrainCold(
           input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
+          input.captureAbandoned !== true &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59252,12 +59341,22 @@ export async function confirmDrainCold(
                 row,
                 recovery,
                 workspaceLost
-                  ? providerLossRecordForLostRow(
-                      row,
-                      "drain_probe",
-                      now,
-                      input.providerMaxRemainingLifetimeMs,
-                    )
+                  ? {
+                      ...providerLossRecordForLostRow(
+                        row,
+                        "drain_probe",
+                        now,
+                        input.providerMaxRemainingLifetimeMs,
+                      ),
+                      ...(input.captureAbandoned === true
+                        ? {
+                            captureAbandoned: true as const,
+                            ...(input.captureAbandonedNotice
+                              ? { unsavedSince: input.captureAbandonedNotice.unsavedSince }
+                              : {}),
+                          }
+                        : {}),
+                    }
                   : undefined,
               ),
             )
@@ -59333,6 +59432,20 @@ export async function confirmDrainCold(
           );
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
+        }
+        if (
+          rows.length > 0 &&
+          workspaceLost &&
+          input.captureAbandoned === true &&
+          input.captureAbandonedNotice
+        ) {
+          const notice = input.captureAbandonedNotice;
+          await withCompleteSandboxGroupScope(tx, () =>
+            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+              type: "sandbox.box.terminated",
+              payload: notice.payload,
+            }),
+          );
         }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
@@ -65305,7 +65418,8 @@ async function foldWorkspaceArchiveOntoLease(
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       -- A published save ends any run of drain snapshot failures: the count
-      -- means failures since this box's last successful save.
+      -- means failures of this drain since this box's last successful save
+      -- (a re-arm to warm resets it too).
       drain_capture_failures = 0,
       drain_capture_failure_epoch = null,
       drain_capture_first_failed_at = null,
@@ -66445,6 +66559,32 @@ export async function readLease(
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+/** The session's sandbox group's latest save when it deliberately left
+ * rebuildable folders out (a drain's reduced save, DC-G3), else null. A later
+ * complete save replaces it, so the answer is current on every turn. */
+export async function readSandboxReducedSave(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ capturedAt: string; omittedPaths: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<LeaseRow>(sql`
+      select lease.* from sandbox_leases lease
+      join sessions session
+        on session.workspace_id = lease.workspace_id
+       and session.sandbox_group_id = lease.sandbox_group_id
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      limit 1
+    `);
+    const current = rows[0] ? recoveryStateFromLeaseRow(rows[0]).archive.current : null;
+    if (current?.version !== 1 || !Array.isArray(current.omittedPaths)) return null;
+    const omittedPaths = current.omittedPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    return omittedPaths.length ? { capturedAt: current.capturedAt, omittedPaths } : null;
   });
 }
 
