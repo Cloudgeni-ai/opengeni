@@ -266,7 +266,11 @@ the organization vaults that work in the requested workspace and says the
 list is incomplete. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
 list as unavailable. 1224 created the organization machine and rig list
-withheld the same way as the vault list.
+withheld the same way as the vault list. 1240 created the inventory of
+meeting tracks not yet kept compact withheld, with the same caller check;
+1261 grants it and removes the check, so the retention sweep then converts
+existing meetings' audio as well. 1261 follows the production baseline pin
+that contains 1240 (`2a02889ffe` or later).
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

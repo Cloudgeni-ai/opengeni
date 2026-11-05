@@ -2225,18 +2225,6 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
       UPDATE recording_tracks SET chunk_objects_deleted_at = NULL WHERE recording_id = ${recordingId}
     `;
     expect(storage.objects.size).toBe(6);
-
-    // Until a release grants the inventory (1240 withholds it), the sweep
-    // leaves existing meetings as they are.
-    expect((await run.applyRecordingRetention()).compaction).toMatchObject({
-      found: null,
-      compacted: 0,
-    });
-    expect(storage.objects.size).toBe(6);
-    await shared.admin`
-      GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
-        TO opengeni_app
-    `;
     const swept = await run.applyRecordingRetention();
     expect(swept.compaction).toMatchObject({
       found: 2,

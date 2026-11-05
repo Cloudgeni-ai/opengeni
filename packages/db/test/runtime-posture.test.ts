@@ -4291,7 +4291,6 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
-      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
