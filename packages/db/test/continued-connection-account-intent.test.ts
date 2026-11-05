@@ -16,6 +16,7 @@ import {
   createDb,
   createSession,
   listSessionSystemUpdatesForTurn,
+  requestSessionCompaction,
   sendAgentMessageInTransaction,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
@@ -356,4 +357,68 @@ test("another agent's message delivered into the receiving context resolves its 
   expect(row!.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
     fresh.binding.connectionId,
   ]);
+}, 60_000);
+
+test("a compaction resolves the compacted turn's intent and records it unchanged", async () => {
+  const w = await fixture();
+  const intent = intentOf(w.g.subjectId);
+  const origin = await startedTurnWithIntent(w, intent);
+  const fresh = await account(w, w.g.subjectId);
+  const seen: ConnectionAccountIntent[] = [];
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async (_tx, input) => {
+    seen.push(input.intent);
+    return {
+      mcpAccountBindings: [fresh.binding],
+      personalConnectionDelegations: [fresh.delegation],
+    };
+  });
+  expect(compaction.turn.source).toBe("compaction");
+  expect(seen).toEqual([intent]);
+  const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings,
+      personal_connection_delegations, initiating_human_subject_id
+      from session_turns where id=${compaction.turn.id}`;
+  expect(row!.connection_account_intent).toEqual(intent);
+  expect(row!.initiating_human_subject_id).toBe(w.g.subjectId);
+  expect(row!.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
+    fresh.binding.connectionId,
+  ]);
+  expect(
+    row!.personal_connection_delegations.map((d: { connectionId: string }) => d.connectionId),
+  ).toEqual([fresh.delegation.connectionId]);
+  const receipts =
+    await shared.admin`select connection_id from turn_connection_authority_snapshots where turn_id=${compaction.turn.id}`;
+  expect(receipts.map((r) => r.connection_id)).toEqual([fresh.binding.connectionId]);
+  expect(origin).not.toBe(compaction.turn.id);
+}, 60_000);
+
+test("a compaction after a turn whose intent names someone else resolves no personal accounts", async () => {
+  const w = await fixture();
+  await startedTurnWithIntent(w, intentOf(`someone-else-${crypto.randomUUID()}`));
+  const seen: ConnectionAccountIntent[] = [];
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async (_tx, input) => {
+    seen.push(input.intent);
+    return { mcpAccountBindings: [], personalConnectionDelegations: [] };
+  });
+  expect(compaction.turn.source).toBe("compaction");
+  expect(seen).toEqual([{ version: 1, principal: { kind: "none" }, selections: [] }]);
+}, 60_000);
+
+test("a compaction never accepts another person's personal account from a resolver", async () => {
+  const w = await fixture();
+  await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  const foreign = await account(w, `other-${crypto.randomUUID()}`);
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async () => ({
+    mcpAccountBindings: [foreign.binding],
+    personalConnectionDelegations: [foreign.delegation],
+  }));
+  expect(compaction.turn.source).toBe("compaction");
+  const [row] =
+    await shared.admin`select mcp_account_bindings, personal_connection_delegations, metadata
+      from session_turns where id=${compaction.turn.id}`;
+  expect(row!.mcp_account_bindings).toEqual([]);
+  expect(row!.personal_connection_delegations).toEqual([]);
+  expect(row!.metadata.connectionAccountsUnresolved).toBe(true);
 }, 60_000);

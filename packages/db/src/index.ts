@@ -79689,6 +79689,93 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               [session],
             );
+            const compactionInitiatingHumanSubjectId =
+              latestStarted?.initiatingHumanSubjectId ??
+              (latestStarted?.initiatorKind === "subject"
+                ? latestStarted.initiatorSubjectId
+                : null);
+            // Compaction continues the turn it compacts after, so it runs with
+            // that person's current connection accounts, resolved exactly as an
+            // internal update continuing the same turn would. The request then
+            // carries the same tool list as the turn before it and reuses its
+            // cached prompt prefix. A carried principal that is not the turn's
+            // person never lends personal accounts.
+            const compactionConnectionAccountIntent = latestStarted
+              ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
+              : null;
+            let compactionPersonalConnectionDelegations: McpPersonalConnectionDelegation[] = [];
+            let compactionMcpAccountBindings: McpConnectionAccountBinding[] = [];
+            let compactionConnectionAccountMetadata: Record<string, unknown> = {};
+            if (compactionConnectionAccountIntent && input.resolveContinuedConnectionAccounts) {
+              const resolveContinuedConnectionAccounts = input.resolveContinuedConnectionAccounts;
+              const claimedSession = session;
+              const principal = compactionConnectionAccountIntent.principal;
+              const intent: ConnectionAccountIntent =
+                principal.kind === "subject" &&
+                principal.subjectId !== compactionInitiatingHumanSubjectId
+                  ? { ...compactionConnectionAccountIntent, principal: { kind: "none" } }
+                  : compactionConnectionAccountIntent;
+              const connectorMetadata = await sessionMcpServerMetadataForSessions(
+                tx as unknown as Database,
+                workspaceId,
+                [sessionId],
+              );
+              try {
+                // A savepoint, so a failed resolution leaves the claim usable.
+                // Maintenance is never blocked by connection accounts: without
+                // them it runs as before, with only the session's shared tools.
+                const resolved = await tx.transaction(async (savepoint) => {
+                  const result = await resolveContinuedConnectionAccounts(
+                    savepoint as unknown as Database,
+                    {
+                      sessionId,
+                      session: mapSession(
+                        claimedSession,
+                        serializeEffectiveSessionControl(effectiveControl),
+                        connectorMetadata.get(sessionId) ?? [],
+                      ),
+                      intent,
+                    },
+                  );
+                  const delegations = parsedPersonalConnectionDelegations(
+                    result.personalConnectionDelegations,
+                    `session_turns:${workspaceId}:${sessionId}:${turnId}:compaction`,
+                  );
+                  if (
+                    delegations.some(
+                      (delegation) =>
+                        delegation.ownerSubjectId !== compactionInitiatingHumanSubjectId,
+                    )
+                  ) {
+                    throw new Error(
+                      "Personal connection owner does not match the compacted turn's person",
+                    );
+                  }
+                  return {
+                    delegations,
+                    bindings: parseAcceptedMcpAccountBindings(result.mcpAccountBindings) ?? [],
+                    gaps: (result.gaps ?? []).slice(0, 32),
+                  };
+                });
+                compactionPersonalConnectionDelegations = resolved.delegations;
+                compactionMcpAccountBindings = resolved.bindings;
+                if (resolved.gaps.length > 0) {
+                  compactionConnectionAccountMetadata = { connectionAccountGaps: resolved.gaps };
+                }
+              } catch {
+                // A lost connection fails the turn insert below instead.
+                compactionConnectionAccountMetadata = { connectionAccountsUnresolved: true };
+              }
+            }
+            if (compactionPersonalConnectionDelegations.length > 0) {
+              await tx.execute(sql`
+                SELECT set_config(
+                  'opengeni.initiating_human_subject_id',
+                  ${compactionInitiatingHumanSubjectId},
+                  true
+                )
+              `);
+            }
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const sharedCompactionPool = latestStarted
               ? null
@@ -79730,7 +79817,10 @@ export async function claimSessionWorkForAttempt(
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                     sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
                     metadata: metadataWithTurnDispatchAttempt(
-                      { executionKind: "context_compaction" },
+                      {
+                        executionKind: "context_compaction",
+                        ...compactionConnectionAccountMetadata,
+                      },
                       {
                         id: input.dispatchId,
                         generation: dispatchGeneration,
@@ -79738,13 +79828,10 @@ export async function claimSessionWorkForAttempt(
                       },
                     ),
                     ...initiatorColumns(compactionInitiator),
-                    initiatingHumanSubjectId:
-                      latestStarted?.initiatingHumanSubjectId ??
-                      (latestStarted?.initiatorKind === "subject"
-                        ? latestStarted.initiatorSubjectId
-                        : null),
-                    personalConnectionDelegations: [],
-                    mcpAccountBindings: [],
+                    initiatingHumanSubjectId: compactionInitiatingHumanSubjectId,
+                    personalConnectionDelegations: compactionPersonalConnectionDelegations,
+                    mcpAccountBindings: compactionMcpAccountBindings,
+                    connectionAccountIntent: compactionConnectionAccountIntent,
                     xaiProviderAccountAuthoritySnapshot:
                       latestStarted?.xaiProviderAccountAuthoritySnapshot ??
                       sharedCompactionPool!.xai,

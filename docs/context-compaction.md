@@ -680,6 +680,20 @@ inference. A Steer accepted while that standalone maintenance attempt is live
 does not interrupt it; maintenance records its terminal compaction result and
 completes normally, then the already-admitted Steer is the next runnable work.
 
+That maintenance execution continues the latest started turn, so its claim
+resolves that turn's connection account intent again exactly as an internal
+update continuing the turn would (see `docs/remote-mcp-credentials.md`). The
+compaction request therefore carries the person's current personal and
+connector tools, the same tool list as the turn before it, and keeps that
+turn's cached prompt prefix. A picked account that can no longer be used leaves
+its connector out and is recorded in `connectionAccountGaps`; an intent naming
+someone other than that turn's person resolves shared accounts only. Account
+resolution never blocks maintenance: if it fails, the claim rolls back only its
+savepoint, records `connectionAccountsUnresolved` in the turn's internal
+metadata, and compacts with the session's shared tools. A session with no
+started turn, or a turn accepted before account intent existed, compacts
+without connection accounts.
+
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated
 checkpoint is not strictly smaller, or it exactly repeats the latest durable

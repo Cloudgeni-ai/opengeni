@@ -279,10 +279,11 @@ connection revocation.
 Each accepted turn also records its account intent: whose personal accounts it
 may use (the person who sent it, or nobody for work without a person behind it)
 and which accounts that person explicitly picked. Work that continues a turn,
-such as a goal continuation, a wait wake-up, a command or child result, or
-informational input delivered into it, carries the same intent and resolves it
-again when it is claimed, exactly as that person's next message with the same
-picks would be resolved now. A reconnected or newly connected account is
+such as a goal continuation, a wait wake-up, a command or child result,
+informational input delivered into it, or a compaction-only turn that compacts
+after it, carries the same intent and resolves it again when it is claimed,
+exactly as that person's next message with the same picks would be resolved
+now. A reconnected or newly connected account is
 therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`
