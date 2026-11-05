@@ -10,6 +10,7 @@ import {
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./organization-connectors";
@@ -436,6 +437,7 @@ import {
   type ConfigurationEffort,
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
+import { settleExitedWorkerAdmissions } from "./exited-worker-admissions";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
@@ -769,6 +771,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionNotificationPostedPayload,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -1262,6 +1265,13 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import {
+  CAPACITY_WAIT_NOTICE_KEY,
+  capacityWaitAttention,
+  capacityWaitNoticeWithdrawal,
+  capacityWaitNotificationPayload,
+  withoutCapacityWaitNotice,
+} from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
 import {
   resolveSessionCodeSearchEnabled,
@@ -1336,6 +1346,8 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
     isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
   });
 export * from "./session-model-settings";
+export * from "./capacity-wait-attention";
+export * from "./capacity-wait-release";
 export * from "./session-queue-commands";
 export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
@@ -23907,29 +23919,19 @@ export type OrganizationComputeSummaryRow = {
   reach: OrganizationComputeReach;
 };
 
-const LIST_ORGANIZATION_COMPUTE = "opengeni_private.list_organization_compute_v1(uuid, uuid, text)";
-
 /**
  * Every active organization machine or rig in the account, wherever it works
  * (migration 1224), for the people who decide where they work; the caller
- * checks account:admin and refuses agent runs. Null while the routine's
- * runtime EXECUTE is withheld (runtime-posture
- * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
- * statement, because EXECUTE is checked when a statement starts.
+ * checks organization administration (the owner or an admin) and refuses
+ * agent runs.
  */
 export async function listOrganizationCompute(
   db: Database,
   access: RigAccessContext,
   kind: "machine" | "rig",
-): Promise<OrganizationComputeSummaryRow[] | null> {
+): Promise<OrganizationComputeSummaryRow[]> {
   return await withRlsContext(db, access, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, access.subjectId);
-    const [grant] = await rawRows<{ granted: boolean | null }>(
-      scopedDb,
-      sql`select coalesce(has_function_privilege(
-          to_regprocedure(${LIST_ORGANIZATION_COMPUTE})::oid, 'EXECUTE'), false) as granted`,
-    );
-    if (grant?.granted !== true) return null;
     const rows = await rawRows<{
       value: {
         id: string;
@@ -27217,7 +27219,12 @@ export async function armSubscriptionCoreCapacityWait(
         provider === "codex"
           ? "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait"
           : "session_lifecycle_outbox.arm_subscription_core_capacity_wait",
-      eventTypes: [vocabulary.waitingEventType, "turn.failed", "session.status.changed"],
+      eventTypes: [
+        vocabulary.waitingEventType,
+        "turn.failed",
+        "session.status.changed",
+        "session.notification.posted",
+      ],
       maxAttempts: 3,
     },
     async (scopedDb) =>
@@ -27330,6 +27337,29 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
+        // A long wait is announced once, as it starts: a worker's parent gets
+        // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const attention = stopped
+          ? null
+          : capacityWaitAttention({
+              waitReason: input.waitReason,
+              earliestResetAt: input.earliestResetAt,
+              healthRetryAt: input.healthRetryAt ?? null,
+              now,
+            });
+        const personNotice =
+          attention && !session.parentSessionId
+            ? SessionNotificationPostedPayload.parse(
+                capacityWaitNotificationPayload({
+                  turnId: input.turnId,
+                  provider,
+                  resetsAt: attention.resetsAt,
+                }),
+              )
+            : null;
+        const waitingMetadata = personNotice
+          ? { ...recoveryMetadata, [CAPACITY_WAIT_NOTICE_KEY]: { key: personNotice.key } }
+          : recoveryMetadata;
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27495,6 +27525,23 @@ export async function armSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(personNotice
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: ++sequence,
+                        type: "session.notification.posted",
+                        payload: personNotice,
+                        turnId: input.turnId,
+                        turnGeneration: turn.executionGeneration,
+                        turnAttemptId: input.attemptId,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27506,7 +27553,7 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: recoveryMetadata,
+            metadata: waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27568,12 +27615,13 @@ export async function armSubscriptionCoreCapacityWait(
                 eq(schema.sessionGoals.status, "active"),
               ),
             );
-        } else {
+        } else if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter!.waiterId,
             provider,
             nextCheckAt,
+            resetsAt: attention.resetsAt,
           });
         }
         if (input.leaseFence) {
@@ -27899,6 +27947,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           } as const;
         }
 
+        const noticeWithdrawal = capacityWaitNoticeWithdrawal(blockedTurn.metadata);
         const events = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -27927,6 +27976,21 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(noticeWithdrawal
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: session.lastSequence + 3,
+                        ...noticeWithdrawal,
+                        turnId: blockedTurn.id,
+                        turnGeneration: blockedTurn.executionGeneration,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27949,7 +28013,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
             status: "recovering",
             activeAttemptId: null,
             metadata: {
-              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ...withoutCapacityWaitNotice(
+                metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ),
               [CODEX_CAPACITY_RECOVERY_KEY]: {
                 ...recovery,
                 resumeGeneration: blockedTurn.executionGeneration + 1,
@@ -27979,7 +28045,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           .set({
             status: "recovering",
             activeTurnId: blockedTurn.id,
-            lastSequence: session.lastSequence + 2,
+            lastSequence: session.lastSequence + events.length,
             updatedAt: now,
           })
           .where(
@@ -28082,6 +28148,19 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       turnId: input.blockedTurn.id,
       turnGeneration: input.blockedTurn.executionGeneration,
       turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const noticeWithdrawal = capacityWaitNoticeWithdrawal(input.blockedTurn.metadata);
+  if (noticeWithdrawal) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + eventValues.length + 1,
+      ...noticeWithdrawal,
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
       occurredAt: input.now,
     });
   }
@@ -52982,6 +53061,29 @@ export async function commitWarmingToWarm(
           (automatic as Record<string, unknown>).status === "accepted" &&
           (automatic as Record<string, unknown>).operationId ===
             row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+        // The model learned of the older snapshot from its receipt when the
+        // restore was authorized. The people in the group are told once, after
+        // this commit, when that restore is verified, so a restore that fails,
+        // retries or ends on an empty workspace never claims their files came
+        // back. Only an archive restore qualifies, never an empty workspace or
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
+        const restoredFrom =
+          automaticVerified &&
+          rematerialization !== undefined &&
+          !freshWorkspace &&
+          !continuityRecovery
+            ? (automatic as Record<string, unknown>).capturedAt
+            : undefined;
+        const restoredNotice =
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
+            ? {
+                operationId: (automatic as Record<string, unknown>).operationId,
+                mode: "checkpoint" as const,
+                capturedAt: restoredFrom,
+              }
+            : null;
         const completedResumeState = resumeStateWithRecovery(
           {
             ...(withArchives ?? {}),
@@ -52993,6 +53095,10 @@ export async function commitWarmingToWarm(
                   opengeniAutomaticCheckpointRecovery: {
                     ...(automatic as Record<string, unknown>),
                     status: "verified",
+                    // Durable until the notice is written: a failed write is
+                    // retried (`deliverPendingSandboxRestoreNotice`) and the
+                    // write clears it, so the notice lands exactly once.
+                    ...(restoredNotice ? { noticePending: true } : {}),
                   },
                 }
               : {}),
@@ -53052,29 +53158,6 @@ export async function commitWarmingToWarm(
             reason: "stale_epoch" as const,
           };
         }
-        // The model learned of the older snapshot from its receipt when the
-        // restore was authorized. The people in the group are told once, after
-        // this commit, when that restore is verified, so a restore that fails,
-        // retries or ends on an empty workspace never claims their files came
-        // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity. A box the drain stopped after failed saves
-        // already told them, when it stopped, which files were not saved.
-        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
-        const restoredFrom =
-          automaticVerified &&
-          rematerialization !== undefined &&
-          !freshWorkspace &&
-          !continuityRecovery
-            ? (automatic as Record<string, unknown>).capturedAt
-            : undefined;
-        const restoredNotice =
-          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
-            ? {
-                operationId: (automatic as Record<string, unknown>).operationId,
-                mode: "checkpoint" as const,
-                capturedAt: restoredFrom,
-              }
-            : null;
         return { committed: true, lease: mapLeaseRow(updated[0]), restoredNotice };
       }),
   );
@@ -53084,26 +53167,17 @@ export async function commitWarmingToWarm(
   if (outcome.committed && restoredNotice) {
     // Its own transaction, after the commit: appending locks every member's
     // session row, and this commit already holds the lease row, which
-    // recovery authorization takes after its own session row. Best-effort:
-    // the verified restore must never be undone for a notice.
+    // recovery authorization takes after its own session row. The verified
+    // restore must never be undone for a notice: a failed write leaves the
+    // durable pending flag, and the next turn delivers it.
     try {
-      await withRlsContext(
-        db,
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-        async (scopedDb) =>
-          await scopedDb.transaction(async (txRaw) => {
-            const tx = txRaw as unknown as Database;
-            await withCompleteSandboxGroupScope(tx, () =>
-              appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
-                type: "sandbox.recovery.selected",
-                payload: restoredNotice,
-              }),
-            );
-          }),
-      );
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+      });
     } catch (error) {
-      // The model's restore receipt is durable; only the person's notice is lost.
-      console.warn("sandbox restore: older-save notice write failed (restore unaffected)", {
+      console.warn("sandbox restore: older-save notice write failed; retried on the next turn", {
         sandboxGroupId: input.sandboxGroupId,
         operationId: restoredNotice.operationId,
         error: error instanceof Error ? error.message : String(error),
@@ -53111,6 +53185,107 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/**
+ * Writes the "files were restored from an older save" notice of a verified
+ * automatic restore to every chat sharing the box, exactly once. The warm
+ * commit records it as pending on the lease's recovery marker; this appends
+ * it and clears that flag in one transaction (sessions locked before the
+ * lease, the canonical order), so concurrent or repeated calls write it once.
+ * Called right after the commit and again at each turn start, so a write that
+ * failed is retried rather than lost. Returns whether this call wrote it.
+ */
+export async function deliverPendingSandboxRestoreNotice(
+  db: Database,
+  input: { accountId: string; workspaceId: string } & (
+    | { sandboxGroupId: string; sessionId?: undefined }
+    | { sessionId: string; sandboxGroupId?: undefined }
+  ),
+): Promise<boolean> {
+  const pendingIn = (resumeState: Record<string, unknown> | null | undefined) => {
+    const marker = resumeState?.opengeniAutomaticCheckpointRecovery as
+      | Record<string, unknown>
+      | undefined;
+    return marker &&
+      typeof marker === "object" &&
+      marker.status === "verified" &&
+      marker.noticePending === true &&
+      typeof marker.operationId === "string" &&
+      typeof marker.capturedAt === "string"
+      ? { operationId: marker.operationId, capturedAt: marker.capturedAt }
+      : null;
+  };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        // Best-effort at turn start and after a restore: never queue behind a
+        // long lock; a pending notice stays pending for the next delivery.
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        return await withCompleteSandboxGroupScope(tx, async () => {
+          const observed = await tx.execute<{
+            id: string;
+            sandbox_group_id: string;
+            resume_state: Record<string, unknown> | null;
+          }>(
+            input.sandboxGroupId !== undefined
+              ? sql`select id, sandbox_group_id, resume_state from sandbox_leases
+                  where workspace_id = ${input.workspaceId}
+                    and sandbox_group_id = ${input.sandboxGroupId}`
+              : sql`select lease.id, lease.sandbox_group_id, lease.resume_state
+                  from sandbox_leases lease
+                  join sessions session
+                    on session.workspace_id = lease.workspace_id
+                   and session.sandbox_group_id = lease.sandbox_group_id
+                  where session.workspace_id = ${input.workspaceId}
+                    and session.id = ${input.sessionId}
+                  limit 1`,
+          );
+          const lease = observed[0];
+          if (!lease || !pendingIn(lease.resume_state)) return false;
+          const sessionIds = (
+            await tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.sandboxGroupId, lease.sandbox_group_id),
+                ),
+              )
+              .orderBy(asc(schema.sessions.id))
+          ).map((session) => session.id);
+          await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionIds,
+          });
+          const locked = await tx.execute<{ resume_state: Record<string, unknown> | null }>(sql`
+            select resume_state from sandbox_leases where id = ${lease.id} for update
+          `);
+          const pending = pendingIn(locked[0]?.resume_state);
+          if (!pending) return false;
+          await appendSessionEventToSandboxGroup(tx, input.workspaceId, lease.sandbox_group_id, {
+            type: "sandbox.recovery.selected",
+            payload: {
+              operationId: pending.operationId,
+              mode: "checkpoint",
+              capturedAt: pending.capturedAt,
+            },
+          });
+          await tx.execute(sql`
+            update sandbox_leases
+            set resume_state = resume_state #- '{opengeniAutomaticCheckpointRecovery,noticePending}',
+                updated_at = now()
+            where id = ${lease.id}
+          `);
+          return true;
+        });
+      }),
+  );
 }
 
 /** The drain's stop notice already told the people in the chat that changes
@@ -58735,31 +58910,18 @@ export type QueuedTurnHoldSummary = {
   oldestAgeSeconds: number;
 };
 
-const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
-
 /**
  * Content-free cross-workspace classification of every `status = 'queued'`
  * turn by what holds it (migration 0988). The classes sum to
  * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
  * the rest wait for a running turn, Resume, a new message, or a person.
  *
- * 0988 creates the routine with its runtime EXECUTE withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
- * grants it, this returns null. The grant is checked in a separate statement:
- * EXECUTE is checked when a statement starts.
+ * 0988 created the routine with its runtime EXECUTE withheld; 1274 grants it
+ * and readiness requires it.
  */
 export async function summarizeQueuedTurnsByHold(
   db: Database,
-): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`
-      select has_function_privilege(
-        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
-      ) as granted
-    `,
-  );
-  if (grant?.granted !== true) return null;
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
   const summary = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
@@ -59059,6 +59221,10 @@ export async function confirmDrainCold(
   backgroundCommandEvents?: SessionEvent[];
   /** Committed wakes of sessions waiting on those commands. */
   backgroundCommandWakes?: SessionWorkflowWake[];
+  /** With `captureAbandoned`: a save of this exact claim had published after
+   * all, before this commit. It committed an ordinary saved teardown instead:
+   * no loss, no notice. Carries the save the box now restores from. */
+  capturePublishedBeforeStop?: { archiveRevision: string | null; omittedPaths?: string[] };
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
   const backgroundCommandWakes: SessionWorkflowWake[] = [];
@@ -59104,6 +59270,15 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // A save of this exact claim that published before the stop makes this
+        // an ordinary saved teardown (decided under the lease lock below). The
+        // blocker decisions taken before that lock use the same effective
+        // truth, so a stopped box whose save landed keeps its supervised
+        // commands to their own supervision, like any saved teardown.
+        const observedPublishedBeforeStop =
+          input.captureAbandoned === true && observed.archive_capture_published_at !== null;
+        const observedProviderMissing =
+          input.providerMissingBeforeCapture === true && !observedPublishedBeforeStop;
         // The box is stopped (or proven gone) before this commit, and the cold
         // commit retires its epoch for good. Every open blocker it leaves on
         // that exact box can therefore never progress: a request a crashed
@@ -59117,8 +59292,7 @@ export async function confirmDrainCold(
         // settles as lost only with the missing-provider truth (0496), so a
         // stopped box keeps it to its own supervision path.
         const staleBlockers =
-          observed.instance_id &&
-          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
+          observed.instance_id && (input.providerStopped === true || observedProviderMissing)
             ? await rawRows<{ present: boolean }>(
                 tx,
                 sql`
@@ -59146,7 +59320,7 @@ export async function confirmDrainCold(
                         and process.state = 'active'
                     )
                   ) and (
-                    ${input.providerMissingBeforeCapture === true}
+                    ${observedProviderMissing}
                     or not exists (
                       select 1 from sandbox_retained_processes supervised
                       where supervised.lease_id = ${observed.id}
@@ -59161,7 +59335,7 @@ export async function confirmDrainCold(
               )
             : [];
         const blockerScope =
-          (input.providerMissingBeforeCapture ||
+          (observedProviderMissing ||
             observed.unobservable_command_drain_ids?.length ||
             observed.deadline_forced_admission_ids?.length ||
             staleBlockers[0]?.present === true) &&
@@ -59242,6 +59416,24 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // The drain stopped the box because its save had not published, but
+        // a slow save of this exact claim can land between that decision and
+        // the stop (or report an error after its store committed). The claim
+        // is still ours (checked above), so a publication on it is this box's
+        // save: commit an ordinary saved teardown. The decision is final here,
+        // under the lease lock; nothing can publish on the claim after it.
+        const capturePublishedBeforeStop =
+          input.captureAbandoned === true && row.archive_capture_published_at !== null;
+        if (capturePublishedBeforeStop !== observedPublishedBeforeStop) {
+          // The save published between the unlocked read and the lock: the
+          // blocker set above was decided on the other outcome. Retry.
+          throw new LostProviderCommandSessionsChangedError(
+            "drain capture published while the cold commit locked its blockers",
+          );
+        }
+        const providerMissingBeforeCapture =
+          input.providerMissingBeforeCapture === true && !capturePublishedBeforeStop;
+        const captureAbandoned = input.captureAbandoned === true && !capturePublishedBeforeStop;
         if (blockerScope) {
           // Enrolled commands are contained only when this drain published the
           // current checkpoint before stopping the box; otherwise the truthful
@@ -59249,7 +59441,7 @@ export async function confirmDrainCold(
           // A pre-0547 enrollment records no reason: settle it as plain loss.
           const reason = row.command_containment_reason;
           const contained =
-            !input.providerMissingBeforeCapture &&
+            !providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
               reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
@@ -59287,15 +59479,14 @@ export async function confirmDrainCold(
         // instead of minting a lost-workspace verdict that would block every
         // later turn of the session. A published box keeps the loss contract.
         const unpublishedWarmingLoss =
-          input.providerMissingBeforeCapture === true &&
+          providerMissingBeforeCapture &&
           current.provider.status === "creating" &&
           current.provider.instanceId !== null &&
           current.provider.instanceId === row.instance_id;
-        const workspaceLost =
-          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
+        const workspaceLost = providerMissingBeforeCapture && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
-          input.captureAbandoned !== true &&
+          !captureAbandoned &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59401,7 +59592,7 @@ export async function confirmDrainCold(
                         now,
                         input.providerMaxRemainingLifetimeMs,
                       ),
-                      ...(input.captureAbandoned === true
+                      ...(captureAbandoned
                         ? {
                             captureAbandoned: true as const,
                             ...(input.captureAbandonedNotice
@@ -59486,12 +59677,7 @@ export async function confirmDrainCold(
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
         }
-        if (
-          rows.length > 0 &&
-          workspaceLost &&
-          input.captureAbandoned === true &&
-          input.captureAbandonedNotice
-        ) {
+        if (rows.length > 0 && workspaceLost && captureAbandoned && input.captureAbandonedNotice) {
           const notice = input.captureAbandonedNotice;
           await withCompleteSandboxGroupScope(tx, () =>
             appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
@@ -59506,6 +59692,17 @@ export async function confirmDrainCold(
         return {
           wentCold: rows.length > 0,
           ...(rows.length > 0 && unpublishedWarmingLoss ? { unpublishedProviderLost: true } : {}),
+          ...(rows.length > 0 && capturePublishedBeforeStop
+            ? {
+                capturePublishedBeforeStop: {
+                  archiveRevision: current.archive.current?.revision ?? null,
+                  ...(current.archive.current?.version === 1 &&
+                  current.archive.current.omittedPaths?.length
+                    ? { omittedPaths: [...current.archive.current.omittedPaths] }
+                    : {}),
+                },
+              }
+            : {}),
         };
       },
     );
@@ -76746,9 +76943,56 @@ function boundedInternalUpdateEventText(
   return { text: `${text}${suffix}`, truncated: true };
 }
 
-function internalUpdateEventMember(update: BoundedSystemUpdate) {
+/**
+ * The names of the automations behind these updates, by update id. An
+ * automation run's own summary is its instructions, which only the agent
+ * reads; people see the automation's name.
+ */
+async function automationNamesForUpdatesInTransaction(
+  tx: Database,
+  workspaceId: string,
+  updates: readonly Pick<BoundedSystemUpdate, "id" | "kind" | "scheduledTaskRunId">[],
+): Promise<ReadonlyMap<string, string>> {
+  const runIds = [
+    ...new Set(
+      updates.flatMap((update) =>
+        update.kind === "scheduled_occurrence" && update.scheduledTaskRunId
+          ? [update.scheduledTaskRunId]
+          : [],
+      ),
+    ),
+  ];
+  const names = new Map<string, string>();
+  if (runIds.length === 0) return names;
+  const rows = await tx
+    .select({ runId: schema.scheduledTaskRuns.id, name: schema.scheduledTasks.name })
+    .from(schema.scheduledTaskRuns)
+    .innerJoin(schema.scheduledTasks, eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId))
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    );
+  const byRun = new Map(rows.map((row) => [row.runId, row.name]));
+  for (const update of updates) {
+    const name = update.scheduledTaskRunId ? byRun.get(update.scheduledTaskRunId) : undefined;
+    if (update.kind === "scheduled_occurrence" && name) names.set(update.id, name);
+  }
+  return names;
+}
+
+function internalUpdateEventMember(
+  update: BoundedSystemUpdate,
+  automationNames?: ReadonlyMap<string, string>,
+) {
+  const automation =
+    update.kind === "scheduled_occurrence"
+      ? automationRunPresentation(update, automationNames?.get(update.id))
+      : null;
   const summary = boundedInternalUpdateEventText(
-    update.summary,
+    // People see what happened; only the agent gets the instructions.
+    automation?.name ?? update.summary,
     MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES,
   );
   const source = boundedInternalUpdateEventText(
@@ -76764,6 +77008,7 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     summary: summary.text,
     summaryTruncated: summary.truncated,
   };
+  if (automation) return { ...preview, automation };
   if (update.kind !== "media_generation_result") return preview;
   const payload = SessionSystemUpdatePayload.safeParse(update.payload);
   return payload.success && payload.data.type === "media_generation_result"
@@ -78774,6 +79019,11 @@ export async function claimSessionWorkForAttempt(
             };
           }
           const modelOrdered = systemUpdatesInModelOrder(deliverable);
+          const automationNames = await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            workspaceId,
+            deliverable,
+          );
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
@@ -78928,7 +79178,9 @@ export async function claimSessionWorkForAttempt(
               historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
-              members: modelOrdered.map(internalUpdateEventMember),
+              members: modelOrdered.map((update) =>
+                internalUpdateEventMember(update, automationNames),
+              ),
             },
             occurredAt,
           };
@@ -81635,10 +81887,11 @@ export async function getSessionAttemptActivityRef(
  * carry a physical settlement before the ordinary receipt transaction is
  * allowed to run.
  *
- * With that proof, owned-box setup that the attempt's provably exited worker
- * left unsettled is settled first (`settleCrashedWorkerSetupAdmissions`).
- * `workerProcessExitDeadlineMs` is the turn worker's process-exit deadline
- * after a shutdown signal; without it a worker-shutdown closure keeps its gate.
+ * With that proof, every request that the attempt's provably exited worker
+ * left unsettled is settled first (`settleExitedWorkerAdmissions`), and the
+ * session is woken when any was. `workerProcessExitDeadlineMs` is the turn
+ * worker's process-exit deadline after a shutdown signal; without it a crashed
+ * worker's requests keep their gate.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -81654,7 +81907,19 @@ export async function reconcileSessionAttemptQuiescence(
     workerProcessExitDeadlineMs?: number;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-  if (input.activitySettled) await settleCrashedWorkerSetupAdmissions(db, input);
+  if (input.activitySettled && (await settleExitedWorkerAdmissions(db, input)) > 0) {
+    // A worker-death closure needs no receipt, so this reconciliation reports
+    // `stale` below and its workflow run may close; the wake brings it back.
+    await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, (tx) =>
+      enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: input.temporalWorkflowId,
+        reason: "exited_worker_admissions_settled",
+      }),
+    );
+  }
   const eligibility = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -81791,113 +82056,6 @@ export async function reconcileSessionAttemptQuiescence(
     temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
-}
-
-/**
- * Reject the owned-box setup requests that a worker-shutdown closure left
- * behind once the closing worker's process provably no longer exists. Nothing
- * else settles them: the worker closed the attempt `interrupted_recoverable`
- * and exited before its writer drain released them, and a box that stays warm
- * (compute is never drained for being idle) never reaches the cold commit that
- * rejects crashed-worker requests. The closed attempt then never quiesced and
- * its session never claimed another turn, Steer or message.
- *
- * A settled activity and a missing holder do not prove the worker exited (a
- * closed attempt's holder is removed at once, and Temporal reports a cancelled
- * activity settled while its code still runs). Time does: the closure came
- * from the attempt's own `worker_shutdown` recovery request, which follows the
- * worker's shutdown signal, and a standalone worker process exits within its
- * process-exit deadline of that signal whatever its drain does. So the attempt
- * must have closed at least that deadline ago, with no Pause/Steer interruption
- * row.
- *
- * The request must be the attempt's own owned-box setup, unsettled, without a
- * holder or retained process, on a turn whose setup Start outcome is not
- * recorded unknown (that turn waits for the box to be gone). Setup writes only
- * through its attempt's command fence, and the replacement attempt runs the same
- * setup again before any model work. Pause, Steer, cancellation, other recovery
- * reasons, other closures and every other request keep today's gate.
- */
-async function settleCrashedWorkerSetupAdmissions(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    attemptId: string;
-    temporalWorkflowId: string;
-    temporalWorkflowRunId: string;
-    temporalActivityId: string;
-    workerProcessExitDeadlineMs?: number;
-  },
-): Promise<void> {
-  const exitDeadlineMs = input.workerProcessExitDeadlineMs;
-  if (exitDeadlineMs === undefined || !Number.isSafeInteger(exitDeadlineMs) || exitDeadlineMs < 0)
-    return;
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`
-        update sandbox_workspace_mutation_admissions admission
-        set provider_outcome = 'rejected', settled_at = now()
-        from session_turn_attempts attempt
-        join session_turns turn
-          on turn.workspace_id = attempt.workspace_id
-         and turn.session_id = attempt.session_id
-         and turn.id = attempt.turn_id
-        where attempt.account_id = ${input.accountId}
-          and attempt.workspace_id = ${input.workspaceId}
-          and attempt.session_id = ${input.sessionId}
-          and attempt.id = ${input.attemptId}
-          and attempt.temporal_workflow_id = ${input.temporalWorkflowId}
-          and attempt.temporal_workflow_run_id = ${input.temporalWorkflowRunId}
-          and attempt.temporal_activity_id = ${input.temporalActivityId}
-          and attempt.state = 'closed'
-          and attempt.quiesced_at is null
-          and attempt.outcome = 'interrupted_recoverable'
-          and attempt.closed_at <= now() - (${exitDeadlineMs}::integer * interval '1 millisecond')
-          and not exists (
-            select 1 from session_attempt_interruptions interruption
-            where interruption.workspace_id = attempt.workspace_id
-              and interruption.session_id = attempt.session_id
-              and interruption.attempt_id = attempt.id
-          )
-          and exists (
-            select 1 from session_events recovery
-            where recovery.account_id = attempt.account_id
-              and recovery.workspace_id = attempt.workspace_id
-              and recovery.session_id = attempt.session_id
-              and recovery.turn_id = attempt.turn_id
-              and recovery.turn_attempt_id = attempt.id
-              and recovery.type = 'turn.recovery.requested'
-              and recovery.payload ->> 'reason' = 'worker_shutdown'
-          )
-          and (turn.metadata -> 'sandboxSetupOutcomeUnknown') is null
-          and admission.account_id = attempt.account_id
-          and admission.workspace_id = attempt.workspace_id
-          and admission.session_id = attempt.session_id
-          and admission.turn_id = attempt.turn_id
-          and admission.attempt_id = attempt.id
-          and admission.actor_kind = 'turn'
-          and admission.actor_id = attempt.id
-          and admission.holder_kind = 'turn'
-          and admission.execution_generation = attempt.execution_generation
-          and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
-          and admission.settled_at is null
-          and admission.provider_outcome is null
-          and not exists (
-            select 1 from sandbox_retained_processes retained
-            where retained.parent_admission_id = admission.id
-          )
-          and not exists (
-            select 1 from sandbox_lease_holders holder
-            where holder.lease_id = admission.lease_id
-              and holder.holder_id = admission.holder_id
-          )
-      `);
-    },
-  );
 }
 
 /**
@@ -89808,6 +89966,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     waiterId: string;
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
+    resetsAt: Date | null;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -89817,6 +89976,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     childTurnId: input.turnId,
     provider: input.provider,
     nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+    resetsAt: input.resetsAt?.toISOString() ?? null,
   };
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childWaitingCapacityDedupeKey({
@@ -91665,7 +91825,14 @@ export async function addSessionSystemUpdateWithSourceMutation<
         ]);
 
         const now = new Date();
-        const eventPreview = internalUpdateEventMember(inserted);
+        const eventPreview = internalUpdateEventMember(
+          inserted,
+          await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+            [inserted],
+          ),
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(

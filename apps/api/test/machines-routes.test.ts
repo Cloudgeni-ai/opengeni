@@ -2,11 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import postgres from "postgres";
 import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -1420,11 +1416,6 @@ describe("Where an organization machine works", () => {
       };
     };
     expect((await listEverywhere(["enrollments:read", "enrollments:manage"])).status).toBe(403);
-    // Until the list is granted: only the ones that work here.
-    const before = await listEverywhere(["enrollments:read", "account:admin"]);
-    expect(before.status).toBe(200);
-    expect(before.body).toEqual({ machines: [], complete: false });
-    await grantDeferredRuntimeAccess(admin);
     const after = await listEverywhere(["enrollments:read", "account:admin"]);
     expect(after.status).toBe(200);
     expect(after.body).toEqual({

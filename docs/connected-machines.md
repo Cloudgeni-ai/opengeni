@@ -1023,7 +1023,41 @@ either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
 task's one-minute repetition starts an exited agent within a minute, with no limit;
 a process that keeps the agent's hidden console host open after the agent exits
 delays that start until it ends, because the task skips a tick while its previous
-run is still going.
+run is still going. Commands run on hidden consoles of their own, so they do not
+hold it open.
+
+A command cannot stop the agent by signalling a process group. Each command runs
+in a process group of its own (on Windows a job object and a hidden console of its
+own), so `kill 0`, `kill -TERM -<its group>` or a console control event to its own
+console reach only that command and what it started, never the agent or other
+commands. `kill -1` in a command signals every process of the user, the agent
+included. On Linux the agent therefore keeps running when one of its own
+commands sends it `SIGTERM` or `SIGINT`. It tells a command from other senders
+by the sending process: a descendant of the agent, or a process in the process
+group, session or operation cgroup of one of its commands. A short-lived sender
+(`/bin/kill`, `sh -c 'kill …'`) has often exited before the agent can look it
+up; while a command runs (an open Opengeni terminal or a background command
+counts as running), or within 5 seconds after one ended, such a sender counts as
+that command. Nothing is blocked: the command still receives every
+signal, and a stop signal from anywhere else (the service manager, the desktop
+app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
+commands) stops the agent as before. Because of that rule, a `/bin/kill` or
+`pkill` from outside, sent while a command runs, may be ignored; the ways just
+listed always work. A foreground agent's keeper also starts the agent again
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in
+an Opengeni terminal counts as a command, including a `kill` typed there by a
+person.
+
+Other signals still end the agent, and it is started again. A foreground
+agent's keeper ignores stop signals from the agent's commands, passes on one
+whose sender already exited (under that sender's name, so the agent decides),
+and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`).
+A `--system` service, the macOS LaunchAgent and a compute sandbox's guest init
+restart the agent after any signal, `SIGKILL` (`kill -9 -1`) included; a
+foreground agent's keeper dies with it then. Some cases still leave the agent
+offline after `kill -1`: under a systemd user service it also stops the user's
+own service manager, which stops its services until the user logs in again, and
+an agent hosted by the desktop app ends with the app.
 
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
@@ -2039,9 +2073,9 @@ machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
 complete }` (`id` is the enrollment), for Organization settings › Shared. It
 needs `enrollments:read` and an organization owner or admin, from a person or
 an agent acting as them; an agent acting as itself gets `403` and sees only
-what works in its workspace. Until a later release grants the
-organization-wide read (migration 1224 adds it), it answers the organization
-machines that work in this workspace with `complete: false`.
+what works in its workspace. `complete` is always `true`; servers before
+migration 1272 could list only the organization machines that work in this
+workspace and sent `false`.
 
 ### Where your own machine works
 

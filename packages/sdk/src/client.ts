@@ -477,6 +477,8 @@ import type {
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
+  OrganizationCompatibleEndpointModel,
+  SetOrganizationCompatibleEndpointModelReasoningRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -2407,7 +2409,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Archive or restore this authenticated member's root chat. */
+  /**
+   * Archive this authenticated member's root chat, or restore it (at any
+   * time; stored content comes back in the background). Archiving refuses
+   * while a sub-chat is in use unless `confirmActiveSubChats` lists it.
+   */
   async updateSessionArchive(
     workspaceId: string,
     sessionId: string,
@@ -6398,7 +6404,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Add a model to an OpenAI-compatible endpoint. */
+  /**
+   * Add a model to an OpenAI-compatible endpoint. The response also carries
+   * the model's `reasoning` levels; list the endpoints to read them typed.
+   */
   async createOrganizationCompatibleEndpointModel(
     organizationId: string,
     connectionId: string,
@@ -6407,6 +6416,20 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationProviderCustomModel>(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Set an OpenAI-compatible endpoint model's reasoning levels, or read them again from the endpoint. */
+  async setOrganizationCompatibleEndpointModelReasoning(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
       request,
     );
   }

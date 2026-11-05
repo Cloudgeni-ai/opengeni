@@ -1,7 +1,8 @@
 // Archived: every archived chat in the workspace, whether someone archived it
 // or it was archived after a long idle period. Archived chats move to
 // long-term storage; they stay readable (open one to read the whole
-// conversation) and searchable, and their work continues in a new chat.
+// conversation) and searchable, and can be restored from the open chat or
+// continued in a new chat.
 // Reached from the session list's view menu.
 import { useChannels } from "@opengeni/react";
 import type { SessionListEntry } from "@opengeni/sdk";
@@ -38,7 +39,7 @@ export function readOnlyChatsDescription(idleDays: number | undefined): string {
   const idle = idleDays
     ? ` Chats with no activity for ${idleDays} ${idleDays === 1 ? "day" : "days"} are archived too.`
     : "";
-  return `Archived chats are in long-term storage. You can read and search them, and continue their work in a new chat.${idle}`;
+  return `Archived chats are in long-term storage. You can read and search them, open one to restore it, or continue its work in a new chat.${idle}`;
 }
 
 export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {

@@ -1145,6 +1145,7 @@ export const englishMessages = {
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
   "composer.appShotSummary": "{app} · App-shot",
+  "composer.imageTag": "Image {number}",
   "composer.appShotTextIncluded":
     "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
   "composer.appShotNoText": "Only the screenshot: this window shared no text.",
@@ -2242,6 +2243,15 @@ export const englishMessages = {
   "machineInputDisplay.agentWaitingForCapacity": "Agent waiting for capacity",
   "machineInputDisplay.automationRun": "Automation run",
   "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
+  /**
+   * The one line a chat shows when an automation acted in it: the automation's
+   * name, then what the event that started it says, e.g. "New task assigned:
+   * Replace the gutter".
+   */
+  "machineInputDisplay.automationRunWhat": "{name}: {what}",
+  /** As above when several events started the run; count is the others. */
+  "machineInputDisplay.automationRunWhatAndMore_one": "{name}: {what} and {count} more",
+  "machineInputDisplay.automationRunWhatAndMore_other": "{name}: {what} and {count} more",
   "machineInputDisplay.commandResultReceived": "Command result received",
   "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
@@ -3386,6 +3396,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -4863,6 +4874,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",
@@ -5231,6 +5243,7 @@ export const englishMessages = {
   "timeline.commandStep.write.running": "Writing {name}",
   "timeline.commandStep.writeFile.done": "Wrote a file",
   "timeline.commandStep.writeFile.running": "Writing a file",
+  "timeline.compactionCopy.chatHistoryIsUnchanged": "Chat history is unchanged.",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":

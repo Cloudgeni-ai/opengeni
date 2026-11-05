@@ -61,6 +61,7 @@ export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
   findRebuildableWorkspacePaths,
+  workspaceCaptureStillRunning,
   probeRemoteWorkspaceSize,
   WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
   REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,

@@ -2872,6 +2872,43 @@ describe("buildTimeline", () => {
     expect(compactionSkipSubtitle(englishText, "summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    for (const trigger of ["operator", "overflow"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Request it again to retry. Chat history is unchanged.",
+      );
+    }
+    // Nobody requested an automatic compaction, so it is not offered again.
+    for (const trigger of ["proactive", "auto"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Chat history is unchanged.",
+      );
+    }
+    // A failed idle checkpoint: the skipped event has no trigger of its own and
+    // keeps the one its request opened the landmark with.
+    reset();
+    const checkpoint = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }, { turnId: null }),
+      event("turn.started", {}, { turnId: "turn-c" }),
+      event(
+        "session.context.compaction.skipped",
+        { reason: "summarization_failed" },
+        { turnId: "turn-c" },
+      ),
+      event(
+        "turn.failed",
+        { error: "compaction summarization failed", code: "context_compaction_failed" },
+        { turnId: "turn-c" },
+      ),
+    ]);
+    const landmarks = checkpoint.filter((item) => item.kind === "context-compaction");
+    expect(landmarks).toHaveLength(1);
+    const landmark = landmarks[0]!;
+    if (landmark.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark).toMatchObject({ phase: "skipped", trigger: "proactive" });
+    expect(compactionSkipSubtitle(englishText, landmark.skipReason, null, landmark.trigger)).toBe(
+      "Chat history is unchanged.",
+    );
+    reset();
     expect(
       compactionFailureDetails(englishText, { ...projected, providerRejection: null }),
     ).toBeNull();

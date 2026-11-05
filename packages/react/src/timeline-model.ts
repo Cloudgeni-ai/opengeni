@@ -28,6 +28,7 @@ export {
   isPreparingWork,
   timelineTurnsWithOutput,
   readableWorkDefaultOpen,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
   rollingActivityItem,
@@ -146,7 +147,9 @@ export {
   SESSION_STATUS_PRESENTATION,
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
+  sessionStatusItemDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus, SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
@@ -188,3 +191,4 @@ export {
   agentWorkHumanInputSummary,
   isAgentWorkHumanInput,
 } from "./timeline/agent-work-human-input";
+export { automationRunLine, isAutomationRunBatch } from "./components/machine-input-display";

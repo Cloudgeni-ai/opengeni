@@ -30,6 +30,7 @@ import {
 import {
   activity,
   goalActivity,
+  sessionPeekActivity,
   turnActivityForTaskQueue,
   workflowFailureMessage,
 } from "./activities";
@@ -781,7 +782,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     deprecatePatch("session-durable-admission-block-v1");
     deprecatePatch("session-safe-control-observation-v1");
     deprecatePatch("session-close-deleted-v1");
-    const peek = await activity.peekSessionWork({
+    const peek = await sessionPeekActivity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       includeAdmissionFence: true,
@@ -908,7 +909,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenSignalVersion = signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         observerAccountId: input.accountId,
@@ -1015,7 +1016,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         "5s",
       );
       if (woke) continue;
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         observerAccountId: input.accountId,
@@ -1061,7 +1062,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // Keep both the durable recheck and the transactional idle/parent-outbox
       // fence. A signal accepted during this activity chain makes us loop;
       // later work restarts the same session via durable signalWithStart.
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         observerAccountId: input.accountId,

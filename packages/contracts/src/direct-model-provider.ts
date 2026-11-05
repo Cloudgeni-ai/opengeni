@@ -1,5 +1,6 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { REASONING_EFFORT_LEVELS, ReasoningEffort } from "./reasoning-effort";
 import { z } from "zod";
 
 export const DirectModelProvider = /* @__PURE__ */ defineSchema(() =>
@@ -110,6 +111,69 @@ export const CompatibleModelName = /* @__PURE__ */ defineSchema(() =>
     .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/),
 );
 
+/**
+ * The reasoning levels a model on an OpenAI-compatible endpoint accepts as
+ * `reasoning_effort`, and the one it uses by default. Read from the
+ * endpoint's model listing when it publishes them, or set by the person who
+ * connected it. A model without this declaration gets no reasoning choice and
+ * no `reasoning_effort` in its requests.
+ */
+export const CompatibleModelReasoning = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      efforts: z
+        .array(ReasoningEffort)
+        .min(1)
+        .max(REASONING_EFFORT_LEVELS.length)
+        .transform((efforts) => REASONING_EFFORT_LEVELS.filter((level) => efforts.includes(level))),
+      defaultEffort: ReasoningEffort,
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      if (!value.efforts.includes(value.defaultEffort)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["defaultEffort"],
+          message: "The default reasoning level must be one of the model’s levels",
+        });
+      }
+    }),
+);
+export type CompatibleModelReasoning = z.output<typeof CompatibleModelReasoning>;
+
+const LISTED_EFFORT_FIELDS = ["supported_reasoning_efforts", "reasoning_efforts"] as const;
+const LISTED_DEFAULT_FIELDS = ["default_reasoning_effort", "reasoning_effort"] as const;
+
+/**
+ * The reasoning levels one entry of an OpenAI-compatible `/models` listing
+ * publishes (`supported_reasoning_efforts`, with its default in
+ * `default_reasoning_effort` or `reasoning_effort`). Levels Opengeni has no
+ * name for are skipped. Null when the entry publishes none it can use.
+ */
+export function compatibleModelReasoningFromListing(
+  entry: unknown,
+): CompatibleModelReasoning | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  const listed = LISTED_EFFORT_FIELDS.map((field) => record[field]).find(Array.isArray);
+  if (!listed) return null;
+  const known = new Set(
+    listed.filter((value): value is ReasoningEffort => ReasoningEffort.safeParse(value).success),
+  );
+  const efforts = REASONING_EFFORT_LEVELS.filter((level) => known.has(level));
+  if (efforts.length === 0) return null;
+  const declared = LISTED_DEFAULT_FIELDS.map((field) => record[field]).find(
+    (value): value is ReasoningEffort =>
+      ReasoningEffort.safeParse(value).success && efforts.includes(value as ReasoningEffort),
+  );
+  const defaultEffort =
+    declared ??
+    (["medium", "high", "low"] as const).find((level) => efforts.includes(level)) ??
+    efforts.find((level) => level !== "none") ??
+    efforts[0]!;
+  return { efforts, defaultEffort };
+}
+
 export const DirectModelProviderMetadata = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -119,6 +183,8 @@ export const DirectModelProviderMetadata = /* @__PURE__ */ defineSchema(() =>
       baseUrl: CompatibleModelBaseUrl.optional(),
       api: CompatibleModelApi.optional(),
       label: primitives.string.trim().min(1).max(60).optional(),
+      /** OpenAI-compatible endpoints only: the model's reasoning levels. */
+      reasoning: CompatibleModelReasoning.optional(),
     })
     .strict()
     .superRefine((value, ctx) => {
@@ -130,7 +196,7 @@ export const DirectModelProviderMetadata = /* @__PURE__ */ defineSchema(() =>
             message: "Enter the exact model or deployment name",
           });
         }
-        for (const field of ["baseUrl", "api", "label"] as const) {
+        for (const field of ["baseUrl", "api", "label", "reasoning"] as const) {
           if (value[field] !== undefined) {
             ctx.addIssue({
               code: "custom",

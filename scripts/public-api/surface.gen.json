@@ -1374,6 +1374,19 @@
       ]
     },
     {
+      "method": "PUT",
+      "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
+      "sdk": [
+        "OpenGeniClient.setOrganizationCompatibleEndpointModelReasoning"
+      ],
+      "request": [
+        "SetOrganizationCompatibleEndpointModelReasoningRequest"
+      ],
+      "response": [
+        "OrganizationCompatibleEndpointModel"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/organizations/:organizationId/overview",
       "sdk": [
@@ -14560,6 +14573,18 @@
         "$": "enum=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]"
       }
     },
+    "CompatibleModelReasoning": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.defaultEffort": "ref(ReasoningEffort)!",
+        "$.efforts": "array!",
+        "$.efforts[]": "ref(ReasoningEffort)"
+      }
+    },
     "CompleteFileUploadResponse": {
       "io": [
         "output"
@@ -15884,6 +15909,7 @@
       "shape": {
         "$": "object",
         "$.operationId": "string!",
+        "$.reasoning": "ref(CompatibleModelReasoning)? null",
         "$.upstreamModelId": "string!"
       }
     },
@@ -15898,7 +15924,8 @@
         "$.baseUrl": "string!",
         "$.label": "string?",
         "$.model": "string!",
-        "$.operationId": "string!"
+        "$.operationId": "string!",
+        "$.reasoning": "ref(CompatibleModelReasoning)? null"
       }
     },
     "CreateOrganizationConnectorRequest": {
@@ -23064,9 +23091,24 @@
         "$.id": "string!",
         "$.label": "string! null",
         "$.models": "array!",
-        "$.models[]": "ref(WorkspaceGatewayCustomModel)",
+        "$.models[]": "ref(OrganizationCompatibleEndpointModel)",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"revoked\\\"\"]",
         "$.updatedAt": "string!",
+        "$.version": "integer!"
+      }
+    },
+    "OrganizationCompatibleEndpointModel": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.reasoning": "ref(CompatibleModelReasoning)! null",
+        "$.updatedAt": "string!",
+        "$.upstreamModelId": "string!",
         "$.version": "integer!"
       }
     },
@@ -28338,6 +28380,7 @@
         "$": "object",
         "$.archive": "object! null",
         "$.archive.archivedAt": "string! null",
+        "$.archive.restoring": "const?=[\"true\"]",
         "$.archive.state": "enum!=[\"\\\"archived\\\"\",\"\\\"archiving\\\"\"]",
         "$.keepLive": "boolean!"
       }
@@ -28722,6 +28765,16 @@
       "shape": {
         "$": "object",
         "$.enabledHere": "boolean!"
+      }
+    },
+    "SetOrganizationCompatibleEndpointModelReasoningRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedVersion": "integer!",
+        "$.reasoning": "ref(CompatibleModelReasoning)? null"
       }
     },
     "SetOwnResourceReachRequest": {
@@ -31796,6 +31849,8 @@
         "$": "object",
         "$.archived": "boolean!",
         "$.clientEventId": "string?",
+        "$.confirmActiveSubChats": "array?",
+        "$.confirmActiveSubChats[]": "string",
         "$.confirmPause": "boolean?",
         "$.expectedVersion": "integer?",
         "$.mode": "enum?=[\"\\\"hide_for_me\\\"\",\"\\\"pause_and_archive\\\"\"]"
@@ -35000,6 +35055,7 @@
       "CompanyProfileMutationResponse": "type",
       "CompanyProfileRevision": "type",
       "CompanyProfileRevisionIdentity": "type",
+      "CompatibleModelReasoning": "type",
       "CompleteFileUploadResponse": "type",
       "ComposerDraft": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
@@ -35753,6 +35809,7 @@
       "OrganizationApiKeyAccess": "type",
       "OrganizationCodexAccountsResponse": "type",
       "OrganizationCompatibleEndpoint": "type",
+      "OrganizationCompatibleEndpointModel": "type",
       "OrganizationCompatibleEndpointsResponse": "type",
       "OrganizationComputeReach": "type",
       "OrganizationComputeReachResponse": "type",
@@ -36164,6 +36221,7 @@
       "SessionVisibilityWork": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "SetMemberAllowanceRequest": "type",
+      "SetOrganizationCompatibleEndpointModelReasoningRequest": "type",
       "SetOwnResourceReachRequest": "type",
       "SetOwnResourceReachResponse": "type",
       "SetSessionModelAccountChoiceRequest": "type",
@@ -38077,6 +38135,7 @@
       "asVaultClient": "value",
       "attachSessionCapability": "value",
       "AuthNeededItem": "type",
+      "automationRunOutcomesOnly": "value",
       "availabilityReasonLabel": "value",
       "billingClassForModel": "value",
       "billingClassLabel": "value",
@@ -38526,6 +38585,7 @@
       "SESSION_EVENT_BROWSER_PENDING_MAX_COUNT": "value",
       "SESSION_STATUS_META": "value",
       "sessionAdmissionBlocked": "value",
+      "sessionArchived": "value",
       "SessionAttentionClientLike": "type",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
@@ -39993,6 +40053,7 @@
       "ApprovedElsewhereCopy": "type",
       "ApprovedMachineChoice": "type",
       "AuthNeededItem": "type",
+      "automationRunOutcomesOnly": "value",
       "buildTimeline": "value",
       "ClientOverride": "type",
       "ComposerBusySend": "type",
@@ -40489,6 +40550,7 @@
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
       "askPresentation": "value",
+      "automationRunLine": "value",
       "bestQuoteOccurrence": "value",
       "BUILT_IN_TOOL_STEP_NAMES": "value",
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
@@ -40528,6 +40590,7 @@
       "isActionableHumanInputRequest": "value",
       "isAgentWorkHumanInput": "value",
       "isApplyPatch": "value",
+      "isAutomationRunBatch": "value",
       "isPreparingWork": "value",
       "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
@@ -40557,6 +40620,7 @@
       "questionNavTarget": "value",
       "rawTypeOf": "value",
       "readableWorkDefaultOpen": "value",
+      "readableWorkIsEmpty": "value",
       "ReadableWorkOptions": "type",
       "readableWorkShowsPreview": "value",
       "readableWorkStatus": "value",
@@ -40589,8 +40653,10 @@
       "SESSION_STATUS_BADGE": "value",
       "SESSION_STATUS_PRESENTATION": "value",
       "sessionAdmissionBlocked": "value",
+      "sessionArchived": "value",
       "sessionDisplayStatus": "value",
       "SessionDisplayStatus": "type",
+      "sessionStatusItemDisplayStatus": "value",
       "SessionStatusTone": "type",
       "STARTUP_WAIT_TITLES": "value",
       "startupDuration": "value",
@@ -42282,6 +42348,7 @@
       "setOrganizationApiIntegrationHere",
       "setOrganizationClaudeSubscriptionAccountAllocator",
       "setOrganizationClaudeSubscriptionRotationSettings",
+      "setOrganizationCompatibleEndpointModelReasoning",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setOwnResourceReach",
@@ -43076,6 +43143,7 @@
       "setOrganizationApiIntegrationHere",
       "setOrganizationClaudeSubscriptionAccountAllocator",
       "setOrganizationClaudeSubscriptionRotationSettings",
+      "setOrganizationCompatibleEndpointModelReasoning",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setOwnResourceReach",
@@ -43911,6 +43979,7 @@
       "setOrganizationApiIntegrationHere",
       "setOrganizationClaudeSubscriptionAccountAllocator",
       "setOrganizationClaudeSubscriptionRotationSettings",
+      "setOrganizationCompatibleEndpointModelReasoning",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setOwnResourceReach",
@@ -46639,6 +46708,9 @@
       "setOrganizationClaudeSubscriptionRotationSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"rotationEnabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionPoolSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "setOrganizationCompatibleEndpointModelReasoning": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetOrganizationCompatibleEndpointModelReasoningRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationCompatibleEndpointModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "setOrganizationSuperGrokAccountAllocator": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"enabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"updated\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49307,6 +49379,9 @@
       "setOrganizationClaudeSubscriptionRotationSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"rotationEnabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionPoolSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "setOrganizationCompatibleEndpointModelReasoning": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetOrganizationCompatibleEndpointModelReasoningRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationCompatibleEndpointModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "setOrganizationSuperGrokAccountAllocator": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"enabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"updated\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51714,6 +51789,9 @@
       ],
       "setOrganizationClaudeSubscriptionRotationSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"rotationEnabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionPoolSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setOrganizationCompatibleEndpointModelReasoning": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetOrganizationCompatibleEndpointModelReasoningRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationCompatibleEndpointModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setOrganizationSuperGrokAccountAllocator": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"enabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"updated\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -54399,6 +54477,9 @@
       "setOrganizationClaudeSubscriptionRotationSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"rotationEnabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionPoolSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "setOrganizationCompatibleEndpointModelReasoning": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetOrganizationCompatibleEndpointModelReasoningRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationCompatibleEndpointModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "setOrganizationSuperGrokAccountAllocator": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"enabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"updated\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -56864,6 +56945,9 @@
       ],
       "setOrganizationClaudeSubscriptionRotationSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"rotationEnabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionPoolSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setOrganizationCompatibleEndpointModelReasoning": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetOrganizationCompatibleEndpointModelReasoningRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationCompatibleEndpointModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setOrganizationSuperGrokAccountAllocator": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"enabled\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"updated\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import {
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
   XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
   XAI_SUBSCRIPTION_MODEL_SLUGS,
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
+import { adoptXaiClientVersionFloor, currentXaiClientVersion } from "./client-version";
 import {
   isXaiSubscriptionRateLimitDiagnostic,
   XaiSubscriptionStreamIdleTimeoutError,
@@ -130,6 +130,7 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
     const streamIdleTimeoutMs = boundedStreamIdleTimeout(
       context.streamIdleTimeoutMs ?? context.hostedToolContinuationTimeoutMs,
     );
+    let presentedClientVersion = currentXaiClientVersion(context.clientVersion);
     const send = async (
       refresh: boolean,
       transportAttempt: number,
@@ -140,11 +141,12 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       // A cancellation while the token resolved reserves nothing either.
       init?.signal?.throwIfAborted();
       const headers = new Headers(originalHeaders);
+      presentedClientVersion = currentXaiClientVersion(context.clientVersion);
       headers.set("authorization", `Bearer ${token.accessToken}`);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      headers.set("user-agent", `opengeni/${context.clientVersion || XAI_CLIENT_VERSION}`);
-      headers.set("x-grok-client-version", context.clientVersion || XAI_CLIENT_VERSION);
+      headers.set("user-agent", `opengeni/${presentedClientVersion}`);
+      headers.set("x-grok-client-version", presentedClientVersion);
       headers.set("x-grok-client-identifier", "opengeni");
       headers.set("x-grok-client-mode", XAI_CLIENT_MODE);
       headers.set("x-authenticateresponse", "authenticate-response");
@@ -230,6 +232,35 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
         ...providerRequestIdFields(sent.response.headers),
       });
       sent = await send(true, 2);
+    }
+    if (!sent.response.ok && definiteErrorStatus(sent.response.status)) {
+      // xAI refuses a Grok client below its minimum and names the version it
+      // requires. The refusal is definite (nothing ran), so adopt that
+      // minimum and send this request once more presenting it.
+      const refused = sent.response;
+      const bytes = new Uint8Array(
+        await readBodySettled(sent.audit, refused, () => refused.arrayBuffer()),
+      );
+      const text = new TextDecoder().decode(bytes.subarray(0, MAX_ERROR_BODY_BYTES));
+      if (adoptXaiClientVersionFloor(text, presentedClientVersion)) {
+        await emitRequestEvent(sent.audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: refused.status,
+          willRetry: true,
+          ...providerRequestIdFields(refused.headers),
+        });
+        sent = await send(false, sent.audit.transportAttempt + 1);
+      } else {
+        sent = {
+          audit: sent.audit,
+          response: new Response(bytes, {
+            status: refused.status,
+            statusText: refused.statusText,
+            headers: refused.headers,
+          }),
+        };
+      }
     }
     return await normalizeResponse(sent.response, sent.audit, context.onFinalContextUsage);
   };

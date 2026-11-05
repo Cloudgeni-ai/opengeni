@@ -86,6 +86,10 @@ const ZSTD_LEVEL: i32 = 1;
 /// it was last carried a sweep may take it anyway.
 const HELD_IDLE: Duration = Duration::from_secs(3_600);
 
+/// Tries one archive makes before it fails: each sweep that took stock
+/// while a try was in flight costs one, and sweeps come an hour apart.
+const FENCED_TRIES: u32 = 3;
+
 /// Each sandbox's archive's held chunks, and when a try last began.
 type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 
@@ -778,24 +782,25 @@ impl Chunked {
     }
 
     /// One try of archiving sandbox `id`, storing its chunks through a
-    /// store holding them ([`Self::holding`]).
+    /// store holding them ([`Self::holding`]): `None` when a sweep took
+    /// stock after it began, so it may not publish.
     async fn archive_once(
         &self,
         id: Id,
         save: Stamp,
         files: &SavedFiles,
         cancel: &CancellationToken,
-    ) -> Result<Archive, EngineError> {
+    ) -> Result<Option<Archive>, EngineError> {
         const OP: &str = "archive";
         if cancel.is_cancelled() {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         }
         // Begun before the store is looked at: a sweep that takes stock
         // before this archive publishes stops it from publishing, so it
         // never names what that sweep deletes.
         let publication = match self.begin(id, save).await? {
             Ok(publication) => publication,
-            Err(settled) => return Ok(settled),
+            Err(settled) => return Ok(Some(settled)),
         };
         let now = self.chunks.now();
         let Before {
@@ -860,10 +865,10 @@ impl Chunked {
         let pack = self.put_pack(id, files, learned.as_deref(), cancel);
         let (disk, memory, profile, pack) = tokio::join!(disk, memory, profile, pack);
         let (Some(disk), Some(memory), profile) = (disk?, memory?, profile?) else {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         };
         if cancel.is_cancelled() {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         }
         let head = Head {
             version: copy_version(packing),
@@ -876,11 +881,12 @@ impl Chunked {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let receipt = receipt_of(&bytes);
         // Refused when the pointer changed since this archive began: the
-        // next archive begins again and checks the owner anew.
-        self.chunks
-            .publish(publication, bytes)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        // next try begins again and checks the owner anew.
+        match self.chunks.publish(publication, bytes).await {
+            Ok(()) => {}
+            Err(StorageError::Superseded) => return Ok(None),
+            Err(error) => return Err(storage_error(OP, error)),
+        }
         // Everything the new copy names was stored by now, or asked about
         // now, or confirmed when the copies it was reused from were.
         let confirmed = [earlier_confirmed, image.map(|image| image.at)]
@@ -889,7 +895,7 @@ impl Chunked {
             .fold(now, SystemTime::min);
         self.confirmed
             .confirm_sandbox(id, receipt.clone(), confirmed);
-        Ok(Archive::Stored(receipt))
+        Ok(Some(Archive::Stored(receipt)))
     }
 }
 
@@ -907,8 +913,25 @@ impl Store for Chunked {
         // again.
         let held = self.held(id);
         let holding = self.holding(&held);
-        let once = Box::pin(holding.archive_once(id, save, files, cancel));
-        let (archived, kept) = self.chunks.keeping(&held, once).await;
+        // A sweep takes stock of every pointer before it deletes anything,
+        // so a try in flight then may not publish. The same files are tried
+        // again at once: that try finds everything the stopped one stored,
+        // and only checks it, where failing the step would capture and
+        // upload the sandbox again after a pause.
+        let tries = Box::pin(async {
+            for tried in 1..=FENCED_TRIES {
+                if let Some(archived) = holding.archive_once(id, save, files, cancel).await? {
+                    return Ok(archived);
+                }
+                tracing::info!(
+                    %id,
+                    tried,
+                    "a sweep took stock while the archive was in flight; trying again"
+                );
+            }
+            Err(storage_error("archive", StorageError::Superseded))
+        });
+        let (archived, kept) = self.chunks.keeping(&held, tries).await;
         if kept.copied_bytes > 0 {
             crate::observe::notes::bytes("copied", kept.copied_bytes);
         }

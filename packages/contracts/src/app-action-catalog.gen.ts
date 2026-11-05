@@ -9035,6 +9035,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelReasoning",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
+    "request": [
+      "SetOrganizationCompatibleEndpointModelReasoningRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/allocator",

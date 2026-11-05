@@ -208,6 +208,7 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   content_archived_at: { why: "its own archive", expected: fresh(null) },
   content_archive: { why: "its own archive", expected: fresh(null) },
   content_archive_purged_at: { why: "its own archive", expected: fresh(null) },
+  content_restore_requested_at: { why: "its own archive", expected: fresh(null) },
   archived_at: { why: "its own archive", expected: fresh(null) },
   archive_requested_by: { why: "its own archive", expected: fresh(null) },
   tool_policy_version: { why: "edit counter of this row's policy", expected: fresh(1) },
