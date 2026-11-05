@@ -328,6 +328,11 @@ async function createRealtimeCall(
  * through negotiation, with refresh under the per-connection lock. The chat
  * binding is never written; the client protocol and HTTP error translation
  * are the legacy broker's.
+ *
+ * A recorded plan can be out of date (a cancelled plan keeps its last
+ * recorded type until the credential next reports one), so when the
+ * provider refuses realtime for one connection's account, the call moves on
+ * to the next candidate; every other failure is final.
  */
 export async function brokerSessionCoreCodexRealtime(
   db: Database,
@@ -335,6 +340,7 @@ export async function brokerSessionCoreCodexRealtime(
   context: { accountId: string; workspaceId: string; sessionId: string },
   input: Omit<CodexRealtimeBrokerInput, "sessionId">,
   fetchImpl: CodexFetch = fetch,
+  brokerOptions: CodexRealtimeBrokerOptions = {},
 ): Promise<CodexRealtimeProviderAnswer> {
   if (!settings.codexSubscriptionEnabled) {
     throw new CodexRealtimeBrokerError(
@@ -363,6 +369,7 @@ export async function brokerSessionCoreCodexRealtime(
   ];
   const operationId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
+  let refused: CodexRealtimeBrokerError | null = null;
   for (const candidate of ordered) {
     const ref: SubscriptionCoreCodexOperationLeaseRef = {
       operationId,
@@ -415,13 +422,46 @@ export async function brokerSessionCoreCodexRealtime(
         },
         { ...input, sessionId: context.sessionId },
       );
+    } catch (error) {
+      if (!codexRealtimeRefusedForConnection(error)) throw error;
+      refused = error;
+      try {
+        brokerOptions.onConnectionRefused?.(error);
+      } catch {
+        // An observer must never change the call's outcome.
+      }
     } finally {
       await releaseSubscriptionCoreCodexOperationLease(db, scope, ref).catch(() => false);
     }
   }
+  if (refused) throw refused;
   throw new CodexRealtimeBrokerError(
     "credential_unavailable",
     "No connected Codex subscription is available for this session",
+  );
+}
+
+export type CodexRealtimeBrokerOptions = {
+  /**
+   * Called when the provider refused realtime for one connection and the
+   * call moves on to the next candidate (for operator logs).
+   */
+  onConnectionRefused?: (error: CodexRealtimeBrokerError) => void;
+};
+
+/**
+ * The provider refused realtime for this connection's account, not for the
+ * request: a plan without voice answers call creation with 404, an account
+ * without the entitlement with 403. Nothing was created, so another
+ * connected subscription may serve the same request.
+ */
+export function codexRealtimeRefusedForConnection(
+  error: unknown,
+): error is CodexRealtimeBrokerError {
+  return (
+    error instanceof CodexRealtimeBrokerError &&
+    (error.reason === "entitlement_denied" ||
+      (error.reason === "incompatible" && error.providerStatus === 404))
   );
 }
 
@@ -431,6 +471,7 @@ export function buildSessionCodexRealtimeBroker(
   settings: Settings,
   context: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl: CodexFetch = fetch,
+  options: CodexRealtimeBrokerOptions = {},
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   const { accountId, workspaceId, sessionId } = context;
   return async (input) => {
@@ -440,6 +481,7 @@ export function buildSessionCodexRealtimeBroker(
       { accountId, workspaceId, sessionId },
       input,
       fetchImpl,
+      options,
     );
   };
 }
