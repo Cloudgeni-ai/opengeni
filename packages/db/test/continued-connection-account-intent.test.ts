@@ -6,6 +6,7 @@ import type {
   McpConnectionAccountBinding,
   McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
+import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { seedSenderConnections } from "./sender-connection-fixture";
 import {
@@ -521,22 +522,78 @@ test("a compaction in a private chat lends only its owner's personal accounts", 
   expect(seen).toEqual([{ version: 1, principal: { kind: "none" }, selections: [] }]);
 }, 60_000);
 
-test("a compaction never borrows a credential-restricted turn's accounts", async () => {
+// Each place accepted work carries a credential restriction: the form an
+// internal update carries forward, a human or API turn's execution policy, and
+// the session's own policy.
+for (const form of ["initiator context", "turn policy", "session policy"] as const) {
+  test(`a compaction never borrows a credential-restricted turn's accounts (${form})`, async () => {
+    const w = await fixture();
+    const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      if (form === "initiator context") {
+        await tx`update session_turns set initiator_context = initiator_context
+          || '{"credentialRestriction":"developer_setup"}'::jsonb where id = ${origin}`;
+        return;
+      }
+      const restricted = {
+        schemaVersion: 1,
+        productModelId: "scripted-model",
+        requestedModelId: null,
+        modelSource: "continuation",
+        reasoningEffort: "low",
+        reasoningSource: "continuation",
+        latencyMode: "standard",
+        latencyModeSource: "continuation",
+        providerId: "scripted-provider",
+        upstreamModelId: "scripted-model",
+        wireApi: "responses",
+        credentialSource: { kind: "deployment", mechanism: "none" },
+        billing: { upstreamPayer: "deployment", metering: "external" },
+        definitionVersion: `sha256:${"0".repeat(64)}`,
+        credentialRestriction: "developer_setup",
+      };
+      // A valid policy, so only its restriction (not a malformed read) is tested.
+      expect(readTurnExecutionPolicyV1({ turnExecutionPolicyV1: restricted }).kind).toBe("valid");
+      if (form === "turn policy") {
+        await tx`update session_turns set metadata = metadata
+          || jsonb_build_object('turnExecutionPolicyV1', ${tx.json(restricted)}::jsonb)
+          where id = ${origin}`;
+      } else {
+        await tx`update sessions set metadata = coalesce(metadata, '{}'::jsonb)
+          || jsonb_build_object('turnExecutionPolicyV1', ${tx.json(restricted)}::jsonb)
+          where id = ${w.sessionId}`;
+      }
+    });
+    const { seen, row, compaction } = await compactWithSpy(w);
+    expect(seen).toEqual([]);
+    expect(row.personal_connection_delegations).toEqual([]);
+    // The compaction carries no intent, so work continuing it never resolves
+    // the accounts the compacted turn could not lend.
+    expect(row.connection_account_intent).toBeNull();
+    await finish(w, compaction);
+    expect((await compactWithSpy(w)).seen).toEqual([]);
+  }, 60_000);
+}
+
+test("a compaction after a turn whose stored intent no longer parses runs without accounts", async () => {
   const w = await fixture();
   const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  // The database checks only the intent's outer shape; a selection the
+  // current schema rejects must not fail the compaction claim.
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
-    await tx`update session_turns set initiator_context = initiator_context
-      || '{"credentialRestriction":"developer_setup"}'::jsonb where id = ${origin}`;
+    await tx`update session_turns set connection_account_intent =
+      '{"version":1,"principal":{"kind":"none"},"selections":[{"unexpected":true}]}'::jsonb
+      where id = ${origin}`;
   });
-  const { seen, row, compaction } = await compactWithSpy(w);
+  const { seen, row } = await compactWithSpy(w);
   expect(seen).toEqual([]);
-  expect(row.personal_connection_delegations).toEqual([]);
-  // The compaction carries no intent, so work continuing it never resolves
-  // the accounts the compacted turn could not lend.
   expect(row.connection_account_intent).toBeNull();
-  await finish(w, compaction);
-  expect((await compactWithSpy(w)).seen).toEqual([]);
+  expect(row.personal_connection_delegations).toEqual([]);
+  expect(row.metadata.connectionAccountsUnresolved).toEqual(
+    expect.objectContaining({ reason: "resolution_failed" }),
+  );
 }, 60_000);
 
 test("a compaction never borrows an external link turn's accounts", async () => {

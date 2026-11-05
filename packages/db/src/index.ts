@@ -79756,12 +79756,21 @@ export async function claimSessionWorkForAttempt(
             // external link's permission ceiling or a credential restriction
             // forward, so a turn with either gives it no connection accounts
             // and no intent at all.
-            const compactionConnectionAccountIntent = latestStarted
-              ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
-              : null;
             let compactionPersonalConnectionDelegations: McpPersonalConnectionDelegation[] = [];
             let compactionMcpAccountBindings: McpConnectionAccountBinding[] = [];
             let compactionConnectionAccountMetadata: Record<string, unknown> = {};
+            // A stored intent the current schema no longer reads lends nothing
+            // and is not carried forward; it never fails the claim.
+            let compactionConnectionAccountIntent: ConnectionAccountIntent | null = null;
+            try {
+              compactionConnectionAccountIntent = latestStarted
+                ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
+                : null;
+            } catch (error) {
+              compactionConnectionAccountMetadata = {
+                connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+              };
+            }
             const compactionAuthorityBorrowable =
               latestStarted !== null &&
               compactionConnectionAccountIntent !== null &&
@@ -79953,6 +79962,9 @@ export async function claimSessionWorkForAttempt(
                 // claim, so the pending request can still run.
                 [compactionTurn] = await tx.transaction(async (savepoint) => {
                   if (compactionPersonalConnectionDelegations.length > 0) {
+                    // Transaction-local: released with the savepoint, it stays
+                    // set for the rest of the claim (as on the internal-update
+                    // path); rolled back with it on refusal.
                     await savepoint.execute(sql`
                       SELECT set_config(
                         'opengeni.initiating_human_subject_id',
