@@ -149,6 +149,8 @@ type FixtureOptions = {
    * admitted for this turn (no accepted account binding).
    */
   productSignInNotAdmitted?: boolean;
+  /** The goal frozen with the turn; omitted leaves it unknown. */
+  goal?: "none" | "paused";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -414,6 +416,22 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         : { kind: "subject", subjectId: "user:fixture-human" },
     resources: [],
     tools: session.tools,
+    ...(options.goal === "none"
+      ? { goalSnapshot: { state: "none", capturedAt: "2026-01-01T00:00:00.000Z" } }
+      : options.goal === "paused"
+        ? {
+            goalSnapshot: {
+              state: "paused",
+              goalId: "77777777-7777-4777-8777-777777777777",
+              objectiveRevision: 1,
+              text: "Finish the migration",
+              successCriteria: null,
+              rootConstraints: [],
+              mutationPolicy: "preserve_intent",
+              capturedAt: "2026-01-01T00:00:00.000Z",
+            },
+          }
+        : {}),
     personalConnectionDelegations: [],
     mcpAccountBindings: [],
   } as BuildTurnAgentDeps["turn"];
@@ -1112,6 +1130,29 @@ describe("agent configuration reaches the production model request", () => {
       }
     },
   );
+});
+
+// goal_resume acts only on an existing goal, so a configured session whose
+// frozen goal is none is not sent it; any goal, or an unknown one, keeps it.
+describe("goal_resume follows the session's goal", () => {
+  const resume = "opengeni__goal_resume";
+  test("a configured session without a goal has no goal_resume or its guidance", async () => {
+    const captured = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
+    expect(captured.names).toContain("opengeni__goal_set");
+    expect(captured.names).toContain("opengeni__goal_pause");
+    expect(captured.names).not.toContain(resume);
+    expect(captured.request.systemInstructions).not.toContain("goal_resume");
+  });
+
+  test.each([
+    ["a paused goal", { agent: agentConfig("all"), goal: "paused" }],
+    ["an unknown goal", { agent: agentConfig("all") }],
+    ["a legacy session without a goal", { agent: null, goal: "none" }],
+  ] as const)("%s keeps goal_resume", async (_label, options) => {
+    const captured = await captureWorkerRequest(options);
+    expect(captured.names).toContain(resume);
+    expect(captured.request.systemInstructions).toContain("goal_resume");
+  });
 });
 
 describe("effective-tools projection agrees with actual model preparation", () => {
@@ -1898,7 +1939,7 @@ const INVENTORY = {
     "## Final answer": 434,
     "### Formatting rules": 127,
     "# Rules for getting work done": 682,
-    "## Autonomy and persistence": 3089,
+    "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
     "## New messages while you work": 805,

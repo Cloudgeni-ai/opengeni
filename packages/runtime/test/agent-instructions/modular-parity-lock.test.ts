@@ -11,6 +11,8 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * must keep these bytes; only a reviewed instruction change updates them. The
  * "none-with-features" cases gained documents when the chat-by-default rule
  * began to follow them; their bytes come from the composer just before that.
+ * They also have workspace connectors, a setup-card source, since the
+ * setup-card sentence began to follow those; that added no other text.
  */
 const LOCKED: Record<string, string> = {
   "all/none": "33399:df282f2185182985f997d4ca829b4c6ce88ce1dd91061cd6fe1e184a63cded56",
@@ -191,7 +193,7 @@ describe("an absent feature only omits its own text", () => {
     },
     build: {
       options: without(
-        { artifacts: false, workspaceAdmin: false },
+        { artifacts: false, workspaceAdmin: false, workspaceConnectors: false },
         { activeSandboxBackend: "none" },
       ),
       gone: ["Decide the design before building it."],
@@ -205,6 +207,12 @@ describe("an absent feature only omits its own text", () => {
     goals: {
       options: without({ goals: false }),
       gone: ["Always retain the full completion audit"],
+      pure: false,
+    },
+    // The base case's only setup-card source is workspace connectors.
+    setupCards: {
+      options: without({ workspaceConnectors: false }),
+      gone: ["show its setup card"],
       pure: false,
     },
     waitForInput: {
@@ -229,6 +237,7 @@ describe("an absent feature only omits its own text", () => {
         "share one workspace",
         "link the source next to each study or figure you cite",
         "Answer in chat by default",
+        "show its setup card",
       ],
       pure: false,
     },

@@ -71781,6 +71781,28 @@ export async function getSessionGoal(
   });
 }
 
+/** The given sessions that have a goal, in any state (one indexed lookup). */
+export async function sessionsWithGoal(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Set<string>> {
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return new Set();
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ sessionId: schema.sessionGoals.sessionId })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, workspaceId),
+          inArray(schema.sessionGoals.sessionId, ids),
+        ),
+      );
+    return new Set(rows.map((row) => row.sessionId));
+  });
+}
+
 /** Bounded MCP management facts. No config, goal metadata, or event payload is materialized.
  * The caller must authorize session.read first, just as for getSession/queue reads. */
 export async function getSessionMcpMonitoringSummary(
