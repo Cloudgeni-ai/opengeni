@@ -4,7 +4,12 @@ import {
   type AzureEntraProviderCredential,
   type Settings,
 } from "@opengeni/config";
-import { DirectModelProviderMetadata, directModelBaseUrl } from "@opengeni/contracts";
+import {
+  compatibleModelReasoningFromListing,
+  DirectModelProviderMetadata,
+  directModelBaseUrl,
+  type CompatibleModelReasoning,
+} from "@opengeni/contracts";
 import {
   AzureEntraTokenError,
   createAzureEntraAccessTokenSource,
@@ -16,6 +21,75 @@ import { HTTPException } from "hono/http-exception";
  * Microsoft Entra ID access token.
  */
 export type DirectModelAccessCredential = string | { bearerToken: string };
+
+/** A `/models` listing larger than this is not read for reasoning levels. */
+const MODEL_LISTING_MAX_BYTES = 8 * 1024 * 1024;
+
+async function boundedJson(response: Response): Promise<unknown> {
+  if (!response.ok || !response.body) return null;
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MODEL_LISTING_MAX_BYTES) {
+    await response.body.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MODEL_LISTING_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the reasoning levels an OpenAI-compatible endpoint publishes for one
+ * model: its `/models/{id}` entry, or else that entry in its `/models`
+ * listing (see compatibleModelReasoningFromListing). Best effort: null when
+ * the endpoint publishes none or cannot be read, never an error. Use the same
+ * DNS-pinned, redirect-refusing fetch as every other request to it.
+ */
+export async function discoverCompatibleModelReasoning(
+  input: { baseUrl: string; model: string },
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<CompatibleModelReasoning | null> {
+  const read = async (path: string): Promise<unknown> => {
+    try {
+      const response = await fetchImpl(`${input.baseUrl}${path}`, {
+        method: "GET",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+        headers: { accept: "application/json", authorization: `Bearer ${apiKey}` },
+      });
+      return await boundedJson(response);
+    } catch {
+      return null;
+    }
+  };
+  const isEntry = (value: unknown): value is Record<string, unknown> =>
+    !!value && typeof value === "object" && !Array.isArray(value);
+  const single = await read(`/models/${input.model}`);
+  if (isEntry(single) && (single.id === undefined || single.id === input.model)) {
+    const reasoning = compatibleModelReasoningFromListing(single);
+    if (reasoning) return reasoning;
+  }
+  const listing = await read("/models");
+  const entries = isEntry(listing) && Array.isArray(listing.data) ? listing.data : [];
+  return compatibleModelReasoningFromListing(
+    entries.find((entry) => isEntry(entry) && entry.id === input.model),
+  );
+}
 
 /** Verify the customer's exact route without persisting their key or test response. */
 export async function verifyDirectModelAccess(

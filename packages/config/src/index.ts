@@ -68,6 +68,7 @@ import {
   McpServerConnectionRef as PublicMcpServerConnectionRef,
   ProductAccessMode,
   ReasoningEffort,
+  type CompatibleModelReasoning,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
   normalizeSitesDomain,
@@ -7325,6 +7326,32 @@ function gatewayModelCapabilities(
   });
 }
 
+/**
+ * A model on a workspace's or organization's own OpenAI-compatible endpoint:
+ * text in and out with function calling over SSE, the capabilities every
+ * such API shares, plus the reasoning levels it declares (read from the
+ * endpoint's model listing or set by whoever connected it). Without a
+ * declaration it offers no reasoning choice and requests carry no
+ * `reasoning_effort`.
+ */
+export function compatibleModelCapabilities(
+  settings: Settings,
+  reasoning: CompatibleModelReasoning | null | undefined,
+): ModelCapabilitiesV1 {
+  const base = openRouterCustomModelCapabilities(settings);
+  if (!reasoning) return base;
+  return normalizeCapabilities({
+    ...base,
+    reasoning: {
+      upstream: "supported",
+      runnable: true,
+      efforts: [...reasoning.efforts],
+      defaultEffort: reasoning.defaultEffort,
+      required: false,
+    },
+  });
+}
+
 function openRouterCustomModelCapabilities(settings: Settings): ModelCapabilitiesV1 {
   const legacy = legacyModelCapabilities(settings, {
     reasoningEffort: false,
@@ -7723,9 +7750,9 @@ export function withDirectModelProviders(
     const spec = directModelConnectionSpec(connection);
     if (!spec) continue;
     if (spec.provider === "openai_compatible") {
-      // A workspace's own OpenAI-compatible server: text in and out with
-      // function calling over SSE, the capabilities every such API shares.
-      // Its requests are DNS-pinned to public addresses by the runtime.
+      // A workspace's own OpenAI-compatible server (see
+      // compatibleModelCapabilities). Its requests are DNS-pinned to public
+      // addresses by the runtime.
       providers.push({
         kind: "direct-compatible-workspace",
         id: spec.providerId,
@@ -7739,7 +7766,7 @@ export function withDirectModelProviders(
             id: spec.modelId,
             upstreamModelId: spec.model,
             label: spec.model,
-            capabilities: openRouterCustomModelCapabilities(settings),
+            capabilities: compatibleModelCapabilities(settings, spec.reasoning),
             toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
           },
         ],
@@ -8177,17 +8204,20 @@ export type OrganizationCompatibleEndpointOverlay = {
   baseUrl: string;
   api: "chat" | "responses";
   label?: string | null;
-  models: readonly { upstreamModelId: string; label?: string | null }[];
+  models: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+    reasoning?: CompatibleModelReasoning | null;
+  }[];
   /** Present only at execution, after the worker decrypts the endpoint's key. */
   apiKey?: string;
 };
 
 /**
  * The organization's own OpenAI-compatible endpoints a workspace can use,
- * replacing any earlier overlay of them. Like a workspace's own endpoint they
- * carry text in and out with function calling over SSE, the capabilities
- * every such API shares; the runtime DNS-pins their requests to public
- * addresses. An endpoint without models adds nothing.
+ * replacing any earlier overlay of them, with the capabilities of
+ * {@link compatibleModelCapabilities}; the runtime DNS-pins their requests to
+ * public addresses. An endpoint without models adds nothing.
  */
 export function withOrganizationCompatibleProviders(
   settings: Settings,
@@ -8209,7 +8239,7 @@ export function withOrganizationCompatibleProviders(
         upstreamModelId: model.upstreamModelId,
         aliases: [],
         label: model.label?.trim() || model.upstreamModelId,
-        capabilities: openRouterCustomModelCapabilities(settings),
+        capabilities: compatibleModelCapabilities(settings, model.reasoning),
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
       });
     }

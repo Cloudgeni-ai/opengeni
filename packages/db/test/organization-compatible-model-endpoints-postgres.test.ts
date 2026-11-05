@@ -18,6 +18,7 @@ import {
   replaceOrganizationCompatibleEndpointKey,
   retireOrganizationCompatibleEndpointModel,
   revokeOrganizationCompatibleEndpoint,
+  setOrganizationCompatibleEndpointModelReasoning,
   updateModelConnectionAccess,
   upsertOrganizationModelProviderConnection,
   type DbClient,
@@ -324,4 +325,74 @@ test("other organization keys stay one per kind, and the catalog ignores endpoin
     providerKinds: ["openrouter"],
   });
   expect(catalog.openrouter.active).toBe(true);
+});
+
+test("a model's reasoning levels are saved with it, versioned, and read by workspaces", async () => {
+  if (!available) return;
+  const reasoning = {
+    efforts: ["none", "low", "high", "max"] as const,
+    defaultEffort: "high" as const,
+  };
+  const created = await createOrganizationCompatibleEndpoint(client.db, {
+    ...actor(two),
+    credentialEncrypted: encryptEnvironmentValue(key, "reasoning-key"),
+    credentialDigest: "digest:reasoning-key",
+    baseUrl: "https://api.reasoning.example/v1",
+    api: "chat",
+    label: null,
+    upstreamModelId: "acme/thinker",
+    reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+    operationId: crypto.randomUUID(),
+  });
+  expect(created.model.reasoning).toEqual({
+    efforts: ["none", "low", "high", "max"],
+    defaultEffort: "high",
+  });
+  const plain = await createOrganizationCompatibleEndpointModel(client.db, {
+    ...actor(two),
+    connectionId: created.endpoint.id,
+    upstreamModelId: "acme/plain",
+    operationId: crypto.randomUUID(),
+  });
+  expect(plain.reasoning).toBeNull();
+
+  const input = {
+    ...actor(two),
+    connectionId: created.endpoint.id,
+    customModelId: plain.id,
+    expectedVersion: plain.version,
+    reasoning: { efforts: ["low", "high"] as ("low" | "high")[], defaultEffort: "low" as const },
+  };
+  const changed = await setOrganizationCompatibleEndpointModelReasoning(client.db, input);
+  expect(changed).toMatchObject({ version: plain.version + 1, reasoning: input.reasoning });
+  // A replay whose answer was lost returns the saved model; a stale change conflicts.
+  expect(await setOrganizationCompatibleEndpointModelReasoning(client.db, input)).toEqual(changed);
+  await expect(
+    setOrganizationCompatibleEndpointModelReasoning(client.db, { ...input, reasoning: null }),
+  ).rejects.toBeInstanceOf(OrganizationModelProviderConflictError);
+  const cleared = await setOrganizationCompatibleEndpointModelReasoning(client.db, {
+    ...input,
+    expectedVersion: changed.version,
+    reasoning: null,
+  });
+  expect(cleared).toMatchObject({ version: changed.version + 1, reasoning: null });
+
+  // Workspaces the endpoint is available in see the same levels in their catalog read.
+  const [seen] = (
+    await listOrganizationCompatibleEndpointsForWorkspace(client.db, {
+      accountId: two.accountId,
+      workspaceId: two.sharedId,
+    })
+  ).filter((endpoint) => endpoint.id === created.endpoint.id);
+  expect(
+    Object.fromEntries(seen!.models.map((model) => [model.upstreamModelId, model.reasoning])),
+  ).toEqual({ "acme/thinker": created.model.reasoning, "acme/plain": null });
+
+  // The database refuses a default outside the saved levels.
+  await expect(
+    shared!.admin`
+      update organization_model_provider_custom_models
+      set reasoning_efforts = array['low']::text[], default_reasoning_effort = 'high'
+      where id = ${plain.id}`,
+  ).rejects.toThrow("organization_model_provider_custom_models_reasoning_chk");
 });

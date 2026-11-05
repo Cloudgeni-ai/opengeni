@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
+  discoverCompatibleModelReasoning,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -327,18 +328,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // A direct model key is always workspace-owned: refuse before calling the provider.
       requireWorkspaceIntegrationAdministration(grant);
       if (payload.verifyModelAccess) {
-        await verifyDirectModelAccess(
-          config.data,
-          payload.credential.apiKey as string,
+        const modelFetch =
           deps.directModelFetch ??
-            (config.data.provider === "openai_compatible"
-              ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
-                  pinnedFetch(input as string | URL | Request, init, settings, {
-                    label: "Model endpoint",
-                    requireHttpsOutsideLocalTest: true,
-                  })) as typeof fetch)
-              : undefined),
-        );
+          (config.data.provider === "openai_compatible"
+            ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+                pinnedFetch(input as string | URL | Request, init, settings, {
+                  label: "Model endpoint",
+                  requireHttpsOutsideLocalTest: true,
+                })) as typeof fetch)
+            : undefined);
+        await verifyDirectModelAccess(config.data, payload.credential.apiKey as string, modelFetch);
+        // An OpenAI-compatible model's reasoning levels, when the request
+        // doesn't set them, come from the endpoint's own model listing.
+        if (config.data.provider === "openai_compatible" && config.data.reasoning === undefined) {
+          const reasoning = await discoverCompatibleModelReasoning(
+            { baseUrl: directModelBaseUrl(config.data), model: config.data.model },
+            payload.credential.apiKey as string,
+            modelFetch,
+          );
+          if (reasoning)
+            payload.metadata = {
+              ...payload.metadata,
+              directModelProvider: { ...config.data, reasoning },
+            };
+        }
       }
     } else if (payload.verifyModelAccess) {
       throw new HTTPException(422, {

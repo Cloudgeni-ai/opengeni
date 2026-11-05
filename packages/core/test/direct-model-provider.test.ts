@@ -1,5 +1,56 @@
 import { expect, test } from "bun:test";
-import { verifyDirectModelAccess } from "../src/domain/direct-model-provider";
+import {
+  discoverCompatibleModelReasoning,
+  verifyDirectModelAccess,
+} from "../src/domain/direct-model-provider";
+
+test("a compatible model's reasoning levels are read from its /models entry, then the listing", async () => {
+  const entry = {
+    id: "acme/thinker",
+    object: "model",
+    supported_reasoning_efforts: ["none", "low", "high", "max", "ultra"],
+    reasoning_effort: "high",
+  };
+  const requested: string[] = [];
+  const single = (async (url: string, init: RequestInit) => {
+    requested.push(url);
+    expect(init.redirect).toBe("error");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer private-test-key");
+    return Response.json(entry);
+  }) as typeof fetch;
+  const input = { baseUrl: "https://inference.example.com/v1", model: "acme/thinker" };
+  // "ultra" has no Opengeni name and is skipped; the endpoint's default is kept.
+  expect(await discoverCompatibleModelReasoning(input, "private-test-key", single)).toEqual({
+    efforts: ["none", "low", "high", "max"],
+    defaultEffort: "high",
+  });
+  expect(requested).toEqual(["https://inference.example.com/v1/models/acme/thinker"]);
+
+  // No single-model route: the full listing is read instead.
+  const listing = (async (url: string) =>
+    url.endsWith("/models")
+      ? Response.json({
+          data: [
+            { id: "acme/other", supported_reasoning_efforts: ["max"] },
+            { id: "acme/thinker", reasoning_efforts: ["low", "medium", "high"] },
+          ],
+        })
+      : new Response("not found", { status: 404 })) as typeof fetch;
+  expect(await discoverCompatibleModelReasoning(input, "private-test-key", listing)).toEqual({
+    efforts: ["low", "medium", "high"],
+    defaultEffort: "medium",
+  });
+
+  // Anything else is best effort: no levels, never an error.
+  const silent = (async () => Response.json({ id: "acme/thinker" })) as typeof fetch;
+  expect(await discoverCompatibleModelReasoning(input, "private-test-key", silent)).toBeNull();
+  const broken = (async () => {
+    throw new TypeError("network down");
+  }) as typeof fetch;
+  expect(await discoverCompatibleModelReasoning(input, "private-test-key", broken)).toBeNull();
+  const garbage = (async () => new Response("<html>")) as typeof fetch;
+  expect(await discoverCompatibleModelReasoning(input, "private-test-key", garbage)).toBeNull();
+});
 
 test("connection checks use the exact official route, with redirects and response storage disabled", async () => {
   for (const provider of ["openai", "azure_openai"] as const) {
