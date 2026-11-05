@@ -609,7 +609,8 @@ export {
   isMachineProcessStartFailureMessage,
   isProcessStartFailureMessage,
   sanitizeProcessStartFailureMessage,
-  processStartFailureNullDeviceNote,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
 } from "./selfhosted/process-start-failure";
 export {
   isModalShellStartFailureMessage,
