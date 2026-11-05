@@ -1608,6 +1608,13 @@ export function useComposer(
       if (!sessionId || !durableDrafts || !owned()) return false;
       const current = draftRef.current;
       if (!current) return false;
+      // This content is being saved now, so leaving the chat has nothing
+      // left to save for it. Until here (for example while it waits for the
+      // slot) leaving still saves it.
+      const unsaved = unsavedDraftRef.current;
+      if (unsaved && draftContentKey(unsaved.payload) === draftContentKey(payload)) {
+        unsavedDraftRef.current = null;
+      }
       let request = { ...payload, expectedRevision: current.revision };
       if (draftSignature(request) === lastSavedSignature.current) return true;
       const writesKey = `${workspaceId}\u0000${sessionId}`;
@@ -2212,8 +2219,6 @@ export function useComposer(
     const timer = window.setTimeout(
       () => {
         savePickPromptlyRef.current = false;
-        // Under way now: a remount recognises it as this page's own write.
-        unsavedDraftRef.current = null;
         void persistPayload(payload);
       },
       savePromptly ? 0 : 500,

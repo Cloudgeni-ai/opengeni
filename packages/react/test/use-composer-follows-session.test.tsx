@@ -248,11 +248,22 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
     const of = (sessionId: string) => servers[sessionId as keyof typeof servers];
     // While held, Sends wait before reaching the server.
     let submitGate: Promise<void> | null = null;
+    // While held, draft saves wait before reaching the server.
+    let saveGate: Promise<void> | null = null;
+    const gate = (): { gate: Promise<void>; release: () => void } => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { gate: held, release };
+    };
     const client = fakeClient({
       getComposerDraft: (workspaceId, sessionId, options) =>
         of(sessionId).client.getComposerDraft(workspaceId, sessionId, options),
-      saveComposerDraft: (workspaceId, sessionId, request) =>
-        of(sessionId).client.saveComposerDraft(workspaceId, sessionId, request),
+      saveComposerDraft: async (workspaceId, sessionId, request) => {
+        await saveGate;
+        return of(sessionId).client.saveComposerDraft(workspaceId, sessionId, request);
+      },
       submitComposerDraft: async (workspaceId, sessionId, request) => {
         await submitGate;
         return of(sessionId).client.submitComposerDraft(workspaceId, sessionId, request);
@@ -263,13 +274,19 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
       first: servers[SESSION_ID],
       other: servers[OTHER_SESSION_ID],
       holdSends: () => {
-        let release!: () => void;
-        submitGate = new Promise<void>((resolve) => {
-          release = resolve;
-        });
+        const held = gate();
+        submitGate = held.gate;
         return () => {
           submitGate = null;
-          release();
+          held.release();
+        };
+      },
+      holdSaves: () => {
+        const held = gate();
+        saveGate = held.gate;
+        return () => {
+          saveGate = null;
+          held.release();
         };
       },
     };
@@ -469,6 +486,33 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
     expect(chats.first.submits).toHaveLength(1);
     const after = await chats.first.client.getComposerDraft(WORKSPACE_ID, SESSION_ID);
     expect(after).toMatchObject({ text: "", policyFollowsSession: true });
+    await hook.unmount();
+  });
+
+  test("a pick waiting behind a slow save is still saved when leaving the chat", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    const release = chats.holdSaves();
+    await act(() => hook.result.current.setValue("some text"));
+    // The text's save is on its way and held.
+    await flush(600);
+    await act(() => hook.result.current.setReasoningEffort("high"));
+    // The pick's save now waits for the held one.
+    await flush(50);
+    await hook.rerender(OTHER_SESSION_ID);
+    release();
+    await flush(600);
+    const kept = await chats.first.client.getComposerDraft(WORKSPACE_ID, SESSION_ID);
+    expect(kept).toMatchObject({
+      text: "some text",
+      reasoningEffort: "high",
+      policyFollowsSession: false,
+    });
     await hook.unmount();
   });
 
