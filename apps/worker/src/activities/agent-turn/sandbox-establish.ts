@@ -95,6 +95,7 @@ import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from ".
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import {
   createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
   recoverSandboxSetupFailure,
 } from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
@@ -1305,6 +1306,14 @@ export async function bindLazySandboxProvisioner(
             throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
               session: provisioned.established.session,
               backend: activeSandboxBackend ?? groupBoxBackend,
+              boxReplacement: modalSandboxBoxReplacer(db, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: sandboxState.sandboxGroupId,
+                box: provisioned,
+                session: provisioned.established.session,
+              }),
               restartsThisTurn: async () =>
                 await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
                   sessionId: input.sessionId,

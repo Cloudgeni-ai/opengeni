@@ -87274,6 +87274,198 @@ export async function countSessionTurnSandboxProcessStartRestarts(
   });
 }
 
+/**
+ * Ask the lease to replace one exact live box whose programs cannot start
+ * (Modal: its /bin/sh is gone). The same operator rotation an image conflict
+ * requests: new arrivals are fenced instead of reusing the box, the drain
+ * grace is zero once its last holder leaves, and the reaper saves /workspace
+ * with the provider's own snapshot before ending the box, so the next acquire
+ * restores a fresh one. A box whose save fails stays draining under the
+ * existing capture policy, and arrivals keep waiting instead of reusing it.
+ * Null when the lease no longer names this box (another epoch or instance, or
+ * not live): nothing is changed.
+ */
+export async function requestSandboxProcessStartReplacement(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseEpoch: number;
+    instanceId: string;
+  },
+): Promise<{
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  liveness: "warm" | "draining";
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        lease_epoch: number | string;
+        instance_id: string;
+        liveness: "warm" | "draining";
+      }>(
+        scopedDb as unknown as Database,
+        sql`update sandbox_leases set
+            rotation_requested_at = coalesce(rotation_requested_at, now()),
+            rotation_reason = coalesce(rotation_reason, 'operator'),
+            expires_at = least(expires_at, now()),
+            updated_at = now()
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.leaseEpoch}
+            and instance_id = ${input.instanceId}
+            and liveness in ('warm', 'draining')
+          returning lease_epoch, instance_id, liveness`,
+      );
+      const row = rows[0];
+      return row
+        ? {
+            sandboxGroupId: input.sandboxGroupId,
+            leaseEpoch: Number(row.lease_epoch),
+            instanceId: row.instance_id,
+            liveness: row.liveness,
+          }
+        : null;
+    },
+  );
+}
+
+/** The box a turn asked to replace because it could not start programs. */
+export type SandboxProcessStartReplacementTarget = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+};
+
+/** Turn metadata naming a box that could not start programs and whose save
+ * failed while the turn waited on its replacement. */
+export const SANDBOX_BOX_NOT_SAVED_METADATA_KEY = "sandboxBoxNotSaved";
+
+/**
+ * The box a drain could not save while this turn waited on its replacement
+ * (it could not start programs), as recorded by
+ * {@link releaseSandboxProcessStartReplacementWaiters}. It holds across a
+ * person's retry: a retry fenced by the same unsaved box stops at once. Null
+ * when no such save failed while the turn waited.
+ */
+export async function readSessionTurnSandboxBoxNotSaved(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<SandboxProcessStartReplacementTarget | null> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ sandbox_group_id: string | null; lease_epoch: string | null }>(
+      scopedDb as unknown as Database,
+      sql`select turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'sandboxGroupId' as sandbox_group_id,
+          turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'leaseEpoch' as lease_epoch
+        from session_turns turn
+        where turn.workspace_id = ${workspaceId}
+          and turn.session_id = ${input.sessionId}
+          and turn.id = ${input.turnId}
+        limit 1`,
+    );
+    const leaseEpoch = Number(row?.lease_epoch);
+    return row?.sandbox_group_id && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
+      ? { sandboxGroupId: row.sandbox_group_id, leaseEpoch }
+      : null;
+  });
+}
+
+/**
+ * A drain could not save a box that a turn asked to replace because it could
+ * not start programs. No turn should wait, possibly until the provider's
+ * lifetime limit, on a save that keeps failing: every turn waiting on that
+ * box's rotation has its wait cleared, is marked with the unsaved box, and is
+ * woken, so its next attempt stops with clear copy (failure settlement). The
+ * box stays fenced and its drain keeps retrying under the existing policy.
+ * Only a rotation some turn requested for this exact box (its process-start
+ * restart event names the group and epoch) releases anyone. Returns how many
+ * turns were released.
+ */
+export async function releaseSandboxProcessStartReplacementWaiters(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string; leaseEpoch: number },
+): Promise<number> {
+  const waitJson = JSON.stringify({
+    [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+      reason: "rotation_in_progress",
+    } satisfies SandboxLifecycleWait,
+  });
+  const notSavedJson = JSON.stringify({
+    [SANDBOX_BOX_NOT_SAVED_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+    },
+  });
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const released = await rawRows<{
+        account_id: string;
+        session_id: string;
+        temporal_workflow_id: string | null;
+      }>(
+        tx,
+        sql`with replacement as (
+            select 1 from sessions requester
+            join session_events restart
+              on restart.workspace_id = requester.workspace_id
+              and restart.session_id = requester.id
+            where requester.workspace_id = ${input.workspaceId}
+              and requester.sandbox_group_id = ${input.sandboxGroupId}
+              and restart.type = 'sandbox.operation.started'
+              and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
+              and restart.payload->>'sandboxGroupId' = ${input.sandboxGroupId}
+              and restart.payload->>'leaseEpoch' = ${String(input.leaseEpoch)}
+            limit 1
+          ), waiting as (
+            select turn.id as turn_id, session.id as session_id, session.account_id,
+              session.temporal_workflow_id
+            from sessions session
+            join session_turns turn
+              on turn.workspace_id = session.workspace_id
+              and turn.session_id = session.id
+              and turn.id = session.active_turn_id
+            where session.workspace_id = ${input.workspaceId}
+              and session.sandbox_group_id = ${input.sandboxGroupId}
+              and session.status = 'recovering'
+              and turn.status = 'recovering'
+              and turn.metadata @> ${waitJson}::jsonb
+              and exists (select 1 from replacement)
+            for update of turn
+          )
+          update session_turns turn
+          set metadata = (turn.metadata - ${SANDBOX_LIFECYCLE_WAIT_METADATA_KEY})
+              || ${notSavedJson}::jsonb,
+            version = turn.version + 1,
+            updated_at = now()
+          from waiting
+          where turn.id = waiting.turn_id
+          returning waiting.account_id, waiting.session_id, waiting.temporal_workflow_id`,
+      );
+      for (const waiter of released) {
+        await enqueueSessionWorkflowWakeInTransaction(tx, {
+          accountId: waiter.account_id,
+          workspaceId: input.workspaceId,
+          sessionId: waiter.session_id,
+          temporalWorkflowId: waiter.temporal_workflow_id ?? `session-${waiter.session_id}`,
+          reason: "sandbox_lifecycle_advanced",
+        });
+      }
+      return released.length;
+    }),
+  );
+}
+
 export async function requestSessionTurnRecovery(
   db: Database,
   workspaceId: string,

@@ -605,6 +605,10 @@ export {
   processStartFailureNullDeviceNote,
 } from "./selfhosted/process-start-failure";
 export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
+export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
   NO_WAKE_HEADER,

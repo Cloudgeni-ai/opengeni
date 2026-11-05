@@ -16,6 +16,7 @@ import {
 } from "@opengeni/db";
 import {
   createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
   recoverSandboxSetupFailure,
 } from "./sandbox-setup-agent-failure";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
@@ -174,6 +175,14 @@ export async function runEagerOwnedSandboxSetup(
     throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
       session: ownedEstablished.session,
       backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      boxReplacement: modalSandboxBoxReplacer(deps.db, {
+        backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: sandboxState.sandboxGroupId,
+        box: eagerResolvedSandbox,
+        session: ownedEstablished.session,
+      }),
       restartsThisTurn: async () => {
         const turnId = deps.attempt.turnId;
         if (!turnId) throw new Error("the attempt has no turn");

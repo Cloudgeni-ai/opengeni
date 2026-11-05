@@ -70,6 +70,7 @@ import {
   type DbClient,
   type WorkspaceDeleteObservation,
 } from "../src/index";
+import * as leaseQueries from "../src/index";
 
 // The 0017 lease state machine driven through the REAL packages/db query fns
 // (acquireLease/commit/release/heartbeat/reap) against a THROWAWAY postgres,
@@ -3838,6 +3839,140 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         expectedEpoch: 8,
       }),
     ).toMatchObject({ wentCold: true });
+  }, 60_000);
+
+  test("(3-process-start) a Modal box that cannot start programs is replaced, never reused", async () => {
+    if (!available) return;
+    // Modal runs every command through the box's /bin/sh. Once it is gone the
+    // worker asks the lease to replace that exact box. Its drain save may keep
+    // failing (the reaper then leaves it draining): arrivals must wait for the
+    // replacement instead of re-arming the broken box.
+    const requestReplacement = (leaseQueries as Partial<typeof leaseQueries>)
+      .requestSandboxProcessStartReplacement;
+    expect(typeof requestReplacement).toBe("function");
+    if (!requestReplacement) return;
+    for (const liveness of ["warm", "draining"] as const) {
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      await admin`
+        insert into sandbox_leases (
+          account_id, workspace_id, sandbox_group_id, liveness, refcount,
+          instance_id, backend, lease_epoch, resume_backend_id, resume_state, expires_at
+        ) values (
+          ${accountId}, ${workspaceId}, ${groupId}, ${liveness}, 0,
+          'sb-no-shell', 'modal', 6, 'modal',
+          jsonb_build_object(
+            'backendId', 'modal',
+            'opengeniProviderInstanceId', 'sb-no-shell'
+          ),
+          now() + interval '1 hour'
+        )`;
+      const scope = { accountId, workspaceId, sandboxGroupId: groupId };
+      // Another epoch or instance is not this box: nothing changes.
+      expect(
+        await requestReplacement(db, { ...scope, leaseEpoch: 5, instanceId: "sb-no-shell" }),
+      ).toBeNull();
+      expect(
+        await requestReplacement(db, { ...scope, leaseEpoch: 6, instanceId: "sb-other" }),
+      ).toBeNull();
+      expect((await readLease(db, workspaceId, groupId))?.rotationRequestedAt).toBeNull();
+
+      expect(
+        await requestReplacement(db, { ...scope, leaseEpoch: 6, instanceId: "sb-no-shell" }),
+      ).toEqual({ sandboxGroupId: groupId, leaseEpoch: 6, instanceId: "sb-no-shell", liveness });
+      const lease = await readLease(db, workspaceId, groupId);
+      expect(lease?.rotationRequestedAt).not.toBeNull();
+      expect(lease?.rotationReason).toBe("operator");
+      expect(lease?.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+      // The same box and its saved workspace are kept for the reaper.
+      expect(lease).toMatchObject({ leaseEpoch: 6, instanceId: "sb-no-shell", liveness });
+
+      const arrival = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: `next-turn-${liveness}`,
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(arrival).toMatchObject({ role: "fenced", reason: "rotation_in_progress" });
+      const [holder] = await admin<{ count: number }[]>`
+        select count(*)::int as count from sandbox_lease_holders h
+        join sandbox_leases l on l.id = h.lease_id
+        where l.workspace_id = ${workspaceId} and l.sandbox_group_id = ${groupId}`;
+      expect(holder?.count).toBe(0);
+    }
+
+    // As in production: the requesting turn holds the warm box. Once it
+    // releases its holder, the box drains at once (no idle grace) for the
+    // reaper to save and end, and arrivals stay fenced while it drains.
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-no-shell",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "sb-held-no-shell",
+      dataPlaneUrl: null,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", opengeniProviderInstanceId: "sb-held-no-shell" },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    const epoch = committed.lease!.leaseEpoch;
+    expect(
+      await requestReplacement(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseEpoch: epoch,
+        instanceId: "sb-held-no-shell",
+      }),
+    ).toEqual({
+      sandboxGroupId: groupId,
+      leaseEpoch: epoch,
+      instanceId: "sb-held-no-shell",
+      liveness: "warm",
+    });
+    expect(
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: "turn-no-shell",
+        idleGraceMs: 60_000,
+        workspaceWritersQuiesced: true,
+      }),
+    ).toMatchObject({ liveness: "draining", refcount: 0 });
+    const draining = await readLease(db, workspaceId, groupId);
+    expect(draining).toMatchObject({
+      liveness: "draining",
+      leaseEpoch: epoch,
+      instanceId: "sb-held-no-shell",
+    });
+    expect(draining?.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(
+      await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: "next-turn-held",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "rotation_in_progress" });
   }, 60_000);
 
   test("(3-claim-cancel) cancelling a transition wait registers no holder", async () => {
