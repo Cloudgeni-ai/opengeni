@@ -8,6 +8,7 @@ import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
   requestSessionTurnRecovery as persistSessionTurnRecovery,
+  readSessionTurnSandboxBoxNotSaved,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -61,6 +62,7 @@ import {
 import { recordCoreCodexRefusal } from "./codex-core-settlement";
 import { failOverCoreCodexTurn } from "./codex-core-failover";
 import { createTurnHistorySink } from "./history-sink";
+import { SandboxBoxNotSavedError } from "./sandbox-setup-agent-failure";
 
 import { BudgetExhaustedError, sessionUsageLimitStopEvents } from "./admission";
 import {
@@ -82,6 +84,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  isSandboxMachineReplacing,
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
@@ -198,7 +201,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     console.error(JSON.stringify({ message: "Local turn failure source locations", locations }));
   }
   const {
-    error,
     input,
     settings,
     db,
@@ -221,6 +223,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A turn whose own box replacement cannot be saved stops instead of
+  // waiting (see sandboxBoxNotSavedStop).
+  const error = await sandboxBoxNotSavedStop(deps);
   // A refused socket applies to the entire logical turn, including recovery
   // caused later by a lease, tool, or worker interruption rather than a model.
   const requestTurnRecovery: typeof persistSessionTurnRecovery = (
@@ -1799,4 +1804,41 @@ export function ownInterruptedCoreRequestRecovery(
   }
   if (failure.code && INTERRUPTED_RESPONSE_CODES.has(failure.code)) return interrupted;
   return failure.retryable === true ? failure : null;
+}
+
+/**
+ * A turn waiting on the replacement of a Modal box that could not start
+ * programs, released because a drain could not save that box (see
+ * releaseSandboxProcessStartReplacementWaiters), comes back fenced by the same
+ * rotation. It stops with clear copy instead of waiting on saves that keep
+ * failing, and so does a person's retry fenced by the same box; the box stays
+ * fenced, so no turn reuses it. Any other failure, including the attempt that
+ * requested the replacement, is returned as is.
+ */
+export async function sandboxBoxNotSavedStop(
+  deps: Pick<TurnFailureDeps, "error" | "db" | "input"> & {
+    attempt: Pick<TurnFailureDeps["attempt"], "turnId">;
+  },
+  reader: typeof readSessionTurnSandboxBoxNotSaved = readSessionTurnSandboxBoxNotSaved,
+): Promise<unknown> {
+  const { error, db, input, attempt } = deps;
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  // The box stays fenced by its rotation, or by a drain capture retrying.
+  if (
+    !transition ||
+    transition.reason === "provider_recovery_in_progress" ||
+    !attempt.turnId ||
+    isSandboxMachineReplacing(error)
+  ) {
+    return error;
+  }
+  const replaced = await reader(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    turnId: attempt.turnId,
+  }).catch(() => null);
+  return replaced &&
+    replaced.sandboxGroupId === transition.sandboxGroupId &&
+    replaced.leaseEpoch === transition.leaseEpoch
+    ? new SandboxBoxNotSavedError()
+    : error;
 }

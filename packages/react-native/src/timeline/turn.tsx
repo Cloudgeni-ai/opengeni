@@ -7,7 +7,9 @@ import {
   selectTurnSummaryFacets,
   toolDisplayName,
   turnSummaryFallbackLabel,
+  turnSummaryLiveMarkState,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { nativeLoadingPhrases } from "./composer-state";
@@ -37,10 +39,13 @@ import { useNativeTimelineMessages } from "./messages";
 /** Native counterpart of the web `TurnSummaryStatus` with a renderable preview. */
 export type NativeTurnStatus =
   | { kind: "worked"; durationMs?: number | undefined; label?: string | undefined }
+  | { kind: "paused"; durationMs?: number | undefined; label?: string | undefined }
   | {
       kind: "working" | "waiting";
       since?: string | undefined;
       label?: string | undefined;
+      /** Who the wait is on: `you` when it needs the reader. */
+      waitingOn?: "you" | undefined;
       preview?: ReactNode;
     };
 
@@ -110,6 +115,8 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /** The host's mark at the leading edge of a live status row (the timeline's `renderLiveMark`). */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   /** The turn has steps that are not loaded yet (opening the row reads them). */
   unloadedSteps?: boolean | undefined;
   /**
@@ -132,6 +139,7 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  renderLiveMark,
   unloadedSteps,
   onOpenStateChange,
   children,
@@ -231,6 +239,18 @@ export function TurnSummary({
         >{`${status.label ?? m.workedFor} ${formatElapsed(t, status.durationMs)}`}</Text>
       );
     }
+  } else if (status?.kind === "paused") {
+    // A paused turn's clock stopped where the pause began.
+    hasStatusText = true;
+    statusNode = (
+      <Text style={text}>
+        {status.durationMs !== undefined &&
+        Number.isFinite(status.durationMs) &&
+        status.durationMs >= 1000
+          ? `${status.label ?? m.paused} · ${formatElapsed(t, status.durationMs)}`
+          : (status.label ?? m.paused)}
+      </Text>
+    );
   } else if (status) {
     hasStatusText = true;
     const label = status.label ?? (status.kind === "working" ? m.working : m.waiting);
@@ -244,6 +264,13 @@ export function TurnSummary({
     );
   }
   const showLive = Boolean(liveHeader) && !open && !status;
+  const liveMarkState = renderLiveMark
+    ? turnSummaryLiveMarkState(
+        status
+          ? { kind: status.kind, waitingOn: "waitingOn" in status ? status.waitingOn : undefined }
+          : undefined,
+      )
+    : null;
   const tail = showLive
     ? ""
     : !hasStatusText && facetText.length === 0 && outcome !== "failed" && outcome !== "cancelled"
@@ -279,6 +306,17 @@ export function TurnSummary({
       <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
         <Icon name="chevron-right" size={14} color={theme.colors["fg-subtle"]} />
       </View>
+      {/* The host's own mark leads the live row; decorative, the words say it. */}
+      {renderLiveMark && liveMarkState ? (
+        <View
+          testID={`live-mark-${liveMarkState.kind}`}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={{ height: 20, flexShrink: 0, alignItems: "center", justifyContent: "center" }}
+        >
+          {renderLiveMark(liveMarkState)}
+        </View>
+      ) : null}
       {showMarker ? (
         <View
           style={{
@@ -371,7 +409,10 @@ export function TurnSummary({
       >
         {renderHeader(false)}
       </View>
-      {status && status.kind !== "worked" && !open && status.preview ? (
+      {status &&
+      (status.kind === "working" || status.kind === "waiting") &&
+      !open &&
+      status.preview ? (
         <Pressable
           onPress={() => toggle(true)}
           style={{ paddingBottom: 4, paddingLeft: 24, minWidth: 0 }}

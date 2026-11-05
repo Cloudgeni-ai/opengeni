@@ -106,10 +106,6 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
-  firstPartySecretValuesFromMeta,
-  maskSecretValuesInError,
-  rememberingSecretResolver,
-  SecretValueMemory,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -413,7 +409,6 @@ import {
   hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
-  withSecretValueMasking,
 } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
@@ -445,6 +440,7 @@ import {
   prepareSlackBotPost,
   resolveSlackBotConnectionForTool,
   sendSlackBotPost,
+  slackBotToolsAvailable,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
@@ -522,7 +518,60 @@ export type McpServerOptions = {
     | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
     | null
     | undefined;
+  /**
+   * Whether the workspace has an Opengeni Slack bot available, resolved by the
+   * route with `resolveSlackBotToolAvailability`. `false` leaves every
+   * `slack_bot_*` tool unlisted; omitted keeps them listed.
+   */
+  slackBotAvailable?: boolean | undefined;
 };
+
+/**
+ * Whether this grant could list any `slack_bot_*` tool at all: they need
+ * `connections:read`, and a session lists only what its signed selection holds.
+ * Lets the route skip the availability read when its answer changes nothing.
+ */
+export function grantMayListSlackBotTools(grant: AccessGrant): boolean {
+  if (!hasPermission(grant.permissions, "connections:read")) return false;
+  if (typeof grant.metadata?.["sessionId"] !== "string") return true;
+  const selection = grant.metadata?.["firstPartyMcpTools"];
+  return (
+    Array.isArray(selection) &&
+    selection.some((name) => typeof name === "string" && name.startsWith("slack_bot_"))
+  );
+}
+
+/**
+ * The `slackBotAvailable` fact for one first-party MCP surface. The bot tools
+ * are offered only where a bot is installed or shared, like other tools that
+ * are listed only when what they act on exists; selection still decides which
+ * of them a session holds.
+ */
+export async function resolveSlackBotToolAvailability(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+): Promise<boolean> {
+  if (!grantMayListSlackBotTools(grant)) return false;
+  return await slackBotToolsAvailable(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+  });
+}
+
+/**
+ * Whether one JSON-RPC message's answer depends on the bot tools being
+ * registered: a tool listing, or a call of a `slack_bot_*` tool. Other calls
+ * answer the same either way, so the route skips the availability read.
+ */
+export function mcpMessageNeedsSlackBotAvailability(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const { method, params } = message as { method?: unknown; params?: unknown };
+  if (method === "tools/list") return true;
+  if (method !== "tools/call") return false;
+  const name =
+    params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
+  return typeof name === "string" && name.startsWith("slack_bot_");
+}
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 // A person's message to a session on someone else's personal machine waits
@@ -1065,24 +1114,7 @@ class PolicyMcpServer extends McpServer {
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
     return super.registerTool(name, config, ((...args: unknown[]) => {
-      const dispatch = () => dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
-      // A worker call whose arguments carried resolved secret values names
-      // them in `_meta`: everything this call stores and returns has them
-      // replaced by their references (docs/secrets.md, Masking).
-      // Only an agent attempt's worker sends them.
-      const memory =
-        this.grant.principalKind === "agent_attempt"
-          ? firstPartyCallSecretValues(args.at(-1))
-          : null;
-      if (!memory) return dispatch();
-      return withSecretValueMasking(memory, async () => {
-        try {
-          // A tool result is data: a tool-shaped record in it is masked in full.
-          return memory.maskData(await dispatch(), "first_party_result");
-        } catch (error) {
-          throw maskSecretValuesInError(error, memory);
-        }
-      });
+      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
     }) as ToolCallback<InputArgs>);
   }
 
@@ -1100,23 +1132,6 @@ class PolicyMcpServer extends McpServer {
         }),
       )
       .disable();
-  }
-}
-
-/** The masking memory for one first-party call's resolved values, if it has any. */
-function firstPartyCallSecretValues(extra: unknown): SecretValueMemory | null {
-  try {
-    const meta =
-      extra !== null && typeof extra === "object"
-        ? (extra as { _meta?: unknown })._meta
-        : undefined;
-    const entries = firstPartySecretValuesFromMeta(meta);
-    if (entries.length === 0) return null;
-    const memory = new SecretValueMemory();
-    for (const entry of entries) memory.remember(entry.value, entry.label);
-    return memory.size > 0 ? memory : null;
-  } catch {
-    return null;
   }
 }
 
@@ -1551,7 +1566,10 @@ export function buildOpenGeniMcpServer(
     registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
-  registerSlackBotTools(server, deps, grant, sessionId, json);
+  // Only where an Opengeni Slack bot is installed or shared: elsewhere the
+  // tools can only fail, and listing them hides the Slack Connect card.
+  if (options.slackBotAvailable !== false)
+    registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
 
   // Orchestration, secret, and GitHub status tools are permission-gated
@@ -2937,15 +2955,15 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
-        note: z4.string().max(1000).optional(),
-        reason: z4
+        note: z4
           .string()
-          .max(500)
+          .max(1000)
           .optional()
-          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
+          .describe("Context the other agent needs; it starts a new chat and can't see this one."),
+        reason: z4.string().max(500).optional().describe("Why, in a few words. Logged only."),
       },
     },
     async ({ agent, note, reason }) => {
@@ -2959,7 +2977,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2973,7 +2991,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
@@ -4847,7 +4865,6 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
         const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
@@ -4855,51 +4872,38 @@ function registerFleetTools(
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
           claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-            ? rememberingSecretResolver(
-                await createRunOnSecretResolver(
-                  deps,
-                  { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-                  (subjectId) =>
-                    vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
-                ),
-                resolvedValues,
+            ? await createRunOnSecretResolver(
+                deps,
+                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                (subjectId) =>
+                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
               )
             : null;
-        // Output that shows a value this call resolved shows its reference
-        // instead, here and in anything the call stores (docs/secrets.md, Masking).
-        // Profile values resolve through the same remembering resolver, so
-        // they are masked too.
-        return await withSecretValueMasking(resolvedValues, async () =>
-          json(
-            resolvedValues.mask(
-              await withUserSetupCard(
-                await runOnSandbox(services, await fleetContext(), target, typedOp, {
-                  ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-                  ...(secretResolver ? { secretResolver } : {}),
-                  // The session's credential profile reaches run_on commands too.
-                  ...(secretResolver && claims && typedOp.kind === "exec"
-                    ? {
-                        credentials: createSessionCredentialEnvironment({
-                          db: deps.db,
-                          workspaceId: grant.workspaceId,
-                          sessionId: claims.sessionId,
-                          resolver: secretResolver,
-                        }),
-                      }
-                    : {}),
-                }),
-                userSetupCard("run_on", target),
-              ),
-              "run_on_result",
-            ),
+        return json(
+          await withUserSetupCard(
+            await runOnSandbox(services, await fleetContext(), target, typedOp, {
+              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+              ...(secretResolver ? { secretResolver } : {}),
+              // The session's credential profile reaches run_on commands too.
+              ...(secretResolver && claims && typedOp.kind === "exec"
+                ? {
+                    credentials: createSessionCredentialEnvironment({
+                      db: deps.db,
+                      workspaceId: grant.workspaceId,
+                      sessionId: claims.sessionId,
+                      resolver: secretResolver,
+                    }),
+                  }
+                : {}),
+            }),
+            userSetupCard("run_on", target),
           ),
         );
       } catch (error) {
         if (isSecretReferenceError(error)) {
           return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
         }
-        // A failure that quotes a value this call resolved shows its reference.
-        throw maskSecretValuesInError(error, resolvedValues);
+        throw error;
       }
     },
   );
@@ -7259,6 +7263,10 @@ function registerWorkspaceOrchestrationTools(
               reasoningEffort: result.reasoningEffort,
               latencyMode: result.latencyMode,
               effectiveFrom: result.effectiveFrom,
+              // The turn that was waiting for subscription capacity continues on this model now.
+              ...(result.releasedCapacityWaitTurnId
+                ? { capacityWaitingTurnContinuesNow: result.releasedCapacityWaitTurnId }
+                : {}),
             },
             nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
           }),

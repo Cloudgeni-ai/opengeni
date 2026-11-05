@@ -58,6 +58,27 @@ const workerDeathTestTimeoutMs = 360_000;
 // ceiling that covers that scheduling variance without changing any runtime
 // timeout, retry contract, or behavioral assertion.
 const temporalWorkflowTestTimeoutMs = 60_000;
+
+// A wait that baselined away a wake would hang until its far deadline; fail
+// such a regression well inside the test ceiling with a clear message.
+const staleWaitFailFastMs = 30_000;
+
+async function resultWithin(handle: { result: () => Promise<unknown> }, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      handle.result(),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`workflow still waiting after ${ms}ms: a wake was lost`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 // Capacity-wait protocol cases assert wake/reconcile ordering, not the herd
 // spread. The test-only workflow input disables the up-to-30s/60s jitter so a
 // real-server run does not pay it on every wake (the bound itself is unit
@@ -71,20 +92,6 @@ const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", im
   .pathname;
 const legacySandboxReaperWorkflowPath = new URL(
   "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
-  import.meta.url,
-).pathname;
-// Recorded with the session workflow immediately before
-// session-capacity-wake-jitter-v1: a capacity wait cut short by a capacity
-// signal, then a waiter whose reset timer fired. Delete it only once that patch
-// is deprecated and no pre-jitter capacity wait can still be replayed.
-const legacySessionCapacityWaitHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
-  import.meta.url,
-).pathname;
-// Recorded from base6609fa6f: an authenticated settled owner still took the
-// unconditional 30-second observer timer before this command patch existed.
-const legacySettledOwnerHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-settled-owner-observation-history.json",
   import.meta.url,
 ).pathname;
 
@@ -228,6 +235,248 @@ describe("Temporal workflow integration", () => {
         admission.approve("approval-event");
         await handle.signal("approvalDecision", "approval-event");
         await waitFor(() => calls.length === 2);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "resumes when the approval commits and signals while the parking peek is in flight",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const client = new Client({ connection });
+      const calls: Array<{ trigger: unknown }> = [];
+      const admission = createTurnAdmission([queuedTurn("event-1")], async (input) => {
+        calls.push({ trigger: input.trigger });
+        return { status: calls.length === 1 ? "requires_action" : "idle" };
+      });
+      let racedPeeks = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        // The first peek after the turn parks reads durable state before the
+        // decision commits, then the decision commits and its signal reaches
+        // the workflow before this peek's result does: the interleaving that
+        // left a production approval waiting forever.
+        peekSessionWork: async () => {
+          const observed = await admission.activities.peekSessionWork();
+          if (observed.kind === "approval-wait" && racedPeeks === 0) {
+            racedPeeks += 1;
+            admission.approve("approval-event");
+            await client.workflow
+              .getHandle(workflowId)
+              .signal("approvalDecision", "approval-event");
+            // Let the workflow handle the signal before this result arrives.
+            await Bun.sleep(1_000);
+          }
+          return observed;
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        // No other wake arrives: the decision's own signal must resume it.
+        await resultWithin(handle, staleWaitFailFastMs);
+        expect(racedPeeks).toBe(1);
+        expect(calls).toEqual([
+          { trigger: { kind: "next" } },
+          { trigger: { kind: "approval", triggerEventId: "approval-event" } },
+        ]);
+        const history = await handle.fetchHistory();
+        const events = history.events ?? [];
+        const eventId = (event: (typeof events)[number]) => Number(event.eventId);
+        const scheduled = events.filter((event) => event.activityTaskScheduledEventAttributes);
+        const firstTurn = scheduled.find(
+          (event) =>
+            event.activityTaskScheduledEventAttributes?.activityType?.name === "runAgentTurn",
+        );
+        // The peek that parked the turn is the first one scheduled after it.
+        const parkingPeek = scheduled.find(
+          (event) =>
+            eventId(event) > eventId(firstTurn!) &&
+            event.activityTaskScheduledEventAttributes?.activityType?.name === "peekSessionWork",
+        );
+        const parkingPeekCompleted = events.find(
+          (event) =>
+            Number(event.activityTaskCompletedEventAttributes?.scheduledEventId ?? -1) ===
+            eventId(parkingPeek!),
+        );
+        const signal = events.find(
+          (event) =>
+            event.workflowExecutionSignaledEventAttributes?.signalName === "approvalDecision",
+        );
+        // The signal really reached the workflow before the stale peek result.
+        expect(eventId(signal!)).toBeLessThan(eventId(parkingPeekCompleted!));
+        expect(patchIds(history)).toContain("session-approval-wait-pre-peek-baseline-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "a Pause accepted while a capacity-wait peek is in flight ends the wait at once",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const client = new Client({ connection });
+      const attemptId = crypto.randomUUID();
+      // The provider's reset is far away: only the interruption can end it.
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 1,
+        nextCheckAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        wakeRevision: 1,
+      };
+      let phase: "capacity" | "interrupted" | "paused" = "capacity";
+      let racedPeeks = 0;
+      const settlements: unknown[] = [];
+      const reconciliations: unknown[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        // The peek reads the durable waiter, then a Pause commits and its
+        // signal reaches the workflow before this stale result does.
+        peekSessionWork: async () => {
+          if (phase === "capacity") {
+            if (racedPeeks === 0) {
+              racedPeeks += 1;
+              phase = "interrupted";
+              await client.workflow.getHandle(workflowId).signal("sessionControl");
+              await Bun.sleep(1_000);
+            }
+            return { kind: "capacity-wait", ref: waiter } as const;
+          }
+          if (phase === "interrupted") {
+            return { kind: "interruption-pending", attemptId } as const;
+          }
+          return { kind: "idle" } as const;
+        },
+        settleSessionInterruptions: async (settlement: unknown) => {
+          settlements.push(settlement);
+          phase = "paused";
+          return { action: "paused" as const };
+        },
+        reconcileCodexCapacityWait: async (reconciliation: unknown) => {
+          reconciliations.push(reconciliation);
+          return { action: "stale" };
+        },
+        runAgentTurn: async () => {
+          throw new Error("a paused capacity wait must not dispatch a turn");
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, ...noCapacityWakeJitter }],
+        });
+        await resultWithin(handle, staleWaitFailFastMs);
+        expect(racedPeeks).toBe(1);
+        expect(settlements).toHaveLength(1);
+        expect(reconciliations).toHaveLength(0);
+        const history = await handle.fetchHistory();
+        expect(patchIds(history)).toContain("session-capacity-wait-pre-peek-baseline-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "a message accepted while a recovery-backoff peek is in flight ends the backoff at once",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const client = new Client({ connection });
+      let phase: "backoff" | "runnable" | "done" = "backoff";
+      let racedPeeks = 0;
+      const turns: string[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        // The peek sees the recovering turn's backoff and no newer message;
+        // the person's message then commits and signals before it returns.
+        peekSessionWork: async () => {
+          if (phase === "backoff") {
+            racedPeeks += 1;
+            phase = "runnable";
+            await client.workflow.getHandle(workflowId).signal("userMessage", "event-2");
+            await Bun.sleep(1_000);
+            return {
+              kind: "admission-blocked",
+              reason: "recovery_backoff",
+              ref: {
+                version: 1,
+                notBefore: new Date(Date.now() + 10 * 60_000).toISOString(),
+                afterSequence: 1,
+              },
+            } as const;
+          }
+          if (phase === "runnable") return { kind: "runnable" } as const;
+          return { kind: "idle" } as const;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          turns.push(input.attemptId);
+          phase = "done";
+          return { status: "idle" as const, turnId: "recovered-turn", attemptId: input.attemptId };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        });
+        await resultWithin(handle, staleWaitFailFastMs);
+        expect(racedPeeks).toBe(1);
+        expect(turns).toHaveLength(1);
+        const history = await handle.fetchHistory();
+        expect(patchIds(history)).toContain("session-recovery-backoff-pre-peek-baseline-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
       } finally {
         worker.shutdown();
         await run;
@@ -498,28 +747,6 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "replays pre-recovery settled-owner observation without adding a close command",
-    async () => {
-      const history = await Bun.file(legacySettledOwnerHistoryPath).json();
-      expect(patchIds(history)).toContain("session-safe-control-observation-v1");
-      expect(patchIds(history)).not.toContain("session-settled-owner-recovery-v1");
-      expect(
-        history.events.some(
-          (event: any) => event.timerStartedEventAttributes?.startToFireTimeout === "30s",
-        ),
-      ).toBe(true);
-      const workflowId =
-        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
-      await Worker.runReplayHistory(
-        { workflowsPath: workflowDefinitionsPath },
-        history,
-        workflowId,
-      );
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
     "settled-current-owner recovery survives continue-as-new with the original owner run and one same-turn successor",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -702,57 +929,6 @@ describe("Temporal workflow integration", () => {
       }
     },
     quiescenceReceiptTestTimeoutMs,
-  );
-
-  test(
-    "replays a pre-safe-observation peek without adding the new activity input",
-    async () => {
-      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      const workflowId = `wf-${crypto.randomUUID()}`;
-      const calls: unknown[] = [];
-      const worker = await Worker.create({
-        connection: nativeConnection,
-        namespace: "default",
-        taskQueue,
-        workflowsPath: new URL(
-          "../../apps/worker/test/fixtures/legacy-session-observer-workflow.ts",
-          import.meta.url,
-        ).pathname,
-        activities: {
-          peekSessionWork: async (input: unknown) => {
-            calls.push(input);
-            return { kind: "admission-blocked" };
-          },
-        },
-      });
-      const run = worker.run();
-      try {
-        const scope = { ...workflowScope(), sessionId: crypto.randomUUID() };
-        const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
-          taskQueue,
-          workflowId,
-          args: [scope],
-        });
-        await handle.result();
-        expect(calls).toEqual([
-          {
-            workspaceId: scope.workspaceId,
-            sessionId: scope.sessionId,
-            includeAdmissionFence: true,
-          },
-        ]);
-        await Worker.runReplayHistory(
-          { workflowsPath: workflowDefinitionsPath },
-          await handle.fetchHistory(),
-          workflowId,
-        );
-      } finally {
-        worker.shutdown();
-        await run;
-      }
-    },
-    temporalWorkflowTestTimeoutMs,
   );
 
   test(
@@ -3026,36 +3202,6 @@ describe("Temporal workflow integration", () => {
         worker.shutdown();
         await run;
       }
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
-    "replays a pre-jitter capacity wait recorded by the previous worker",
-    async () => {
-      // Forward rolling direction: a patched worker must replay every capacity
-      // wait an older worker recorded (signal-cut timer, then a fired timer)
-      // without adding the jitter timers. The reverse direction is not
-      // supported: an older worker fails a history that carries the marker.
-      const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
-        events: Array<{
-          workflowExecutionStartedEventAttributes?: { workflowId?: string };
-          markerRecordedEventAttributes?: unknown;
-          timerStartedEventAttributes?: unknown;
-          eventType?: string;
-        }>;
-      };
-      const recordedPatches = patchIds(history);
-      expect(recordedPatches).toContain("session-safe-control-observation-v1");
-      expect(recordedPatches).not.toContain("session-capacity-wake-jitter-v1");
-      expect(history.events.filter((event) => event.timerStartedEventAttributes)).toHaveLength(3);
-      const workflowId =
-        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
-      await Worker.runReplayHistory(
-        { workflowsPath: workflowDefinitionsPath },
-        history,
-        workflowId,
-      );
     },
     temporalWorkflowTestTimeoutMs,
   );

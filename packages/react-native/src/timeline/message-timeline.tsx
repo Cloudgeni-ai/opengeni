@@ -7,12 +7,14 @@ import type {
 import {
   buildTimeline,
   groupTimeline,
+  useTimelinePauses,
   type AgentMessageItem,
   type AuthNeededItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
   type TimelineItem,
+  type TimelineLivePause,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import {
@@ -35,9 +37,11 @@ import {
   readableWorkShowsPreview,
   readableWorkStatus,
   SESSION_STATUS_PRESENTATION,
+  sessionStatusItemDisplayStatus,
   timelineGroupContainsPresentedImage,
   timelineGroupIndexAtSequence,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react/timeline-model";
 import {
   useCallback,
@@ -133,7 +137,20 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   items?: TimelineItem[] | undefined;
   events?: SessionEvent[] | undefined;
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause (`timelineLivePause(session.effectiveControl)`).
+   * A turn still open under a pause reads "Paused" with its clock stopped.
+   */
+  pause?: TimelineLivePause | null | undefined;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20pt); it is hidden from screen readers, so the row's words
+   * still say what is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   /** Replace the preparing visual (the web orb) — e.g. a product character. */
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
@@ -211,7 +228,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     () => props.items ?? buildTimeline(t, props.events ?? []),
     [t, props.items, props.events],
   );
-  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
+  const pauses = useTimelinePauses(props.events, props.pause);
+  const groups = useMemo(
+    () => groupTimeline(t, items, { readableTurns: true, pauses }),
+    [t, items, pauses],
+  );
   const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
@@ -617,6 +638,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const context: GroupContext = {
     turnsWithOutput,
     facets: props.facets,
+    renderLiveMark: props.renderLiveMark,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
@@ -832,6 +854,7 @@ function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPr
 type GroupContext = {
   turnsWithOutput: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
@@ -919,13 +942,17 @@ function TimelineGroupView({
                   kind: "waiting",
                   since: base.since,
                   label: base.label,
+                  waitingOn: base.waitingOn,
                   preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
                 }
-              : { kind: "worked", durationMs: base.durationMs, label: base.label };
+              : base.kind === "paused"
+                ? { kind: "paused", durationMs: base.durationMs, label: base.label }
+                : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary
             items={group.items}
             status={status}
+            renderLiveMark={context.renderLiveMark}
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
@@ -1074,7 +1101,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
         />
       );
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[sessionStatusItemDisplayStatus(item)];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}

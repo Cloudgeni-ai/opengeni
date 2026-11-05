@@ -23,3 +23,18 @@ test("recognizes only the complete Connected Machine uncertainty receipt", () =>
     expect(isConnectedMachineOutcomeUnknownOutput(other)).toBe(false);
   }
 });
+
+test("recognizes the same uncertainty receipt from the chat's workspace machine", () => {
+  const box = receipt.replace("[connected machine] ", "[workspace machine] ");
+  expect(isConnectedMachineOutcomeUnknownOutput(box)).toBe(true);
+  expect(isConnectedMachineOutcomeUnknownOutput(box.replace("unknown — ", "nothing ran — "))).toBe(
+    false,
+  );
+  expect(isConnectedMachineOutcomeUnknownOutput(`[workspace] ${receipt.slice(20)}`)).toBe(false);
+});
+
+test("still recognizes a receipt stored under the workspace machine's earlier name", () => {
+  const stored = receipt.replace("[connected machine] ", "[cloud computer] ");
+  expect(isConnectedMachineOutcomeUnknownOutput(stored)).toBe(true);
+  expect(isConnectedMachineOutcomeUnknownOutput(`[cloud] ${receipt.slice(20)}`)).toBe(false);
+});

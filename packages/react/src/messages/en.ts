@@ -34,6 +34,8 @@ export const englishMessages = {
   "approvalSurface.sendingAnswer": "Sending answer…",
   /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
   "approvalSurface.serverAsks": "{server} asks",
+  /** A waiting action whose review offers no decision yet; a Try again button follows. */
+  "approvalSurface.thisActionCanTBeDecided": "This action can't be decided yet.",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -1143,6 +1145,7 @@ export const englishMessages = {
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
   "composer.appShotSummary": "{app} · App-shot",
+  "composer.imageTag": "Image {number}",
   "composer.appShotTextIncluded":
     "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
   "composer.appShotNoText": "Only the screenshot: this window shared no text.",
@@ -2104,7 +2107,15 @@ export const englishMessages = {
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
+  "lib.format.newChatModelUnavailable":
+    "This model isn't available to you. Choose another model. Your message is saved.",
+  "lib.format.modelPolicyCredits":
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+  "lib.format.modelPolicyRefused":
+    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
   "lib.format.now": "now",
+  "lib.format.speedUnavailable":
+    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -2180,6 +2191,8 @@ export const englishMessages = {
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
   "lib.providerRecovery.theSandboxServiceIsTemporarily":
     "The sandbox service is temporarily unavailable",
+  "lib.providerRecovery.theWorkspaceMachineWasRestarted":
+    "The workspace machine couldn't start programs, so it was restarted",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
@@ -2195,8 +2208,6 @@ export const englishMessages = {
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",
   "machineCard.attach": "Attach",
   "machineCard.cpuLast15m": "CPU · last 15m",
-  "machineCard.display": "display",
-  "machineCard.headless": "headless",
   "machineCard.lastSeen": "Last seen",
   "machineCard.live": "Live",
   "machineCard.neverConnected": "Never connected",
@@ -2456,7 +2467,7 @@ export const englishMessages = {
   "machinesDashboard.retrying": "Retrying…",
   "machineStatusPill.consentRequired": "Consent required",
   "machineStatusPill.enrolling": "Enrolling",
-  "machineStatusPill.noDisplay": "No display",
+  "machineStatusPill.noDisplay": "No screen",
   "machineStatusPill.offline": "Offline",
   "machineStatusPill.online": "Online",
   "machineStatusPill.reconnecting": "Reconnecting",
@@ -2514,6 +2525,7 @@ export const englishMessages = {
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
+  "meetings.detailPage.upgradeToPro": "Upgrade to Pro",
   "meetings.detailPage.auto": "Auto",
   "meetings.detailPage.backToMeetings": "Back to Meetings",
   "meetings.detailPage.canTLoadThePreview": "Can't show the live text right now",
@@ -2935,6 +2947,8 @@ export const englishMessages = {
     "The credit allowance is used up for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
   "meetings.recordings.errorMonthlyCostLimit":
     "This organization has reached its monthly spending limit. An admin can raise it, or transcribe with a model that doesn't use credits.",
+  "meetings.recordings.errorSubscriptionApiUnavailable":
+    "Connected subscriptions aren't available through the API. Choose a credit-billed model.",
   "meetings.recordings.errorPolicyBlocked":
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
@@ -3373,6 +3387,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -3730,6 +3745,7 @@ export const englishMessages = {
   "native.timeline.messages.onAMachine": "On a machine",
   "native.timeline.messages.output": "Output",
   "native.timeline.messages.pauseGoal": "Pause goal",
+  "native.timeline.messages.paused": "Paused",
   "native.timeline.messages.pin": "Pin",
   "native.timeline.messages.pinned": "Pinned",
   "native.timeline.messages.proposedKnowledge": "Proposed knowledge",
@@ -3987,6 +4003,8 @@ export const englishMessages = {
     "This tab cannot safely continue with the new server version. Reload it before sending or controlling work.",
   "providerRecoveryNotice.theTurnContinuesAutomaticallyAs":
     "The turn continues automatically as soon as the sandbox is ready.",
+  "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
+    "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
     "Your message is saved. {product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
@@ -4250,11 +4268,18 @@ export const englishMessages = {
   "sandboxFiles.wakingWorkspace": "Waking workspace",
   "sandboxFiles.workspaceIsResting": "Workspace is resting",
   "sandboxLabelModel.cloudSandbox": "Cloud sandbox",
+  "sandboxLabelModel.linux": "Linux",
   "sandboxLabelModel.localSandbox": "Local sandbox",
+  "sandboxLabelModel.mac": "Mac",
+  "sandboxLabelModel.noScreen": "No screen",
   "sandboxLabelModel.noSandbox": "No sandbox",
   "sandboxLabelModel.onlyMe": "Only me",
   "sandboxLabelModel.organization": "Organization",
+  "sandboxLabelModel.screenNotShared": "Screen not shared",
+  "sandboxLabelModel.screenShared": "Agents can use its screen",
   "sandboxLabelModel.thisComputer": "this computer",
+  "sandboxLabelModel.thisComputerName": "This computer",
+  "sandboxLabelModel.windows": "Windows",
   "sandboxLabelModel.workspace": "Workspace",
   "sandboxTerminal.clear": "Clear",
   "sandboxTerminal.connecting": "connecting",
@@ -4478,6 +4503,10 @@ export const englishMessages = {
   "sessionAgentsModel.needsYou": "Needs you",
   "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  /** The agents chip's detail: how many helper agents are paused. */
+  "sessionAgentsModel.pausedCount_other": "{count} paused",
+  /** The agents chip's detail: how many helper agents are running. */
+  "sessionAgentsModel.runningCount_other": "{count} running",
   "sessionAgentsModel.stuck": "Stuck",
   "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
@@ -4583,6 +4612,26 @@ export const englishMessages = {
     "Paused by the agent: it is waiting on a human decision before continuing.",
   "sessionChrome.pausedManuallyByAPerson":
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
+  // The goal pill's short pause reasons, shown after "Paused · ". Keep each to a word or two:
+  // the goal panel carries the full explanation.
+  /** The agent paused its own goal to wait for a person's decision. */
+  "sessionChrome.pausedReasonAgent": "agent",
+  /** The deployment's usage allowance ran out. */
+  "sessionChrome.pausedReasonAllowance": "allowance",
+  /** The monthly model spending limit was reached. */
+  "sessionChrome.pausedReasonBudget": "budget",
+  /** The goal reached its cap of automatic continuations; new input resumes it. */
+  "sessionChrome.pausedReasonCap": "cap",
+  /** The workspace ran out of credits. */
+  "sessionChrome.pausedReasonCredits": "credits",
+  /** An admission limit or the application's usage policy paused the goal. */
+  "sessionChrome.pausedReasonLimits": "limits",
+  /** A person (or an API call) paused the goal. */
+  "sessionChrome.pausedReasonManually": "manually",
+  /** The selected model is unavailable. */
+  "sessionChrome.pausedReasonModel": "model",
+  /** A model policy blocks the selected model. */
+  "sessionChrome.pausedReasonPolicy": "policy",
   "sessionChrome.pausedSuffix": "Paused · {suffix}",
   "sessionChrome.placingInQueue": "Placing in queue",
   "sessionChrome.previousWorkStopping": "Previous work stopping",
@@ -4816,6 +4865,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",
@@ -5470,6 +5520,8 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.repositoryPreparationInterrupted":
     "Repository preparation interrupted",
   "timeline.platformActivityPresentation.repositoryReady": "Repository ready",
+  "timeline.platformActivityPresentation.restartingTheWorkspaceMachine":
+    "Restarting the workspace machine",
   "timeline.platformActivityPresentation.runtimeModelPreparationFailed":
     "Runtime/model preparation failed",
   "timeline.platformActivityPresentation.runtimeModelPreparationInterrupted":
@@ -5510,6 +5562,11 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.workerStarted": "Worker started",
   "timeline.platformActivityPresentation.workerStartupFailed": "Worker startup failed",
   "timeline.platformActivityPresentation.workerWaitInterrupted": "Worker wait interrupted",
+  "timeline.platformActivityPresentation.workspaceMachineRestarted": "Workspace machine restarted",
+  "timeline.platformActivityPresentation.workspaceMachineRestartFailed":
+    "Workspace machine restart failed",
+  "timeline.platformActivityPresentation.workspaceMachineRestartInterrupted":
+    "Workspace machine restart interrupted",
   "timeline.platformActivityRow.command": "Command",
   "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":
@@ -5520,9 +5577,17 @@ export const englishMessages = {
   "timeline.projection.approvalNeededTheTurnIs":
     "Approval needed — the turn is paused until someone decides.",
   "timeline.projection.details": "Details",
+  "timeline.projection.filesChangedAfterCouldNotBeSaved":
+    "Files changed after {time} couldn't be saved before this chat's workspace machine shut down.",
+  "timeline.projection.filesCouldNotBeSaved":
+    "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
+  "timeline.projection.restoredFromOlderSave":
+    "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.savedWithoutRebuildableFolders":
+    "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":
     "Switched to another subscription account.",
@@ -5562,6 +5627,7 @@ export const englishMessages = {
   "timeline.screenshotLightbox.zoomOut": "Zoom out",
   "timeline.shared.bytesOmitted_one": "{bytes} byte omitted",
   "timeline.shared.bytesOmitted_other": "{bytes} bytes omitted",
+  "timeline.shared.copyStep": "Copy step",
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",
@@ -6072,6 +6138,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",
   "timeline.turnSummary.waiting": "Waiting",

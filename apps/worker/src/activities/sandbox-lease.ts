@@ -26,7 +26,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { isProviderCommandObservationUnavailableError } from "@opengeni/runtime";
-import { Context } from "@temporalio/activity";
+import { ApplicationFailure, Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
   accrueWarmSeconds,
@@ -81,6 +81,7 @@ import {
   listEndedEpochSandboxSetupUncertainties,
   reconcileCompletedSandboxSetup,
   readLease,
+  releaseSandboxProcessStartReplacementWaiters,
   settleEndedEpochWorkspaceBlockers,
   readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
@@ -118,6 +119,7 @@ import {
 import {
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
   sandboxArchiveCaptureTimeoutMs,
+  effectiveSandboxDrainProviderSnapshotTimeoutMs,
   sandboxDeadlineMandatoryCaptureLeadMs,
   sandboxProviderMaxRemainingLifetimeMs,
   sandboxWarmRateMicrosPerSecond,
@@ -141,6 +143,10 @@ import {
   // reuse the runtime's provider-ready proof without ever cold-restoring.
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  findRebuildableWorkspacePaths,
+  workspaceSizeFromArchiveDescriptor,
   type VerifiedWorkspaceArchivePayload,
   type VerifiedHostWorkspaceArchive,
   cancelSelfhostedOp,
@@ -204,6 +210,7 @@ import {
   SANDBOX_REAPER_CHILD_DISPATCH_LIMIT,
   type SandboxDrainActivityInput,
   type SandboxLeaseSweepMaintenanceInput,
+  sandboxDrainCaptureRetryDelayMs,
   sandboxDrainTimeoutClass,
   sandboxIdleCheckpointWorkflowId,
   type SandboxIdleCheckpointActivityInput,
@@ -220,6 +227,9 @@ import {
   recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
+  recordSandboxDrainCaptureFailure,
+  recordSandboxDrainCaptureFallback,
+  recordSandboxWorkspaceSnapshotSize,
   recordOpenSandboxKubernetesInventoryGauges,
   recordRetainedProcessInventoryGauges,
   recordRetainedProcessReconciliation,
@@ -324,6 +334,10 @@ export type ProviderTerminationOutcome = {
   /** True only when a definitive provider NotFound proved the cloud box had
    *  already vanished before this drain could capture its workspace. */
   providerMissingBeforeCapture: boolean;
+  /** The drain stopped the box itself after its snapshots kept failing, so
+   *  the box's changes since its last save are lost (reported, with
+   *  `providerMissingBeforeCapture`, as a loss before capture). */
+  captureAbandoned?: boolean;
 };
 
 /** `discard`: the group ended (a compute sandbox whose chat or workspace was
@@ -351,6 +365,7 @@ export type TerminateBoxFn = (
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
   beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
+  drainFallback?: SandboxDrainCaptureFallback | null,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -479,6 +494,22 @@ export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
 export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = CONNECTED_COMMAND_CLAIM_TTL_MS;
+
+const drainCaptureFailures = new WeakSet<object>();
+
+/** Record that this drain failed because the box's workspace could not be saved. */
+function markSandboxDrainCaptureFailure(error: unknown): void {
+  if (typeof error === "object" && error !== null) drainCaptureFailures.add(error);
+}
+
+/**
+ * Whether a drain failed because the box's workspace could not be saved (the
+ * provider capture rejected or timed out), as opposed to a failure after a
+ * save, such as termination or publication.
+ */
+export function isSandboxDrainCaptureFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && drainCaptureFailures.has(error);
+}
 
 export class SandboxProviderCaptureTimeoutError extends Error {
   readonly name = "SandboxProviderCaptureTimeoutError";
@@ -610,7 +641,106 @@ type SandboxDrainCaptureAttempt = {
 };
 
 class SandboxDrainRecoveryDeferredError extends Error {
-  readonly name = "SandboxDrainRecoveryDeferredError";
+  readonly name: string = "SandboxDrainRecoveryDeferredError";
+}
+
+/** A full drain snapshot of this lease epoch failed recently: wait out its
+ * capped exponential backoff before starting another one. */
+class SandboxDrainCaptureBackoffError extends SandboxDrainRecoveryDeferredError {
+  override readonly name: string = "SandboxDrainCaptureBackoffError";
+  constructor(
+    message: string,
+    readonly retryAfterMs: number,
+  ) {
+    super(message);
+  }
+}
+
+/** Time left in this lease's drain snapshot backoff, or zero. No backoff once
+ * the provider deadline is inside the mandatory pre-deadline save window, and
+ * none that would run past that window's start: there, waiting would only let
+ * the provider end the box uncaptured. */
+function sandboxDrainCaptureBackoffRemainingMs(
+  lease: Pick<LeaseSnapshot, "drainCaptureFailures" | "providerDeadlineAt">,
+  settings: Parameters<typeof sandboxDeadlineMandatoryCaptureLeadMs>[0],
+  nowMs = Date.now(),
+): number {
+  const failures = lease.drainCaptureFailures;
+  if (!failures || failures.count <= 0 || !failures.lastFailedAt) return 0;
+  const backoffMs = Math.max(
+    0,
+    failures.lastFailedAt.getTime() + sandboxDrainCaptureRetryDelayMs(failures.count) - nowMs,
+  );
+  if (!lease.providerDeadlineAt) return backoffMs;
+  const windowStartsInMs =
+    lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) - nowMs;
+  return Math.min(backoffMs, Math.max(0, windowStartsInMs));
+}
+
+/** Full drain snapshots of one lease epoch that must fail before the drain
+ * tries a reduced save instead. */
+export const SANDBOX_DRAIN_REDUCED_CAPTURE_AFTER_FAILURES = 3;
+/** Outside the pre-deadline save window, drain snapshots must also have kept
+ * failing this long before a reduced save: it gives up rebuildable folders,
+ * which a passing provider problem does not justify. */
+export const SANDBOX_DRAIN_REDUCED_CAPTURE_AFTER_FAILING_MS = 15 * 60_000;
+/** How long a lease epoch's drain snapshots may keep failing before a failed
+ * reduced save stops the box instead of retrying. Inside the pre-deadline
+ * save window there is no such grace: the provider ends the box soon anyway. */
+export const SANDBOX_DRAIN_ABANDON_AFTER_FAILING_MS = 60 * 60_000;
+/** Largest workspace (after leaving rebuildable folders out) a reduced save
+ * reads into worker memory and uploads to object storage. */
+export const SANDBOX_DRAIN_REDUCED_CAPTURE_MAX_BYTES = 256 * 1024 * 1024;
+/** Without object storage the reduced save is stored inline in the lease. */
+export const SANDBOX_DRAIN_REDUCED_INLINE_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A drain's bounded answer to Modal native snapshots that keep failing.
+ * `reduced`: save a portable archive without rebuildable folders (see
+ * `REBUILDABLE_WORKSPACE_DIRECTORY_NAMES`) instead of another full snapshot.
+ * `abandonOnFailure`: if that save fails, times out or cannot be stored, stop
+ * the box deliberately rather than keep it draining until the provider ends
+ * it. `abandonWhenUnavailable`: stop it too when no reduced save can be tried
+ * at all; only inside the save window, where the provider ends the box soon
+ * anyway. Elsewhere a full snapshot is still the only chance, so it retries.
+ */
+export type SandboxDrainCaptureFallback = {
+  reduced: true;
+  abandonOnFailure: boolean;
+  abandonWhenUnavailable: boolean;
+  /** The provider ends the box soon: a reduced save that is still running
+   * when the wait ends also stops it, instead of being left to finish. */
+  inSaveWindow: boolean;
+};
+
+export function sandboxDrainCaptureFallback(
+  lease: Pick<LeaseSnapshot, "drainCaptureFailures" | "providerDeadlineAt">,
+  settings: Parameters<typeof sandboxDeadlineMandatoryCaptureLeadMs>[0],
+  backend: string,
+  nowMs = Date.now(),
+): SandboxDrainCaptureFallback | null {
+  if (backend !== "modal") return null;
+  const failures = lease.drainCaptureFailures;
+  const count = failures?.count ?? 0;
+  if (count <= 0) return null;
+  const inSaveWindow =
+    lease.providerDeadlineAt !== null &&
+    lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) <= nowMs;
+  const failingSinceMs = failures?.firstFailedAt?.getTime();
+  const failingForMs = failingSinceMs === undefined ? 0 : nowMs - failingSinceMs;
+  if (
+    !inSaveWindow &&
+    (count < SANDBOX_DRAIN_REDUCED_CAPTURE_AFTER_FAILURES ||
+      failingForMs < SANDBOX_DRAIN_REDUCED_CAPTURE_AFTER_FAILING_MS)
+  ) {
+    return null;
+  }
+  return {
+    reduced: true,
+    abandonOnFailure: inSaveWindow || failingForMs >= SANDBOX_DRAIN_ABANDON_AFTER_FAILING_MS,
+    abandonWhenUnavailable: inSaveWindow,
+    inSaveWindow,
+  };
 }
 
 /**
@@ -628,6 +758,9 @@ class SandboxDrainRecoveryDeferredError extends Error {
  * provider call that never settles cannot pin the lease to this worker forever.
  */
 const settlingDrainCaptures = new Map<string, { startedAtMs: number }>();
+
+/** Below this, Temporal's own retry schedule is already about as soon. */
+const SANDBOX_DRAIN_CAPTURE_MIN_RETRY_HINT_MS = 1_000;
 
 type DrainCaptureIdentity = {
   sandboxGroupId: string;
@@ -718,6 +851,7 @@ export function createSandboxLeaseActivities(
       workspaceId,
       beforeProviderStop,
       beforeWorkspaceCapture,
+      drainFallback,
     ) =>
       await terminateProviderBox(
         settings,
@@ -734,6 +868,7 @@ export function createSandboxLeaseActivities(
         workspaceId,
         beforeProviderStop,
         beforeWorkspaceCapture,
+        drainFallback,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -1041,8 +1176,59 @@ export function createSandboxLeaseActivities(
         };
         if (error instanceof SandboxDrainRecoveryDeferredError) {
           observability.info("sandbox reaper: per-sandbox recovery deferred safely", details);
+        } else if (
+          error instanceof Error &&
+          error.name === "SandboxCheckpointArtifactRegistrationConflictError"
+        ) {
+          // A takeover's earlier attempt registered the same provider snapshot
+          // first and publishes it; this retry then finds the box drained. A
+          // conflict that persists still leaves the lease expired-draining,
+          // which alerts on its own.
+          observability.info(
+            "sandbox reaper: drain snapshot already registered by an earlier attempt",
+            details,
+          );
         } else {
           observability.warn("sandbox reaper: per-sandbox drain failed", details);
+        }
+        // Turns waiting on the replacement of a box that could not start
+        // programs stop with clear copy instead of waiting on saves that keep
+        // failing. Only a failed save (or the backoff after one) releases
+        // them: a failure after the save (termination, publication) is
+        // finished by the next sweep. The box stays draining and fenced; the
+        // drain policy is unchanged.
+        if (
+          isSandboxDrainCaptureFailure(error) ||
+          error instanceof SandboxDrainCaptureBackoffError
+        ) {
+          await releaseSandboxProcessStartReplacementWaiters(db, {
+            workspaceId: row.workspaceId,
+            sandboxGroupId: row.sandboxGroupId,
+            leaseEpoch: row.leaseEpoch,
+          }).catch((releaseError) => {
+            observability.warn("sandbox reaper: replacement waiters not released", {
+              ...details,
+              releaseError: errorMessage(releaseError),
+            });
+          });
+        }
+        // After a settled snapshot failure, ask Temporal to come back when the
+        // backoff ends rather than on its short default schedule. A snapshot
+        // still in flight (its claim is held) keeps the short schedule, so a
+        // late success is torn down promptly.
+        const retryAfterMs =
+          error instanceof SandboxDrainCaptureBackoffError
+            ? error.retryAfterMs
+            : lease && !lease.archiveCapture && lease.leaseEpoch === row.leaseEpoch
+              ? sandboxDrainCaptureBackoffRemainingMs(lease, drainSettings)
+              : 0;
+        if (retryAfterMs > SANDBOX_DRAIN_CAPTURE_MIN_RETRY_HINT_MS) {
+          throw ApplicationFailure.create({
+            message: errorMessage(error),
+            type: error instanceof Error ? error.name : "SandboxDrainFailed",
+            ...(error instanceof Error ? { cause: error } : {}),
+            nextRetryDelay: retryAfterMs,
+          });
         }
         throw error;
       }
@@ -3666,8 +3852,6 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        // Publishes nothing until a later migration grants 0988's withheld
-        // runtime EXECUTE (the summary is null).
         recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
@@ -4343,6 +4527,8 @@ async function terminateDrainableBox(
   let captureClaimLease: LeaseSnapshot | null = null;
   let providerMissingBeforeCapture = false;
   let captureDisposition: DrainCaptureDisposition = "capture_required";
+  // Set only for a fresh capture claim after repeated failures of this epoch.
+  let drainFallback: SandboxDrainCaptureFallback | null = null;
   if (lease.instanceId && managedProvider) {
     if (lease.archiveCapture) {
       const priorCapture = lease.archiveCapture;
@@ -4488,6 +4674,16 @@ async function terminateDrainableBox(
         }
       }
     } else {
+      // Back off between full snapshots after settled failures of this epoch
+      // instead of starting a new one on every retry.
+      const backoffMs = sandboxDrainCaptureBackoffRemainingMs(lease, settings);
+      if (backoffMs > 0) {
+        throw new SandboxDrainCaptureBackoffError(
+          `sandbox ${row.sandboxGroupId} epoch ${row.leaseEpoch} drain snapshot failed ` +
+            `${lease.drainCaptureFailures?.count ?? 0} time(s); next attempt in ${backoffMs}ms`,
+          backoffMs,
+        );
+      }
       const claimed = await claimWorkspaceArchiveCapture(db, {
         accountId,
         workspaceId: row.workspaceId,
@@ -4519,6 +4715,9 @@ async function terminateDrainableBox(
       if (claimed.status === "claimed") {
         captureClaim = claimed.claim;
         captureClaimLease = claimed.lease;
+        // The claim's own read: a re-arm or another worker's failure since the
+        // sweep's read decides this attempt.
+        drainFallback = sandboxDrainCaptureFallback(claimed.lease, settings, backend);
       } else if (claimed.status === "mutation_in_progress") {
         // An admission is normally authoritative proof that a provider
         // operation may still be running. It cannot, however, pin a draining
@@ -4579,6 +4778,14 @@ async function terminateDrainableBox(
     captureDisposition === "archive_published"
       ? (lease.recovery.archive.current?.revision ?? null)
       : null;
+  // Folders a reduced save published by this drain left out (by this attempt,
+  // or by an earlier one whose late publication this attempt tears down from).
+  const publishedArchive =
+    captureDisposition === "archive_published" ? lease.recovery.archive.current : null;
+  let savedOmittedPaths: string[] | undefined =
+    publishedArchive?.version === 1 && publishedArchive.omittedPaths?.length
+      ? publishedArchive.omittedPaths
+      : undefined;
   const persistArchive: PersistArchiveFn = async (
     archiveBase64: string | VerifiedHostWorkspaceArchive | null,
     archiveMetadata?: WorkspaceArchiveDescriptor,
@@ -4698,6 +4905,10 @@ async function terminateDrainableBox(
     if (result.wrote && archiveBase64 !== null) {
       persisted = true;
       archiveRevision = result.archiveRevision;
+      savedOmittedPaths =
+        archiveMetadata?.version === 1 && archiveMetadata.omittedPaths?.length
+          ? archiveMetadata.omittedPaths
+          : undefined;
     }
     return result;
   };
@@ -4763,6 +4974,11 @@ async function terminateDrainableBox(
             captureId: captureClaim.id,
             expectedEpoch: row.leaseEpoch,
             expectedInstanceId: lease.instanceId,
+            recordDrainCaptureFailure: true,
+            // The count the database stored, so a fenced or no longer
+            // draining release observes nothing.
+            onDrainCaptureFailureCounted: (consecutiveFailures) =>
+              recordSandboxDrainCaptureFailure(observability, { backend, consecutiveFailures }),
           });
         },
         row.workspaceId,
@@ -4784,18 +5000,24 @@ async function terminateDrainableBox(
               });
             }
           : undefined,
+        drainFallback,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
     return false;
   }
+  const captureAbandoned =
+    typeof termination !== "boolean" && termination.captureAbandoned === true;
 
   // Self-hosted/none and an unassigned lease have no provider stop callback;
   // finish their usage at logical detach without touching customer compute.
   // A managed instance that was stopped without its callback must fail closed.
+  // A box the drain stopped itself after failed saves ran until that stop.
   const providerMissingDuringStop =
     providerMissingBeforeCapture ||
-    (typeof termination !== "boolean" && termination.providerMissingBeforeCapture);
+    (typeof termination !== "boolean" &&
+      termination.providerMissingBeforeCapture &&
+      !captureAbandoned);
   if (!stopCutoffMarked && !providerMissingDuringStop) {
     if (managedProvider && lease.instanceId) {
       throw new Error("managed sandbox stopped without a warm usage cutoff");
@@ -4829,6 +5051,30 @@ async function terminateDrainableBox(
   const providerMissing =
     providerMissingBeforeCapture ||
     (typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture);
+  // The last good save's time: changes after it were not kept.
+  const unsavedSince = captureAbandoned
+    ? (lease.recovery.archive.current?.capturedAt ?? null)
+    : undefined;
+  // Durable termination record (sandbox-file-persistence observability): who
+  // ended this box and whether its /workspace was captured first, appended to
+  // every session sharing the group's box.
+  const terminatedEventPayload = {
+    actor: "reaper",
+    persisted,
+    archiveRevision,
+    instanceId: lease.instanceId,
+    providerMissingBeforeCapture: providerMissing,
+    // Why the box drained: the lease's bounded rotation reason when one
+    // was requested (provider deadline, operator/image conflict, teardown
+    // claim), otherwise the ordinary idle drain. Additive diagnostic
+    // fact; no identifiers beyond the ones already carried above.
+    drainReason: sandboxDrainReason(lease),
+    // Shown to the people in the chat: a save without rebuildable
+    // folders, or a box stopped after its saves kept failing, with the
+    // time of its last good save (changes after it were not kept).
+    ...(savedOmittedPaths ? { omittedPaths: savedOmittedPaths } : {}),
+    ...(captureAbandoned ? { captureAbandoned: true, unsavedSince } : {}),
+  };
   // The authoritative commit clears the durable capture/teardown claim together
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
@@ -4841,6 +5087,18 @@ async function terminateDrainableBox(
       expectedEpoch: row.leaseEpoch,
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
+      // A box the drain stopped itself tells the people in the chat in the
+      // same commit that records the loss, so the later restore can rely on
+      // that notice instead of announcing the loss a second time.
+      ...(captureAbandoned
+        ? {
+            captureAbandoned: true,
+            captureAbandonedNotice: {
+              unsavedSince: unsavedSince ?? null,
+              payload: terminatedEventPayload,
+            },
+          }
+        : {}),
       ...(providerMissing
         ? {
             providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
@@ -4873,8 +5131,12 @@ async function terminateDrainableBox(
     // observed loss. Keep this outside the best-effort session event writer.
     // An unpublished warming replacement (its creator died before warm
     // publication) held no workspace; its absence is not a capture loss.
-    if (providerMissing && !unpublishedProviderLost) {
+    // A box the drain stopped itself is counted by its fallback metric.
+    if (providerMissing && !unpublishedProviderLost && !captureAbandoned) {
       recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
+    if (captureAbandoned) {
+      recordSandboxDrainCaptureFallback(observability, { backend, outcome: "abandoned" });
     }
     if (lease.unobservableCommandDrainIds?.length) {
       recordSandboxCommandContainment(
@@ -4882,26 +5144,15 @@ async function terminateDrainableBox(
         providerMissing ? "provider_missing" : "contained",
       );
     }
-    // Durable termination record (sandbox-file-persistence observability): who
-    // ended this box and whether its /workspace was captured first, appended to
-    // every session sharing the group's box. Best-effort: attribution must
-    // never affect the drain outcome.
+    // Best-effort: attribution must never affect the drain outcome. A box the
+    // drain stopped itself already has its record from the cold commit.
     try {
-      await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
-        type: "sandbox.box.terminated",
-        payload: {
-          actor: "reaper",
-          persisted,
-          archiveRevision,
-          instanceId: lease.instanceId,
-          providerMissingBeforeCapture: providerMissing,
-          // Why the box drained: the lease's bounded rotation reason when one
-          // was requested (provider deadline, operator/image conflict, teardown
-          // claim), otherwise the ordinary idle drain. Additive diagnostic
-          // fact; no identifiers beyond the ones already carried above.
-          drainReason: sandboxDrainReason(lease),
-        },
-      });
+      if (!captureAbandoned) {
+        await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
+          type: "sandbox.box.terminated",
+          payload: terminatedEventPayload,
+        });
+      }
     } catch (eventError) {
       observability.warn(
         "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
@@ -5064,6 +5315,7 @@ export async function terminateProviderBox(
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
   beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
+  drainFallback?: SandboxDrainCaptureFallback | null,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -5324,18 +5576,139 @@ export async function terminateProviderBox(
   // Physical capture bookkeeping for this worker: released once the capture
   // and its spool are settled, or by the late path that inherits them.
   let releaseSettlingCapture: () => void = () => undefined;
+  // Workspace size at snapshot time, for metrics only.
+  const recordCapturedSize = (
+    descriptor: Parameters<typeof workspaceSizeFromArchiveDescriptor>[0],
+  ) => {
+    const size = workspaceSizeFromArchiveDescriptor(descriptor);
+    if (size)
+      recordSandboxWorkspaceSnapshotSize(observability, { backend, outcome: "captured", ...size });
+  };
+  // Provider snapshots carry no tree size, and a failed one is when the size
+  // matters most: measure it with one bounded walk in the background, so the
+  // drain never waits for it.
+  const observeFailedCaptureSize = () => {
+    // Inside the pre-deadline save window the next snapshot starts without
+    // backoff; a walk then would compete with the last chance to save. Skip
+    // one that could still be running when the window opens, too.
+    if (
+      lease.providerDeadlineAt &&
+      lease.providerDeadlineAt.getTime() -
+        sandboxDeadlineMandatoryCaptureLeadMs(settings) -
+        (WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS + 10) * 1_000 <=
+        Date.now()
+    ) {
+      return;
+    }
+    void probeRemoteWorkspaceSize(session)
+      .then((size) => {
+        if (size) {
+          recordSandboxWorkspaceSnapshotSize(observability, {
+            backend,
+            outcome: "failed",
+            ...size,
+          });
+        }
+      })
+      .catch(() => undefined);
+  };
+  // Repeated failed snapshots (DC-G3): a reduced save leaves rebuildable
+  // folders out, and when even that fails late in the box's life (or after
+  // an hour of failures) the drain stops the box itself instead of letting it
+  // drain until the provider kills it. Only Modal native snapshots qualify:
+  // they are the snapshots that cannot leave anything out.
+  const reducedCaptureDue =
+    captureDisposition === "capture_required" &&
+    drainFallback?.reduced === true &&
+    backend === "modal" &&
+    (sessionWorkspacePersistence === "snapshot_filesystem" ||
+      sessionWorkspacePersistence === "snapshot_directory");
+  let omitPaths: string[] | undefined;
+  // Set once a capture that outlived its wait has published under the claim.
+  let latePublished = false;
+  const abandonCapture = async (): Promise<ProviderTerminationOutcome> => {
+    // The claim still fences arrivals; this pure CAS proves it is still ours
+    // and the lease was not re-armed before anything is stopped.
+    const { wrote } = await persistArchive(null);
+    if (!wrote) {
+      observability.info(
+        "sandbox reaper: lease re-armed before a failed-save stop — leaving box RUNNING",
+        { ...logIdentity },
+      );
+      return { terminated: false, providerMissingBeforeCapture: false };
+    }
+    if (!session || !sessionState) {
+      throw new Error(`sandbox backend ${backend} returned no terminable session state`);
+    }
+    await beforeProviderStop?.();
+    try {
+      await terminateManagedSandboxSession(client, sessionState, session);
+    } catch (error) {
+      if (!isProviderSandboxNotFoundError(client.backendId, error)) throw error;
+    }
+    if (latePublished) {
+      // A reduced save that timed out published late, before the stop: the
+      // box was saved after all, so this is an ordinary saved teardown.
+      observability.info("sandbox reaper: late reduced save landed before the stop", {
+        ...logIdentity,
+      });
+      return { terminated: true, providerMissingBeforeCapture: false };
+    }
+    // Counted as `abandoned` once the cold commit records the stop.
+    observability.warn(
+      "sandbox reaper: drain saves kept failing — stopped the box without a new save",
+      {
+        ...logIdentity,
+        consecutiveFailures: lease.drainCaptureFailures?.count ?? 0,
+        lastSavedAt: lease.recovery.archive.current?.capturedAt ?? null,
+      },
+    );
+    return { terminated: true, providerMissingBeforeCapture: true, captureAbandoned: true };
+  };
+  if (reducedCaptureDue && session?.persistWorkspace) {
+    const found = await findRebuildableWorkspacePaths(session);
+    const maxBytes = diskBackedArchives
+      ? SANDBOX_DRAIN_REDUCED_CAPTURE_MAX_BYTES
+      : SANDBOX_DRAIN_REDUCED_INLINE_CAPTURE_MAX_BYTES;
+    if (found && found.paths.length > 0 && found.kept.totalFileBytes <= maxBytes) {
+      omitPaths = found.paths;
+    } else {
+      recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_unavailable" });
+      observability.info("sandbox reaper: no reduced drain save possible", {
+        ...logIdentity,
+        rebuildableFolders: found?.paths.length ?? null,
+        keptBytes: found?.kept.totalFileBytes ?? null,
+      });
+      // Otherwise the drain retries a full snapshot under its backoff: with
+      // nothing a reduced save could leave out, stopping the box would only
+      // give up the full snapshot's remaining chance before the save window.
+      if (drainFallback?.abandonWhenUnavailable) return await abandonCapture();
+    }
+  }
   try {
     if (captureDisposition === "capture_required" && session?.persistWorkspace) {
       releaseSettlingCapture = trackSettlingDrainCapture(lease);
       // The budget bounds only this attempt's wait, never the capture: a slow
       // but finite capture keeps reading and publishes late, and the retry
       // that finds it still settling here defers instead of starting another.
+      // The provider's own hard timeout is the separate, longer drain budget:
+      // when it equalled the wait, a snapshot slower than the wait was killed
+      // by the provider every time and the box could never drain.
+      // The capture claim's deadline (wait + settlement grace) therefore no
+      // longer bounds the provider operation. That is safe: a retry by another
+      // worker takes the claim over with the same provider request id, which
+      // Modal treats as the same snapshot, so a late result publishes once.
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),
         {
           requestId: providerCaptureRequestId ?? randomUUID(),
           strategy: liveCapturePolicy.strategy,
+          providerTimeoutMs: effectiveSandboxDrainProviderSnapshotTimeoutMs(
+            settings,
+            settings.sandboxSnapshotTimeoutMs,
+          ),
+          ...(omitPaths ? { omitPaths } : {}),
         },
         diskBackedArchives,
       );
@@ -5357,6 +5730,17 @@ export async function terminateProviderBox(
               session,
               checkpointBinding,
             );
+            // A late capture fenced by a successor is not this box's save.
+            if (result.wrote) {
+              latePublished = true;
+              recordCapturedSize(archive.descriptor);
+            }
+            if (omitPaths && result.wrote) {
+              recordSandboxDrainCaptureFallback(observability, {
+                backend,
+                outcome: "reduced_saved",
+              });
+            }
             observability.info(
               result.wrote
                 ? "sandbox reaper: late workspace capture published under durable claim"
@@ -5379,10 +5763,19 @@ export async function terminateProviderBox(
           // provider teardown. Release only our unpublished claim so a waiting
           // turn can re-arm the intact live box; stale callbacks are DB-fenced.
           void releaseAfterCaptureFailure();
+          if (omitPaths) {
+            recordSandboxDrainCaptureFallback(observability, {
+              backend,
+              outcome: "reduced_failed",
+            });
+          }
           warnCaptureFailure("sandbox reaper: timed-out provider capture later failed", error);
+          // A snapshot slower than the wait is the case the size matters for.
+          observeFailedCaptureSize();
         },
         onLateSettled: () => releaseSettlingCapture(),
       });
+      recordCapturedSize(verifiedArchive?.descriptor);
     }
   } catch (error) {
     // Every rejection except the caller's own timeout means the capture has
@@ -5394,17 +5787,41 @@ export async function terminateProviderBox(
       });
       return { terminated: true, providerMissingBeforeCapture: true };
     }
+    // A reduced save past its grace that fails stops the box: its last chance
+    // is spent, and keeping it draining would only let the provider end it
+    // later with the same files unsaved. One still running when the wait ends
+    // is left to finish under its own hard bound (it publishes late, or its
+    // late failure counts toward the next attempt), except inside the save
+    // window, where the provider ends the box soon anyway; stopping the box
+    // there also ends the read.
+    if (
+      omitPaths &&
+      drainFallback?.abandonOnFailure &&
+      (!(error instanceof SandboxProviderCaptureTimeoutError) || drainFallback.inSaveWindow)
+    ) {
+      warnCaptureFailure("sandbox reaper: reduced drain save failed — stopping the box", error);
+      if (!(error instanceof SandboxProviderCaptureTimeoutError)) {
+        recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_failed" });
+      }
+      // Keep the claim: stopping the box needs its fence, not a re-arm.
+      return await abandonCapture();
+    }
     warnCaptureFailure(
-      "sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)",
+      "sandbox reaper: persistWorkspace failed — leaving box draining for a retry",
       error,
     );
     // An unresolved timeout is not proof of capture failure: retain the fence
     // until its provider promise settles. A settled failure cannot enter the
     // teardown path below, so its unpublished claim may safely be released.
     if (!(error instanceof SandboxProviderCaptureTimeoutError)) {
+      if (omitPaths) {
+        recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_failed" });
+      }
       await releaseAfterCaptureFailure();
+      observeFailedCaptureSize();
     }
     // NEVER terminate a box whose snapshot we could not capture.
+    markSandboxDrainCaptureFailure(error);
     throw error;
   }
 
@@ -5439,6 +5856,15 @@ export async function terminateProviderBox(
         session,
         checkpointBinding,
       ));
+    } catch (error) {
+      // A reduced save that was read but could not be stored is a failed save
+      // for the stop decision too.
+      if (!omitPaths || !drainFallback?.abandonOnFailure) throw error;
+      warnCaptureFailure("sandbox reaper: reduced drain save could not be stored", error);
+      recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_failed" });
+      // The finally below disposes the archive and releases the settling
+      // capture after the stop.
+      return await abandonCapture();
     } finally {
       try {
         await disposeWorkspaceArchive(verifiedArchive);
@@ -5454,6 +5880,9 @@ export async function terminateProviderBox(
         },
       );
       return { terminated: false, providerMissingBeforeCapture: false };
+    }
+    if (omitPaths) {
+      recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_saved" });
     }
   } else {
     // A resumable cloud box that produces no verified archive cannot be safely

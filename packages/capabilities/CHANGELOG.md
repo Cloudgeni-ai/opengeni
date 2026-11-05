@@ -1,5 +1,68 @@
 # @opengeni/capabilities
 
+## 6.10.0
+
+### Minor Changes
+
+- 3cb57d8: `tool_search` now offers the Connect card for an integration the query names even when an unrelated installed tool matches strongly, such as a Slack bot tool for "posts on Slack" or meeting search for "Linear issues". The integration catalog lookup is skipped only when a strong match is that integration's own tool; ownership by a shared vendor domain also needs agreeing names, so a Microsoft Teams tool does not hide Microsoft Excel. Beside strong matches the catalog is read only when the query has a capitalised word mid-sentence or a word no installed tool uses, the search waits for it at most 1.5 seconds, and only a distinctive mention names an integration, so "close the ticket" or "linear regression" add no card.
+
+  Integration names are also recognised with different spacing or case ("hub spot", "wisprflow"), as near spellings ("whisperflow" for Wispr Flow, "hubsopt" for HubSpot), and by the vendor's word in its registrable domain ("jira" for Atlassian at jira.com) when that domain is one product's ("microsoft" names none of Teams, Excel and OneDrive). Common words close to a name ("email" for Gmail, "conference" for Confluence), plurals ("snowflakes") and compound phrases ("linked in", "the last pass") do not name one. `@opengeni/capabilities` exports the shared matching (`integrationMentionsIn`, `integrationMentionMatcher`, `isDistinctiveIntegrationMention`, `isIntegrationNearSpelling`, `integrationVendorWord`, `integrationQueryWords`, `integrationNamesAgree`, `sharedVendorDomains`, `registrableHostDomain`), and capability catalog search ranks entries a query names distinctively above entries that only share its ordinary words ("send a message" does not promote Send). Entries whose names agree with a named entry share its rank, so naming "GitHub" keeps GitHub App above the GitHub plugin.
+
+### Patch Changes
+
+- 168d812: Generated OpenAPI integrations now read files whose download redirects. A safe read (GET or HEAD) follows at most three https redirects, such as Microsoft Graph `/content` to its pre-signed download URL, through the same pinned transport and one shared deadline, without the Authorization header, credential cookies or credential query parameters. A redirect target's own 401 or 403 (an expired link) is returned as the provider's result rather than as a lost authorization. A mutation's redirect is still rejected and its outcome stays unknown. Response bytes that are not UTF-8 (PDFs, images, Word, Excel and PowerPoint files) come back as base64 instead of replacement characters, up to 2 MiB; larger binary reports its size. A body over the response limit is a recoverable `response_too_large` error.
+
+  A generated integration call that fails with a known outcome (a rejected redirect, a missing path parameter, an authorization the provider refused) now reaches the model as an ordinary tool error, `{"ok":false,"error":{"code","message","status","retryable"}}`, on every server. It is no longer reported as a tool that is unavailable for the rest of the turn. A missing path parameter's error names the parameter.
+
+- c672cf7: Reviewed OpenAPI definitions can now correct a provider's document declaratively, without new prompt text.
+
+  - `requestPath` sends a reviewed operation to a different path while it keeps its tool identity. `{+name}` in it expands a path parameter as a path (RFC 6570 reserved expansion, marked as `allowReserved` on the binding): each segment is encoded once (an already percent-encoded segment is decoded first), `/` is kept, extra slashes are dropped, a `.` or `..` segment is refused as a recoverable error, and the parameter gets generic path guidance. A request path that lands on a path another operation uses is merged with it.
+  - `omitQueryParameters` drops query parameters the provider documents but rejects, including ones declared for the whole path.
+  - Any path parameter whose value is `.`, `..` or invalid Unicode is now a recoverable `parameter_invalid` error.
+  - `operationText` replaces a prefix-selected operation's summary and description when the provider's text describes a different operation.
+
+  These Microsoft definitions use the new fields:
+
+  - SharePoint's site lookup by path now uses Graph's colon form, `/sites/{hostname}:/{path}`, which Graph accepts. Previously it sent an encoded `getByPath(path='%2Fsites%2Fhr')`, which Graph rejected with "Error in query syntax".
+  - Teams channel messages offer only `$top`, `$select`, `$expand` and paging, not `$orderby`, `$skip`, `$search`, `$filter` or `$count`, which Graph doesn't support there.
+  - Outlook's list, create-draft, get, update and delete message operations, and the MIME content operations, get correct names and descriptions instead of Graph's open-extension and eventMessage text.
+  - The SharePoint and Teams search descriptions now say to send one entry in `requests` per call, because Graph v1.0 rejects several.
+
+  Installed integrations adopt these changes when their definition is refreshed.
+
+- f0d27b2: One connector's bad tool no longer stops a turn. When a connector lists the same tool more than once (as the ElevenLabs hosted MCP did while its tool list changed), Opengeni keeps one copy. Two different tools that would share a Codemode path now get distinct paths, and a tool that still cannot be added, or whose definition is invalid, is left out for that turn. Each case is logged as a structured warning. A call always runs the tool the model was shown: when two different tools claim one model name, the catalog keeps one, and a call meant for the other is refused rather than sent to the wrong tool. OpenAPI connectors whose operation names differ only by a number suffix keep a separate tool for each operation.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b5201d5]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/network@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/network@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/network@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

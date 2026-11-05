@@ -22,9 +22,12 @@ use crate::lazy::Fetcher;
 use crate::paging::Paging;
 use crate::store::Receipt;
 
+/// The directory of a sandbox's memory images, in its own.
+const IMAGES: &str = "images";
+
 /// The sandbox's memory images.
 pub(crate) fn images_of(paths: &Paths) -> Images {
-    Images::new(paths.dir.join("images"))
+    Images::new(paths.dir.join(IMAGES))
 }
 
 /// The learned order the guest touches memory after a wake.
@@ -160,6 +163,18 @@ pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<
         compute_engine::confined::check_written(moved)?;
     }
     Ok(taken)
+}
+
+/// The files and directories that hold the sandbox's local copy, which
+/// [`clear_local`] deletes: what giving the copy up frees.
+pub(crate) fn local_copy(paths: &Paths) -> [PathBuf; 5] {
+    [
+        paths.disk.clone(),
+        checkpoint_disk(paths),
+        paths.snapshot.state.clone(),
+        paths.snapshot.memory.clone(),
+        paths.dir.join(IMAGES),
+    ]
 }
 
 /// Deletes the sandbox's local disk, memory images and snapshot files.

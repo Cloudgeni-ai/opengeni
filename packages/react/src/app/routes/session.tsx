@@ -5,6 +5,7 @@ import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
+  timelineLivePause,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
@@ -52,10 +53,17 @@ import {
   failureFallbackReason,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerNotice,
+} from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
+import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
+import { notifySessionListChanged } from "../lib/session-list-invalidation";
 import { waitingDescendants } from "../lib/descendant-requests";
 import {
   useDescendantRequestsRefresh,
@@ -258,11 +266,7 @@ import {
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
 import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  runnableLatencyModesForModel,
-} from "../lib/model-policy";
+import { findPickerRow } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
   isCodexUsageLimitFailure,
@@ -658,6 +662,34 @@ export function SessionRoute({
       clearTimeout(timer);
     };
   }, [waitingForDispatch, sessionId, refreshSession]);
+  // A restored chat's content comes back in the background: read it again
+  // until it is live (no event announces that).
+  const restoringArchive = session?.retention?.archive?.restoring === true;
+  useEffect(() => {
+    if (!restoringArchive) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshSession();
+    }, 3_000);
+    return () => clearInterval(timer);
+  }, [restoringArchive, sessionId, refreshSession]);
+  const restoreArchived = useCallback(async () => {
+    if (!session) return false;
+    try {
+      const updated = await requestSessionArchive(
+        context,
+        session,
+        false,
+        sessionDisplayTitle(session),
+      );
+      if (!updated) return false;
+      notifySessionListChanged({ workspaceId, sessionId: session.id, archived: updated.archived });
+      await refreshSession();
+      return true;
+    } catch (error) {
+      toast.error("Couldn't restore the chat.", { description: userErrorText(error) });
+      return false;
+    }
+  }, [context, refreshSession, session, workspaceId]);
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -1557,6 +1589,11 @@ export function SessionRoute({
           search: { continueSessionId: sessionId },
         })
       }
+      onRestoreArchived={
+        session && session.parentSessionId === null && canArchiveChat(context, workspaceId)
+          ? restoreArchived
+          : undefined
+      }
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
@@ -2198,6 +2235,11 @@ function SessionChatPane(props: {
   onNewSession: () => void;
   /** Starts a new chat that continues this archived chat's work. */
   onContinueInNewSession: () => void;
+  /**
+   * Restores this archived chat so it can continue here; absent when this
+   * person can't, or for a sub-chat. Resolves whether a restore started.
+   */
+  onRestoreArchived?: (() => Promise<boolean>) | undefined;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
@@ -2335,9 +2377,11 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const cancelled = isTerminalSessionStatus(props.session.status);
   // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
+  // Archiving a chat cancels its running work, so an archived chat often has
+  // the `cancelled` status too: it still reads as archived, never cancelled.
+  const cancelled = readOnlyArchive === null && isTerminalSessionStatus(props.session.status);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -2942,7 +2986,14 @@ function SessionChatPane(props: {
       personalAttachment.loading ||
       personalAttachment.refreshing ||
       connectionAccounts.loading,
-    loadFailed: connectionAccounts.error !== null,
+    loadFailed:
+      connectionAccounts.error === null
+        ? false
+        : connectionAccounts.accessDenied
+          ? "denied"
+          : connectionAccounts.unavailable
+            ? "updating"
+            : "failed",
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
   const workspaceAccountId = context.workspaces.find(
@@ -3075,10 +3126,10 @@ function SessionChatPane(props: {
       : null;
   });
   chatSendContext.current = {
-    blocked: isTerminalSessionStatus(props.session.status)
-      ? "This chat has ended. Start a new chat to use a repository."
-      : sessionReadOnlyArchive(props.session)
-        ? "This chat is archived. Continue in a new chat to use a repository."
+    blocked: sessionReadOnlyArchive(props.session)
+      ? "This chat is archived. Continue in a new chat to use a repository."
+      : isTerminalSessionStatus(props.session.status)
+        ? "This chat has ended. Start a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -3176,12 +3227,7 @@ function SessionChatPane(props: {
     composerPolicy.reasoningEffort === props.session.reasoningEffort &&
     composerPolicy.latencyMode === props.session.latencyMode,
   );
-  const catalogComboValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
-    (latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
-  );
+  const catalogComboValid = pickerPolicyRunnable(selectedPolicyRow, reasoningEffort, latencyMode);
   // A model the catalog no longer lists (retired or removed) is refused by the
   // API, so the frozen session policy stops counting as sendable for it.
   const refusedSessionModel =
@@ -3281,6 +3327,34 @@ function SessionChatPane(props: {
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
       />
     ) : null;
+
+  // Send's blocker as one visible line, unless the composer is still
+  // preparing or the unavailable-model notice or picker already explains it.
+  const sendBlocker = composerSendBlocker();
+  const visibleSendBlocker =
+    terminal || composerDelivery.preparing
+      ? null
+      : sendBlocker === "policy" && (unavailableModelNotice || noRunnableModel || !composerPolicy)
+        ? null
+        : sendBlocker === "policy" && selectedPolicyRow?.selectable !== true
+          ? "model_unavailable"
+          : sendBlocker;
+  const sendBlockerNotice = composerSendBlockerNotice(visibleSendBlocker) ? (
+    <ComposerSendBlockerNotice
+      blocker={visibleSendBlocker}
+      className="px-2 pt-2"
+      // While the picker is locked (sending, draft loading) the fix can't
+      // apply, so the line shows no action rather than one that does nothing.
+      onAction={
+        modelPickerDisabled && visibleSendBlocker === "policy"
+          ? undefined
+          : (action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(model);
+              else if (visibleSendBlocker === "accounts") void connectionAccounts.refresh();
+            }
+      }
+    />
+  ) : null;
 
   useEffect(() => {
     if (
@@ -3462,7 +3536,8 @@ function SessionChatPane(props: {
   });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
-    (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
+    readOnlyArchive === null &&
+      (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -4130,6 +4205,7 @@ function SessionChatPane(props: {
               <ReadOnlySessionNotice
                 session={props.session}
                 onContinue={props.onContinueInNewSession}
+                onRestore={props.onRestoreArchived}
               />
             </div>
           ) : null}
@@ -4240,6 +4316,7 @@ function SessionChatPane(props: {
                           focusSequence={momentSequence}
                           events={props.events}
                           status={props.session.status}
+                          pause={timelineLivePause(admissionControl)}
                           computeLabel={computeLabel}
                           renderMessageText={renderMessageText}
                           renderMessageActions={renderMessageActions}
@@ -4509,6 +4586,7 @@ function SessionChatPane(props: {
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
+                  sendBlockerNotice ||
                   showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
@@ -4538,6 +4616,7 @@ function SessionChatPane(props: {
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
                       {ownLoginsHeadsUp}
+                      {sendBlockerNotice}
                     </>
                   ) : null
                 }
@@ -4685,7 +4764,8 @@ function SessionChatPane(props: {
                   ) : null
                 }
                 placeholder={chatComposerPlaceholder({
-                  cancelled: props.session.status === "cancelled",
+                  archived: readOnlyArchive !== null,
+                  cancelled,
                   creditStopped:
                     Boolean(props.creditExhausted) &&
                     (props.session.status === "failed" || props.session.status === "idle"),

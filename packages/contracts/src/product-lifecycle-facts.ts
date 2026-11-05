@@ -64,6 +64,7 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
     "elevenlabs",
     "openai",
     "azure_openai",
+    "openai_compatible",
   ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],

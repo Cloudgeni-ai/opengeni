@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -315,9 +314,9 @@ impl LinuxApplicationLauncher {
         command
             .arg(application_id)
             .envs(LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(opengeni_agent_platform::discarded_stdio())
+            .stdout(opengeni_agent_platform::discarded_stdio())
+            .stderr(opengeni_agent_platform::discarded_stdio());
         let mut child = command.spawn().map_err(|error| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::DriverFailed,

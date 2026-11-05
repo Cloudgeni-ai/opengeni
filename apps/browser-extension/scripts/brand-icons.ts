@@ -7,7 +7,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import sharp from "sharp";
+import sharp, { type OverlayOptions } from "sharp";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -52,7 +52,7 @@ for (const size of [16, 32, 48, 128]) {
   const tile = Math.round((size * 96) / 128);
   const inset = (size - tile) / 2;
   const markSize = args.tile ? Math.round(tile * 0.72) : tile;
-  const layers: sharp.OverlayOptions[] = [];
+  const layers: OverlayOptions[] = [];
   if (args.tile) {
     const radius = Math.max(2, Math.round(tile / 6));
     layers.push({

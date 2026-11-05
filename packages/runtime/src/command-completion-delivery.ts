@@ -46,11 +46,6 @@ export type CommandCompletionSource = {
    * the cut. Omitted: the default budget.
    */
   maxTextBytes?: () => number;
-  /**
-   * Mask known secret values in the notice before it is appended (and stored),
-   * for tools whose results the generic masking does not wrap.
-   */
-  mask?(text: string): Promise<string>;
   /** The turn's cancellation: nothing is taken once it is cancelled. */
   signal?: AbortSignal | undefined;
   /** The exact text appended to a tool result (unique: it names each command). */
@@ -105,8 +100,7 @@ export class CommandCompletionDelivery {
     const take = (async () => {
       const completions = await this.source.take({ maxBytes });
       if (completions.length === 0) return null;
-      const notice = renderCommandCompletionNotice(completions);
-      return this.source.mask ? await this.source.mask(notice) : notice;
+      return renderCommandCompletionNotice(completions);
     })();
     this.takes.add(take);
     let notice: string | null;
@@ -226,18 +220,26 @@ export function appendToPlainTextToolOutput(output: unknown, text: string): unkn
 }
 
 /**
- * The tool's own output for audit views: without whichever of `appended` it
- * ends with (that text is then removed from the set), otherwise unchanged.
+ * The tool's own output for audit views: without every text of `appended` it
+ * ends with, however many were appended in turn (each is then removed from
+ * the set), otherwise unchanged.
  */
 export function withoutAppendedCommandCompletions(output: unknown, appended: Set<string>): unknown {
-  for (const text of appended) {
-    const own = withoutAppendedText(output, text);
-    if (own !== output) {
-      appended.delete(text);
-      return own;
+  let current = output;
+  let stripped = true;
+  while (stripped) {
+    stripped = false;
+    for (const text of appended) {
+      const own = withoutAppendedText(current, text);
+      if (own !== current) {
+        appended.delete(text);
+        current = own;
+        stripped = true;
+        break;
+      }
     }
   }
-  return output;
+  return current;
 }
 
 /** The tool's own output without exactly `appended`, for audit views; otherwise unchanged. */
@@ -339,8 +341,7 @@ const agentDeliveries = new WeakMap<object, CommandCompletionDelivery>();
 
 /**
  * Wrap the agent's function tools so finished commands follow their results.
- * Install it after the tool wrappers that shape results and before secret
- * masking, which must see the appended text too. Clones get it too.
+ * Install it after the tool wrappers that shape results. Clones get it too.
  */
 export function installCommandCompletionDelivery(
   agent: DeliveringAgent,

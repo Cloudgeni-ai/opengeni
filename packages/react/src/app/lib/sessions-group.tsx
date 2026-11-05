@@ -73,6 +73,7 @@ export type RailAggregateStatusKind =
   | "active"
   | "queued"
   | "waiting"
+  | "paused"
   | "unread"
   | "active_work"
   | "neutral";
@@ -103,6 +104,8 @@ export type RailStatusCounts = {
   queued: number;
   /** Idle sessions parked on their own wake-up (input or timer), not executing. */
   waiting: number;
+  /** Paused sessions whose work is parked for Resume. */
+  paused: number;
   unread: number;
   activeWork: number;
 };
@@ -122,6 +125,7 @@ export function sessionProjectTotals(
     active: 0,
     queued: 0,
     waiting: 0,
+    paused: 0,
     unread: 0,
     activeWork: 0,
   });
@@ -137,6 +141,7 @@ export function sessionProjectTotals(
       ...group,
       active: group.active - waiting,
       waiting,
+      paused: 0,
       sendFailed: 0,
     });
   }
@@ -173,9 +178,30 @@ function ownRailStatusCounts(
         ? 1
         : 0,
     waiting: sessionInputWait(session) ? 1 : 0,
+    paused: hasPausedWork(session) ? 1 : 0,
     unread: session.unread ? 1 : 0,
     activeWork: session.activelyWorking ? 1 : 0,
   };
+}
+
+/**
+ * Work a pause holds for Resume: a turn still open, queued or running. A
+ * paused chat with nothing in progress shows no marker, nor does one that
+ * needs the person or is ending (Cancel also pauses while the turn stops).
+ * Matches the server's `treeStats.pausedWorkDescendants`.
+ */
+function hasPausedWork(session: Session): boolean {
+  return (
+    !hasActiveEffectiveControl(session) &&
+    session.status !== "requires_action" &&
+    session.status !== "cancelled" &&
+    session.status !== "failed" &&
+    (Boolean(session.activeTurnId) ||
+      session.status === "running" ||
+      session.status === "recovering" ||
+      session.status === "queued" ||
+      session.status === "waiting_capacity")
+  );
 }
 
 function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts): void {
@@ -187,6 +213,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.active += source.active;
   target.queued += source.queued;
   target.waiting += source.waiting;
+  target.paused += source.paused;
   target.unread += source.unread;
   target.activeWork += source.activeWork;
 }
@@ -211,6 +238,7 @@ function railStatusCounts(
       active: summary.active - waiting,
       queued: summary.queued,
       waiting,
+      paused: 0,
       unread: summary.unread,
       activeWork: summary.activeWork,
     };
@@ -225,6 +253,7 @@ function railStatusCounts(
       "active",
       "queued",
       "waiting",
+      "paused",
       "unread",
       "activeWork",
     ] as const)
@@ -244,6 +273,7 @@ function railStatusCounts(
     counts.active += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
     counts.waiting += stats.waitingDescendants ?? 0;
+    counts.paused += stats.pausedWorkDescendants ?? 0;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -298,6 +328,7 @@ export function summarizeRailNodes(
     active: 0,
     queued: 0,
     waiting: 0,
+    paused: 0,
     unread: 0,
     activeWork: 0,
   };
@@ -318,9 +349,15 @@ export function summarizeRailNodes(
  * covers stays in its label ("1 unread · 2 working"), and an expanded row's
  * workers keep their own markers. The chat's own running or queued turn keeps
  * its spinner: progress it posts mid-turn can leave it unread, and the answer
- * arrives when that turn ends. Anything that needs you, a failure and an
- * unsent message still come first. Section headers and Site rows summarize
+ * arrives when that turn ends; its own paused turn likewise stays paused.
+ * Anything that needs you, a failure and an unsent message still come first. Section headers and Site rows summarize
  * many chats and keep the plain order.
+ *
+ * Paused is the one state a row does not take from its workers: the pause mark
+ * reads as "this chat is paused", so it shows only when the chat itself is
+ * paused (its own parked turn, or its pause holding its workers' work). Paused
+ * workers under a chat that is not paused stay in its hover card and on their
+ * own rows.
  */
 export function summarizeRailRow(
   node: SessionTreeNode,
@@ -328,12 +365,19 @@ export function summarizeRailRow(
   now: Date = new Date(),
 ): RailAggregateStatus {
   const counts = railStatusCounts(node, localDeliveryAttention);
+  if (!node.siteGroup && hasActiveEffectiveControl(node.session)) counts.paused = 0;
   const summary = summarizeRailStatusCounts(counts, now);
   if (node.siteGroup || !node.session.unread) return summary;
-  if (summary.kind !== "active" && summary.kind !== "queued" && summary.kind !== "waiting")
+  if (
+    summary.kind !== "active" &&
+    summary.kind !== "queued" &&
+    summary.kind !== "waiting" &&
+    summary.kind !== "paused"
+  )
     return summary;
   const own = ownRailStatusCounts(node.session, localDeliveryAttention);
-  if (own.active > 0 || own.queued > 0) return summary;
+  if (own.active > 0 || own.queued > 0 || (summary.kind === "paused" && own.paused > 0))
+    return summary;
   return {
     kind: "unread",
     count: counts.unread,
@@ -400,6 +444,14 @@ export function summarizeRailStatusCounts(
       count: counts.waiting,
       total: counts.total,
       label: `${counts.waiting} waiting to resume`,
+    };
+  }
+  if (counts.paused > 0) {
+    return {
+      kind: "paused",
+      count: counts.paused,
+      total: counts.total,
+      label: `${counts.paused} paused`,
     };
   }
   if (counts.unread > 0) {
@@ -1120,6 +1172,7 @@ type RemovedCounts = {
   waiting: number;
   attention: number;
   paused: number;
+  pausedWork: number;
   failed: number;
   unreadFailed: number;
   unread: number;
@@ -1134,6 +1187,7 @@ function emptyRemovedCounts(): RemovedCounts {
     waiting: 0,
     attention: 0,
     paused: 0,
+    pausedWork: 0,
     failed: 0,
     unreadFailed: 0,
     unread: 0,
@@ -1148,6 +1202,7 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.waiting += source.waiting;
   target.attention += source.attention;
   target.paused += source.paused;
+  target.pausedWork += source.pausedWork;
   target.failed += source.failed;
   target.unreadFailed += source.unreadFailed;
   target.unread += source.unread;
@@ -1164,6 +1219,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     waiting: sessionInputWait(node.session) ? 1 : 0,
     attention: awaitsPerson(node.session) ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
+    pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
     unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
     unread: node.session.unread ? 1 : 0,
@@ -1177,6 +1233,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     counts.waiting += stats.waitingDescendants ?? 0;
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
+    counts.pausedWork += stats.pausedWorkDescendants ?? 0;
     counts.failed += stats.failedDescendants;
     counts.unreadFailed += stats.unreadFailedDescendants ?? stats.failedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
@@ -1219,6 +1276,14 @@ function prunePinnedSubtreesWithCounts(
             : {}),
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
+          ...(stats.pausedWorkDescendants !== undefined
+            ? {
+                pausedWorkDescendants: Math.max(
+                  0,
+                  stats.pausedWorkDescendants - removed.pausedWork,
+                ),
+              }
+            : {}),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
           ...(stats.unreadFailedDescendants !== undefined
             ? {

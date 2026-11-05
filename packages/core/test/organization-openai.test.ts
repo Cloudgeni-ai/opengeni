@@ -129,6 +129,7 @@ describe("organization OpenAI execution overlay", () => {
         null,
       ),
       spyOn(opengeniDb, "loadOrganizationModelProviderApiKey").mockResolvedValue(null),
+      spyOn(opengeniDb, "listOrganizationCompatibleEndpointsForWorkspace").mockResolvedValue([]),
       spyOn(opengeniDb, "loadOrganizationModelProviderCredential").mockImplementation(
         async (_db, _settings, input) => (input.providerKind === "openai" ? credential : null),
       ),

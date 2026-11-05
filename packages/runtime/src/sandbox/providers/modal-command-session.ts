@@ -21,6 +21,7 @@ import {
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
 import { MODAL_ROUTER_READ_MAX_WAIT_MS } from "./modal-command-router-wire";
+import { modalShellStartFailureNotice } from "./modal-process-start";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
 
 type Entry = {
@@ -194,13 +195,17 @@ export function installModalCommandSession(
     page: ProviderCommandOutput,
     maxOutputTokens?: number,
   ): string => {
+    const output = page.chunks.map((chunk) => chunk.text).join("");
+    // A command Modal could not start (its /bin/sh does not load) gets short
+    // copy instead of Modal's error, which repeats the whole wrapper script.
+    const startFailure = modalShellStartFailureNotice(output, page.exitCode);
     const result = [
       `Provider output receipt: ${randomUUID()}`,
       page.exitCode === null
         ? `Process running with session ID ${handle}`
         : `Process exited with code ${page.exitCode}`,
       "Output:",
-      truncateOutput(page.chunks.map((chunk) => chunk.text).join(""), maxOutputTokens).text,
+      startFailure ?? truncateOutput(output, maxOutputTokens).text,
     ].join("\n");
     if (page.exitCode === null || entries.get(handle)?.persistence) {
       receipts.set(result, { handle, page });

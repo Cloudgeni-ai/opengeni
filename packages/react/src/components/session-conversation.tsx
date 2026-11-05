@@ -61,7 +61,7 @@ import {
 } from "./conversation-capability-connect";
 import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
 import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
-import type { AuthNeededItem } from "../timeline";
+import { timelineLivePause, type AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
@@ -215,6 +215,15 @@ export type SessionConversationProps = ClientOverride &
     modelPicker?: boolean | undefined;
     /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
     modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
+    /**
+     * Show how the agent works behind the scenes above the composer: the goal
+     * pill, and the agents and commands segments a host passes in
+     * `chromeProps`. Defaults to true. Set `false` for end users to whom a
+     * paused goal, a count of helper agents or a running command means
+     * nothing; queued messages, approvals and the agent's questions still
+     * show.
+     */
+    agentSignals?: boolean | undefined;
     /** Localized actions for already-sent user-message disclosure. */
     userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
     loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -401,6 +410,7 @@ function ConversationView({
   realtimeVoiceProps,
   genieLoading,
   modelPickerProps,
+  agentSignals = true,
   userMessageDisclosureLabels,
   loadSkillReview,
   className,
@@ -418,6 +428,8 @@ function ConversationView({
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
   const t = useOpenGeniText();
+  // Without agent signals the chrome keeps only the queue and incoming rows.
+  const hostChrome = agentSignals ? chromeProps : withoutAgentSignals(chromeProps);
   const {
     sessionId,
     config,
@@ -718,6 +730,7 @@ function ConversationView({
               emptyState={timelineProps?.emptyState}
               renderMessageSender={timelineProps?.renderMessageSender}
               status={status}
+              pause={timelineLivePause(voiceControl)}
               hasOlder={feed.hasOlder}
               loadingOlder={feed.loadingOlder}
               onLoadOlder={feed.loadOlder}
@@ -791,17 +804,18 @@ function ConversationView({
                 client={context.client}
                 workspaceId={context.workspaceId}
                 events={feed.events}
+                goal={agentSignals}
                 chrome={
                   terminal
                     ? {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         sessionStatus: status,
                         readOnly: true,
                         onOpenSession,
                       }
                     : {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         composer,
                         queuedRecall,
@@ -902,13 +916,31 @@ type ConversationChromeProps = {
   client: unknown;
   workspaceId: string;
   events: UseGoalOptions["events"];
+  /** Show the goal pill (and read the goal) when the client can reach goals. */
+  goal: boolean;
   chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
 };
+
+type ConversationChromeExtras = SessionConversationProps["chromeProps"];
+
+/** The host's chrome extras without the agents and commands segments. */
+function withoutAgentSignals(chrome: ConversationChromeExtras): ConversationChromeExtras {
+  if (!chrome) return chrome;
+  const {
+    agentsPanel: _agentsPanel,
+    agentsSignal: _agentsSignal,
+    commandsPanel: _commandsPanel,
+    commandsCount: _commandsCount,
+    ...rest
+  } = chrome;
+  return rest;
+}
 
 /** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
 function ConversationChrome(props: ConversationChromeProps) {
   const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
   const canReachGoals =
+    props.goal &&
     typeof goals.getGoal === "function" &&
     typeof goals.updateGoal === "function" &&
     typeof goals.deleteGoal === "function";

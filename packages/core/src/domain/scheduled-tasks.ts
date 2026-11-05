@@ -28,10 +28,12 @@ import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/
 import type { BillingOrigin, VaultPolicy } from "@opengeni/contracts";
 import type {
   AccessGrant,
+  FirstPartyMcpToolName,
   McpConnectionAccountSelection,
   Permission,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  ScheduledTaskAgentConfigInput,
   Session,
   ToolRef,
   SessionAuthorizationPort,
@@ -147,6 +149,7 @@ import {
   canonicalConfiguredModel,
   creationInitiatorForGrant,
   modelUnavailableHttpException,
+  resolveFirstPartyMcpToolsForCreate,
   settingsWithSessionMcpServerMetadata,
   settingsWithSessionMcpServerInputs,
   validateSessionMcpServersForCreate,
@@ -367,6 +370,17 @@ export async function createValidatedScheduledTask(input: {
     throw new HTTPException(410, {
       message: knowledgeSourceSyncRetirement(input.payload.agentConfig.knowledgeSource).message,
     });
+  // The requested Opengeni tools and permissions become the task's creator
+  // selection below; they are never stored in its agentConfig.
+  const {
+    firstPartyMcpTools: requestedFirstPartyMcpTools,
+    firstPartyMcpPermissions: requestedFirstPartyMcpPermissions,
+    ...requestedAgentConfig
+  }: ScheduledTaskAgentConfigInput = input.payload.agentConfig;
+  input = {
+    ...input,
+    payload: { ...input.payload, agentConfig: requestedAgentConfig } as CreateScheduledTaskPayload,
+  };
   if (input.payload.runMode === "existing_session") {
     const target = await validateScheduledTaskTarget({
       ...input,
@@ -572,6 +586,11 @@ export async function createValidatedScheduledTask(input: {
     grant: input.grant,
     authorization: input.authorization,
     actor: creationInitiator.actor ?? null,
+    requested: {
+      firstPartyMcpTools: requestedFirstPartyMcpTools,
+      firstPartyMcpPermissions: requestedFirstPartyMcpPermissions,
+    },
+    goal: agentConfig.goal !== undefined,
   });
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
@@ -704,6 +723,11 @@ export async function createValidatedScheduledTask(input: {
  * schedule more than itself). The session access policy is copied from the
  * projection when it exposes those facts; each absent fact is stored as null
  * so a generated session keeps its own default for that key.
+ *
+ * A person, key or app that creates the task can instead name the Opengeni
+ * tools and permissions its runs get, as on session create (`requested`):
+ * tools within the deployment's allowed set and permissions it holds itself.
+ * An agent's task always keeps its own chat's selection.
  */
 export async function frozenScheduledTaskCreatorPolicy(input: {
   db: Database;
@@ -711,11 +735,70 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   grant: AccessGrant;
   authorization?: AccessGrantAuthorization | undefined;
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
+  requested?: {
+    firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+    firstPartyMcpPermissions?: Permission[] | undefined;
+  };
+  /** Whether the task's runs carry a goal, which needs goals:manage. */
+  goal?: boolean;
 }): Promise<ScheduledTaskCreatorPolicy | null> {
   let restricted =
     (input.authorization?.grant === input.grant &&
       isDeveloperSetupAuthorization(input.authorization)) ||
     isDeveloperSetupGrant(input.grant);
+  const requestedTools = input.requested?.firstPartyMcpTools;
+  const requestedPermissions = input.requested?.firstPartyMcpPermissions;
+  if (input.actor && (requestedTools !== undefined || requestedPermissions !== undefined)) {
+    throw new HTTPException(422, {
+      message:
+        "A schedule an agent creates uses that agent's own Opengeni tools and permissions; omit firstPartyMcpTools and firstPartyMcpPermissions.",
+    });
+  }
+  if (!input.actor && (requestedTools !== undefined || requestedPermissions !== undefined)) {
+    const firstPartyMcpTools =
+      requestedTools === undefined
+        ? null
+        : resolveFirstPartyMcpToolsForCreate(
+            requestedTools,
+            undefined,
+            resolveFirstPartyMcpToolPolicy(input.settings),
+          );
+    if (requestedPermissions !== undefined) {
+      requireExplicitPermissionDelegation(input.grant, requestedPermissions);
+      for (const permission of requestedPermissions) {
+        if (!hasPermission(input.grant.permissions, permission, input.grant.permissionMode)) {
+          throw new HTTPException(403, {
+            message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
+          });
+        }
+      }
+      if (input.goal && !requestedPermissions.includes("goals:manage")) {
+        throw new HTTPException(422, {
+          message: "goal-bearing scheduled runs require goals:manage in firstPartyMcpPermissions",
+        });
+      }
+    }
+    // Omitted permissions keep what this credential would delegate anyway.
+    const firstPartyMcpPermissions =
+      requestedPermissions ??
+      (input.grant.permissionMode === "explicit"
+        ? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+            hasPermission(input.grant.permissions, permission, "explicit"),
+          )
+        : null);
+    if (firstPartyMcpPermissions?.length === 0) {
+      throw new HTTPException(403, {
+        message:
+          "the organization key holds no first-party MCP permission it could delegate to scheduled runs",
+      });
+    }
+    return {
+      firstPartyMcpTools,
+      firstPartyMcpPermissions,
+      sessionPolicy: null,
+      ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
+    };
+  }
   if (!input.actor) {
     if (input.grant.permissionMode === "explicit") {
       const permissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>

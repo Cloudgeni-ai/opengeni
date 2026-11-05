@@ -76,6 +76,9 @@ The agent then sets itself up with its ordinary tools (installing Skills,
 offering plugins and connections, creating schedules and event triggers,
 choosing a machine) and the chat simply continues as the bot.
 
+Bot templates are being merged with Slack agents into [agents](agents.md);
+every template is already mirrored into the `agents` tables.
+
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
 they handle on-call today and set up what fits") so the same template works for

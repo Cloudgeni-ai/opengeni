@@ -1,5 +1,8 @@
 import type { HumanInputAnswer, HumanInputQuestion } from "@opengeni/sdk";
-import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  sessionStatusItemDisplayStatus,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import type { ActivityItem, TimelineItem } from "@opengeni/react/session";
 import type { OpenGeniNativeLabels } from "./presentation";
 import { humanInputAnswerLines } from "./timeline/secret-field-model";
@@ -37,6 +40,7 @@ export function nativeSessionStatusTone(
     case "failed":
       return "failed";
     case "cancelled":
+    case "archived":
       return "complete";
     default:
       return "neutral";
@@ -405,7 +409,7 @@ export function timelineAccessibilityLabel(
     case "startup-phase":
       return `${labels.activity}, ${nativeTimelineStatusLabel(item.status, labels)}`;
     case "session-status":
-      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
+      return nativeSessionStatusLabel(sessionStatusItemDisplayStatus(item), labels);
     case "goal":
       return `${nativeGoalActionLabel(item.action, labels)}${item.text ? `: ${item.text}` : ""}`;
     case "notice":
@@ -454,6 +458,8 @@ export function nativeSessionStatusLabel(
       return labels.statusFailed;
     case "cancelled":
       return labels.statusCancelled;
+    case "archived":
+      return labels.statusArchived;
   }
 }
 

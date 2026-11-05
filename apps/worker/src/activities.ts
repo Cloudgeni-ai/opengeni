@@ -133,10 +133,12 @@ export const maintainSessionStorage = defaultControlActivities.maintainSessionSt
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;
 export const storeArchivedSession = defaultControlActivities.storeArchivedSession;
+export const restoreArchivedSessions = defaultControlActivities.restoreArchivedSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
 export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
+export const scanRecordingSpeakers = defaultControlActivities.scanRecordingSpeakers;
 export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
 export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
 export const expireDictation = defaultControlActivities.expireDictation;

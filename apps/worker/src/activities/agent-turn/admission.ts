@@ -24,6 +24,7 @@ import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
   SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
   type AllowanceExhaustedRefusal,
   type BillingOrigin,
   type SessionEvent,
@@ -443,6 +444,9 @@ export async function ensureRunAllowed(
   ownSubscription = false,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
+  if (ownSubscription && billingOrigin === "api") {
+    throw new Error(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
+  }
   // Per-task usage limit: independent of funding, so it applies to
   // credit, subscription, workspace-key and free paths alike.
   if (sessionId) await ensureSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId });

@@ -31,9 +31,10 @@ died with it, every upgrade would interrupt every sandbox on the host.
   blocked until it is removed, as does a sandbox blocked for anything but
   a failed recovery (a twice-taken ordinal, a record not known to be
   durable or unreadable, files a failed create left, a failed removal).
-  A host whose lease the service gave up registers again only once
-  nothing is blocked (ADR 18), so these retries are also what lets it
-  rejoin once its VMs answer or are gone.
+  A host whose lease the service gave up registers again once nothing is
+  blocked but sandboxes whose VMs were found held frozen (ADR 18), so
+  these retries are also what lets it rejoin once its other VMs answer
+  or are gone.
 - A small holder process per VM keeps a descriptor to its disk open, so a disk
   write error that happens while the agent is down is still seen.
 - One agent per host, enforced by a lock file.

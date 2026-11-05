@@ -90,8 +90,20 @@ async function archiveChat(input: {
         select account_id from workspaces where id = ${input.workspaceId}`
     )[0]!.account_id;
   const scope = { accountId, workspaceId: input.workspaceId, sessionId: input.sessionId };
+  // These fixtures archive whole trees on purpose, sub-chats at work included.
+  const tree = await admin<{ id: string }[]>`
+    select id from sessions where workspace_id = ${input.workspaceId}
+      and root_session_id = ${input.sessionId}`;
   return input.archived
-    ? await requestSessionArchive(db, { ...scope, subjectId: input.subjectId }, input.now)
+    ? await requestSessionArchive(
+        db,
+        {
+          ...scope,
+          subjectId: input.subjectId,
+          confirmActiveSubChats: tree.map((row) => row.id),
+        },
+        input.now,
+      )
     : await undoSessionArchive(db, scope, input.now);
 }
 
@@ -814,6 +826,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -838,6 +851,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -1041,6 +1055,125 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
   });
 
+  test("counts paused work and applies an ancestor's pause to a sub-chat's stats", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const root = await session({ ...workspace, message: "manager" });
+    const pausedChild = await session({
+      ...workspace,
+      message: "paused queued child",
+      parentSessionId: root.id,
+    });
+    const finished = await session({
+      ...workspace,
+      message: "paused finished child",
+      parentSessionId: pausedChild.id,
+    });
+    const worker = await session({
+      ...workspace,
+      message: "worker held by its parent's pause",
+      parentSessionId: pausedChild.id,
+    });
+    const leaf = await session({
+      ...workspace,
+      message: "leaf held by its grandparent's pause",
+      parentSessionId: worker.id,
+    });
+    const setControls = (assignments: SQL) =>
+      executeSessionActivity(
+        workspace.workspaceId,
+        sql`
+          update sessions
+          set ${assignments}, updated_at = now()
+          where id in (${root.id}, ${pausedChild.id}, ${finished.id}, ${worker.id}, ${leaf.id})
+        `,
+      );
+    await setControls(sql`
+      status = case
+        when id = ${pausedChild.id} then 'queued'
+        when id = ${worker.id} then 'running'
+        when id = ${leaf.id} then 'queued'
+        else 'idle'
+      end,
+      direct_control_state = case when id = ${pausedChild.id} then 'paused' else direct_control_state end,
+      direct_pause_revision = case when id = ${pausedChild.id} then 10 else direct_pause_revision end,
+      control_version = case when id = ${pausedChild.id} then 10 else control_version end
+    `);
+    // The finished child sleeps on an input wait: a pause holds no work there.
+    const sleepingTurnId = crypto.randomUUID();
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, resources, tools, metadata,
+        execution_generation
+      ) values (
+        ${sleepingTurnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${finished.id},
+        ${crypto.randomUUID()}, ${`wf-${sleepingTurnId}`}, 'completed',
+        2, 'sleeping prompt', 'test-model',
+        'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 1
+      )`,
+    );
+    await setControls(sql`
+      input_wait_turn_id = case when id = ${finished.id} then ${sleepingTurnId}::uuid else input_wait_turn_id end,
+      input_wait_until = case when id = ${finished.id} then now() + interval '1 hour' else input_wait_until end,
+      input_wait_reason = case when id = ${finished.id} then 'sleep' else input_wait_reason end,
+      input_wait_set_at = case when id = ${finished.id} then now() else input_wait_set_at end
+    `);
+    const stats = (rootId: string) =>
+      withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
+        sessionTreeStatsForSessions(scoped, workspace.workspaceId, [rootId]),
+      ).then((byRoot) => byRoot.get(rootId));
+
+    // The finished child is paused but has no work for Resume to continue;
+    // its input wait is not work either.
+    expect(await stats(root.id)).toMatchObject({
+      totalDescendants: 4,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      pausedDescendants: 4,
+      pausedWorkDescendants: 3,
+    });
+    // A sub-chat's own stats inherit the pause of its parent.
+    expect(await stats(worker.id)).toMatchObject({
+      totalDescendants: 1,
+      queuedDescendants: 0,
+      pausedDescendants: 1,
+      pausedWorkDescendants: 1,
+    });
+
+    // Resuming the worker's subtree defeats the older pause above it.
+    await setControls(sql`
+      subtree_run_override_revision = case when id = ${worker.id} then 11 else subtree_run_override_revision end,
+      control_version = case when id = ${worker.id} then 11 else control_version end
+    `);
+    expect(await stats(worker.id)).toMatchObject({
+      queuedDescendants: 1,
+      pausedDescendants: 0,
+      pausedWorkDescendants: 0,
+    });
+    expect(await stats(root.id)).toMatchObject({
+      runningDescendants: 1,
+      queuedDescendants: 1,
+      pausedDescendants: 2,
+      pausedWorkDescendants: 1,
+    });
+
+    // A workspace pause reaches the sub-chat unless a newer resume sits above it.
+    await admin`
+      update workspace_inference_controls
+      set revision = 20, workspace_state = 'paused', workspace_pause_revision = 20
+      where workspace_id = ${workspace.workspaceId}`;
+    expect(await stats(worker.id)).toMatchObject({ queuedDescendants: 0, pausedDescendants: 1 });
+    await setControls(sql`
+      subtree_run_override_revision = case when id = ${pausedChild.id} then 25 else subtree_run_override_revision end,
+      control_version = case when id = ${pausedChild.id} then 25 else control_version end
+    `);
+    expect(await stats(worker.id)).toMatchObject({ queuedDescendants: 1, pausedDescendants: 0 });
+  });
+
   test("bounds deep, wide, and overlapping descendant summaries with explicit lower bounds", async () => {
     if (!available) return;
     const workspace = await freshWorkspace({ maxNestedAgentDepth: 64 });
@@ -1120,6 +1253,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -1135,6 +1269,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -1150,6 +1285,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -1256,6 +1392,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
+      pausedWorkDescendants: 0,
       failedDescendants: 0,
       unreadFailedDescendants: 0,
       unreadDescendants: 0,
@@ -3274,6 +3411,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         waitingDescendants: 0,
         attentionDescendants: 0,
         pausedDescendants: 0,
+        pausedWorkDescendants: 0,
         failedDescendants: 0,
         unreadFailedDescendants: 0,
         unreadDescendants: 0,

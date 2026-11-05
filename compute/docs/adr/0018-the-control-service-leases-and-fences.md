@@ -403,7 +403,16 @@ can be built and tested.
   the Unix socket stays for local tools, which
   on a host in a fleet never create, adopt, hand off or remove sandboxes.
   A host with sandboxes it cannot read (blocked) does not register until
-  they are readable or removed, since it cannot rule on them.
+  they are readable or removed, since it cannot rule on them. The
+  exception is a sandbox whose record is sound but whose VM the agent
+  could not take back because the guard holds it frozen, as it does
+  after the lease ran out: only the deadline a registration brings thaws
+  it, so waiting for it to answer would wait for good. The host lists it
+  under the owner epoch its record names. The service rules on it like
+  any other: a drop or a refetch ends its VM (a kill works on a frozen
+  process) before the host answers, and a keep leaves it frozen, taken
+  back once the guard thaws it. Since the deadline is written only after
+  that, nothing the service gave another host thaws here.
 - **Requests.** A create is placed (two random hosts that fit, preferring
   one with a ready clone of the shape, then the larger share of its room
   free (the smaller of the shares of its memory and processor time it can
@@ -415,7 +424,18 @@ can be built and tested.
   anywhere else the sandbox boots afresh and loses its programs. A
   host that refuses it (`host_full`, `unavailable`, `expired`) holds
   nothing of it, so the service gives it to the next candidate under a new
-  epoch. A wake or connect goes straight to the owner, found in the
+  epoch. A replica does not ask a host that refused a sandbox as full
+  about it again, or about anything of the same kind that needs at least
+  as much, until the host reports something different, or for ten
+  seconds at most. While no host is left to ask, a try places nothing,
+  reads no archive pointer and writes no row. A sandbox whose owner
+  refused to adopt it under its current epoch is placed again without
+  first being woken there, since that host holds nothing of it. A wake
+  waiting for room looks for it in the view every 250 ms and reads its
+  row once a second.
+  On each replica, one caller at a time places a sandbox nobody owns. The
+  others wait their turn and then find it placed. A wake or connect goes
+  straight to the owner, found in the
   replica's cache. If the owner answers, finally, that it does not have
   it, because a hand-off finished before the service heard, or its copy is
   behind the archive, the service gives it to the same host again under a

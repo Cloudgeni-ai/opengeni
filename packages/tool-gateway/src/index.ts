@@ -38,7 +38,6 @@ import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
   ToolGatewayOutputValidationError,
-  ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
 import { summarizeToolGatewayInputErrors, type ToolGatewayInputIssueSummary } from "./input-issues";
@@ -146,6 +145,12 @@ export type ModelToolGatewayCall = {
   subjectId: string;
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
+  /**
+   * The identity the caller advertised under `modelName`. When set, the call
+   * runs only if the catalog binds that model name to this exact identity; a
+   * name the catalog gave to a different tool is not found, never rerouted.
+   */
+  expectedIdentity?: ToolGatewayIdentity;
 };
 
 type CompiledDefinition = {
@@ -175,7 +180,11 @@ export type PreparedToolGatewayCall = {
 export class PreparedToolGatewayDefinitions {
   readonly entries: readonly ToolGatewayCatalogEntryValue[];
 
-  constructor(private readonly definitions: readonly CompiledDefinition[]) {
+  constructor(
+    private readonly definitions: readonly CompiledDefinition[],
+    /** Tools that were deduplicated, re-pathed or left out while building the catalog. */
+    readonly warnings: readonly ToolGatewayCatalogWarning[] = [],
+  ) {
     this.entries = definitions.map(({ entry }) => entry);
   }
 
@@ -440,6 +449,13 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
+    if (
+      input.expectedIdentity !== undefined &&
+      identityKey(input.expectedIdentity) !== identityKey(definition.entry.identity)
+    ) {
+      // Two tools claimed this model name and the catalog kept the other one.
+      throw new ToolGatewayToolNotFoundError();
+    }
     const call = {
       operationId: input.operationId ?? randomUUID(),
       catalogDigest: this.catalogDigest,
@@ -465,83 +481,248 @@ export class ToolGateway {
   }
 }
 
+/**
+ * One tool the catalog builder could not take as given. A catalog is built for
+ * every turn attempt, so one bad tool from one connector must never fail it:
+ * the tool is deduplicated, given a disambiguated path, or left out, and the
+ * builder reports it here instead of throwing.
+ */
+export type ToolGatewayCatalogWarning = {
+  code:
+    | "duplicate_identity"
+    | "conflicting_identity"
+    | "duplicate_model_name"
+    | "path_disambiguated"
+    | "path_unavailable"
+    | "invalid_definition";
+  serverId: string;
+  toolName: string;
+  modelName: string;
+  /** The path the tool would have had. */
+  path?: string;
+  /** The path it was given instead, for `path_disambiguated`. */
+  resolvedPath?: string;
+  /** Short value-free reason, for `invalid_definition`. */
+  reason?: string;
+};
+
+export type PrepareToolGatewayDefinitionsOptions = {
+  /** Receives the builder's warnings; defaults to one structured `console.warn` per build. */
+  onWarnings?: (warnings: readonly ToolGatewayCatalogWarning[]) => void;
+};
+
+const TOOL_GATEWAY_LOGGED_WARNINGS_MAX = 32;
+
+function logToolGatewayCatalogWarnings(warnings: readonly ToolGatewayCatalogWarning[]): void {
+  console.warn("[tool-gateway] tool catalog built without some tools as listed", {
+    event: "tool_catalog_degraded",
+    count: warnings.length,
+    warnings: warnings.slice(0, TOOL_GATEWAY_LOGGED_WARNINGS_MAX),
+  });
+}
+
+type AdmittedDefinition = {
+  definition: ToolGatewayDefinition;
+  entry: ToolGatewayCatalogEntryValue;
+};
+
+/**
+ * Admit each definition on its own. Exact repeats of one identity collapse to
+ * the first; a different tool claiming an identity or model name already taken
+ * is left out, because either name routes to exactly one executor and must
+ * never silently reach another tool. A definition the catalog contract rejects
+ * makes only that tool unavailable.
+ */
+function admitToolGatewayDefinitions(
+  definitions: readonly ToolGatewayDefinition[],
+  warnings: ToolGatewayCatalogWarning[],
+): AdmittedDefinition[] {
+  const parsed: (AdmittedDefinition & { key: string; content: string })[] = [];
+  const contentsByIdentity = new Map<string, Set<string>>();
+  for (const definition of definitions) {
+    const about = warningSubject(definition);
+    let entry: ToolGatewayCatalogEntryValue;
+    let content: string;
+    try {
+      if (
+        definition.approvalAuthorityDigest !== undefined &&
+        !/^[0-9a-f]{64}$/u.test(definition.approvalAuthorityDigest)
+      ) {
+        throw new Error("approval authority digest must be lowercase SHA-256 hex");
+      }
+      if (
+        definition.effectAuthorityDigest !== undefined &&
+        !/^[0-9a-f]{64}$/u.test(definition.effectAuthorityDigest)
+      ) {
+        throw new Error("effect authority digest must be lowercase SHA-256 hex");
+      }
+      const {
+        execute: _execute,
+        approvalAuthorityDigest: _approvalAuthorityDigest,
+        effectAuthorityDigest: _effectAuthorityDigest,
+        requiresProviderPreflight: _requiresProviderPreflight,
+        preflightCall: _preflightCall,
+        lifecycle: _lifecycle,
+        codemodePath: _path,
+        ...entryInput
+      } = definition;
+      // Validate with the tool's own projected path; the final path may differ.
+      entry = ToolGatewayCatalogEntry.parse({
+        ...entryInput,
+        codemodePath: projectToolGatewayPath(definition),
+      });
+      content = digestCanonicalJson({
+        entry,
+        approvalAuthorityDigest: definition.approvalAuthorityDigest ?? null,
+        effectAuthorityDigest: definition.effectAuthorityDigest ?? null,
+      });
+    } catch (error) {
+      warnings.push({
+        ...about,
+        code: "invalid_definition",
+        reason: invalidDefinitionReason(error),
+      });
+      continue;
+    }
+    const key = identityKey(entry.identity);
+    parsed.push({ definition, entry, key, content });
+    const contents = contentsByIdentity.get(key) ?? new Set<string>();
+    contents.add(content);
+    contentsByIdentity.set(key, contents);
+  }
+  const admitted: AdmittedDefinition[] = [];
+  const admittedIdentities = new Set<string>();
+  const modelNames = new Set<string>();
+  for (const { definition, entry, key } of parsed) {
+    const about = warningSubject(definition);
+    if (contentsByIdentity.get(key)!.size > 1) {
+      // Different definitions claim one identity. Identity is the routing key
+      // for every caller, so no choice between them is safe: leave all out.
+      warnings.push({ ...about, code: "conflicting_identity" });
+      continue;
+    }
+    if (admittedIdentities.has(key)) {
+      warnings.push({ ...about, code: "duplicate_identity" });
+      continue;
+    }
+    if (modelNames.has(entry.modelName)) {
+      // Callers that advertise this name pass the identity they advertised
+      // (`expectedIdentity`), so the later tool's calls are refused, not rerouted.
+      warnings.push({ ...about, code: "duplicate_model_name" });
+      continue;
+    }
+    admittedIdentities.add(key);
+    modelNames.add(entry.modelName);
+    admitted.push({ definition, entry });
+  }
+  return admitted;
+}
+
+function warningSubject(
+  definition: ToolGatewayDefinition,
+): Pick<ToolGatewayCatalogWarning, "serverId" | "toolName" | "modelName"> {
+  const identity = (definition as { identity?: Partial<ToolGatewayIdentity> }).identity;
+  return {
+    serverId: boundedWarningText(identity?.serverId),
+    toolName: boundedWarningText(identity?.toolName),
+    modelName: boundedWarningText((definition as { modelName?: unknown }).modelName),
+  };
+}
+
+function boundedWarningText(value: unknown): string {
+  return typeof value === "string" ? value.slice(0, 256) : "";
+}
+
+/** Value-free: names the failing fields, never their contents. */
+function invalidDefinitionReason(error: unknown): string {
+  const issues = (error as { issues?: unknown }).issues;
+  if (Array.isArray(issues) && issues.length > 0) {
+    const fields = [
+      ...new Set(
+        issues.map((issue) =>
+          Array.isArray((issue as { path?: unknown }).path)
+            ? (issue as { path: unknown[] }).path.map(String).join(".") || "(root)"
+            : "(root)",
+        ),
+      ),
+    ];
+    return `invalid fields: ${fields.slice(0, 8).join(", ")}`.slice(0, 256);
+  }
+  return error instanceof Error ? error.message.slice(0, 256) : "invalid definition";
+}
+
 export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
+  options: PrepareToolGatewayDefinitionsOptions = {},
 ): PreparedToolGatewayDefinitions {
-  const paths = allocateToolPaths(definitions);
+  const warnings: ToolGatewayCatalogWarning[] = [];
+  const admittedDefinitions = admitToolGatewayDefinitions(definitions, warnings);
+  const paths = allocateToolPaths(admittedDefinitions, warnings);
+  const admitted = admittedDefinitions.flatMap((candidate, index) => {
+    const path = paths[index];
+    return path ? [{ ...candidate, path }] : [];
+  });
+  if (warnings.length > 0) {
+    (options.onWarnings ?? logToolGatewayCatalogWarnings)(warnings);
+  }
   let schemaValidators: SchemaValidators | undefined;
   let diagnosticValidators: SchemaValidators | undefined;
-  const compiled = definitions.map((definition, index): CompiledDefinition => {
-    const {
-      execute,
-      approvalAuthorityDigest,
-      effectAuthorityDigest,
-      requiresProviderPreflight: _requiresProviderPreflight,
-      preflightCall,
-      lifecycle,
-      codemodePath: _path,
-      ...entryInput
-    } = definition;
-    if (approvalAuthorityDigest !== undefined && !/^[0-9a-f]{64}$/u.test(approvalAuthorityDigest)) {
-      throw new Error("Tool gateway approval authority digest must be lowercase SHA-256 hex");
-    }
-    if (effectAuthorityDigest !== undefined && !/^[0-9a-f]{64}$/u.test(effectAuthorityDigest)) {
-      throw new Error("Tool gateway effect authority digest must be lowercase SHA-256 hex");
-    }
-    const entry = ToolGatewayCatalogEntry.parse({
-      ...entryInput,
-      codemodePath: paths[index],
-    });
-    // Compilation used to snapshot these at preparation. Keep that boundary
-    // even though the compiler is now reached only by a call to this tool.
-    const inputSchema = structuredClone(entry.inputSchema);
-    const outputSchema = entry.outputSchema ? structuredClone(entry.outputSchema) : null;
-    let validators:
-      | {
-          input: ValidateFunction<unknown>;
-          output: ValidateFunction<unknown> | null;
+  const compiled = admitted.map(
+    ({ definition, entry: admittedEntry, path }): CompiledDefinition => {
+      const { execute, approvalAuthorityDigest, effectAuthorityDigest, preflightCall, lifecycle } =
+        definition;
+      const entry: ToolGatewayCatalogEntryValue = { ...admittedEntry, codemodePath: path };
+      // Compilation used to snapshot these at preparation. Keep that boundary
+      // even though the compiler is now reached only by a call to this tool.
+      const inputSchema = structuredClone(entry.inputSchema);
+      const outputSchema = entry.outputSchema ? structuredClone(entry.outputSchema) : null;
+      let validators:
+        | {
+            input: ValidateFunction<unknown>;
+            output: ValidateFunction<unknown> | null;
+          }
+        | undefined;
+      let compilationFailure: ToolGatewaySchemaCompilationError | undefined;
+      const compile = () => {
+        if (validators) return validators;
+        if (compilationFailure) throw compilationFailure;
+        try {
+          const compiler = (schemaValidators ??= createSchemaValidators("first_error"));
+          // Compile both before argument admission, authorization or execution.
+          // A broken output schema must never fail after a side effect has run.
+          validators = {
+            input: compileCatalogSchema(compiler, inputSchema),
+            output: outputSchema ? compileCatalogSchema(compiler, outputSchema) : null,
+          };
+          return validators;
+        } catch (error) {
+          compilationFailure = new ToolGatewaySchemaCompilationError(error);
+          throw compilationFailure;
         }
-      | undefined;
-    let compilationFailure: ToolGatewaySchemaCompilationError | undefined;
-    const compile = () => {
-      if (validators) return validators;
-      if (compilationFailure) throw compilationFailure;
-      try {
-        const compiler = (schemaValidators ??= createSchemaValidators("first_error"));
-        // Compile both before argument admission, authorization or execution.
-        // A broken output schema must never fail after a side effect has run.
-        validators = {
-          input: compileCatalogSchema(compiler, inputSchema),
-          output: outputSchema ? compileCatalogSchema(compiler, outputSchema) : null,
-        };
-        return validators;
-      } catch (error) {
-        compilationFailure = new ToolGatewaySchemaCompilationError(error);
-        throw compilationFailure;
-      }
-    };
-    let diagnoseInput: ValidateFunction<unknown> | undefined;
-    return {
-      entry,
-      execute,
-      approvalAuthorityDigest,
-      effectAuthorityDigest,
-      preflightCall,
-      lifecycle,
-      get validateInput() {
-        return compile().input;
-      },
-      diagnoseInput: () =>
-        (diagnoseInput ??= compileCatalogSchema(
-          (diagnosticValidators ??= createSchemaValidators("all_errors")),
-          inputSchema,
-        )),
-      get validateOutput() {
-        return compile().output;
-      },
-    };
-  });
-  return new PreparedToolGatewayDefinitions(compiled);
+      };
+      let diagnoseInput: ValidateFunction<unknown> | undefined;
+      return {
+        entry,
+        execute,
+        approvalAuthorityDigest,
+        effectAuthorityDigest,
+        preflightCall,
+        lifecycle,
+        get validateInput() {
+          return compile().input;
+        },
+        diagnoseInput: () =>
+          (diagnoseInput ??= compileCatalogSchema(
+            (diagnosticValidators ??= createSchemaValidators("all_errors")),
+            inputSchema,
+          )),
+        get validateOutput() {
+          return compile().output;
+        },
+      };
+    },
+  );
+  return new PreparedToolGatewayDefinitions(compiled, warnings);
 }
 
 export function createWorkspaceToolGateway(input: {
@@ -558,8 +739,12 @@ export function createWorkspaceToolGateway(input: {
     context: { transportMeta?: Record<string, unknown> | null },
   ) => boolean;
   resolveArguments?: ToolGatewayArgumentResolver;
+  onWarnings?: PrepareToolGatewayDefinitionsOptions["onWarnings"];
 }): { catalog: ToolGatewayCatalogValue; gateway: ToolGateway } {
-  const prepared = prepareToolGatewayDefinitions(input.definitions);
+  const prepared = prepareToolGatewayDefinitions(
+    input.definitions,
+    input.onWarnings ? { onWarnings: input.onWarnings } : {},
+  );
   const unsigned = {
     version: TOOL_GATEWAY_CATALOG_VERSION,
     accountId: input.accountId,
@@ -786,10 +971,93 @@ export function inputSchemaArgumentIssues(
   return summarizeToolGatewayInputErrors(errors, { schema, arguments: args });
 }
 
-function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {
-  const allocated = definitions.map(projectToolGatewayPath);
-  assertNoToolPathCollisions(allocated);
+/**
+ * Give every admitted tool a unique Codemode path. Paths are convenience only
+ * (calls are routed by identity), so a collision never fails the catalog: the
+ * later tool in a canonical order gets a path disambiguated by its own identity
+ * digest, and is left out only when no candidate path is free. The order is by
+ * projected path and identity, so the result does not depend on listing order.
+ */
+function allocateToolPaths(
+  admitted: readonly AdmittedDefinition[],
+  warnings: ToolGatewayCatalogWarning[],
+): (string[] | null)[] {
+  const projected = admitted.map(({ entry }) => entry.codemodePath);
+  const order = admitted
+    .map((_candidate, index) => index)
+    .sort(
+      (left, right) =>
+        compareToolPaths(projected[left]!, projected[right]!) ||
+        compareCanonicalStrings(
+          identityKey(admitted[left]!.entry.identity),
+          identityKey(admitted[right]!.entry.identity),
+        ),
+    );
+  const root: ToolPathNode = { children: new Map(), leaf: false };
+  const allocated: (string[] | null)[] = admitted.map(() => null);
+  for (const index of order) {
+    const { entry } = admitted[index]!;
+    const base = projected[index]!;
+    const candidates = toolPathCandidates(base, entry.identity);
+    const path = candidates.find((candidate) => claimToolPath(root, candidate));
+    const subject = {
+      serverId: entry.identity.serverId,
+      toolName: entry.identity.toolName,
+      modelName: entry.modelName,
+      path: boundedWarningText(base.join(".")),
+    };
+    if (!path) {
+      warnings.push({ ...subject, code: "path_unavailable" });
+      continue;
+    }
+    if (path !== candidates[0]) {
+      warnings.push({
+        ...subject,
+        code: "path_disambiguated",
+        resolvedPath: boundedWarningText(path.join(".")),
+      });
+    }
+    allocated[index] = path;
+  }
   return allocated;
+}
+
+/** The projected path, then its leaf with an identity suffix, then a flattened leaf. */
+function toolPathCandidates(base: readonly string[], identity: ToolGatewayIdentity): string[][] {
+  const digest = identityDigest(identity);
+  const withSuffix = (segment: string, length: number): string => {
+    const suffix = `_${digest.slice(0, length)}`;
+    return `${segment.slice(0, 128 - suffix.length)}${suffix}`;
+  };
+  const last = base.at(-1)!;
+  const suffixedLast = last.endsWith(`_${digest.slice(0, 10)}`)
+    ? withSuffix(last, 16)
+    : withSuffix(last, 10);
+  // A path under an existing tool leaf can only move up beside it.
+  const flattened = [base[0]!, withSuffix(base.slice(1).join("_"), 16)];
+  return [[...base], [...base.slice(0, -1), suffixedLast], flattened];
+}
+
+/** Claim `path` as a leaf when nothing occupies it; leaves the trie untouched otherwise. */
+function claimToolPath(root: ToolPathNode, path: readonly string[]): boolean {
+  let probe: ToolPathNode | undefined = root;
+  for (const segment of path) {
+    if (probe.leaf) return false;
+    probe = probe.children.get(segment);
+    if (!probe) break;
+  }
+  if (probe && (probe.leaf || probe.children.size > 0)) return false;
+  let node = root;
+  for (const segment of path) {
+    let child = node.children.get(segment);
+    if (!child) {
+      child = { children: new Map(), leaf: false };
+      node.children.set(segment, child);
+    }
+    node = child;
+  }
+  node.leaf = true;
+  return true;
 }
 
 /** Shared forward projection; never reverse-parse a namespace as authority. */
@@ -811,29 +1079,6 @@ type ToolPathNode = {
   leaf: boolean;
 };
 
-function assertNoToolPathCollisions(paths: readonly (readonly string[])[]): void {
-  const root: ToolPathNode = { children: new Map(), leaf: false };
-  const ordered = [...paths].sort(compareToolPaths);
-  for (const path of ordered) {
-    let node = root;
-    for (const [index, segment] of path.entries()) {
-      if (node.leaf) throw new ToolGatewayPathCollisionError(path, "extends_leaf");
-      let child = node.children.get(segment);
-      if (!child) {
-        child = { children: new Map(), leaf: false };
-        node.children.set(segment, child);
-      }
-      node = child;
-      if (index === path.length - 1) {
-        if (node.leaf || node.children.size > 0) {
-          throw new ToolGatewayPathCollisionError(path, "collision");
-        }
-        node.leaf = true;
-      }
-    }
-  }
-}
-
 function compareToolPaths(left: readonly string[], right: readonly string[]): number {
   const length = Math.min(left.length, right.length);
   for (let index = 0; index < length; index += 1) {
@@ -853,7 +1098,11 @@ export function safeNamespaceSegment(value: string): string {
 }
 
 function shortIdentityDigest(identity: ToolGatewayIdentity): string {
-  return createHash("sha256").update(identityKey(identity), "utf8").digest("hex").slice(0, 10);
+  return identityDigest(identity).slice(0, 10);
+}
+
+function identityDigest(identity: ToolGatewayIdentity): string {
+  return createHash("sha256").update(identityKey(identity), "utf8").digest("hex");
 }
 
 function identityKey(identity: ToolGatewayIdentity): string {

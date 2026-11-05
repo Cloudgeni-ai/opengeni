@@ -61,6 +61,9 @@ describe("session-only entry", () => {
       "@opengeni/contracts/claude-subscription-model-ids",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
+      // The archive's stop reason, so an archive never reads as cancelled: a
+      // dependency-free contracts leaf shared with the server.
+      "@opengeni/contracts/session-history",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
       "@opengeni/contracts/values",
       "@opengeni/sdk",
@@ -211,7 +214,12 @@ describe("session-only entry", () => {
     // Pure send-destination and run-control rules shared with the console and
     // native screens (a turn parked on a usage limit does not hold a Send).
     expect(reactSources.some((id) => id.endsWith("/src/session-status-model.ts"))).toBe(true);
-    expect(reactSources.length).toBe(63);
+    // Pause spans for a custom timeline, from its events and live control:
+    // paused time is not work and a paused turn reads "Paused".
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
+      true,
+    );
+    expect(reactSources.length).toBe(64);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

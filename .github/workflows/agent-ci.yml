@@ -49,11 +49,11 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install desktop and native build dependencies
         run: |
           sudo apt-get update
@@ -85,11 +85,11 @@ jobs:
         working-directory: .
         shell: bash
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install
         run: bun install --frozen-lockfile
       - name: Stage the source-pinned Windows worker and transport
@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 6
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Compile and exercise native protocol and failure cases
         timeout-minutes: 5
         run: make -C native/command-supervisor test CFLAGS='-O2 -g'
@@ -132,13 +132,13 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.82.0
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust 1.82
-        uses: dtolnay/rust-toolchain@1.82.0
+        uses: dtolnay/rust-toolchain@40a9285135951116a4a08e10a723a42b12d721d3 # 1.82.0
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: agent
 
@@ -155,15 +155,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: agent
 
@@ -194,19 +194,19 @@ jobs:
         os: [ubuntu-latest, macos-26, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Bun for the macOS desktop adapter and the Linux NATS install
         if: runner.os != 'Windows'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: agent
 
@@ -237,9 +237,19 @@ jobs:
       - name: Install the native transport test broker
         uses: ./.github/actions/setup-agent-test-nats
 
+      # The /dev/null regression test hides /dev in a private mount namespace,
+      # which Ubuntu's AppArmor denies to unprivileged users by default.
+      - name: Allow unprivileged user namespaces for the agent's namespace tests
+        if: runner.os == 'Linux'
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: cargo test --workspace
         env:
           OPENGENI_AGENT_REQUIRE_NATS: ${{ runner.os == 'Linux' && '1' || '' }}
+          OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --all-features
 
       - name: Verify publication receipts, websocket dialing and platform roots across reconnects
@@ -288,13 +298,13 @@ jobs:
         os: [ubuntu-latest, macos-26, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: agent
 

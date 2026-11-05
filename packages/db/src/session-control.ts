@@ -33,6 +33,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { releaseCapacityWaitingTurnInTransaction } from "./capacity-wait-release";
 import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
 import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import {
@@ -3228,6 +3229,35 @@ async function loadParentSessionId(
   return row?.parentSessionId ?? null;
 }
 
+/** The sessions among these whose active turn waits for subscription capacity. */
+async function loadCapacityWaitingTurns(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Array<{ sessionId: string; turnId: string }>> {
+  if (sessionIds.length === 0) return [];
+  const rows = await db
+    .select({ sessionId: schema.sessions.id, turnId: schema.sessionTurns.id })
+    .from(schema.sessions)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+        eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.id, sessionIds),
+        eq(schema.sessions.status, "waiting_capacity"),
+        eq(schema.sessionTurns.status, "waiting_capacity"),
+      ),
+    )
+    .orderBy(schema.sessions.id);
+  return rows;
+}
+
 /**
  * The one control-plane child -> parent outbox insert (terminal cancellation,
  * direct Pause, and cancelled human-input resolutions). The caller holds the
@@ -3887,6 +3917,17 @@ export async function mutateSessionControlInTransaction(
     input.action === "cancel"
       ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
       : [];
+  // Pause stops turns parked on subscription capacity in the paused subtree
+  // (a wait has no attempt to interrupt). The workspace control lock taken
+  // above keeps any new wait from arming until this commit.
+  const capacityWaitingTurns =
+    input.action === "pause"
+      ? await loadCapacityWaitingTurns(
+          db,
+          input.workspaceId,
+          (await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)).sessionIds,
+        )
+      : [];
   // A direct Pause of a child notifies its parent (child_paused) through the
   // outbox in this same commit, so the parent joins the UUID-ordered session
   // lock exactly like Cancel locks the root's surviving parent.
@@ -3903,13 +3944,22 @@ export async function mutateSessionControlInTransaction(
         ? [
             input.actor.sessionId,
             ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
             ...(lineageParentSessionId ? [lineageParentSessionId] : []),
           ]
-        : [...cancellationSessionIds, ...(lineageParentSessionId ? [lineageParentSessionId] : [])],
+        : [
+            ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
+            ...(lineageParentSessionId ? [lineageParentSessionId] : []),
+          ],
     turnIds:
       input.actor.type === "agent_attempt"
-        ? [input.actor.turnId, ...cancellationTurnIds]
-        : cancellationTurnIds,
+        ? [
+            input.actor.turnId,
+            ...cancellationTurnIds,
+            ...capacityWaitingTurns.map((row) => row.turnId),
+          ]
+        : [...cancellationTurnIds, ...capacityWaitingTurns.map((row) => row.turnId)],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   if (input.action === "cancel" || pauseParentSessionId !== null) {
@@ -4018,6 +4068,8 @@ export async function mutateSessionControlInTransaction(
       input.action === "pause"
         ? targetSession.directControlState !== "paused" ||
           directPauseRevision === null ||
+          // Before Pause released waits, a paused chat could keep one.
+          capacityWaitingTurns.length > 0 ||
           (await sessionPauseEffectsNeeded(db, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -4284,6 +4336,25 @@ export async function mutateSessionControlInTransaction(
           cancelledTurnCount: 0,
           affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
         };
+  for (const waiting of capacityWaitingTurns) {
+    const released = await releaseCapacityWaitingTurnInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiting.sessionId,
+      turnId: waiting.turnId,
+      trigger: "session_pause",
+    });
+    if (!released) continue;
+    const affected = cancellation.affectedSessionEvents.find(
+      (entry) => entry.sessionId === waiting.sessionId,
+    );
+    if (affected) affected.eventIds.push(...released.eventIds);
+    else
+      cancellation.affectedSessionEvents.push({
+        sessionId: waiting.sessionId,
+        eventIds: released.eventIds,
+      });
+  }
   if (input.action === "pause" && pauseParentSessionId !== null) {
     // Direct Pause only (a recursive ancestor pause never reaches this command
     // for the child), and never when the parent's own live attempt issued it:

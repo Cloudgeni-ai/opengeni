@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "6.7.0",
+  "version": "6.10.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -77,9 +77,9 @@
   },
   "dependencies": {
     "@alibaba-group/opensandbox": "0.1.11",
-    "@grpc/grpc-js": "1.14.4",
+    "@grpc/grpc-js": "1.14.7",
     "@modelcontextprotocol/client": "2.3.1",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@noble/hashes": "^1.8.0",
     "@openai/agents": "0.14.3",
     "@openai/agents-core": "0.14.3",
@@ -104,7 +104,7 @@
     "openai": "6.47.0",
     "postal-mime": "2.7.5",
     "protobufjs": "7.6.5",
-    "sharp": "0.34.5",
+    "sharp": "0.35.5",
     "ws": "8.21.1",
     "zod": "4.4.3"
   },

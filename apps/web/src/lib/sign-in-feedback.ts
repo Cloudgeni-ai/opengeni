@@ -23,7 +23,8 @@ export function signInCallbackError(code: string | null | undefined): string | n
     case "email_verification_required":
       return "Verify your email before using this sign-in method. Use your existing sign-in method to access your account.";
     case "signup_challenge_required":
-      return "To create a new account, choose Sign up or enable Create a new account, then complete verification.";
+      // Only a client that skipped the challenge, or whose token failed, gets here.
+      return "Verification didn't complete, so no account was created. Try again.";
     case "signup_disabled":
       return `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in with the method you used before.`;
     case "signup_email_not_allowed":

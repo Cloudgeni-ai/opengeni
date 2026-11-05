@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use compute_core::{Durability, Input, Level, SandboxId};
+use compute_core::{Durability, Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
@@ -36,7 +36,7 @@ use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, MadeAt, Owned, OwnerEpoch, Stamp, Store};
 
-use super::disk::{AfterReading, Room};
+use super::disk::{AfterReading, Room, unwanted};
 use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
@@ -371,9 +371,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let unclaimed = self.size(&config, Some(0));
         let policy = match self.can_create(id, &config, unclaimed, true) {
             Ok((Room::Now, policy)) => policy,
-            Ok((Room::AfterReading, _)) => {
+            Ok((Room::AfterReading, policy)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
+                // Booked meanwhile, so disk relief frees it.
+                self.want_disk(id.0, Host::first_wake_disk(unclaimed, policy, true));
                 return;
             }
             Err(error) => {
@@ -398,7 +400,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         self.preparing.insert(id.0);
         let by_ms = self.first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, policy, true, by_ms));
+        self.inputs([
+            unwanted(id.0),
+            self.first_wake(id, unclaimed, policy, true, by_ms),
+        ]);
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);
@@ -465,9 +470,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// before it is admitted and its files are whole.
     pub(super) fn copy_claimed(&mut self, record: Record, claimed: Claimed, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
-        if let Err(refused) = self.adopted_room(&record) {
-            self.prepared(id, ordinal, Err(refused), reply, None, None);
-            return;
+        match self.adopted_room(&record) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                let waiting = AfterReading::Claimed(Box::new(record), Box::new(claimed), reply);
+                self.after_reading(waiting);
+                return;
+            }
+            Err(refused) => {
+                self.prepared(id, ordinal, Err(refused), reply, None, None);
+                return;
+            }
         }
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
@@ -736,10 +749,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// the rest, keeping the store's copies, and adopts again those whose
     /// copy here is behind the store's. Answers once every drop is done, so
     /// the new lease lets only what the service gave this host run.
+    ///
+    /// A sandbox whose VM recovery found held frozen (see
+    /// [`Self::frozen_owner`]) is ruled on too: one dropped or adopted
+    /// again has its VM ended before the answer, as any other; one kept
+    /// under any epoch stays blocked, and is taken back once the lease
+    /// lets the guard thaw it. So nothing the service gave another host
+    /// runs here again, and only what it gave this host thaws.
     pub(super) fn reconcile(&mut self, rulings: Vec<Ruling>, reply: Reply<()>) {
-        if let Some((&id, _)) = self.blocked.first_key_value() {
+        if let Some(id) = self.unruled_blocked() {
             let _ = reply.send(Err(HostError::Blocked {
-                id: Id(id),
+                id,
                 reason: "a sandbox the host does not manage may still run a VM another host now \
                          runs; remove it before the host registers"
                     .into(),
@@ -757,12 +777,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let id = record.id;
             let (verdict, link) = rulings.remove(&id).unwrap_or((Verdict::Drop, None));
+            let frozen = self.frozen_owner(id.0).is_some();
             let (done, answer) = oneshot::channel();
             match verdict {
                 Verdict::Keep { owner_epoch } => {
                     let owner = OwnerEpoch(owner_epoch);
                     if record.removing {
                         continue;
+                    }
+                    if frozen {
+                        self.take_back_on_thaw(id.0);
                     }
                     if owner == record.owner() {
                         // Kept as it was, unless its link changed.
@@ -790,6 +814,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     } else if let Some(slot) = self.slots.get_mut(&id.0) {
                         slot.removers.push(done);
                         self.drop_copy(id, None);
+                    } else if frozen {
+                        self.hand_away_frozen(&record, vec![done]);
                     } else {
                         continue;
                     }
@@ -804,7 +830,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         reply: done,
                         under: None,
                     };
-                    self.drop_copy(id, Some(then));
+                    if frozen {
+                        // The adopt goes on once its VM is gone.
+                        self.then_adopt.insert(id.0, then);
+                        self.hand_away_frozen(&record, Vec::new());
+                    } else {
+                        self.drop_copy(id, Some(then));
+                    }
                 }
             }
             waits.push((id, answer));

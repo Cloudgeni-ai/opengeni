@@ -386,3 +386,51 @@ test("a sandbox failure that stops shows only its authored copy, never the servi
     expect(turnFailureClass(summary)).toBe("sandbox");
   }
 });
+
+test("a workspace machine that can't start programs reads as plain words while restarting and once stopped", async () => {
+  // Exact worker shapes: the retryable recovery while the box restarts, and
+  // the terminal failure once a restart did not help.
+  const restarting = parseProviderRecovery({
+    error:
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
+    code: "sandbox_machine_restarting",
+    retryable: true,
+    providerRecoveryCount: 1,
+    maxProviderRecoveryCount: 5,
+  });
+  expect(restarting).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(englishText, restarting!)).toBe(
+    "The workspace machine couldn't start programs, so it was restarted…",
+  );
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={restarting} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("The turn continues automatically as soon as it's back.");
+    expect(text).not.toContain("sandbox");
+    // Restarted once per turn: no attempt budget to count.
+    expect(text).not.toContain("attempt");
+  } finally {
+    await view.unmount();
+  }
+
+  const error =
+    "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";
+  const payload = {
+    error,
+    code: "sandbox_process_start_failed",
+    retryable: false,
+    detail:
+      "not found: start the program for a shell command: No such file or directory (os error 2)",
+  };
+  expect(parseProviderRecovery(payload)).toBeNull();
+  // The agent's own text stays on the event for operators, never in the copy.
+  const presented = presentFailure(englishText, payload);
+  expect(presented).toMatchObject({ reason: error, diagnostic: false });
+  const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+  expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+  const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+  const banner = failedSessionCopy(summary, false, false, true);
+  expect(banner.reason).toBe(error);
+  expect(banner.reason).not.toContain("node -e");
+  expect(turnFailureClass(summary)).toBe("sandbox");
+});

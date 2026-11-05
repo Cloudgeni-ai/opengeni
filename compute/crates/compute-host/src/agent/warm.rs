@@ -16,6 +16,7 @@ use crate::protocol::{Id, ImageId};
 use crate::rootfs::Cache;
 use crate::store::Store;
 
+use super::relief::{self, Kept};
 use super::{Event, HostAgent, HostConfig, SAVE_EXTRA, Warm};
 
 /// How often unused images are looked for.
@@ -192,17 +193,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// unused, unless a template of theirs is kept or being built; looks at
     /// most once a minute.
     pub(super) fn retire_unused_images(&mut self) {
-        if self.rootfs_retired.elapsed() < ROOTFS_RETIRE_EVERY {
+        if !self.relief.retire_images_now(ROOTFS_RETIRE_EVERY) {
             return;
         }
-        self.rootfs_retired = Instant::now();
         let keep = self
             .warm
             .as_ref()
             .map(|warm| warm.pool.images())
             .unwrap_or_default();
         let rootfs = Arc::clone(&self.rootfs);
-        tokio::spawn(async move { rootfs.retire(&keep, SystemTime::now()).await });
+        let (observer, measured) = (self.observer.clone(), self.measured_images());
+        tokio::spawn(async move {
+            let removed = rootfs.retire(&keep, SystemTime::now()).await;
+            relief::retired_images(&observer, &removed, &measured);
+        });
     }
 
     /// Records a create of `shape`, which keeps its template from retiring.
@@ -225,6 +229,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut retired = Vec::new();
         for shape in warm.uses.unused(SystemTime::now()) {
             if let Some(gone) = warm.pool.retire(shape) {
+                tracing::info!(%shape, "template unused for long; retired");
                 retired.push(shape);
                 if let Some(template) = gone.template {
                     tokio::spawn(pool::remove(&template));
@@ -232,6 +237,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         for shape in retired {
+            self.retired_unused(Kept::Template(shape));
             self.discard_stale_ready(shape);
         }
     }

@@ -32,6 +32,11 @@ import {
   responderWaitExhausted,
 } from "./control-replay";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+} from "./process-start-failure";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -132,6 +137,13 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
+  /** The machine itself cannot start programs (a missing `/dev/null` the
+   *  agent had to open, or an older agent's shell that would not start). Its
+   *  message names only the started program, never the command text, and it
+   *  is never a missing-path answer, so `osNotFound` stays false. Any other
+   *  failed start (one missing program, brief resource pressure) keeps its
+   *  ordinary mapping, also with the command text removed. */
+  readonly processStartFailed: boolean;
   /** The reply exceeded the transport's max payload (a distinguishing flag so the
    *  fault renderer can name the size wall + recovery instead of a generic OS error). */
   readonly payloadTooLarge: boolean;
@@ -166,19 +178,37 @@ export class SelfhostedControlError extends Error {
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
-    super(input.message);
+    // Every failed process start is reduced to the program's name, so no
+    // command text reaches events, tool output or the person; only one that
+    // says the machine itself cannot start programs is flagged as such.
+    const startFailure = isProcessStartFailureMessage(input.message);
+    const processStartFailed = startFailure && isMachineProcessStartFailureMessage(input.message);
+    super(startFailure ? sanitizeProcessStartFailureMessage(input.message) : input.message);
     this.code = input.code;
     this.reason = input.reason;
     this.retryable = input.retryable;
     this.fenced = input.fenced ?? false;
     this.draining = input.draining ?? false;
     this.agentOffline = input.agentOffline ?? false;
-    this.osNotFound = input.osNotFound ?? false;
+    this.processStartFailed = processStartFailed;
+    // A failed process start is reported as ENOENT for whatever the spawn
+    // could not open; it says nothing about a path the caller asked about.
+    this.osNotFound = (input.osNotFound ?? false) && !processStartFailed;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
     this.connectionReplaced = input.connectionReplaced ?? false;
     this.controlRequestId = input.controlRequestId ?? null;
-    this.detail = input.detail ?? {};
+    this.detail =
+      startFailure && input.detail
+        ? Object.fromEntries(
+            Object.entries(input.detail).map(([key, value]) => [
+              key,
+              isProcessStartFailureMessage(value)
+                ? sanitizeProcessStartFailureMessage(value)
+                : value,
+            ]),
+          )
+        : (input.detail ?? {});
   }
 }
 
@@ -409,6 +439,11 @@ export function execDeadlineHint(seconds: number): string {
  *  provably never reached the machine. `agentErrorToControlError` reads it into
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
+
+/** The `detail` key a compute box's wake gate sets, to the seconds it waited,
+ *  when the box did not come back after a wake: no request was dispatched. A
+ *  detail rather than `neverSent`, which drives retry and abandon decisions. */
+export const COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY = "compute_wake_timeout_seconds";
 
 /** The reserved `detail` key the transport sets to "1" when the agent
  *  connection a request was sent to was replaced by a new one.

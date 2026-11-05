@@ -247,7 +247,8 @@ personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check, and 1101 granted it and
-removed that check. 1002 created the
+removed that check. 0988 created the queued-turn hold summary withheld, with
+the same caller check, and 1274 granted it and removed the check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
 inference change function withheld the same way, and 1210 granted it. 1091
@@ -255,7 +256,12 @@ created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
 account-administrator grant withheld, with the same caller check, and 1149
-granted it and removed the check. 1218 created the organization vault list
+granted it and removed the check. 1107 created the agent-call and native push
+v2 functions withheld; 1239 grants all six to every configured application
+role and removes the privilege probes and v1 caller fallbacks. The v1 SQL
+functions and grants stay intact for rolling binaries. 1239 follows the
+production baseline pin that contains 1107 (`d91058a8b8` or later). 1218
+created the organization vault list
 withheld, with the same caller check; until it is granted the API lists only
 the organization vaults that work in the requested workspace and says the
 list is incomplete. 1211 created the names-only organization member list

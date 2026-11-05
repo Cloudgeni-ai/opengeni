@@ -6,7 +6,11 @@
  * entitlements before placement and records a selection receipt). Nothing
  * here names a provider.
  */
-import { getSessionGoal, subscriptionCoreTurnActor } from "@opengeni/db";
+import {
+  childWaitingCapacityDedupeKey,
+  getSessionGoal,
+  subscriptionCoreTurnActor,
+} from "@opengeni/db";
 import type {
   Database,
   SubscriptionCorePlacement,
@@ -15,6 +19,7 @@ import type {
 } from "@opengeni/db";
 import { readSubscriptionCoreTurnIdentity } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { deliverChildLifecycleOutboxToParent } from "../parent-wake";
 import { handOverWaitToSteer } from "./waiting-steer";
 import {
   recordTurnStartupPhase,
@@ -449,6 +454,26 @@ export async function parkCoreSubscriptionTurn(
       return { exit: claimedResult({ status: "recovering" }) };
     }
     if (evaluated?.action === "waiting") {
+      // A long wait told the worker's parent in the arm commit; deliver it now
+      // so the parent hears at once (the outbox reaper is only the fallback).
+      if (deps.settings.childLifecycleNoticesEnabled && deps.session.parentSessionId) {
+        await deliverChildLifecycleOutboxToParent(
+          {
+            db,
+            bus,
+            settings: deps.settings,
+            observability: deps.observability,
+            wakeSessionWorkflow: deps.wakeSessionWorkflow,
+          },
+          input.workspaceId,
+          input.sessionId,
+          childWaitingCapacityDedupeKey({
+            childSessionId: input.sessionId,
+            waiterId: armed.waiter.waiterId,
+          }),
+          { requireRow: false },
+        );
+      }
       control.turnMetricOutcome = "recovering";
       control.activityStatus = "waiting_capacity";
       return {

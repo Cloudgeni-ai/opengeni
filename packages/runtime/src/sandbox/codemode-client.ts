@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
-import { sandboxCommandExitCode } from "./command-result";
+import { sandboxCommandExitCode, sandboxCommandOutput } from "./command-result";
+import { SandboxLifecycleCommandExitError } from "./lifecycle-command-error";
 
 /** Data shipped with the worker, never fetched from a package registry at turn time. */
 export type ManagedCodemodeClient = {
@@ -197,9 +198,18 @@ for (const name of ['package.json', 'ogtool', 'client.mjs']) {
     const result = await run(
       `node -e ${quote(install)} ${quote(stage)} && node -e ${quote(verify)}`,
     );
-    if (sandboxCommandExitCode(result) !== 0) {
-      throw new Error(
-        "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release",
+    const exitCode = sandboxCommandExitCode(result);
+    if (exitCode !== 0) {
+      // The command names only the staging file and digest. Its bounded
+      // output tail is kept, so setup can tell a full or blocked /workspace
+      // (which the model can fix) from other failures.
+      const message =
+        "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release";
+      if (exitCode === null) throw new Error(message);
+      throw new SandboxLifecycleCommandExitError(
+        message,
+        exitCode,
+        sandboxCommandOutput(result).slice(-1_000),
       );
     }
   } catch (error) {

@@ -438,6 +438,11 @@ export type SessionStatusItem = {
    * is asked of the person, so it reads as stuck, not "waiting on you".
    */
   blocked?: true;
+  /**
+   * The `cancelled` status archiving a chat recorded when it stopped the
+   * chat's work: it reads as archived, never as "cancelled".
+   */
+  archived?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -782,10 +787,16 @@ export type TimelineGroup =
         /**
          * Settled time inside this work span in which the agent was not
          * working: capacity waits, and the gap between a failed attempt and
-         * the Retry that reopened the turn. The worked duration and the live
-         * working clock exclude it.
+         * the Retry that reopened the turn, and settled pauses. The worked
+         * duration and the live working clock exclude it.
          */
         pausedMs?: number;
+        /**
+         * Set while a pause is in force over this still-open turn: when it
+         * began. Pause parks the turn for Resume, so it reads as paused with
+         * its clock stopped here, not as working.
+         */
+        pausedAt?: string;
         details: TimelineGroup[];
         /**
          * While the turn is live, its progress notes stay readable above the

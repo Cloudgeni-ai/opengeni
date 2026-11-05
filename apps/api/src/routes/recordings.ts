@@ -4,6 +4,7 @@ import {
   CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
+  UpcomingMeetingsResponse,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   RecordingCapturePurpose,
@@ -100,11 +101,21 @@ import {
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
-import { meetingCalendarLookup, meetingCalendarTitle } from "../meeting-calendar-title";
+import {
+  meetingCalendarLookup,
+  meetingCalendarTitle,
+  upcomingMeetings,
+} from "../meeting-calendar-title";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
+/** The longest a transcript list waits for a version to finish, under proxy timeouts. */
+const TRANSCRIPT_WAIT_MAX_SECONDS = 25;
+/** How often a waiting list looks at the version again: often at first, when a dictation finishes. */
+const TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS = 100;
+const TRANSCRIPT_WAIT_FAST_SECONDS = 5;
+const TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS = 1_000;
 
 /** The type the worker stored a prepared track with, read from its key's extension. */
 function preparedTrackContentType(objectKey: string): string {
@@ -355,12 +366,18 @@ export function registerRecordingRoutes(
     // A request that names its provider takes no default, not even its model.
     const defaults = requested.providerId
       ? null
-      : await meetingModelFor(deployment, settings.transcription, {
-          accountId: actor.accountId,
-          workspaceId: actor.workspaceId,
-          subjectId: actor.subjectId,
-        });
+      : await meetingModelFor(
+          deployment,
+          settings.transcription,
+          {
+            accountId: actor.accountId,
+            workspaceId: actor.workspaceId,
+            subjectId: actor.subjectId,
+          },
+          true,
+        );
     const providerId = requested.providerId ?? defaults!.providerId;
+    await deployment.assertEligible?.(providerId, actor);
     const model = requested.model ?? defaults?.model;
     const pinnedAway =
       deployment.pinned !== null &&
@@ -394,7 +411,12 @@ export function registerRecordingRoutes(
         ...(diarizer ? { diarizer } : {}),
         ...(keyterms.length > 0 ? { keyterms } : {}),
       },
-      automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
+      automatic:
+        !requested.providerId &&
+        deployment.pinned === null &&
+        (!settings.transcription ||
+          settings.transcription.providerId !== providerId ||
+          settings.transcription.model !== found.spec.model),
     };
   }
 
@@ -431,6 +453,7 @@ export function registerRecordingRoutes(
     };
     const asked = recording.transcription?.providerId;
     if (asked) {
+      await deployment.assertEligible?.(asked, actor);
       const named = dictationChoiceOf(deployment, asked, recording.transcription?.model);
       const ready = named ? await service.availableProviderIds?.(context) : null;
       if (!named || (ready && !ready.includes(named.id))) {
@@ -468,7 +491,7 @@ export function registerRecordingRoutes(
         details: { code: "policy_blocked" },
       });
     }
-    if (!deps.transcription || !(await deps.transcription.available({ workspaceId }))) {
+    if (!deps.transcription) {
       throw dictationUnavailable();
     }
     return WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
@@ -731,6 +754,29 @@ export function registerRecordingRoutes(
     });
   }
 
+  /** Never fails the upload: without it the speakers are only found after the end. */
+  async function startSpeakerScan(
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+    recordingId: string,
+  ): Promise<void> {
+    try {
+      const recording = await getRecording(db, { ...actor, recordingId });
+      if (recording.purpose !== "meeting" || recording.state !== "capturing") return;
+      await deps.workflowClient.startRecordingSpeakerScan?.({
+        accountId: actor.accountId,
+        workspaceId: recording.workspaceId,
+        recordingId,
+        ownerSubjectId: recording.ownerSubjectId,
+      });
+    } catch (error) {
+      observability?.warn("couldn't start telling a meeting's speakers apart while it records", {
+        workspaceId: actor.workspaceId,
+        recordingId,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+      });
+    }
+  }
+
   /** The live model a request names, else the provider's first, else the deployment's. */
   function liveModelChoice(requested: {
     providerId?: string | undefined;
@@ -925,7 +971,11 @@ export function registerRecordingRoutes(
                   reason: problem.reason,
                 }),
             }),
-            { subjectId: actor.subjectId, at: startedAt },
+            {
+              subjectId: actor.subjectId,
+              at: startedAt,
+              ...(body.calendarEvent ? { event: body.calendarEvent } : {}),
+            },
           )
         : null,
     ]);
@@ -942,7 +992,10 @@ export function registerRecordingRoutes(
         visibility: body.visibility ?? settings.defaultVisibility ?? "private",
         startedAt,
         externalRef: body.externalRef,
-        metadata: body.metadata,
+        // The calendar event it was started for stays with it.
+        metadata: body.calendarEvent
+          ? { ...body.metadata, calendarEvent: body.calendarEvent }
+          : body.metadata,
         tracks: body.tracks,
         transcription,
         ownerName,
@@ -957,6 +1010,30 @@ export function registerRecordingRoutes(
       });
     }
     return c.json(result.recording, result.created ? 201 : 200);
+  });
+
+  // The caller's own meetings about to start, with the links that join them,
+  // for a reminder that joins one and starts its recording (the desktop app's).
+  app.get("/v1/workspaces/:workspaceId/upcoming-meetings", async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const result = await upcomingMeetings(
+      meetingCalendarLookup({
+        db,
+        settings: deps.settings,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+        ...(deps.meetingCalendarFetch ? { fetch: deps.meetingCalendarFetch } : {}),
+        onProblem: (problem) =>
+          observability?.warn("couldn't read the caller's calendar for upcoming meetings", {
+            workspaceId: actor.workspaceId,
+            providerDomain: problem.providerDomain,
+            reason: problem.reason,
+          }),
+      }),
+      { subjectId: actor.subjectId, now: new Date() },
+    );
+    c.header("Cache-Control", "no-store");
+    return c.json(UpcomingMeetingsResponse.parse(result));
   });
 
   app.get(`${base}/:recordingId`, async (c) => {
@@ -1132,6 +1209,11 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    // About every half minute of a meeting's audio, make sure its speakers
+    // are being told apart while it records (starting it again is a no-op).
+    if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
+      await startSpeakerScan(actor, recordingId);
+    }
     if (newlyStoredBytes > 0) {
       count(
         "opengeni_recording_stored_bytes_total",
@@ -1200,9 +1282,32 @@ export function registerRecordingRoutes(
   app.get(`${base}/:recordingId/transcripts`, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const recordingId = recordingIdParam(c);
-    return c.json({
-      versions: await guard(() => listRecordingTranscriptVersions(db, { ...actor, recordingId })),
-    });
+    const waitFor = versionIdQuery(c, "waitFor");
+    const waitSeconds = c.req.query("waitSeconds");
+    const wait = waitSeconds === undefined ? 0 : Number(waitSeconds);
+    if (!(Number.isFinite(wait) && wait >= 0 && wait <= TRANSCRIPT_WAIT_MAX_SECONDS)) {
+      throw invalid(`waitSeconds must be between 0 and ${TRANSCRIPT_WAIT_MAX_SECONDS}`);
+    }
+    const list = () => guard(() => listRecordingTranscriptVersions(db, { ...actor, recordingId }));
+    let versions = await list();
+    // Answer the moment the awaited version (or the newest) is heard or fails,
+    // so a client learns its text is ready without checking every second.
+    const started = Date.now();
+    const deadline = started + wait * 1_000;
+    const signal = c.req.raw.signal;
+    while (Date.now() < deadline && !signal.aborted) {
+      const awaited = waitFor
+        ? versions.find((version) => version.id === waitFor)
+        : [...versions].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (!awaited || awaited.state === "complete" || awaited.state === "failed") break;
+      const check =
+        Date.now() - started < TRANSCRIPT_WAIT_FAST_SECONDS * 1_000
+          ? TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS
+          : TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(check, deadline - Date.now())));
+      versions = await list();
+    }
+    return c.json({ versions });
   });
 
   app.post(`${base}/:recordingId/transcripts`, async (c) => {
@@ -1454,11 +1559,16 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
     const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
-      accountId: actor.accountId,
-      workspaceId: actor.workspaceId,
-      subjectId: actor.subjectId,
-    });
+    const defaults = await meetingModelFor(
+      deployment,
+      recordingSettings.transcription,
+      {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      },
+      true,
+    );
     const pinned = deployment.pinned;
     const liveDefault = deployment.liveDefault;
     const offered = pinned

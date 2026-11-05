@@ -10,7 +10,10 @@
    steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
-   messages waiting. */
+   messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
+   `&signals=off` mounts it with `agentSignals: false`, as a product for end
+   users would. `&mark=1` leads the live turn row with a host mark
+   (`turnSummary.renderLiveMark`). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -20,8 +23,9 @@ import {
   NewConversation,
   SessionConversationView,
   useSessionConversation,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react";
-import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
+import { fakeClient, fakeGoal, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -34,6 +38,9 @@ const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
+const pausedGoal = params.get("goal") === "paused";
+const agentSignals = params.get("signals") !== "off";
+const liveMark = params.get("mark") === "1";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -392,6 +399,21 @@ const client = fakeClient({
   },
 });
 
+// A goal the agent paused to wait for a person's decision.
+if (pausedGoal) {
+  const goal = fakeGoal({
+    sessionId: SELECTED,
+    status: "paused",
+    pausedReason: "agent",
+    text: "Resolve the double charge on T-4821",
+  });
+  Object.assign(client, {
+    getGoal: async () => goal,
+    updateGoal: async () => goal,
+    deleteGoal: async () => undefined,
+  });
+}
+
 // The demo can hold the real default new-chat flow at a response boundary.
 // Browser checks edit the next draft, retry an uncertain outcome, then settle
 // the same synthetic create without contacting a provider.
@@ -485,6 +507,13 @@ function PersistentConversationDemo() {
 }
 
 /** A plain host product around the stock component, as a customer would ship it. */
+/** A stand-in for a host's animated mascot at the start of the live turn row. */
+function demoLiveMark(state: TurnSummaryLiveMarkState) {
+  return (
+    <span data-demo-mark={state.kind} className="size-4 animate-pulse rounded-full bg-og-accent" />
+  );
+}
+
 function HostApp() {
   const nav = ["Inbox", "Tickets", "Customers", "Billing"];
   const narrow = window.innerWidth < 640;
@@ -557,9 +586,20 @@ function HostApp() {
           ) : (
             <OpenGeniChat
               defaultSessionId={scenario === "empty" ? null : SELECTED}
-              {...(oneSend
-                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
-                : {})}
+              conversationProps={{
+                agentSignals,
+                ...(liveMark
+                  ? {
+                      timelineProps: {
+                        turnSummary: {
+                          rolling: true,
+                          renderLiveMark: demoLiveMark,
+                        },
+                      },
+                    }
+                  : {}),
+                ...(oneSend ? { composerOptions: { busySend: "steer" as const } } : {}),
+              }}
             />
           )}
         </OpenGeniProvider>

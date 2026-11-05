@@ -524,6 +524,107 @@ if (previewParameters.get("scenario") === "unread-reply") {
   );
 }
 
+if (previewParameters.get("scenario") === "paused") {
+  // A working chat beside chats whose work Pause parked: the chat's own pause,
+  // a parent's pause reaching its workers, and a paused chat with nothing left.
+  const control = (state: "active" | "paused", directState: "active" | "paused" = state) => ({
+    state,
+    controlVersion: 1,
+    controlEtag: `preview-${state}`,
+    directState,
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  });
+  const tree = (overrides: Record<string, number> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    pausedWorkDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const row = (number: number, title: string, age: number, overrides: Partial<Session>) =>
+    ({
+      ...session(number, title, null, age),
+      effectiveControl: control("active"),
+      treeStats: tree(),
+      ...overrides,
+    }) as Session;
+  const manager = row(5003, "Nightly cost report", 2, {
+    effectiveControl: control("paused"),
+    treeStats: tree({
+      directChildren: 2,
+      totalDescendants: 2,
+      pausedDescendants: 2,
+      pausedWorkDescendants: 2,
+    }),
+  } as Partial<Session>);
+  // Finished its own work and is not paused; only the workers it started are.
+  const owner = row(5007, "Stale pull request sweep", 3, {
+    pinned: true,
+    pinnedAt: timeBefore(60),
+    treeStats: tree({
+      directChildren: 3,
+      totalDescendants: 3,
+      pausedDescendants: 3,
+      pausedWorkDescendants: 3,
+    }),
+  } as Partial<Session>);
+  const pausedWorker = (number: number, title: string) =>
+    ({
+      ...row(number, title, 3, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "paused"),
+      } as Partial<Session>),
+      parentSessionId: owner.id,
+      rootSessionId: owner.id,
+    }) as Session;
+  rows.splice(
+    0,
+    rows.length,
+    owner,
+    pausedWorker(5008, "Close stale issues"),
+    pausedWorker(5009, "Rebase open pull requests"),
+    pausedWorker(5010, "Triage flaky checks"),
+    row(5001, "Ship the pause indicator", 0, { status: "running", activeTurnId: "turn-1" }),
+    row(5002, "Migrate the staging database", 1, {
+      activeTurnId: "turn-1",
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+    manager,
+    {
+      ...row(5004, "Collect AWS costs", 2, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    {
+      ...row(5005, "Collect GCP costs", 2, {
+        status: "queued",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    row(5006, "Quarterly cost review", 30, {
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+  );
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {

@@ -1,6 +1,7 @@
 import { codexSubscriptionHeaders, type CodexAuthHeaders } from "./api-client";
 import {
   CODEX_REALTIME_CALL_TIMEOUT_MS,
+  CODEX_REALTIME_CALLS_URL,
   CODEX_REALTIME_CONFIG_ID,
   CODEX_REALTIME_CONFIG_TIMEOUT_MS,
   CODEX_REALTIME_DEFAULT_VOICE,
@@ -8,7 +9,6 @@ import {
   CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK,
   CODEX_REALTIME_PROVIDER_MODEL_FALLBACK,
   CODEX_REALTIME_VERSION,
-  CODEX_RESPONSES_BASE,
   CODEX_WHAM_BASE,
 } from "./constants";
 import type { CodexFetch } from "./device-code";
@@ -20,7 +20,14 @@ import {
 
 const MAX_REALTIME_SDP_BYTES = 1024 * 1024;
 const MAX_REALTIME_PROVIDER_VALUE_LENGTH = 128;
+const MAX_REALTIME_ERROR_BODY_BYTES = 16 * 1024;
 const REALTIME_PROVIDER_VALUE = /^[a-z0-9][a-z0-9._-]*$/i;
+/**
+ * Short identifier-like provider error fields (`model_not_found`,
+ * `invalid_request_error`, `session.model`, `Not Found`). Anything else, such
+ * as a sentence that could quote request content, is dropped rather than kept.
+ */
+const REALTIME_PROVIDER_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/;
 const REALTIME_CALL_ID =
   /^(?:rtc_.+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
@@ -69,12 +76,40 @@ export type CodexRealtimeErrorCode =
   | "timeout"
   | "cancelled";
 
+/**
+ * Where a realtime negotiation failed: local validation of the request, the
+ * provider's remote configuration read, or the provider's call creation.
+ */
+export type CodexRealtimeFailureStage = "request" | "config" | "call";
+
+/**
+ * Operator diagnostics for one failure. Every value is code-authored or a
+ * short provider identifier with a closed grammar; never a response body,
+ * credential, account identity, or request content.
+ */
+export type CodexRealtimeDiagnostics = {
+  stage: CodexRealtimeFailureStage;
+  /** Provider error `code` (or FastAPI-style `detail`) when identifier-shaped. */
+  providerErrorCode?: string | undefined;
+  /** Provider error `type` when identifier-shaped. */
+  providerErrorType?: string | undefined;
+  /** Provider error `param` when identifier-shaped. */
+  providerErrorParam?: string | undefined;
+  /** Whether call parameters came from the remote configuration or the pinned defaults. */
+  configSource?: CodexRealtimeProviderConfig["source"];
+  /** Protocol version the remote configuration advertised, when it was readable. */
+  advertisedVersion?: string | undefined;
+  providerModel?: string | undefined;
+  providerArchitecture?: string | undefined;
+};
+
 /** Safe provider failure: it contains no response body, credential, or account identity. */
 export class CodexRealtimeError extends Error {
   constructor(
     readonly code: CodexRealtimeErrorCode,
     message: string,
     readonly providerStatus: number | null = null,
+    readonly diagnostics: CodexRealtimeDiagnostics = { stage: "request" },
   ) {
     super(message);
     this.name = "CodexRealtimeError";
@@ -91,18 +126,34 @@ export type CodexRealtimeProviderConfig = {
   architecture: string;
   model: string;
   version: typeof CODEX_REALTIME_VERSION;
+  /**
+   * `remote` when the authenticated configuration supplied V3 parameters;
+   * `fallback` when the pinned defaults are used instead (configuration
+   * unavailable, malformed, or advertising another protocol version).
+   */
+  source?: "remote" | "fallback" | undefined;
+  /** The version the remote configuration advertised, kept for diagnostics. */
+  advertisedVersion?: string | undefined;
 };
 
 const FALLBACK_REALTIME_PROVIDER_CONFIG: CodexRealtimeProviderConfig = {
   architecture: CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK,
   model: CODEX_REALTIME_PROVIDER_MODEL_FALLBACK,
   version: CODEX_REALTIME_VERSION,
+  source: "fallback",
 };
 
 /**
  * Resolve the provider-controlled Codex voice model without changing the
  * stable Opengeni model id. ChatGPT rotates this config independently of Codex
  * releases; pinning the old value caused deterministic call-creation failures.
+ *
+ * The configuration's `version` is the protocol the first-party desktop client
+ * prefers, not a requirement of the call endpoint: the open-source Codex CLI
+ * speaks V3 with the pinned defaults and never reads it. So a configuration
+ * that advertises another version only means its model and architecture are
+ * not V3 values; the call then uses the pinned V3 defaults instead of being
+ * refused, and the advertised version is kept for diagnostics.
  */
 export async function fetchCodexRealtimeProviderConfig(
   auth: CodexAuthHeaders,
@@ -146,6 +197,7 @@ export async function fetchCodexRealtimeProviderConfig(
         "authentication",
         "Codex subscription rejected authentication",
         response.status,
+        { stage: "config" },
       );
     }
     if (!response.ok) {
@@ -162,10 +214,10 @@ export async function fetchCodexRealtimeProviderConfig(
     const value = payload.dynamic_configs?.[CODEX_REALTIME_CONFIG_ID]?.value;
     const version = value?.version;
     if (version !== undefined && version !== CODEX_REALTIME_VERSION) {
-      throw new CodexRealtimeError(
-        "incompatible",
-        `Codex realtime remote configuration requires ${String(version)}`,
-      );
+      return {
+        ...FALLBACK_REALTIME_PROVIDER_CONFIG,
+        ...(validProviderValue(version) ? { advertisedVersion: version } : {}),
+      };
     }
     const architecture = validProviderValue(value?.architecture)
       ? value.architecture
@@ -173,11 +225,19 @@ export async function fetchCodexRealtimeProviderConfig(
     const model = validProviderValue(value?.model)
       ? value.model
       : FALLBACK_REALTIME_PROVIDER_CONFIG.model;
-    return { architecture, model, version: CODEX_REALTIME_VERSION };
+    return {
+      architecture,
+      model,
+      version: CODEX_REALTIME_VERSION,
+      source: value ? "remote" : "fallback",
+      ...(version === undefined ? {} : { advertisedVersion: CODEX_REALTIME_VERSION }),
+    };
   } catch (error) {
     if (error instanceof CodexRealtimeError) throw error;
     if (options.signal?.aborted) {
-      throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+      throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled", null, {
+        stage: "config",
+      });
     }
     return FALLBACK_REALTIME_PROVIDER_CONFIG;
   } finally {
@@ -202,6 +262,17 @@ export async function createCodexRealtimeCall(
   validateRealtimeInput(input);
   const timeoutMs = options.timeoutMs ?? CODEX_REALTIME_CALL_TIMEOUT_MS;
   const providerConfig = options.providerConfig ?? FALLBACK_REALTIME_PROVIDER_CONFIG;
+  const callDiagnostics: CodexRealtimeDiagnostics = {
+    stage: "call",
+    configSource: providerConfig.source,
+    advertisedVersion: validProviderValue(providerConfig.advertisedVersion)
+      ? providerConfig.advertisedVersion
+      : undefined,
+    providerModel: validProviderValue(providerConfig.model) ? providerConfig.model : undefined,
+    providerArchitecture: validProviderValue(providerConfig.architecture)
+      ? providerConfig.architecture
+      : undefined,
+  };
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new CodexRealtimeError("invalid_request", "Codex realtime timeout must be positive");
   }
@@ -233,7 +304,14 @@ export async function createCodexRealtimeCall(
   });
   const onAbort = (): void => {
     controller.abort(options.signal?.reason);
-    rejectCancellation?.(new CodexRealtimeError("cancelled", "Codex realtime request cancelled"));
+    rejectCancellation?.(
+      new CodexRealtimeError(
+        "cancelled",
+        "Codex realtime request cancelled",
+        null,
+        callDiagnostics,
+      ),
+    );
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -241,13 +319,23 @@ export async function createCodexRealtimeCall(
     timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-      reject(new CodexRealtimeError("timeout", "Codex realtime request timed out"));
+      reject(
+        new CodexRealtimeError(
+          "timeout",
+          "Codex realtime request timed out",
+          null,
+          callDiagnostics,
+        ),
+      );
     }, timeoutMs);
   });
 
   const request = (async (): Promise<CodexRealtimeCallResult> => {
+    // One fresh voice session per provider call, named in both the header and
+    // the session body as the official Codex desktop app does.
+    const voiceSessionId = crypto.randomUUID();
     const response = await fetchImpl(
-      `${CODEX_RESPONSES_BASE}/realtime/calls?intent=quicksilver&architecture=${encodeURIComponent(providerConfig.architecture)}`,
+      `${CODEX_REALTIME_CALLS_URL}?intent=quicksilver&architecture=${encodeURIComponent(providerConfig.architecture)}`,
       {
         method: "POST",
         headers: {
@@ -256,6 +344,7 @@ export async function createCodexRealtimeCall(
           "openai-alpha": "quicksilver=v2",
           "session-id": input.sessionId,
           "thread-id": input.sessionId,
+          "voice-session-id": voiceSessionId,
         },
         body: JSON.stringify({
           sdp: input.sdp,
@@ -280,6 +369,7 @@ export async function createCodexRealtimeCall(
                   })),
                 }
               : {}),
+            voice_session_id: voiceSessionId,
           },
         }),
         signal: controller.signal,
@@ -287,8 +377,8 @@ export async function createCodexRealtimeCall(
     );
 
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw providerHttpError(response.status);
+      const providerError = await readProviderErrorFields(response);
+      throw providerHttpError(response.status, { ...callDiagnostics, ...providerError });
     }
     const location = response.headers.get("location");
     if (!location || !validRealtimeLocation(location)) {
@@ -297,14 +387,16 @@ export async function createCodexRealtimeCall(
         "invalid_response",
         "Codex realtime response did not identify a compatible call",
         response.status,
+        callDiagnostics,
       );
     }
-    const sdp = await readBoundedSdp(response);
+    const sdp = await readBoundedSdp(response, callDiagnostics);
     if (!isAudioSdp(sdp)) {
       throw new CodexRealtimeError(
         "invalid_response",
         "Codex realtime response was not an audio SDP answer",
         response.status,
+        callDiagnostics,
       );
     }
     return {
@@ -321,12 +413,27 @@ export async function createCodexRealtimeCall(
   } catch (error) {
     if (error instanceof CodexRealtimeError) throw error;
     if (options.signal?.aborted) {
-      throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+      throw new CodexRealtimeError(
+        "cancelled",
+        "Codex realtime request cancelled",
+        null,
+        callDiagnostics,
+      );
     }
     if (timedOut || controller.signal.aborted) {
-      throw new CodexRealtimeError("timeout", "Codex realtime request timed out");
+      throw new CodexRealtimeError(
+        "timeout",
+        "Codex realtime request timed out",
+        null,
+        callDiagnostics,
+      );
     }
-    throw new CodexRealtimeError("network", "Codex realtime provider request failed");
+    throw new CodexRealtimeError(
+      "network",
+      "Codex realtime provider request failed",
+      null,
+      callDiagnostics,
+    );
   } finally {
     if (timeout) clearTimeout(timeout);
     options.signal?.removeEventListener("abort", onAbort);
@@ -401,12 +508,76 @@ function validateRealtimeInput(input: CodexRealtimeCallInput): void {
   }
 }
 
-function providerHttpError(status: number): CodexRealtimeError {
+/**
+ * Read only the identifier-shaped fields of a bounded JSON error body. The
+ * body itself is never kept: free text could quote instructions or history.
+ */
+async function readProviderErrorFields(
+  response: Response,
+): Promise<
+  Pick<CodexRealtimeDiagnostics, "providerErrorCode" | "providerErrorType" | "providerErrorParam">
+> {
+  const declared = Number(response.headers.get("content-length"));
+  if (!response.body || (Number.isFinite(declared) && declared > MAX_REALTIME_ERROR_BODY_BYTES)) {
+    await response.body?.cancel().catch(() => undefined);
+    return {};
+  }
+  let text = "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MAX_REALTIME_ERROR_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {};
+      }
+      text += decoder.decode(next.value, { stream: true });
+    }
+  } catch {
+    return {};
+  } finally {
+    reader.releaseLock();
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object") return {};
+  const record = parsed as { error?: unknown; detail?: unknown };
+  const error =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : null;
+  const code = providerErrorToken(error?.code) ?? providerErrorToken(record.detail);
+  const type = providerErrorToken(error?.type);
+  const param = providerErrorToken(error?.param);
+  return {
+    ...(code ? { providerErrorCode: code } : {}),
+    ...(type ? { providerErrorType: type } : {}),
+    ...(param ? { providerErrorParam: param } : {}),
+  };
+}
+
+function providerErrorToken(value: unknown): string | null {
+  return typeof value === "string" && REALTIME_PROVIDER_ERROR_TOKEN.test(value) ? value : null;
+}
+
+function providerHttpError(
+  status: number,
+  diagnostics: CodexRealtimeDiagnostics,
+): CodexRealtimeError {
   if (status === 401) {
     return new CodexRealtimeError(
       "authentication",
       "Codex subscription rejected authentication",
       status,
+      diagnostics,
     );
   }
   if (status === 403) {
@@ -414,6 +585,7 @@ function providerHttpError(status: number): CodexRealtimeError {
       "entitlement",
       "Codex subscription lacks realtime entitlement",
       status,
+      diagnostics,
     );
   }
   if (status === 404) {
@@ -421,12 +593,23 @@ function providerHttpError(status: number): CodexRealtimeError {
       "incompatible",
       "Codex subscription realtime is unavailable",
       status,
+      diagnostics,
     );
   }
   if (status === 429) {
-    return new CodexRealtimeError("rate_limited", "Codex realtime is rate limited", status);
+    return new CodexRealtimeError(
+      "rate_limited",
+      "Codex realtime is rate limited",
+      status,
+      diagnostics,
+    );
   }
-  return new CodexRealtimeError("provider", "Codex realtime provider request failed", status);
+  return new CodexRealtimeError(
+    "provider",
+    "Codex realtime provider request failed",
+    status,
+    diagnostics,
+  );
 }
 
 function validRealtimeLocation(location: string): boolean {
@@ -439,7 +622,10 @@ function isAudioSdp(sdp: string): boolean {
   return /^v=0(?:\r?\n)/.test(sdp) && /(?:^|\r?\n)m=audio\s/m.test(sdp);
 }
 
-async function readBoundedSdp(response: Response): Promise<string> {
+async function readBoundedSdp(
+  response: Response,
+  diagnostics: CodexRealtimeDiagnostics,
+): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_REALTIME_SDP_BYTES) {
     await response.body?.cancel().catch(() => undefined);
@@ -447,6 +633,7 @@ async function readBoundedSdp(response: Response): Promise<string> {
       "invalid_response",
       "Codex realtime SDP answer is too large",
       response.status,
+      diagnostics,
     );
   }
   if (!response.body) return "";
@@ -464,6 +651,7 @@ async function readBoundedSdp(response: Response): Promise<string> {
           "invalid_response",
           "Codex realtime SDP answer is too large",
           response.status,
+          diagnostics,
         );
       }
       chunks.push(next.value);
@@ -484,6 +672,7 @@ async function readBoundedSdp(response: Response): Promise<string> {
       "invalid_response",
       "Codex realtime SDP answer was not valid UTF-8",
       response.status,
+      diagnostics,
     );
   }
 }

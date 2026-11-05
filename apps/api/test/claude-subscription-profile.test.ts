@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { claudeSubscriptionPlanUpdate } from "@opengeni/config";
 import {
   fetchClaudeSubscriptionProfile,
   parseClaudeSubscriptionProfile,
@@ -28,6 +29,40 @@ test("profile retains provider email and plan while excluding other fields", () 
   expect(
     parseClaudeSubscriptionProfile({ account: { uuid: accountUuid, email: "invalid" } }),
   ).toBeNull();
+});
+test("the Max tier tells Max from Ultra; an unknown tier stays Max or Ultra", () => {
+  const plan = (organization: Record<string, unknown>, account: Record<string, unknown> = {}) =>
+    parseClaudeSubscriptionProfile({ account: { uuid: accountUuid, ...account }, organization })!
+      .plan;
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" })).toBe(
+    "claude_max_20x",
+  );
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_max_5x" })).toBe(
+    "claude_max_5x",
+  );
+  expect(plan({ rate_limit_tier: "default_claude_max_20x" }, { has_claude_max: true })).toBe(
+    "claude_max_20x",
+  );
+  // No tier, or one this build doesn't know: the bare id ("Max or Ultra").
+  expect(plan({ organization_type: "claude_max" })).toBe("claude_max");
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_ai" })).toBe(
+    "claude_max",
+  );
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: 20 })).toBe("claude_max");
+  // A tier never turns another plan into Max.
+  expect(plan({ organization_type: "claude_pro", rate_limit_tier: "default_claude_max_20x" })).toBe(
+    "claude_pro",
+  );
+});
+test("a reconnect that can't resolve the Max tier keeps the recorded tier", () => {
+  expect(claudeSubscriptionPlanUpdate("claude_max", "claude_max_20x")).toBe("claude_max_20x");
+  expect(claudeSubscriptionPlanUpdate("claude_max", "claude_max_5x")).toBe("claude_max_5x");
+  // A resolved read, a real change, or no known tier: the read wins.
+  expect(claudeSubscriptionPlanUpdate("claude_max_5x", "claude_max_20x")).toBe("claude_max_5x");
+  expect(claudeSubscriptionPlanUpdate("claude_pro", "claude_max_20x")).toBe("claude_pro");
+  expect(claudeSubscriptionPlanUpdate("claude_max", "claude_pro")).toBe("claude_max");
+  expect(claudeSubscriptionPlanUpdate("claude_max", null)).toBe("claude_max");
+  expect(claudeSubscriptionPlanUpdate(null, "claude_max_20x")).toBeNull();
 });
 test("inference-only setup token makes no profile request", async () => {
   let calls = 0;

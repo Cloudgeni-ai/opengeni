@@ -6,6 +6,7 @@ import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageSentByPerson,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
@@ -57,6 +58,8 @@ import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
+  requireDeveloperSetupDelegatablePermissions,
+  developerSetupCredentialRestricted,
   withDeveloperSetupCredentialRestriction,
 } from "../developer-setup-credential-ceiling";
 
@@ -72,6 +75,7 @@ import {
   ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   ORGANIZATION_OPENAI_PROVIDER_ID,
   organizationDirectModelProviderOf,
+  organizationCompatibleConnectionIdOf,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
@@ -375,6 +379,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
     organizationDirectModelProviderOf(modelId) !== null ||
+    organizationCompatibleConnectionIdOf(modelId) !== null ||
     (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
@@ -1930,13 +1935,16 @@ export async function assertWorkspaceModelPolicyAllows(
     chargesCredits: policyChargesCreditsForModel(settings, canonicalModel),
   });
   if (!verdict.allowed) {
+    const message =
+      verdict.reason === "credits"
+        ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
+        : verdict.reason === "provider"
+          ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+          : `model "${canonicalModel}" is not allowed by this workspace's model policy`;
+    // Typed, so a refused new chat can say which rule in words a person reads.
     throw new HTTPException(422, {
-      message:
-        verdict.reason === "credits"
-          ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
-          : verdict.reason === "provider"
-            ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-            : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
+      message,
+      cause: new ModelPolicyRefusedError(canonicalModel, verdict.reason, message),
     });
   }
 }
@@ -3159,6 +3167,7 @@ async function createSessionForRequestInFileScope(
               workspaceId,
               subjectId: grant.subjectId,
               workspaceSettings: workspace.settings,
+              billingOrigin,
             }),
           );
   const inheritedModel =
@@ -3607,7 +3616,12 @@ async function createSessionForRequestInFileScope(
           : {}),
       });
       if (!admissibleWorkspaceModel(selections, model)) {
-        throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+        // Typed as unavailable (it is not selectable for this caller), so the
+        // composer names it instead of showing this developer text.
+        throw new HTTPException(422, {
+          message: `model is not selectable: ${model}`,
+          cause: new ModelUnavailableError(model),
+        });
       }
     }
   });
@@ -5226,12 +5240,17 @@ export async function setSessionUnattended(
   return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }
 
-/** Change future defaults without accepting a prompt or touching accepted work. */
+/**
+ * Change the chat's model for future turns. A turn that is waiting for
+ * subscription capacity moves onto the new model too and continues, because
+ * switching away from a model without capacity is how the wait ends sooner.
+ */
 export async function setSessionModel(
   deps: Pick<
     ApiRouteDeps,
     "db" | "bus" | "settings" | "catalogSourceSettings" | "sessionAuthorization"
-  >,
+  > &
+    Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
   request: SetSessionModelRequest,
@@ -5263,10 +5282,20 @@ export async function setSessionModel(
       : service
         ? { type: "service", subjectId: service.initiator.subjectId, context: service.context }
         : { type: "human", subjectId: grant.subjectId };
+  const capacityRelease = await capacityWaitReleaseForModelSwitch(deps, grant, settings, {
+    sessionId,
+    model,
+    requestedModel: input.model,
+    reasoningEffort: input.reasoningEffort,
+  });
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "session.model_settings",
-      eventTypes: ["session.model_settings.updated"],
+      eventTypes: [
+        "session.model_settings.updated",
+        "turn.recovery.requested",
+        "session.status.changed",
+      ],
       maxAttempts: 3,
     },
     async () => {
@@ -5279,6 +5308,7 @@ export async function setSessionModel(
           operationKey: input.idempotencyKey,
           model,
           reasoningEffort: input.reasoningEffort,
+          ...(capacityRelease ? { capacityRelease } : {}),
           validate: (session) => {
             try {
               // Validate fresh selection/provider and preserved latency exactly as
@@ -5310,9 +5340,98 @@ export async function setSessionModel(
           );
     },
   );
-  const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
-  if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
+  const events = (
+    await Promise.all(
+      [result.eventId, ...result.releaseEventIds].map((id) =>
+        getSessionEvent(deps.db, grant.workspaceId, id),
+      ),
+    )
+  ).filter((event): event is SessionEvent => event !== null);
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  if (result.releaseEventIds.length > 0) {
+    // The durable wake is committed; this only skips the dispatcher's tick.
+    void deps.workflowClient?.requestSessionWorkflowWakeDispatch?.()?.catch(() => {
+      console.warn("[sessions] capacity release wake dispatch failed; durable wake remains", {
+        errorCode: "session_capacity_release_wake_dispatch_failed",
+      });
+    });
+  }
   return { sessionId, ...result, effectiveFrom: "future_turns" as const };
+}
+
+/**
+ * The policy a capacity-waiting turn would run with on the new model, or null
+ * when there is no such turn, the model is unchanged, or the new model is not
+ * admissible for it now (then only future turns change).
+ */
+async function capacityWaitReleaseForModelSwitch(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  grant: AccessGrant,
+  settings: Settings,
+  input: {
+    sessionId: string;
+    model: string;
+    requestedModel: string;
+    reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+  },
+): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
+  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session.activeTurnId) return null;
+  const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
+  if (
+    !turn ||
+    turn.activeAttemptId !== null ||
+    (turn.status !== "waiting_capacity" && turn.status !== "recovering") ||
+    turn.model === input.model
+  ) {
+    return null;
+  }
+  try {
+    const executionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: input.model,
+        requestedModelId: input.requestedModel,
+        modelSource: "explicit",
+        reasoningEffort: input.reasoningEffort,
+        reasoningSource: "explicit",
+        latencyMode: turn.latencyMode,
+        latencyModeSource: "session",
+      }),
+      { grant, trustedMetadata: [session.metadata, turn.metadata] },
+    );
+    // Moving the turn is a new model request, billed as that turn was.
+    await requireLimit(
+      { ...deps, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance({
+          initiator: turn.initiator,
+          initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+            deps.db,
+            grant.workspaceId,
+            turn.id,
+          ),
+        }),
+        action: "agent_run:create",
+        quantity: 1,
+        model: input.model,
+        acceptedTurn: { sessionId: session.id, turnId: turn.id },
+        billingOrigin:
+          (await readTurnBillingOrigin(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            turnId: turn.id,
+          })) ?? "app",
+      },
+    );
+    return { turnId: turn.id, executionPolicy };
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
 }
 
 /**
@@ -5385,6 +5504,7 @@ function toolPolicyAuditSnapshot(
   tools: ToolRef[],
   firstPartyMcpTools: FirstPartyMcpToolName[],
   policy = session.toolPolicy,
+  firstPartyMcpPermissions?: readonly Permission[],
 ) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
@@ -5429,6 +5549,9 @@ function toolPolicyAuditSnapshot(
     toolCount: allToolRefs.length,
     firstPartyMcpTools: [...firstPartyMcpTools].sort(),
     firstPartyMcpToolCount: firstPartyMcpTools.length,
+    ...(firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: [...firstPartyMcpPermissions].sort() }
+      : {}),
     truncated:
       allToolRefs.length > toolRefs.length ||
       (policy.excludedMcpServerIds?.length ?? 0) > maxToolPolicyAuditRefs,
@@ -5507,6 +5630,43 @@ export async function updateSessionToolPolicy(
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  // A new permission set never out-ranks the caller: the same delegation
+  // rules as creating a session with that set. Parent, agent-narrowing and
+  // goal checks run under the session lock below.
+  const requestedFirstPartyMcpPermissions = request.firstPartyMcpPermissions
+    ? [...new Set(request.firstPartyMcpPermissions)]
+    : null;
+  if (requestedFirstPartyMcpPermissions) {
+    requireDeveloperSetupDelegatablePermissions(
+      developerSetupCredentialRestricted({
+        grant,
+        trustedMetadata: [existingSession.metadata],
+      }),
+      requestedFirstPartyMcpPermissions,
+    );
+    requireExplicitPermissionDelegation(grant, requestedFirstPartyMcpPermissions);
+    for (const permission of requestedFirstPartyMcpPermissions) {
+      if (!hasPermission(grant.permissions, permission)) {
+        throw new HTTPException(403, {
+          message: `cannot grant first-party MCP permission beyond the calling grant: ${permission}`,
+        });
+      }
+    }
+  }
+  const sessionGoal = requestedFirstPartyMcpPermissions
+    ? await getSessionGoal(deps.db, grant.workspaceId, sessionId)
+    : null;
+  if (
+    requestedFirstPartyMcpPermissions &&
+    sessionGoal !== null &&
+    sessionGoal.status !== "completed" &&
+    !hasPermission(requestedFirstPartyMcpPermissions, "goals:manage")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
+  }
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -5807,6 +5967,45 @@ export async function updateSessionToolPolicy(
         }
       }
 
+      const currentFirstPartyMcpPermissions = [
+        ...(session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS),
+      ];
+      if (requestedFirstPartyMcpPermissions && session.parentSessionId) {
+        const parent = await context.getLockedSession(session.parentSessionId);
+        if (!parent) {
+          throw new HTTPException(409, { message: "parent session is no longer available" });
+        }
+        const parentPermissions =
+          parent.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(parentPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `child first-party MCP permissions may only narrow the parent session grant: ${widened}`,
+          });
+        }
+      }
+      if (requestedFirstPartyMcpPermissions && agentAttemptCaller) {
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(currentFirstPartyMcpPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `an agent may only narrow its session first-party permissions: ${widened}`,
+          });
+        }
+      }
+      // An equal set (in any order) keeps the stored value, so restating the
+      // default never pins it.
+      const permissionsChanged =
+        requestedFirstPartyMcpPermissions !== null &&
+        stableJson([...requestedFirstPartyMcpPermissions].sort()) !==
+          stableJson([...currentFirstPartyMcpPermissions].sort());
+      const nextFirstPartyMcpPermissions = permissionsChanged
+        ? requestedFirstPartyMcpPermissions!
+        : currentFirstPartyMcpPermissions;
+
       const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
       // JSON.stringify would turn an identical retry into a second mutation
@@ -5824,7 +6023,7 @@ export async function updateSessionToolPolicy(
           firstPartyMcpTools: nextFirstPartyMcpTools,
           policy: nextPolicy,
         });
-      if (unchanged) {
+      if (unchanged && !permissionsChanged) {
         return { events: [] };
       }
 
@@ -5839,12 +6038,14 @@ export async function updateSessionToolPolicy(
                 session.tools,
                 [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
+                currentFirstPartyMcpPermissions,
               ),
               after: toolPolicyAuditSnapshot(
                 session,
                 nextTools,
                 nextFirstPartyMcpTools,
                 nextPolicy,
+                nextFirstPartyMcpPermissions,
               ),
               version: nextVersion,
               effectiveFrom: "next_attempt",
@@ -5857,6 +6058,7 @@ export async function updateSessionToolPolicy(
           toolPolicy: nextPolicy,
           toolPolicyVersion: nextVersion,
           expectedToolPolicyVersion: request.expectedVersion,
+          ...(permissionsChanged ? { firstPartyMcpPermissions: nextFirstPartyMcpPermissions } : {}),
         },
       };
     },
