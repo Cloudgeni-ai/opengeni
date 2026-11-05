@@ -54,6 +54,12 @@ export function takeSandboxSetupNotices(agent: object): string | null {
   return text;
 }
 
+/** Drop the held notices that match, keeping the rest. */
+export function dropSandboxSetupNotices(agent: object, matches: (notice: string) => boolean): void {
+  const queue = agentQueues.get(agent);
+  if (queue) queue.pending = queue.pending.filter((notice) => !matches(notice));
+}
+
 function setupNoticeDeliveringTool<T extends Tool<any>>(tool: T, queue: SetupNoticeQueue): T {
   if (tool.type !== "function" || !SETUP_NOTICE_TOOL_NAMES.has(tool.name)) return tool;
   let cache = deliveringTools.get(queue);

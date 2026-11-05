@@ -1,4 +1,5 @@
 import {
+  discardHeldSoftSetupFailureNotices,
   runOwnedSandboxSetup,
   withRunCredentialsSession,
   type GitCredentialTokenWriterSession,
@@ -98,7 +99,7 @@ export async function runEagerOwnedSandboxSetup(
     // credential session callback. Materialize host-managed run credentials
     // before any setup command (including provider login hooks), then decorate
     // setup commands so they source the active generation.
-    await measure("credential_materialization", () =>
+    const runCredentialSoftFailure = await measure("credential_materialization", () =>
       deps.attachRunCredentialRenewal(
         eagerSetupSession as RunCredentialCommandSession,
         deps.initialRunCredentialMaterial,
@@ -124,6 +125,9 @@ export async function runEagerOwnedSandboxSetup(
             settings: deps.runSettings,
             environment: deps.sandboxEnvironment,
             measureSetup: measure,
+            ...(runCredentialSoftFailure
+              ? { priorSoftSetupFailures: [runCredentialSoftFailure] }
+              : {}),
             ...(options.preparedInput ? { preparedInput: options.preparedInput } : {}),
             ...(options.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
             onRuntimeEvent: async (event) => {
@@ -246,7 +250,11 @@ export function createEagerOwnedSandboxSetup(
         await prestarted;
         // A box rebound while the setup ran (rotation, recovery) gets its
         // own setup; the prestarted one only covered the earlier box.
+        // Its held notices join this stream's input when the run starts.
         if (sandboxIdentity(deps.sandboxState) === startedFor) return;
+        // Its setup failure notices describe the earlier box; the new box's
+        // setup reports its own.
+        discardHeldSoftSetupFailureNotices(deps.agent);
       }
       await runSetup(deps, options);
     },
