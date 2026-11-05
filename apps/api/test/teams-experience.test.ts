@@ -1,0 +1,398 @@
+import { describe, expect, test } from "bun:test";
+import type { App } from "@microsoft/teams.apps";
+import {
+  TEAMS_AI_GENERATED_ENTITY,
+  teamsCommand,
+  teamsEventUuid,
+  teamsHelp,
+  teamsMarkdown,
+  teamsMarkdownParts,
+  teamsUnlinkReply,
+  teamsWelcome,
+  type TeamsExperienceState,
+} from "../src/integrations/teams-experience";
+import { normalizeTeamsFeedback, teamsPersonalInstall } from "../src/integrations/teams-protocol";
+import { keepTeamsTyping, sendTeamsReply } from "../src/integrations/teams-bot";
+
+const tenantId = "10000000-0000-4000-8000-000000000001";
+const actorId = "10000000-0000-4000-8000-000000000002";
+
+const states: TeamsExperienceState[] = [true, false].flatMap((personal) =>
+  (["active", "unavailable"] as const).flatMap((installation) =>
+    [true, false].map((linked) => ({ personal, installation, linked })),
+  ),
+);
+
+describe("Teams commands", () => {
+  test("only a whole-message command counts", () => {
+    expect(teamsCommand("help")).toBe("help");
+    expect(teamsCommand("  Help! ")).toBe("help");
+    expect(teamsCommand("/help")).toBe("help");
+    expect(teamsCommand("unlink")).toBe("unlink");
+    expect(teamsCommand("Disconnect")).toBe("unlink");
+    expect(teamsCommand("unlink  confirm")).toBe("unlink_confirm");
+    expect(teamsCommand("help me write a plan")).toBeNull();
+    expect(teamsCommand("how do I unlink my account?")).toBeNull();
+  });
+});
+
+describe("Teams welcome and help", () => {
+  test.each(states)(
+    "welcome says what Opengeni is, that it is AI, its requirements and how to get help (%o)",
+    (state) => {
+      const { text } = teamsWelcome(state);
+      expect(text).toContain("Opengeni is an AI agent");
+      expect(text).toContain("AI-generated");
+      expect(text).toContain("You need an Opengeni account");
+      expect(text).toContain("Microsoft Teams");
+      expect(text).toContain("Files and images");
+      expect(text).toContain("**help**");
+      expect(text).not.toMatch(/https?:/);
+    },
+  );
+  test.each(states)("help is fixed text that stays in Teams (%o)", (state) => {
+    const reply = teamsHelp(state);
+    expect(reply.text).toContain("**Opengeni help**");
+    expect(reply.text).toContain("**unlink**");
+    expect(reply.text).toContain("thumbs up or down");
+    expect(reply.text).not.toMatch(/https?:/);
+    expect(teamsHelp(state)).toEqual(reply);
+  });
+  test("only an unlinked person in a connected organization's 1:1 chat gets a link button", () => {
+    for (const state of states) {
+      const action = teamsHelp(state).action;
+      if (state.personal && state.installation === "active" && !state.linked)
+        expect(action).toEqual({ kind: "link", title: "Link account" });
+      else expect(action).toBeUndefined();
+      expect(teamsWelcome(state).action).toEqual(action);
+    }
+    expect(teamsHelp({ personal: false, installation: "active", linked: false }).text).toContain(
+      "Send me a direct message to link your Opengeni account",
+    );
+  });
+  test("unlink asks for confirmation with a button that sends the confirm command", () => {
+    expect(teamsUnlinkReply("confirm").action).toEqual({
+      kind: "command",
+      title: "Unlink account",
+      command: "unlink confirm",
+    });
+    expect(teamsCommand("unlink confirm")).toBe("unlink_confirm");
+  });
+});
+
+describe("Teams Markdown", () => {
+  test("tables become lists, deep headings bold lines, images links; rules are dropped", () => {
+    const input = [
+      "# Title",
+      "#### Detail",
+      "",
+      "| Name | Status |",
+      "| --- | :---: |",
+      "| API | **up** |",
+      "| Web | |",
+      "",
+      "---",
+      "![diagram](https://example.test/a.png)",
+      "- [ ] todo",
+      "- [x] done",
+    ].join("\n");
+    expect(teamsMarkdown(input)).toBe(
+      [
+        "# Title",
+        "**Detail**",
+        "",
+        "- **Name:** API; **Status:** **up**",
+        "- **Name:** Web",
+        "",
+        "",
+        "[diagram](https://example.test/a.png)",
+        "- ☐ todo",
+        "- ☑ done",
+      ].join("\n"),
+    );
+  });
+  test("leaves code blocks, links, emphasis and lists as written", () => {
+    const input = [
+      "**Bold** and _italic_ with [a link](https://example.test).",
+      "",
+      "1. one",
+      "2. two",
+      "",
+      "```md",
+      "| a | b |",
+      "| - | - |",
+      "#### not a heading",
+      "---",
+      "```",
+      "> quoted",
+    ].join("\n");
+    expect(teamsMarkdown(input)).toBe(input);
+  });
+  test("a plain split is lossless and within the limit, including multibyte text", () => {
+    const text = "🦉 hello\n".repeat(5000);
+    const parts = teamsMarkdownParts(text, 2000);
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.join("")).toBe(text);
+    expect(parts.every((part) => Buffer.byteLength(part) <= 2000)).toBe(true);
+    // Parts end at line breaks when lines allow it.
+    expect(parts.slice(0, -1).every((part) => part.endsWith("\n"))).toBe(true);
+  });
+  test("a code block cut between parts is closed and reopened", () => {
+    const text = `Intro\n\`\`\`ts\n${"const x = 1;\n".repeat(400)}\`\`\`\nAfter`;
+    const parts = teamsMarkdownParts(text, 1000);
+    expect(parts.length).toBeGreaterThan(2);
+    for (const part of parts) {
+      expect(Buffer.byteLength(part)).toBeLessThanOrEqual(1000);
+      expect((part.match(/^```/gm) ?? []).length % 2).toBe(0);
+    }
+    expect(parts[1]!.startsWith("```ts\n")).toBe(true);
+    expect(parts.at(-1)!.endsWith("```\nAfter")).toBe(true);
+  });
+});
+
+describe("Teams activities", () => {
+  const install = (overrides: Record<string, unknown> = {}) => ({
+    type: "conversationUpdate",
+    channelId: "msteams",
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    from: { id: "29:person", aadObjectId: actorId.toUpperCase() },
+    recipient: { id: "28:bot" },
+    conversation: { id: "a:personal", conversationType: "personal", tenantId },
+    channelData: { tenant: { id: tenantId } },
+    membersAdded: [{ id: "28:bot" }],
+    ...overrides,
+  });
+  test("a personal install names the bot and the person", () => {
+    expect(teamsPersonalInstall(install())).toEqual({
+      tenantId,
+      actorId,
+      conversationId: "a:personal",
+      serviceUrl: "https://smba.trafficmanager.net/emea/",
+      botId: "28:bot",
+    });
+    expect(teamsPersonalInstall(install({ membersAdded: [{ id: "29:person" }] }))).toBeNull();
+    expect(
+      teamsPersonalInstall(
+        install({ conversation: { id: "19:g", conversationType: "groupChat", tenantId } }),
+      ),
+    ).toBeNull();
+    expect(
+      teamsPersonalInstall(install({ serviceUrl: "https://attacker.example.test/" })),
+    ).toBeNull();
+    expect(
+      teamsPersonalInstall(
+        install({
+          conversation: {
+            id: "a:personal",
+            conversationType: "personal",
+            tenantId: "10000000-0000-4000-8000-000000000009",
+          },
+        }),
+      ),
+    ).toBeNull();
+  });
+  const feedback = (overrides: Record<string, unknown> = {}) => ({
+    type: "invoke",
+    name: "message/submitAction",
+    id: "invoke-1",
+    channelId: "msteams",
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    from: { id: "29:person", aadObjectId: actorId },
+    recipient: { id: "28:bot" },
+    conversation: { id: "a:personal", conversationType: "personal", tenantId },
+    channelData: { tenant: { id: tenantId } },
+    replyToId: "bot-message-1",
+    value: {
+      actionName: "feedback",
+      actionValue: { reaction: "dislike", feedback: JSON.stringify({ feedbackText: " Wrong " }) },
+    },
+    ...overrides,
+  });
+  test("feedback reads the reaction and the written comment", () => {
+    expect(normalizeTeamsFeedback(feedback())).toEqual({
+      tenantId,
+      actorId,
+      conversationId: "a:personal",
+      personal: true,
+      replyToId: "bot-message-1",
+      eventId: "invoke-1",
+      sentiment: "negative",
+      comment: "Wrong",
+      botId: "28:bot",
+    });
+    expect(
+      normalizeTeamsFeedback(
+        feedback({
+          value: { actionName: "feedback", actionValue: { reaction: "like", feedback: "{bad" } },
+        }),
+      ),
+    ).toMatchObject({ sentiment: "positive", comment: null });
+  });
+  test("feedback refuses other invokes, bots and mismatched tenants", () => {
+    expect(normalizeTeamsFeedback(feedback({ name: "adaptiveCard/action" }))).toBeNull();
+    expect(normalizeTeamsFeedback(feedback({ replyToId: undefined }))).toBeNull();
+    expect(
+      normalizeTeamsFeedback(feedback({ from: { id: "28:bot", aadObjectId: actorId } })),
+    ).toBeNull();
+    expect(
+      normalizeTeamsFeedback(
+        feedback({
+          conversation: {
+            id: "a:personal",
+            conversationType: "personal",
+            tenantId: "10000000-0000-4000-8000-000000000009",
+          },
+        }),
+      ),
+    ).toBeNull();
+  });
+  test("the stable event UUID is a valid, repeatable UUID", () => {
+    const id = teamsEventUuid("teams-feedback", "a");
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(teamsEventUuid("teams-feedback", "a")).toBe(id);
+    expect(teamsEventUuid("teams-feedback", "b")).not.toBe(id);
+  });
+});
+
+function transport() {
+  const calls: Array<{ conversationId: string; activity: Record<string, unknown> }> = [];
+  const app = {
+    api: {
+      fromServiceUrl: () => ({
+        conversations: {
+          createActivity: async (conversationId: string, activity: Record<string, unknown>) => {
+            calls.push({ conversationId, activity });
+            return { id: `sent-${calls.length}` };
+          },
+        },
+      }),
+    },
+  } as unknown as App;
+  return { app, calls };
+}
+
+describe("Teams deterministic replies", () => {
+  const target = {
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    conversationId: "a:personal",
+    threadId: null,
+    botId: "28:bot",
+  };
+  test("a link button goes only to a personal chat", async () => {
+    const { app, calls } = transport();
+    const reply = teamsHelp({ personal: true, installation: "active", linked: false });
+    await sendTeamsReply(app, { ...target, personal: true }, reply, () => "https://app.test/#x");
+    await sendTeamsReply(app, { ...target, personal: false }, reply, () => "https://app.test/#x");
+    expect(calls[0]!.activity).toMatchObject({
+      type: "message",
+      text: reply.text,
+      textFormat: "markdown",
+      attachments: [
+        {
+          content: {
+            actions: [
+              { type: "Action.OpenUrl", title: "Link account", url: "https://app.test/#x" },
+            ],
+          },
+        },
+      ],
+    });
+    expect(calls[1]!.activity.attachments).toBeUndefined();
+    expect(JSON.stringify(calls[1])).not.toContain("app.test");
+    // Deterministic replies are not AI-generated.
+    expect(calls[0]!.activity.entities).toBeUndefined();
+  });
+  test("the unlink confirmation button sends the confirm command back as the person", async () => {
+    const { app, calls } = transport();
+    await sendTeamsReply(app, { ...target, personal: true }, teamsUnlinkReply("confirm"));
+    expect(calls[0]!.activity).toMatchObject({
+      attachments: [
+        {
+          content: {
+            actions: [
+              {
+                type: "Action.Submit",
+                title: "Unlink account",
+                data: { msteams: { type: "imBack", value: "unlink confirm" } },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  });
+  test("the AI label entity is the documented schema.org message", () => {
+    expect(TEAMS_AI_GENERATED_ENTITY).toEqual({
+      type: "https://schema.org/Message",
+      "@type": "Message",
+      "@context": "https://schema.org",
+      "@id": "",
+      additionalType: ["AIGeneratedContent"],
+    });
+  });
+});
+
+describe("Teams typing indicator", () => {
+  test("repeats while the reply is pending and stops when it is ready", async () => {
+    const loops = new Map<string, { eventId: string }>();
+    let sent = 0;
+    let checks = 0;
+    await keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-1",
+      send: async () => {
+        sent += 1;
+      },
+      pending: async () => ++checks < 3,
+      intervalMs: 1,
+    });
+    expect(sent).toBe(3);
+    expect(loops.size).toBe(0);
+  });
+  test("a newer message in the same chat takes over the running loop", async () => {
+    const loops = new Map<string, { eventId: string }>();
+    const seen: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const first = keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-1",
+      send: () => gate,
+      pending: async (eventId) => {
+        seen.push(eventId);
+        return false;
+      },
+      intervalMs: 1,
+    });
+    await keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-2",
+      send: async () => {
+        throw new Error("a second loop must not start");
+      },
+      pending: async () => true,
+    });
+    release();
+    await first;
+    expect(seen).toEqual(["event-2"]);
+  });
+  test("stops at the time limit even while the reply is pending", async () => {
+    let sent = 0;
+    await keepTeamsTyping({
+      loops: new Map(),
+      key: "route",
+      eventId: "event-1",
+      send: async () => {
+        sent += 1;
+      },
+      pending: async () => true,
+      intervalMs: 5,
+      maxMs: 20,
+    });
+    expect(sent).toBeGreaterThan(0);
+    expect(sent).toBeLessThan(10);
+  });
+});

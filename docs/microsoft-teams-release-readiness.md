@@ -221,7 +221,8 @@ Required acceptance cases:
    verify old pending replies stop and a newly accepted audience gets fresh history.
    Verify inline `text/html` representations accompanying canonical `activity.text`
    are accepted without parsing or fetching HTML. Files, images, URL-backed HTML,
-   mixed attachment arrays and invoke activities remain rejected.
+   mixed attachment arrays and every invoke other than the feedback
+   `message/submitAction` remain rejected.
    Private/shared channel type is not classified automatically: verify each
    allowed channel is standard. A channel absent from its exact allowlist must
    be denied even with broad rollout enabled. Remove an entry and verify pending
@@ -241,8 +242,50 @@ Required acceptance cases:
    returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
+   Check the first-run and AI experience described in
+   [In-Teams experience](#in-teams-experience): one welcome on personal install,
+   `help` answered without agent work, typing while a reply is produced, rendered
+   Markdown, the AI generated label and feedback buttons on agent replies (web and
+   desktop only), and `unlink` with its confirmation.
 
 Reference: [custom app upload](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload).
+
+## In-Teams experience
+
+Everything the bot says outside agent replies is fixed text in
+`apps/api/src/integrations/teams-experience.ts`; none of it calls a model. The
+welcome and help content is chosen by the person's state (personal or shared
+conversation, organization connected or not, account linked or not).
+
+- **Welcome.** Adding the bot in personal scope (an authenticated
+  `conversationUpdate` naming the bot in `membersAdded`) sends one welcome: what
+  Opengeni does, that replies are AI-generated, the account requirement, the main
+  limitations and how to get help. An unlinked person in a connected organization
+  also gets the link button. Messages never repeat it. A linked person's first
+  1:1 chat adds one line about AI and `help` to the "Started" notice.
+- **Commands.** A whole message of `help` (or `commands`) gets the help text in the
+  same conversation, for linked and unlinked people, without starting agent work.
+  In a 1:1 chat, `unlink` (or `disconnect`) asks for confirmation; its button
+  sends `unlink confirm`, which removes the person's Teams link with the same
+  logic as the web unlink. Anyone may always remove their own link. In shared
+  conversations `unlink` points to the 1:1 chat.
+- **Typing.** After a message is accepted, the bot sends Teams typing activities
+  about every three seconds until a reply is queued for that chat, the message
+  is refused, or five minutes pass. The loop lives in the process that accepted
+  the message and is best-effort.
+- **Markdown.** Messages are sent with `textFormat: "markdown"`. Agent Markdown
+  Teams can't show in text messages is rewritten: tables become one list item per
+  row, headings below level three become bold lines, images become links and
+  horizontal rules are dropped. A code block split across 20,000-byte parts is
+  closed and reopened.
+- **AI label and feedback.** Agent replies (from `turn.completed`) carry the
+  schema.org `AIGeneratedContent` message entity and `channelData.feedbackLoop`.
+  The authenticated `message/submitAction` feedback invoke is accepted only for a
+  delivered agent reply in the same conversation and installation generation,
+  from a linked person who can read that chat (only its owner for a 1:1 chat). It
+  is recorded through the ordinary Opengeni feedback store (`feedback_submissions`)
+  on the chat and turn, with an idempotency key derived from the Teams activity,
+  so a redelivered invoke records once.
 
 ## Publisher verification and Store submission
 

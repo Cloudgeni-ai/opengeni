@@ -214,6 +214,133 @@ export function normalizeTeamsMessage(
     routeIdentity: envelope.route.identity,
   };
 }
+
+const PersonalInstall = z.object({
+  type: z.literal("conversationUpdate"),
+  channelId: z.literal("msteams"),
+  serviceUrl: z.string().url(),
+  from: z.object({ id: opaque, aadObjectId: uuid.optional() }).optional(),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.literal("personal"),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({ tenant: z.object({ id: uuid }) }),
+  membersAdded: z
+    .array(z.object({ id: z.string() }).passthrough())
+    .min(1)
+    .max(16),
+});
+export type TeamsPersonalInstall = {
+  tenantId: string;
+  /** The person who added the bot, when Teams names them. */
+  actorId: string | null;
+  conversationId: string;
+  serviceUrl: string;
+  botId: string;
+};
+/**
+ * The bot was added to someone's personal scope. Called only by the SDK's
+ * authenticated activity callback; the caller still checks the bot identity.
+ */
+export function teamsPersonalInstall(raw: unknown): TeamsPersonalInstall | null {
+  const parsed = PersonalInstall.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (
+    !a.membersAdded.some((member) => member.id === a.recipient.id) ||
+    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
+  )
+    return null;
+  let serviceUrl: string;
+  try {
+    serviceUrl = teamsServiceUrl(a.serviceUrl);
+  } catch {
+    return null;
+  }
+  return {
+    tenantId,
+    actorId: a.from?.aadObjectId?.toLowerCase() ?? null,
+    conversationId: a.conversation.id,
+    serviceUrl,
+    botId: a.recipient.id,
+  };
+}
+
+const FeedbackInvoke = z.object({
+  type: z.literal("invoke"),
+  name: z.literal("message/submitAction"),
+  id: opaque,
+  channelId: z.literal("msteams"),
+  serviceUrl: z.string().url(),
+  from: z.object({ id: opaque, aadObjectId: uuid, role: z.string().optional() }),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.enum(["personal", "channel", "groupChat"]),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({ tenant: z.object({ id: uuid }) }),
+  replyToId: opaque,
+  value: z.object({
+    actionName: z.literal("feedback"),
+    actionValue: z.object({
+      reaction: z.enum(["like", "dislike"]),
+      feedback: z.string().max(16384).optional(),
+    }),
+  }),
+});
+export type TeamsFeedback = {
+  tenantId: string;
+  actorId: string;
+  conversationId: string;
+  personal: boolean;
+  /** The bot message the feedback is about. */
+  replyToId: string;
+  eventId: string;
+  sentiment: "positive" | "negative";
+  /** What the person wrote in the feedback form, if anything. */
+  comment: string | null;
+  botId: string;
+};
+/**
+ * A thumbs up or down from Teams' feedback buttons on a bot message. Called
+ * only by the SDK's authenticated activity callback.
+ */
+export function normalizeTeamsFeedback(raw: unknown): TeamsFeedback | null {
+  const parsed = FeedbackInvoke.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (
+    a.from.role === "bot" ||
+    a.from.id === a.recipient.id ||
+    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
+  )
+    return null;
+  // Teams sends the form as JSON text: {"feedbackText": "..."}.
+  let comment: string | null = null;
+  try {
+    const form = a.value.actionValue.feedback ? JSON.parse(a.value.actionValue.feedback) : null;
+    if (form && typeof form.feedbackText === "string" && form.feedbackText.trim())
+      comment = form.feedbackText.trim().slice(0, 4000);
+  } catch {
+    comment = null;
+  }
+  return {
+    tenantId,
+    actorId: a.from.aadObjectId.toLowerCase(),
+    conversationId: a.conversation.id,
+    personal: a.conversation.conversationType === "personal",
+    replyToId: a.replyToId,
+    eventId: a.id,
+    sentiment: a.value.actionValue.reaction === "like" ? "positive" : "negative",
+    comment,
+    botId: a.recipient.id,
+  };
+}
 const Proof = z
   .object({
     version: z.literal(1),

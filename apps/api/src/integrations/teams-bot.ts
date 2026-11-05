@@ -50,6 +50,11 @@ import {
   renewTeamsRoute,
   teamsDeliveryStatus,
   refuseTeamsRouteOutputs,
+  teamsReplyPending,
+  getTeamsDeliveredReply,
+  createFeedback,
+  FeedbackConflictError,
+  FeedbackTargetNotFoundError,
   type TeamsInstallation,
   type TeamsRoute,
 } from "@opengeni/db";
@@ -60,11 +65,28 @@ import {
   teamsTenantEnabled,
   teamsServiceUrl,
   normalizeTeamsMessage,
+  normalizeTeamsFeedback,
+  teamsPersonalInstall,
   teamsRouteId,
   mintTeamsProof,
   verifyTeamsProof,
+  type TeamsFeedback,
   type TeamsMessage,
+  type TeamsPersonalInstall,
 } from "./teams-protocol";
+import {
+  TEAMS_AI_GENERATED_ENTITY,
+  teamsCommand,
+  teamsEventUuid,
+  teamsHelp,
+  teamsMarkdown,
+  teamsMarkdownParts,
+  teamsUnlinkReply,
+  teamsWelcome,
+  type TeamsCommand,
+  type TeamsExperienceReply,
+  type TeamsExperienceState,
+} from "./teams-experience";
 
 import {
   resolveTeamsGroupAudience,
@@ -76,13 +98,18 @@ const ENDPOINT = "/v1/integrations/teams/messages";
 const ROOT = "/v1/workspaces/:workspaceId/integrations/teams";
 const inventoryCursors = new WeakMap<ApiRouteDeps, string>();
 const runtimes = new WeakMap<ApiRouteDeps, Promise<App>>();
+const typingLoops = new WeakMap<ApiRouteDeps, Map<string, { eventId: string }>>();
 
 function configuredBase(deps: ApiRouteDeps): string {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
   if (!base) throw new Error("teams_public_url_missing");
   return base;
 }
-function proofLink(deps: ApiRouteDeps, m: TeamsMessage, i: TeamsInstallation | null): string {
+function proofLink(
+  deps: ApiRouteDeps,
+  m: Pick<TeamsMessage, "tenantId" | "actorId">,
+  i: TeamsInstallation | null,
+): string {
   const purpose = i ? "link" : "setup";
   const token = mintTeamsProof(deps.settings.integrationsStateSecret!, {
     purpose,
@@ -108,21 +135,88 @@ function sessionUrl(deps: ApiRouteDeps, r: TeamsRoute): string {
 function routeSessionWorkspace(r: TeamsRoute): string {
   return r.session_workspace_id ?? r.workspace_id;
 }
+type TeamsTarget = Pick<TeamsMessage, "serviceUrl" | "conversationId" | "threadId" | "botId">;
+function deliveryConversation(m: TeamsTarget): string {
+  return m.threadId && !m.conversationId.includes(";messageid=")
+    ? `${m.conversationId};messageid=${m.threadId}`
+    : m.conversationId;
+}
+/** Text is Teams Markdown. An agent reply carries Teams' AI label and feedback buttons. */
 async function send(
   app: App,
-  m: Pick<TeamsMessage, "serviceUrl" | "conversationId" | "threadId" | "botId">,
+  m: TeamsTarget,
   text: string,
+  options: { ai?: boolean } = {},
 ): Promise<string> {
   const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
-  const conversationId =
-    m.threadId && !m.conversationId.includes(";messageid=")
-      ? `${m.conversationId};messageid=${m.threadId}`
-      : m.conversationId;
-  const response = await client.conversations.createActivity(conversationId, {
+  const response = await client.conversations.createActivity(deliveryConversation(m), {
     type: "message",
     text,
-    textFormat: "plain",
+    textFormat: "markdown",
     ...(m.threadId ? { replyToId: m.threadId } : {}),
+    ...(options.ai
+      ? {
+          entities: [{ ...TEAMS_AI_GENERATED_ENTITY, additionalType: ["AIGeneratedContent"] }],
+          channelData: { feedbackLoop: { type: "default" } },
+        }
+      : {}),
+  });
+  if (!response.id) throw new Error("teams_delivery_missing_receipt");
+  return response.id;
+}
+/** Shows that Opengeni is working on a reply. Teams clears it when the next message arrives. */
+async function sendTyping(app: App, m: TeamsTarget): Promise<void> {
+  await app.api
+    .fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) })
+    .conversations.createActivity(deliveryConversation(m), {
+      type: "typing",
+      ...(m.threadId ? { replyToId: m.threadId } : {}),
+    });
+}
+/**
+ * A deterministic reply: Markdown text and, when it has one, a card button.
+ * A link button carries an identity proof, so it is only ever sent in a
+ * personal chat; elsewhere the reply goes out as text alone.
+ */
+export async function sendTeamsReply(
+  app: App,
+  m: TeamsTarget & { personal: boolean },
+  reply: TeamsExperienceReply,
+  linkUrl?: () => string,
+): Promise<string> {
+  const action =
+    reply.action?.kind === "link"
+      ? m.personal && linkUrl
+        ? { type: "Action.OpenUrl", title: reply.action.title, url: linkUrl() }
+        : null
+      : reply.action?.kind === "command"
+        ? {
+            type: "Action.Submit",
+            title: reply.action.title,
+            data: { msteams: { type: "imBack", value: reply.action.command } },
+          }
+        : null;
+  const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
+  const response = await client.conversations.createActivity(deliveryConversation(m), {
+    type: "message",
+    text: reply.text,
+    textFormat: "markdown",
+    ...(m.threadId ? { replyToId: m.threadId } : {}),
+    ...(action
+      ? {
+          attachments: [
+            {
+              contentType: "application/vnd.microsoft.card.adaptive",
+              content: {
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+                type: "AdaptiveCard",
+                version: "1.2",
+                actions: [action],
+              },
+            },
+          ],
+        }
+      : {}),
   });
   if (!response.id) throw new Error("teams_delivery_missing_receipt");
   return response.id;
@@ -263,6 +357,307 @@ async function readGroupRoster(
     .fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) })
     .conversations.getMembers(m.conversationId);
 }
+function experienceState(
+  personal: boolean,
+  i: TeamsInstallation | null,
+  grant: AccessGrant | null,
+): TeamsExperienceState {
+  return { personal, installation: i?.active ? "active" : "unavailable", linked: Boolean(grant) };
+}
+/** The welcome for someone who just added the bot for themselves. */
+async function welcomeTeamsInstall(
+  deps: ApiRouteDeps,
+  app: App,
+  install: TeamsPersonalInstall,
+): Promise<void> {
+  const i = await getTeamsInstallation(deps.db, install.tenantId);
+  const grant = i?.active && install.actorId ? await actorGrant(deps, i, install.actorId) : null;
+  // Without the person's identity there is nothing to link yet; their first
+  // message gets the link button.
+  const state = experienceState(true, install.actorId ? i : null, grant);
+  const actorId = install.actorId;
+  await sendTeamsReply(
+    app,
+    { ...install, threadId: null, personal: true },
+    teamsWelcome(state),
+    i && actorId ? () => proofLink(deps, { tenantId: install.tenantId, actorId }, i) : undefined,
+  );
+}
+/** Help and account commands: fixed replies that never reach the agent. */
+async function answerTeamsCommand(
+  deps: ApiRouteDeps,
+  app: App,
+  m: TeamsMessage,
+  i: TeamsInstallation | null,
+  command: TeamsCommand,
+): Promise<string> {
+  const active = i?.active ? i : null;
+  if (command === "help") {
+    const grant = active ? await actorGrant(deps, active, m.actorId) : null;
+    await sendTeamsReply(
+      app,
+      m,
+      teamsHelp(experienceState(m.personal, active, grant)),
+      active ? () => proofLink(deps, m, active) : undefined,
+    );
+    return "help_sent";
+  }
+  if (!m.personal) {
+    await sendTeamsReply(app, m, teamsUnlinkReply("not_personal"));
+    return "unlink_not_personal";
+  }
+  // The stored link, even when the person has since lost workspace access:
+  // anyone may always remove their own link.
+  const subjectId = active ? await getTeamsActor(deps.db, active, m.actorId) : null;
+  if (!active || !subjectId) {
+    await sendTeamsReply(app, m, teamsUnlinkReply("not_linked"));
+    return "unlink_not_linked";
+  }
+  if (command === "unlink") {
+    await sendTeamsReply(app, m, teamsUnlinkReply("confirm"));
+    return "unlink_confirmation_sent";
+  }
+  await removeTeamsLink(deps.db, active, subjectId);
+  await sendTeamsReply(app, m, teamsUnlinkReply("done"));
+  return "unlinked";
+}
+/**
+ * Keeps Teams' typing indicator up while the reply to a message is being
+ * produced: from the moment the message is accepted until a reply is queued
+ * for its chat, the message is refused, or `maxMs` passes. One loop per chat;
+ * a newer message in the same chat takes over the running loop.
+ */
+export async function keepTeamsTyping(input: {
+  loops: Map<string, { eventId: string }>;
+  key: string;
+  eventId: string;
+  send: () => Promise<void>;
+  pending: (eventId: string) => Promise<boolean>;
+  intervalMs?: number;
+  maxMs?: number;
+}): Promise<void> {
+  const live = input.loops.get(input.key);
+  if (live) {
+    live.eventId = input.eventId;
+    return;
+  }
+  const state = { eventId: input.eventId };
+  input.loops.set(input.key, state);
+  const deadline = Date.now() + (input.maxMs ?? 5 * 60_000);
+  try {
+    for (;;) {
+      await input.send();
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, input.intervalMs ?? 3000);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      if (Date.now() >= deadline || !(await input.pending(state.eventId))) return;
+    }
+  } finally {
+    input.loops.delete(input.key);
+  }
+}
+/** Records a thumbs up or down on an agent reply as Opengeni feedback on its chat and turn. */
+export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback): Promise<string> {
+  if (f.botId.toLowerCase() !== `28:${deps.settings.teamsBotClientId!.toLowerCase()}`)
+    return "bot_identity_mismatch";
+  if (!teamsTenantEnabled(deps.settings, f.tenantId)) return "tenant_disabled";
+  const i = await getTeamsInstallation(deps.db, f.tenantId);
+  if (!i?.active) return "feedback_installation_inactive";
+  const identity = await actorGrant(deps, i, f.actorId);
+  if (!identity) return "feedback_actor_unlinked";
+  const reply = await getTeamsDeliveredReply(deps.db, i, {
+    conversationId: f.conversationId,
+    providerMessageId: f.replyToId,
+  });
+  if (!reply || (reply.personal && reply.subject_id !== identity.subjectId))
+    return "feedback_target_missing";
+  const grant = reply.session_workspace_id
+    ? await ownPersonalWorkspaceGrant(deps, i, identity.subjectId, reply.session_workspace_id)
+    : identity;
+  if (!grant || !hasPermission(grant.permissions, "sessions:read")) return "feedback_not_permitted";
+  const save = (turnId: string | null) => () =>
+    createFeedback(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      principalKind: grant.principalKind ?? null,
+      request: {
+        idempotencyKey: teamsEventUuid("teams-feedback", `${i.tenant_id}:${f.eventId}`),
+        sessionId: reply.session_id,
+        ...(turnId ? { turnId } : {}),
+        sentiment: f.sentiment,
+        ...(f.comment ? { comment: f.comment } : {}),
+      },
+      server: { version: deps.settings.serverVersion, revision: deps.settings.deploymentRevision },
+    });
+  try {
+    const authorization = await requireSessionAuthorization(deps, grant, {
+      sessionId: reply.session_id,
+      operation: "session.feedback.write",
+      surface: "core",
+    });
+    const run = (turnId: string | null) =>
+      authorization
+        ? withResolvedSessionAuthorization(authorization, save(turnId))
+        : save(turnId)();
+    let result;
+    try {
+      result = await run(reply.turn_id);
+    } catch (error) {
+      // A turn that no longer exists still leaves feedback on the chat.
+      if (!(error instanceof FeedbackTargetNotFoundError) || !reply.turn_id) throw error;
+      result = await run(null);
+    }
+    return result.replayed ? "feedback_replayed" : "feedback_recorded";
+  } catch (error) {
+    if (error instanceof FeedbackTargetNotFoundError) return "feedback_target_missing";
+    if (error instanceof FeedbackConflictError) return "feedback_conflict";
+    if (error instanceof HTTPException && error.status >= 400 && error.status < 500)
+      return "feedback_not_permitted";
+    throw error;
+  }
+}
+/**
+ * Handles one Teams activity. Call it only with an activity the Teams SDK has
+ * authenticated (Connector JWT, audience, issuer, expiry and service URL);
+ * it never authenticates anything itself.
+ */
+export async function handleTeamsActivity(
+  deps: ApiRouteDeps,
+  app: App,
+  body: unknown,
+): Promise<{ status: number }> {
+  const observed = (reason: string) =>
+    deps.observability?.info("Teams authenticated activity outcome", { reason });
+  const botId = `28:${deps.settings.teamsBotClientId!.toLowerCase()}`;
+  const change = teamsGroupMembershipChange(body, botId);
+  if (change) {
+    const installation = await getTeamsInstallation(deps.db, change.tenantId);
+    if (installation?.active)
+      await invalidateTeamsGroup(deps.db, installation, change.conversationId);
+    return { status: 200 };
+  }
+  const install = teamsPersonalInstall(body);
+  if (install) {
+    if (install.botId.toLowerCase() !== botId) observed("bot_identity_mismatch");
+    else if (!teamsTenantEnabled(deps.settings, install.tenantId)) observed("tenant_disabled");
+    else {
+      await welcomeTeamsInstall(deps, app, install);
+      observed("welcome_sent");
+    }
+    return { status: 200 };
+  }
+  const feedback = normalizeTeamsFeedback(body);
+  if (feedback) {
+    observed(await recordTeamsFeedback(deps, feedback));
+    return { status: 200 };
+  }
+  const m = normalizeTeamsMessage(body, (diagnostic) => {
+    deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
+  });
+  if (!m) return { status: 200 };
+  if (m.botId.toLowerCase() !== botId) {
+    observed("bot_identity_mismatch");
+    return { status: 200 };
+  }
+  if (!teamsTenantEnabled(deps.settings, m.tenantId)) {
+    observed("tenant_disabled");
+    return { status: 200 };
+  }
+  if (
+    !m.personal &&
+    !(m.groupChat
+      ? deps.settings.teamsBotAllowedGroupChatIds.includes(`${m.tenantId}:${m.conversationId}`)
+      : deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
+  ) {
+    observed("channel_disabled");
+    return { status: 200 };
+  }
+  const i = await getTeamsInstallation(deps.db, m.tenantId);
+  const command = teamsCommand(m.text);
+  if (command) {
+    observed(await answerTeamsCommand(deps, app, m, i, command));
+    return { status: 200 };
+  }
+  if (!i?.active) {
+    if (m.personal && deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)) {
+      await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
+      observed("setup_link_sent");
+    } else observed("setup_not_permitted");
+    return { status: 200 };
+  }
+  const grant = await actorGrant(deps, i, m.actorId);
+  if (!grant) {
+    // Identity bearers are never sent to channels or shared conversations.
+    if (m.personal) await sendTeamsOnboarding(app, m, "link", proofLink(deps, m, i));
+    else
+      await send(
+        app,
+        m,
+        "Send me a direct message to link your Opengeni account, then mention me here again.",
+      );
+    return { status: 200 };
+  }
+  if (!hasPermission(grant.permissions, "sessions:create")) return { status: 200 };
+  let audience: TeamsGroupAudience | undefined;
+  if (m.groupChat) {
+    try {
+      audience = await groupAudience(deps, i, m, async (value) =>
+        app.api
+          .fromServiceUrl({ serviceUrl: teamsServiceUrl(value.serviceUrl) })
+          .conversations.getMembers(value.conversationId),
+      );
+      if (!audience.some((x) => x.actorId === m.actorId && x.subjectId === grant.subjectId))
+        throw new Error("teams_group_sender_missing");
+    } catch {
+      await invalidateTeamsGroup(deps.db, i, m.conversationId, {
+        revision: i.group_revision,
+      });
+      await send(
+        app,
+        m,
+        "I couldn’t verify this chat’s access. Everyone needs workspace access and a linked Opengeni account. Message me privately to connect, then @mention me here.",
+      );
+      return { status: 200 };
+    }
+  }
+  // A 1:1 chat lands in the sender's own Personal workspace; channels
+  // and group chats stay in the installation's workspace.
+  const sessionWorkspaceId = m.personal
+    ? await teamsChatPersonalWorkspace(deps, i, grant.subjectId)
+    : null;
+  const routeId = teamsRouteId(m, i.generation, grant.subjectId, sessionWorkspaceId);
+  const eventId = `${m.identity}:${i.generation}`;
+  await enqueueTeamsMessage(deps.db, i, {
+    routeId,
+    actorId: m.actorId,
+    subjectId: grant.subjectId,
+    personal: m.personal,
+    sessionWorkspaceId,
+    channelId: m.channelId,
+    ...(audience ? { groupAudience: audience, groupRevision: i.group_revision } : {}),
+    conversationId: m.conversationId,
+    threadId: m.threadId,
+    serviceUrl: m.serviceUrl,
+    botId: m.botId,
+    eventId,
+    payload: m,
+  });
+  let loops = typingLoops.get(deps);
+  if (!loops) typingLoops.set(deps, (loops = new Map()));
+  void keepTeamsTyping({
+    loops,
+    key: routeId,
+    eventId,
+    send: () => sendTyping(app, m),
+    pending: (current) => teamsReplyPending(deps.db, i, routeId, current),
+  }).catch(() => {
+    // The indicator is a courtesy; the reply is delivered either way.
+    observed("typing_stopped");
+  });
+  return { status: 200 };
+}
 async function runtime(deps: ApiRouteDeps): Promise<App> {
   let pending = runtimes.get(deps);
   if (!pending) {
@@ -283,110 +678,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
       await app.initialize();
       // The SDK invokes this only after validating the Connector JWT, audience,
       // issuer, expiry and service URL. Never pass a pre-authenticated request token.
-      app.server.onRequest = async ({ body }) => {
-        const observed = (reason: string) =>
-          deps.observability?.info("Teams authenticated activity outcome", { reason });
-        const change = teamsGroupMembershipChange(
-          body,
-          `28:${deps.settings.teamsBotClientId!.toLowerCase()}`,
-        );
-        if (change) {
-          const installation = await getTeamsInstallation(deps.db, change.tenantId);
-          if (installation?.active)
-            await invalidateTeamsGroup(deps.db, installation, change.conversationId);
-          return { status: 200 };
-        }
-        const m = normalizeTeamsMessage(body, (diagnostic) => {
-          deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
-        });
-        if (!m) return { status: 200 };
-        if (m.botId.toLowerCase() !== `28:${deps.settings.teamsBotClientId!.toLowerCase()}`) {
-          observed("bot_identity_mismatch");
-          return { status: 200 };
-        }
-        if (!teamsTenantEnabled(deps.settings, m.tenantId)) {
-          observed("tenant_disabled");
-          return { status: 200 };
-        }
-        if (
-          !m.personal &&
-          !(m.groupChat
-            ? deps.settings.teamsBotAllowedGroupChatIds.includes(
-                `${m.tenantId}:${m.conversationId}`,
-              )
-            : deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
-        ) {
-          observed("channel_disabled");
-          return { status: 200 };
-        }
-        const i = await getTeamsInstallation(deps.db, m.tenantId);
-        if (!i?.active) {
-          if (
-            m.personal &&
-            deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
-          ) {
-            await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
-            observed("setup_link_sent");
-          } else observed("setup_not_permitted");
-          return { status: 200 };
-        }
-        const grant = await actorGrant(deps, i, m.actorId);
-        if (!grant) {
-          // Identity bearers are never sent to channels or shared conversations.
-          if (m.personal) await sendTeamsOnboarding(app, m, "link", proofLink(deps, m, i));
-          else
-            await send(
-              app,
-              m,
-              "Send me a direct message to link your Opengeni account, then mention me here again.",
-            );
-          return { status: 200 };
-        }
-        if (!hasPermission(grant.permissions, "sessions:create")) return { status: 200 };
-        let audience: TeamsGroupAudience | undefined;
-        if (m.groupChat) {
-          try {
-            audience = await groupAudience(deps, i, m, async (value) =>
-              app.api
-                .fromServiceUrl({ serviceUrl: teamsServiceUrl(value.serviceUrl) })
-                .conversations.getMembers(value.conversationId),
-            );
-            if (!audience.some((x) => x.actorId === m.actorId && x.subjectId === grant.subjectId))
-              throw new Error("teams_group_sender_missing");
-          } catch {
-            await invalidateTeamsGroup(deps.db, i, m.conversationId, {
-              revision: i.group_revision,
-            });
-            await send(
-              app,
-              m,
-              "I couldn’t verify this chat’s access. Everyone needs workspace access and a linked Opengeni account. Message me privately to connect, then @mention me here.",
-            );
-            return { status: 200 };
-          }
-        }
-        // A 1:1 chat lands in the sender's own Personal workspace; channels
-        // and group chats stay in the installation's workspace.
-        const sessionWorkspaceId = m.personal
-          ? await teamsChatPersonalWorkspace(deps, i, grant.subjectId)
-          : null;
-        await enqueueTeamsMessage(deps.db, i, {
-          routeId: teamsRouteId(m, i.generation, grant.subjectId, sessionWorkspaceId),
-          actorId: m.actorId,
-          subjectId: grant.subjectId,
-          personal: m.personal,
-          sessionWorkspaceId,
-          channelId: m.channelId,
-          ...(audience ? { groupAudience: audience, groupRevision: i.group_revision } : {}),
-          conversationId: m.conversationId,
-          threadId: m.threadId,
-          serviceUrl: m.serviceUrl,
-          botId: m.botId,
-          eventId: `${m.identity}:${i.generation}`,
-          payload: m,
-        });
-        return { status: 200 };
-      };
+      app.server.onRequest = async ({ body }) => handleTeamsActivity(deps, app, body);
       return app;
     })();
     runtimes.set(deps, pending);
@@ -603,32 +895,21 @@ async function catalogDeps(deps: ApiRouteDeps, grant: AccessGrant): Promise<ApiR
 /**
  * An agent's reply as Teams message parts. Claude citation tags left in the
  * text become their quoted text instead of raw markup; links the Claude
- * transport already made from them stay Markdown links.
+ * transport already made from them stay Markdown links. Markdown Teams can't
+ * show in a text message is rewritten into what it can (see teamsMarkdown).
  */
 export function teamsReplyParts(text: string): string[] {
-  return teamsTextParts(rewriteClaudeCiteTags(text));
+  return teamsTextParts(teamsMarkdown(rewriteClaudeCiteTags(text)));
 }
 
+/** Message parts within the Teams size limit; code blocks survive a split. */
 export function teamsTextParts(text: string): string[] {
-  const parts: string[] = [];
-  let part = "";
-  let bytes = 0;
-  for (const c of text) {
-    const size = Buffer.byteLength(c);
-    if (bytes + size > 20_000) {
-      parts.push(part);
-      part = "";
-      bytes = 0;
-    }
-    part += c;
-    bytes += size;
-  }
-  if (part) parts.push(part);
-  return parts;
+  return teamsMarkdownParts(text);
 }
 type TeamsSender = (
   message: Pick<TeamsMessage, "serviceUrl" | "conversationId" | "threadId" | "botId">,
   text: string,
+  options?: { ai?: boolean },
 ) => Promise<string>;
 function admissionNotice(
   deps: ApiRouteDeps,
@@ -755,7 +1036,9 @@ async function drainRoute(
       }
       if (!r.session_bound)
         await enqueueTeamsOutput(deps.db, i, r, 0, [
-          `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}`,
+          r.personal
+            ? `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`
+            : `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}`,
         ]);
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null);
       r.session_bound = true;
@@ -821,12 +1104,23 @@ async function drainRoute(
       for (const event of page.events) {
         const payload = event.payload as Record<string, unknown>;
         let text: string | null = null;
-        if (event.type === "turn.completed")
+        if (event.type === "turn.completed") {
           text =
             typeof payload.output === "string" && payload.output.trim()
               ? payload.output
               : turnCompletedReply(payload);
-        else if (
+          await enqueueTeamsOutput(
+            deps.db,
+            i,
+            r,
+            event.sequence,
+            text ? teamsReplyParts(text) : [],
+            undefined,
+            { turnId: event.turnId ?? null },
+          );
+          continue;
+        }
+        if (
           event.type === "session.requiresAction" ||
           event.type === "session.humanInput.requested"
         )
@@ -905,6 +1199,7 @@ async function drainRoute(
             output.payload.notice === "audience_changed" ? "audience_changed" : "admission",
           )
         : output.payload.text,
+      { ai: Number(output.source_sequence) !== -1 && output.payload.ai === true },
     );
     await settleTeamsOutput(deps.db, i, output.operation_id, {
       state: "delivered",
@@ -934,7 +1229,7 @@ async function drainRoute(
 }
 export async function drainTeamsBotOnce(
   deps: ApiRouteDeps,
-  deliver: TeamsSender = async (m, text) => send(await runtime(deps), m, text),
+  deliver: TeamsSender = async (m, text, options) => send(await runtime(deps), m, text, options),
   readRoster: TeamsRosterReader = async (m) => readGroupRoster(deps, m),
 ): Promise<void> {
   if (

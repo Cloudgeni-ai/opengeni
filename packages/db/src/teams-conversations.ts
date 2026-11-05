@@ -47,7 +47,14 @@ export type TeamsInbox = {
 export type TeamsOutbox = {
   source_sequence: number;
   operation_id: string;
-  payload: { text: string; notice?: "admission" | "audience_changed" };
+  payload: {
+    text: string;
+    notice?: "admission" | "audience_changed";
+    /** An agent reply: shown with Teams' AI label and feedback buttons. */
+    ai?: true;
+    /** The turn an agent reply came from, for feedback about it. */
+    turnId?: string;
+  };
   route_id: string;
 };
 const scope = (i: { account_id: string; workspace_id: string }) => ({
@@ -426,6 +433,7 @@ export async function enqueueTeamsOutput(
   sequence: number,
   parts: string[],
   notice?: { eventId: string; kind: "admission" | "audience_changed" },
+  reply?: { turnId: string | null },
 ) {
   await teamsScoped(db, i, async (tx) => {
     const owned = await rawRows(
@@ -435,12 +443,57 @@ export async function enqueueTeamsOutput(
     if (!owned.length) return;
     for (const [index, text] of parts.entries())
       await tx.execute(
-        sql`insert into teams_bot_outbox(account_id,workspace_id,operation_id,route_id,source_sequence,part_index,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${`${r.route_id}:${notice ? `notice:${notice.eventId}` : sequence}:${index}`},${r.route_id},${sequence},${index},${JSON.stringify({ text, ...(notice ? { notice: notice.kind } : {}) })}::jsonb) on conflict(operation_id) do nothing`,
+        sql`insert into teams_bot_outbox(account_id,workspace_id,operation_id,route_id,source_sequence,part_index,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${`${r.route_id}:${notice ? `notice:${notice.eventId}` : sequence}:${index}`},${r.route_id},${sequence},${index},${JSON.stringify({ text, ...(notice ? { notice: notice.kind } : {}), ...(reply ? { ai: true, ...(reply.turnId ? { turnId: reply.turnId } : {}) } : {}) })}::jsonb) on conflict(operation_id) do nothing`,
       );
     await tx.execute(
       sql`update teams_bot_routes set delivered_sequence=greatest(delivered_sequence,${sequence}) where route_id=${r.route_id}`,
     );
   });
+}
+/**
+ * Whether the reply to one inbound message is still being produced: the
+ * message waits to be admitted, or it was admitted and nothing has been queued
+ * for its chat since, apart from the "started" notice.
+ */
+export async function teamsReplyPending(
+  db: Database,
+  i: TeamsInstallation,
+  routeId: string,
+  eventId: string,
+): Promise<boolean> {
+  return teamsScoped(db, i, async (tx) => {
+    const [row] = await rawRows<{ state: string; replied: boolean }>(
+      tx,
+      sql`select inbox.state,exists(select 1 from teams_bot_outbox outbox where outbox.route_id=inbox.route_id and outbox.source_sequence<>0 and outbox.created_at>=inbox.created_at) as replied from teams_bot_inbox inbox where inbox.route_id=${routeId} and inbox.event_id=${eventId}`,
+    );
+    return Boolean(row && (row.state === "pending" || (row.state === "accepted" && !row.replied)));
+  });
+}
+/** An agent reply the bot delivered in one Teams conversation, found by its Teams message id. */
+export type TeamsDeliveredReply = {
+  route_id: string;
+  subject_id: string;
+  personal: boolean;
+  session_id: string;
+  session_workspace_id: string | null;
+  turn_id: string | null;
+};
+export async function getTeamsDeliveredReply(
+  db: Database,
+  i: TeamsInstallation,
+  input: { conversationId: string; providerMessageId: string },
+): Promise<TeamsDeliveredReply | null> {
+  return teamsScoped(
+    db,
+    i,
+    async (tx) =>
+      (
+        await rawRows<TeamsDeliveredReply>(
+          tx,
+          sql`select r.route_id,r.subject_id,r.personal,r.session_id,r.session_workspace_id,o.payload->>'turnId' as turn_id from teams_bot_routes r join teams_bot_outbox o on o.route_id=r.route_id where r.tenant_id=${i.tenant_id}::uuid and r.generation=${i.generation}::uuid and split_part(r.conversation_id,';',1)=${input.conversationId.split(";")[0]} and r.session_bound and o.state='delivered' and o.provider_message_id=${input.providerMessageId} and o.payload->>'ai'='true' limit 1`,
+        )
+      )[0] ?? null,
+  );
 }
 export async function claimTeamsOutput(
   db: Database,
