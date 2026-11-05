@@ -111,10 +111,12 @@ fi
 # The pinned rg and jq each agent embeds and appends to its commands' PATH
 # (agent/crates/opengeni-agent/build.rs). Verified against the manifest.
 SHELL_TOOLS_DIR="$STAGE_DIR/shell-tools"
+SHELL_TOOLS_MARKER='Third-party notices for the shell tools Opengeni ships'
+shell_tools_targets=()
+for target in $TARGETS; do shell_tools_targets+=(--target "$target"); done
 (
   cd "$REPO_ROOT"
-  bun scripts/fetch-shell-tools.ts --out "$SHELL_TOOLS_DIR" \
-    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+  bun scripts/fetch-shell-tools.ts --out "$SHELL_TOOLS_DIR" "${shell_tools_targets[@]}"
 )
 
 for target in $TARGETS; do
@@ -168,6 +170,10 @@ for target in $TARGETS; do
       cargo zigbuild --locked --release --target "$target" -p opengeni-agent
   )
   cp "$AGENT_DIR/target/$target/release/opengeni-agent" "$STAGE_DIR/opengeni-agent-$target"
+  # The embedded notices travel only with the embedded tools.
+  if ! grep -aqF "$SHELL_TOOLS_MARKER" "$STAGE_DIR/opengeni-agent-$target"; then
+    log "the $target agent does not carry the pinned rg and jq"; exit 1
+  fi
   for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
     asset="$component-$target"
     test -s "$STAGE_DIR/$asset"

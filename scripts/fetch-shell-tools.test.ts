@@ -137,22 +137,30 @@ describe("pinned shell tools manifest", () => {
         }
       >;
     };
-    const steps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
-    const bun = steps.findIndex((step) => step.uses?.startsWith("oven-sh/setup-bun@"));
-    const agentBuilds = steps
-      .map((step, index) => ({ step, index }))
-      .filter(({ step }) => /cargo (zig)?build [^\n]*-p opengeni-agent\b/u.test(step.run ?? ""));
-    expect(agentBuilds.length).toBeGreaterThanOrEqual(3);
-    for (const { step, index } of agentBuilds) {
-      expect(index).toBeGreaterThan(bun);
-      expect(
-        step.env?.OPENGENI_RUNTIME_BUILD_ID !== undefined ||
-          (step.run ?? "").includes("OPENGENI_RUNTIME_BUILD_ID="),
-      ).toBe(true);
+    let agentBuilds = 0;
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      const steps = job.steps ?? [];
+      // Each job is its own runner: Bun must be set up in the same job.
+      const bun = steps.findIndex((step) => step.uses?.startsWith("oven-sh/setup-bun@"));
+      steps.forEach((step, index) => {
+        if (!/cargo (zig)?build [^\n]*-p opengeni-agent\b/u.test(step.run ?? "")) return;
+        agentBuilds++;
+        expect({ job: name, bunBeforeBuild: bun >= 0 && index > bun }).toEqual({
+          job: name,
+          bunBeforeBuild: true,
+        });
+        expect(
+          step.env?.OPENGENI_RUNTIME_BUILD_ID !== undefined ||
+            (step.run ?? "").includes("OPENGENI_RUNTIME_BUILD_ID="),
+        ).toBe(true);
+      });
     }
+    expect(agentBuilds).toBeGreaterThanOrEqual(3);
     const buildScript = await readFile(join(root, "agent/crates/opengeni-agent/build.rs"), "utf8");
     expect(buildScript).toContain('env::var_os("OPENGENI_RUNTIME_BUILD_ID")?');
     expect(buildScript).toContain("scripts/fetch-shell-tools.ts");
+    // Without Bun a release build fails instead of shipping without the tools.
+    expect(buildScript).toContain("a release build needs bun to fetch the pinned rg and jq");
   });
 });
 

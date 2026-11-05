@@ -16,7 +16,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 # The pinned rg and jq builds the agent embeds and appends to every command's
 # PATH. Pins equal packages/runtime/src/sandbox/shell-tools-manifest.ts
-# (checked by scripts/shell-tools.test.ts); the cache is keyed by checksum.
+# (checked by scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
 FROM scratch AS shell-tools-linux
 ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
 ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915

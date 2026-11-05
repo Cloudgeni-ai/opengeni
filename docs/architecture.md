@@ -2294,8 +2294,11 @@ extends each command's PATH, covering compute sandboxes, selfhosted task
 containers, Connected Machines and run_on targets. For other managed backends
 the worker carries per-architecture Linux bundles and the `shell-tools` setup
 hook installs one beside the Codemode client (signed download, else the
-provider's file API; skipped when the image has both tools), at
-`/workspace/.opengeni/shell-tools/rg-<version>-jq-<version>`. Image and release
+provider's file API; skipped when the image has both tools, and for a day
+after a box could not install them), at
+`/workspace/.opengeni/shell-tools/rg-<version>-jq-<version>`. The hook and the
+PATH line ride with the managed Codemode client, so an agent without Codemode
+on those backends keeps only the image's own tools. Image and release
 builds get the bytes from `scripts/fetch-shell-tools.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,

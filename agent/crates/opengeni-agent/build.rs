@@ -78,7 +78,7 @@ fn embed_shell_tools() {
         ("windows", "aarch64") => ("aarch64-pc-windows-msvc", ".exe"),
         _ => return,
     };
-    let Some(root) = shell_tools_root(target) else {
+    let Some((root, inputs)) = shell_tools_root(target) else {
         return;
     };
     let rg = root.join(target).join(format!("rg{suffix}"));
@@ -94,28 +94,50 @@ fn embed_shell_tools() {
             "the agent's shell tools are missing {}; run scripts/fetch-shell-tools.ts",
             path.display()
         );
-        println!("cargo:rerun-if-changed={}", path.display());
+        // Files this script wrote itself are outputs: watching them would
+        // make Cargo rerun the script, and rebuild the agent, on every call.
+        if inputs == ToolInputs::Given {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
         println!("cargo:rustc-env={name}={}", path.display());
     }
     println!("cargo:rustc-cfg=opengeni_embedded_shell_tools");
 }
 
-fn shell_tools_root(target: &str) -> Option<std::path::PathBuf> {
+/// Where the embedded tools come from.
+#[derive(PartialEq, Eq)]
+enum ToolInputs {
+    /// An explicit `OPENGENI_EMBEDDED_SHELL_TOOLS` directory, watched for changes.
+    Given,
+    /// Fetched by this script into `OUT_DIR`; only the pins are watched.
+    Fetched,
+}
+
+fn shell_tools_root(target: &str) -> Option<(std::path::PathBuf, ToolInputs)> {
     if let Some(root) = env::var_os("OPENGENI_EMBEDDED_SHELL_TOOLS") {
-        return (!root.is_empty()).then(|| std::path::PathBuf::from(root));
+        return (!root.is_empty()).then(|| (std::path::PathBuf::from(root), ToolInputs::Given));
     }
     env::var_os("OPENGENI_RUNTIME_BUILD_ID")?;
+    // A release build: shipping without the tools must fail loudly, never
+    // quietly. `OPENGENI_EMBEDDED_SHELL_TOOLS=` (empty) opts out explicitly.
     let repository = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR")?).join("../../..");
     let script = repository.join("scripts/fetch-shell-tools.ts");
-    if !script.is_file() {
-        println!("cargo:warning=no scripts/fetch-shell-tools.ts; the agent embeds no rg/jq");
-        return None;
-    }
+    assert!(
+        script.is_file(),
+        "a release build needs {} to embed rg and jq; set OPENGENI_EMBEDDED_SHELL_TOOLS= (empty) to build without them",
+        script.display()
+    );
     println!("cargo:rerun-if-changed={}", script.display());
     println!(
         "cargo:rerun-if-changed={}",
         repository
             .join("packages/runtime/src/sandbox/shell-tools-manifest.ts")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repository
+            .join("packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt")
             .display()
     );
     let out = std::path::PathBuf::from(env::var_os("OUT_DIR")?).join("shell-tools");
@@ -125,13 +147,12 @@ fn shell_tools_root(target: &str) -> Option<std::path::PathBuf> {
         .arg(&out)
         .status()
     {
-        Ok(status) if status.success() => Some(out),
+        Ok(status) if status.success() => Some((out, ToolInputs::Fetched)),
         Ok(status) => panic!(
             "fetching the pinned rg and jq failed ({status}); set OPENGENI_EMBEDDED_SHELL_TOOLS= (empty) to build without them"
         ),
-        Err(error) => {
-            println!("cargo:warning=cannot run bun ({error}); the agent embeds no rg/jq");
-            None
-        }
+        Err(error) => panic!(
+            "a release build needs bun to fetch the pinned rg and jq ({error}); set OPENGENI_EMBEDDED_SHELL_TOOLS= (empty) to build without them"
+        ),
     }
 }

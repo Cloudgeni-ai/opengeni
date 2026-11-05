@@ -119,7 +119,11 @@ async function assetBytes(asset: ShellToolAsset, offline: boolean): Promise<Uint
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(asset.url, { redirect: "follow" });
+      const response = await fetch(asset.url, {
+        redirect: "follow",
+        // A stalled download must not hang an image or agent build.
+        signal: AbortSignal.timeout(120_000),
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status} for ${asset.url}`);
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (sha256(bytes) !== asset.sha256) {

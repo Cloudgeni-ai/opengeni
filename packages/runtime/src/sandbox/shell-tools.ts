@@ -137,13 +137,6 @@ export function buildManagedShellToolsBundle(files: {
 
 // ---- Loading the release's bundles ------------------------------------------
 
-/** Notices text kept beside this module in the source tree. */
-export function shellToolsNotices(): Uint8Array {
-  return readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "shell-tools-THIRD-PARTY-NOTICES.txt"),
-  );
-}
-
 /**
  * Bundles from a `scripts/fetch-shell-tools.ts` output directory, each
  * executable checked against the manifest.
@@ -203,7 +196,11 @@ export function loadManagedShellTools(): Promise<ManagedShellTools | null> {
     const fetched = process.env.OPENGENI_SHELL_TOOLS_DIR;
     if (fetched) return managedShellToolsFromDirectory(fetched);
     return null;
-  })());
+  })().catch((error: unknown) => {
+    // A failed read is retried by the next turn rather than kept.
+    releaseTools = undefined;
+    throw error;
+  }));
 }
 
 export function resetManagedShellToolsForTest(): void {
@@ -213,6 +210,10 @@ export function resetManagedShellToolsForTest(): void {
 // ---- Installing in a box ----------------------------------------------------
 
 const MARKER = ".complete";
+/** Written when a box cannot install this bundle, so later turns skip it. */
+const FAILED_MARKER = ".failed";
+/** How long, in minutes, a box that could not install them is left alone. */
+const FAILED_RETRY_MINUTES = 24 * 60;
 const RESULT_PREFIX = "opengeni-shell-tools:";
 
 export type ManagedShellToolsInstallResult =
@@ -220,6 +221,7 @@ export type ManagedShellToolsInstallResult =
   | "system"
   | "installed"
   | "unsupported"
+  | "skipped"
   | "failed";
 
 function archSelection(tools: ManagedShellTools, download?: ManagedShellToolsDownload): string {
@@ -243,25 +245,36 @@ function archSelection(tools: ManagedShellTools, download?: ManagedShellToolsDow
 /**
  * Shared POSIX shell for both delivery paths. It needs only tar (with gzip),
  * and checks every checksum with sha256sum, shasum or openssl when the box has
- * one; gzip's own CRC still guards a box with none. Files move into place one
- * rename at a time and the marker comes last, so a concurrent install or an
- * interrupted one never leaves a directory that claims to be complete.
+ * one: with a hashing tool, anything but the exact digest (an empty or failed
+ * hash included) is a mismatch, and only a box with none relies on gzip's own
+ * CRC. Files move into place one rename at a time and the marker comes last,
+ * so a concurrent install or an interrupted one never leaves a directory that
+ * claims to be complete. A linked directory on the way is refused.
  */
 function installFunctions(): string {
   return [
-    "sum() {",
-    '  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d " " -f 1',
-    '  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d " " -f 1',
-    '  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed "s/.* //"',
-    "  fi",
-    "}",
+    "if command -v sha256sum >/dev/null 2>&1; then hasher=sha256sum",
+    "elif command -v shasum >/dev/null 2>&1; then hasher=shasum",
+    "elif command -v openssl >/dev/null 2>&1; then hasher=openssl",
+    "else hasher=",
+    "fi",
     "matches() {",
-    '  got="$(sum "$1" 2>/dev/null)"',
-    '  [ -z "$got" ] || [ "$got" = "$2" ]',
+    '  [ -n "$hasher" ] || return 0',
+    '  [ -f "$1" ] || return 1',
+    '  case "$hasher" in',
+    '    sha256sum) got="$(sha256sum "$1" 2>/dev/null)" || return 1 ;;',
+    '    shasum) got="$(shasum -a 256 "$1" 2>/dev/null)" || return 1 ;;',
+    '    openssl) got="$(openssl dgst -sha256 "$1" 2>/dev/null)" || return 1; got="${got##* }" ;;',
+    "  esac",
+    '  got="${got%% *}"',
+    '  [ -n "$got" ] && [ "$got" = "$2" ]',
+    "}",
+    "unlinked() {",
+    '  for path in "${root%/*}" "$root" "$dir"; do [ ! -L "$path" ] || return 1; done',
     "}",
     "install_bundle() {",
     '  matches "$1" "$want" || return 1',
-    '  mkdir -p "$dir" || return 1',
+    '  unlinked && mkdir -p "$dir" && unlinked || return 1',
     '  stage="$dir/.stage.$$"',
     '  rm -rf "$stage"; mkdir "$stage" || return 1',
     '  if ! tar -xzf "$1" -C "$stage" 2>/dev/null && ! (gzip -dc < "$1" | tar -xf - -C "$stage") 2>/dev/null; then rm -rf "$stage"; return 1; fi',
@@ -272,7 +285,14 @@ function installFunctions(): string {
     `  printf '%s\\n' "$want" > "$stage/${MARKER}" && mv -f "$stage/${MARKER}" "$dir/${MARKER}"`,
     "  status=$?",
     '  rm -rf "$stage"',
+    `  [ "$status" -eq 0 ] && rm -f "$dir/${FAILED_MARKER}"`,
+    // Versions earlier releases installed beside this one.
+    '  [ "$status" -eq 0 ] && for old in "$root"/rg-*-jq-*; do [ "$old" = "$dir" ] || rm -rf -- "$old"; done',
     "  return $status",
+    "}",
+    "give_up() {",
+    `  unlinked && [ -d "$dir" ] && printf '%s\\n' "$want" > "$dir/${FAILED_MARKER}" 2>/dev/null`,
+    "  return 0",
     "}",
   ].join("\n");
 }
@@ -284,8 +304,9 @@ function preamble(
 ): string {
   return [
     `dir=${quote(directory)}`,
+    `root=${quote(posix.dirname(directory))}`,
     archSelection(tools, download),
-    `if [ "$(cat "$dir/${MARKER}" 2>/dev/null)" = "$want" ]; then echo '${RESULT_PREFIX} present'; exit 0; fi`,
+    `if [ "$(cat "$dir/${MARKER}" 2>/dev/null)" = "$want" ] && [ -x "$dir/rg" ] && [ -x "$dir/jq" ]; then echo '${RESULT_PREFIX} present'; exit 0; fi`,
     installFunctions(),
   ].join("\n");
 }
@@ -304,18 +325,26 @@ export function managedShellToolsProbeCommand(
     "(",
     preamble(tools, directory, download),
     `if command -v rg >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then echo '${RESULT_PREFIX} system'; exit 0; fi`,
+    // A box that recently could not install this bundle (read-only or noexec
+    // storage, no tar) is not asked again on every turn.
+    `if [ "$(cat "$dir/${FAILED_MARKER}" 2>/dev/null)" = "$want" ] && [ -n "$(find "$dir/${FAILED_MARKER}" -mmin -${FAILED_RETRY_MINUTES} 2>/dev/null)" ]; then echo '${RESULT_PREFIX} skipped'; exit 0; fi`,
+    // Never write, or let the file API stage, through a planted link.
+    `unlinked || { echo '${RESULT_PREFIX} failed'; exit 0; }`,
+    // Staging files an interrupted delivery left behind.
+    `find "$root" -maxdepth 1 -name 'stage-*.b64' -mmin +60 -exec rm -f {} + 2>/dev/null`,
     'if [ -n "$url" ]; then',
     '  fetched="$(mktemp "${TMPDIR:-/tmp}/opengeni-shell-tools.XXXXXX")" || fetched=""',
     '  if [ -n "$fetched" ]; then',
     "    trap 'rm -f -- \"$fetched\"' EXIT",
-    '    if command -v curl >/dev/null 2>&1; then curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 2 --retry-delay 1 --output "$fetched" "$url" >/dev/null 2>&1',
-    '    elif command -v wget >/dev/null 2>&1; then wget -q -T 60 -O "$fetched" "$url" >/dev/null 2>&1',
+    // Short limits: a box without network falls back to the file API.
+    '    if command -v curl >/dev/null 2>&1; then curl --fail --location --silent --show-error --connect-timeout 5 --max-time 30 --output "$fetched" "$url" >/dev/null 2>&1',
+    '    elif command -v wget >/dev/null 2>&1; then wget -q -T 15 -t 1 -O "$fetched" "$url" >/dev/null 2>&1',
     "    else false",
     `    fi && install_bundle "$fetched" && { echo '${RESULT_PREFIX} installed'; exit 0; }`,
     "  fi",
     "fi",
     // The file API stages beside this directory, so it must exist first.
-    'mkdir -p "$dir" 2>/dev/null',
+    'unlinked && mkdir -p "$dir" 2>/dev/null',
     `echo "${RESULT_PREFIX} need $arch"`,
     ")",
   ].join("\n");
@@ -338,9 +367,18 @@ export function managedShellToolsStagedInstallCommand(
     'if base64 -d < "$staged" > "$decoded" 2>/dev/null || openssl base64 -d -A -in "$staged" -out "$decoded" 2>/dev/null; then',
     `  install_bundle "$decoded" && { echo '${RESULT_PREFIX} installed'; exit 0; }`,
     "fi",
+    "give_up",
     "exit 1",
     ")",
   ].join("\n");
+}
+
+/** Records that this box cannot receive the bundle, so later turns skip it. */
+export function managedShellToolsGiveUpCommand(
+  tools: ManagedShellTools,
+  directory = MANAGED_SHELL_TOOLS_DIRECTORY,
+): string {
+  return ["(", preamble(tools, directory), "give_up", ")"].join("\n");
 }
 
 function parseResult(output: string): ManagedShellToolsInstallResult | `need ${string}` | null {
@@ -353,6 +391,7 @@ function parseResult(output: string): ManagedShellToolsInstallResult | `need ${s
         value === "system" ||
         value === "installed" ||
         value === "unsupported" ||
+        value === "skipped" ||
         value.startsWith("need ")
       ) {
         return value as ManagedShellToolsInstallResult | `need ${string}`;
@@ -384,7 +423,10 @@ export async function installManagedShellTools(
   const arch = outcome.slice("need ".length) as ManagedShellToolsArch;
   if (!MANAGED_SHELL_TOOLS_ARCHES.includes(arch)) return "failed";
   const editor = session.createEditor?.(runAs);
-  if (!editor) return "failed";
+  if (!editor) {
+    await run(managedShellToolsGiveUpCommand(tools, directory));
+    return "failed";
+  }
   const stage = `${posix.dirname(directory)}/stage-${randomUUID()}.b64`;
   let result: ManagedShellToolsInstallResult = "failed";
   try {
@@ -396,11 +438,12 @@ export async function installManagedShellTools(
     const installed = await run(
       managedShellToolsStagedInstallCommand(tools, arch, stage, directory),
     );
-    if (
-      sandboxCommandExitCode(installed) === 0 &&
-      parseResult(sandboxCommandOutput(installed)) === "installed"
-    ) {
+    const installedResult = parseResult(sandboxCommandOutput(installed));
+    if (sandboxCommandExitCode(installed) === 0 && installedResult === "installed") {
       result = "installed";
+    } else if (installedResult === "present") {
+      // A concurrent setup finished first.
+      result = "present";
     }
   } finally {
     try {

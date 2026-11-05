@@ -66,6 +66,11 @@ fn append_directory(current: Option<OsString>, directory: &Path) -> Option<OsStr
         #[cfg(not(unix))]
         None => return None,
     };
+    // An empty `PATH` deliberately searches nowhere; appending would turn it
+    // into `:<dir>`, which also searches the working directory.
+    if current.is_empty() {
+        return None;
+    }
     let mut entries = std::env::split_paths(&current).collect::<Vec<_>>();
     if entries.iter().any(|entry| same_directory(entry, directory)) {
         return None;
@@ -132,6 +137,14 @@ mod tests {
         assert_eq!(
             path,
             OsString::from(format!("{DEFAULT_UNIX_PATH}:/og/tools"))
+        );
+    }
+
+    #[test]
+    fn an_empty_path_is_left_alone() {
+        assert_eq!(
+            append_directory(Some(OsString::new()), Path::new("/og/tools")),
+            None
         );
     }
 

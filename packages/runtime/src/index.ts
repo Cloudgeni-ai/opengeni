@@ -567,7 +567,11 @@ import {
   managedCodemodeClientDirectory,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
-import { installManagedShellTools, loadManagedShellTools } from "./sandbox/shell-tools";
+import {
+  installManagedShellTools,
+  loadManagedShellTools,
+  type ManagedShellTools,
+} from "./sandbox/shell-tools";
 export {
   loadManagedShellTools,
   MANAGED_SHELL_TOOLS_ARCHES,
@@ -15618,14 +15622,21 @@ export async function runManagedCodemodeClientHook(
  * agent, which carries its own rg and jq; `local` is the operator's own host.
  */
 export function managedShellToolsBackend(backend: Settings["sandboxBackend"] | undefined): boolean {
-  return (
-    backend !== undefined &&
-    backend !== "selfhosted" &&
-    backend !== "compute" &&
-    backend !== "local" &&
-    backend !== "none"
-  );
+  return backend !== undefined && MANAGED_SHELL_TOOLS_BACKENDS.has(backend);
 }
+
+/** Listed explicitly, so a new backend receives nothing until it is added here. */
+const MANAGED_SHELL_TOOLS_BACKENDS: ReadonlySet<Settings["sandboxBackend"]> = new Set([
+  "docker",
+  "modal",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+  "opensandbox",
+]);
 
 /**
  * Delivers the release's rg and jq beside the managed Codemode client. Best
@@ -15635,9 +15646,10 @@ export function managedShellToolsBackend(backend: Settings["sandboxBackend"] | u
 export async function runManagedShellToolsHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext,
+  load: () => Promise<ManagedShellTools | null> = loadManagedShellTools,
 ): Promise<void> {
   try {
-    const tools = await loadManagedShellTools();
+    const tools = await load();
     if (!tools) return;
     const result = await withSandboxOperationPurpose("hook.shell-tools", () =>
       installManagedShellTools(

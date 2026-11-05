@@ -13,7 +13,7 @@
  * Consumers: the machine agent's release builds (`scripts/fetch-shell-tools.ts`
  * and `agent/crates/opengeni-agent/build.rs`), the managed sandbox delivery in
  * `shell-tools.ts`, and the image builds in `docker/`, whose `ADD --checksum`
- * pins `scripts/shell-tools.test.ts` keeps equal to this file.
+ * pins `scripts/fetch-shell-tools.test.ts` keeps equal to this file.
  */
 
 export type ShellToolName = "rg" | "jq";

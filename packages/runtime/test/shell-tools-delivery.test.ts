@@ -14,6 +14,7 @@ import {
   type ManagedShellTools,
 } from "../src/sandbox/shell-tools";
 import { managedShellToolsBackend, runManagedShellToolsHook } from "../src/index";
+import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 
 // A private host directory stands in for the box. The box's PATH is a copy of
 // the host's executables without rg and jq, so each test decides which the
@@ -249,16 +250,140 @@ describe("managed shell tools delivery", () => {
     expect(existsSync(join(directory, "rg"))).toBe(false);
   });
 
+  test("an executable that fails its checksum is never installed", async () => {
+    const directory = box();
+    const wrong = { ...bundle, binarySha256: { ...bundle.binarySha256, rg: "0".repeat(64) } };
+    const result = await installManagedShellTools(
+      editorSession(),
+      { x86_64: wrong, aarch64: wrong },
+      runner(imageBin),
+      undefined,
+      undefined,
+      directory,
+    );
+    expect(result).toBe("failed");
+    expect(existsSync(join(directory, "rg"))).toBe(false);
+    expect(existsSync(join(directory, ".complete"))).toBe(false);
+  });
+
+  test("a box that cannot install them is not asked again on every turn", async () => {
+    const directory = box();
+    expect(
+      await installManagedShellTools(
+        editorSession([], [], true),
+        tools,
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("failed");
+    const commands: string[] = [];
+    const staged: string[] = [];
+    expect(
+      await installManagedShellTools(
+        editorSession(staged),
+        tools,
+        runner(imageBin, commands),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("skipped");
+    expect(commands).toHaveLength(1);
+    expect(staged).toEqual([]);
+    // A new bundle is tried again.
+    const next = buildManagedShellToolsBundle({
+      rg: new TextEncoder().encode("#!/bin/sh\necho 'ripgrep 15.3.0 (bundled)'\n"),
+      jq: new TextEncoder().encode("#!/bin/sh\necho jq-1.8.3-bundled\n"),
+      notices: new TextEncoder().encode("notices\n"),
+    });
+    expect(
+      await installManagedShellTools(
+        editorSession(),
+        { x86_64: next, aarch64: next },
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("installed");
+    expect(existsSync(join(directory, ".failed"))).toBe(false);
+  });
+
   test("a provider without file ingress reports a failed delivery", async () => {
+    const directory = box();
     const result = await installManagedShellTools(
       {} as never,
       tools,
       runner(imageBin),
       undefined,
       undefined,
-      box(),
+      directory,
     );
     expect(result).toBe("failed");
+    expect(
+      await installManagedShellTools(
+        {} as never,
+        tools,
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("skipped");
+  });
+
+  test("a linked tools directory is refused", async () => {
+    const directory = box();
+    const elsewhere = join(root, `elsewhere-${++counter}`);
+    await mkdir(elsewhere, { recursive: true });
+    await mkdir(dirname(dirname(directory)), { recursive: true });
+    await symlink(elsewhere, dirname(directory));
+    const result = await installManagedShellTools(
+      editorSession(),
+      tools,
+      runner(imageBin),
+      undefined,
+      undefined,
+      directory,
+    );
+    expect(result).toBe("failed");
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  test("an install removes versions earlier releases left beside it", async () => {
+    const directory = box();
+    const earlier = join(dirname(directory), "rg-15.1.0-jq-1.7.1");
+    const unrelated = join(dirname(directory), "notes");
+    await mkdir(earlier, { recursive: true });
+    await mkdir(unrelated, { recursive: true });
+    expect(
+      await installManagedShellTools(
+        editorSession(),
+        tools,
+        runner(imageBin),
+        undefined,
+        undefined,
+        directory,
+      ),
+    ).toBe("installed");
+    expect(existsSync(earlier)).toBe(false);
+    expect(existsSync(unrelated)).toBe(true);
+    expect(existsSync(join(directory, "rg"))).toBe(true);
+  });
+
+  test("a recorded install whose tools went missing is installed again", async () => {
+    const directory = box();
+    const run = runner(imageBin);
+    expect(
+      await installManagedShellTools(editorSession(), tools, run, undefined, undefined, directory),
+    ).toBe("installed");
+    await rm(join(directory, "jq"));
+    expect(
+      await installManagedShellTools(editorSession(), tools, run, undefined, undefined, directory),
+    ).toBe("installed");
+    expect(existsSync(join(directory, "jq"))).toBe(true);
   });
 });
 
@@ -298,6 +423,34 @@ describe("managed shell tools setup hook", () => {
       if (previous !== undefined) process.env.OPENGENI_SHELL_TOOLS_DIR = previous;
       resetManagedShellToolsForTest();
     }
+  });
+
+  test("swallows a provider error but lets a turn cancellation stop setup", async () => {
+    const load = async () => tools;
+    await expect(
+      runManagedShellToolsHook(
+        {
+          exec: async () => {
+            throw new Error("provider lost the box");
+          },
+        } as never,
+        { environment: {} },
+        load,
+      ),
+    ).resolves.toBeUndefined();
+    const cancelled = new TurnSandboxCommandCancelledError("steered");
+    await expect(
+      runManagedShellToolsHook(
+        {} as never,
+        {
+          environment: {},
+          commandRunner: async () => {
+            throw cancelled;
+          },
+        },
+        load,
+      ),
+    ).rejects.toBe(cancelled);
   });
 
   test("never fails setup when the bundles cannot be loaded", async () => {

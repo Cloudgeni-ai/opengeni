@@ -602,8 +602,9 @@ x64 and arm64). At start the agent writes them to
 (so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
 and appends that directory to the end of every command's PATH, including the
 PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
-Nothing is downloaded. Earlier generations are removed by the agent holding
-the instance lock. Exceptions: a command that starts a login shell may have
+Nothing is downloaded. A tool file that was changed is replaced with the
+agent's own copy. Generations no agent has started with for 14 days are
+removed by the agent holding the instance lock. Exceptions: a command that starts a login shell may have
 PATH reset by the machine's profile, other architectures get no tools, and
 an agent built without them (development builds, or older releases until
 they update) leaves PATH unchanged.

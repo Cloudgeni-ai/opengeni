@@ -57,12 +57,17 @@ if (tool === "git") {
   const name = args[args.indexOf("-p") + 1];
   const bundle = {};
   for (const [key, path] of Object.entries(embedded)) if (path) bundle[key] = await readFile(path, "utf8");
+  const shellTools = process.env.OPENGENI_EMBEDDED_SHELL_TOOLS;
+  if (name === "opengeni-agent" && shellTools && process.env.BAKE_FIXTURE_SKIP !== "shell-tools") {
+    bundle.OPENGENI_EMBEDDED_SHELL_TOOLS_NOTICES = await readFile(join(shellTools, "THIRD-PARTY-NOTICES.txt"), "utf8");
+  }
   await output(join(process.cwd(), "target", target, "release", name), JSON.stringify({name, buildId:process.env.OPENGENI_RUNTIME_BUILD_ID, bundle}));
 } else if (tool === "bun") {
   if (args[0] === "build") {
     if (process.env.BAKE_FIXTURE_SKIP !== "browserd") await output(args[args.indexOf("--outfile") + 1], "browserd " + process.env.OPENGENI_RUNTIME_BUILD_ID);
   } else if (args[0] === "scripts/fetch-shell-tools.ts") {
-    // The pinned rg/jq fetch is covered by scripts/shell-tools.test.ts.
+    // The pinned rg/jq fetch is covered by scripts/fetch-shell-tools.test.ts.
+    await output(join(args[args.indexOf("--out") + 1], "THIRD-PARTY-NOTICES.txt"), "Third-party notices for the shell tools Opengeni ships\n");
   } else if (args[0] === "docker/distrust-embedded-roots.ts") {
     // The fixture binaries carry no root list; the call itself is asserted.
   } else throw Error("unexpected Bun command");
@@ -222,6 +227,19 @@ describe("exact-source canary interaction bundle", () => {
     try {
       const result = await value.run({ BAKE_FIXTURE_SKIP: "browserd" });
       expect(result.exit).not.toBe(0);
+      const baked = join(value.directory, "agent/install/baked");
+      expect((await readdir(baked)).filter((name) => name.startsWith("opengeni-"))).toEqual([]);
+    } finally {
+      await value.close();
+    }
+  });
+
+  test("an agent without the pinned rg and jq cannot publish a cohort", async () => {
+    const value = await fixture();
+    try {
+      const result = await value.run({ BAKE_FIXTURE_SKIP: "shell-tools" });
+      expect(result.exit).not.toBe(0);
+      expect(result.stderr).toContain("does not carry the pinned rg and jq");
       const baked = join(value.directory, "agent/install/baked");
       expect((await readdir(baked)).filter((name) => name.startsWith("opengeni-"))).toEqual([]);
     } finally {

@@ -175,7 +175,7 @@ RUN set -eux; \
 
 # The pinned rg and jq builds the worker delivers to managed sandboxes. Pins
 # equal packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
-# scripts/shell-tools.test.ts); the cache is keyed by checksum.
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
 FROM scratch AS shell-tools-linux
 ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
 ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915

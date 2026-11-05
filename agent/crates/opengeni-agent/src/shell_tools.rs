@@ -96,9 +96,10 @@ fn generation_digest(files: &[ToolFile<'_>]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Writes one immutable generation under `root` and returns its directory.
-/// A file that already exists must match exactly; a modified tool is refused
-/// rather than run.
+/// Writes one generation under `root` and returns its directory. Each file
+/// ends with exactly the embedded bytes and mode: a missing, modified or
+/// wrongly-moded file is replaced atomically, so commands never run anything
+/// else. Marks the generation as in use for [`prune_stale_generations`].
 fn materialize_into(root: &Path, files: &[ToolFile<'_>]) -> PlatformResult<PathBuf> {
     let directory = root.join(&generation_digest(files)[..24]);
     create_shared_directory(root)?;
@@ -106,10 +107,22 @@ fn materialize_into(root: &Path, files: &[ToolFile<'_>]) -> PlatformResult<PathB
     for (name, bytes, mode) in files {
         materialize_file(&directory.join(name), bytes, *mode)?;
     }
+    mark_in_use(&directory);
     Ok(directory)
 }
 
+/// Creates `path` and every missing parent, each readable by every user:
+/// `run_as` users must reach the tools whatever the agent's umask is.
 fn create_shared_directory(path: &Path) -> PlatformResult<()> {
+    let mut missing = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if std::fs::symlink_metadata(candidate).is_ok() {
+            break;
+        }
+        missing.push(candidate.to_path_buf());
+        cursor = candidate.parent();
+    }
     std::fs::create_dir_all(path)
         .map_err(|error| PlatformError::from_io("create shell tools directory", &error))?;
     let metadata = std::fs::symlink_metadata(path)
@@ -122,36 +135,43 @@ fn create_shared_directory(path: &Path) -> PlatformResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|error| PlatformError::from_io("set shell tools directory mode", &error))?;
+        if !missing.iter().any(|created| created == path) {
+            missing.push(path.to_path_buf());
+        }
+        for directory in missing {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).map_err(
+                |error| PlatformError::from_io("set shell tools directory mode", &error),
+            )?;
+        }
     }
+    #[cfg(not(unix))]
+    let _ = missing;
     Ok(())
 }
 
 fn materialize_file(path: &Path, expected: &[u8], mode: u32) -> PlatformResult<()> {
-    match std::fs::read(path) {
-        Ok(bytes) if blake3::hash(&bytes) == blake3::hash(expected) => return Ok(()),
-        Ok(_) => {
-            return Err(PlatformError::os(
-                "a materialized shell tool failed its immutable digest",
-            ));
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && has_mode(&metadata, mode) => {
+            match std::fs::read(path) {
+                Ok(bytes) if blake3::hash(&bytes) == blake3::hash(expected) => return Ok(()),
+                Ok(_) => tracing::warn!(
+                    path = %path.display(),
+                    "replacing a modified shell tool with the agent's own copy"
+                ),
+                Err(error) => return Err(PlatformError::from_io("inspect shell tool", &error)),
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(PlatformError::from_io("inspect shell tool", &error)),
+        Ok(_) | Err(_) => {}
     }
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(format!(".new.{}", std::process::id()));
     let temporary = PathBuf::from(temporary);
-    std::fs::write(&temporary, expected)
-        .map_err(|error| PlatformError::from_io("write shell tool", &error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))
-            .map_err(|error| PlatformError::from_io("set shell tool mode", &error))?;
+    // A leftover from an earlier crash of a process with the same id.
+    let _ = std::fs::remove_file(&temporary);
+    if let Err(error) = write_new_file(&temporary, expected, mode) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
-    #[cfg(not(unix))]
-    let _ = mode;
     if let Err(error) = std::fs::rename(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
         return Err(PlatformError::from_io("install shell tool", &error));
@@ -159,17 +179,73 @@ fn materialize_file(path: &Path, expected: &[u8], mode: u32) -> PlatformResult<(
     Ok(())
 }
 
-/// Removes generations earlier agent releases left beside this process's own.
-/// Only the agent holding the instance lock calls this. Returns the number
-/// removed.
+/// Writes `bytes` to a file that must not exist yet, so a planted link is
+/// never followed.
+fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> PlatformResult<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(mode);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| PlatformError::from_io("write shell tool", &error))?;
+    file.write_all(bytes)
+        .map_err(|error| PlatformError::from_io("write shell tool", &error))?;
+    #[cfg(unix)]
+    {
+        // The umask may have narrowed the mode `open` applied.
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|error| PlatformError::from_io("set shell tool mode", &error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn has_mode(metadata: &std::fs::Metadata, mode: u32) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o7777 == mode
+}
+
+#[cfg(not(unix))]
+fn has_mode(_metadata: &std::fs::Metadata, _mode: u32) -> bool {
+    true
+}
+
+/// The file whose modification time records when an agent last started with
+/// a generation.
+const IN_USE_MARKER: &str = ".in-use";
+
+/// How long a generation no agent has started with is kept. Other agents on
+/// the machine (another config directory, or commands an earlier release
+/// handed over) may still have it on their `PATH`; agents restart with every
+/// update, so a generation idle this long has no users left.
+const UNUSED_GENERATION_RETENTION: std::time::Duration =
+    std::time::Duration::from_secs(14 * 24 * 60 * 60);
+
+fn mark_in_use(directory: &Path) {
+    if let Err(error) = std::fs::write(directory.join(IN_USE_MARKER), b"") {
+        tracing::debug!(%error, "could not mark the shell tools generation in use");
+    }
+}
+
+/// Removes generations no agent has started with for
+/// [`UNUSED_GENERATION_RETENTION`], beside this process's own. Only the agent
+/// holding the instance lock calls this. Returns the number removed.
 pub fn prune_stale_generations() -> usize {
     let Some(current) = CURRENT_GENERATION.get() else {
         return 0;
     };
-    prune_generations_except(current)
+    prune_generations_except(current, std::time::SystemTime::now())
 }
 
-fn prune_generations_except(current: &Path) -> usize {
+fn prune_generations_except(current: &Path, now: std::time::SystemTime) -> usize {
     let (Some(root), Some(current_name)) = (current.parent(), current.file_name()) else {
         return 0;
     };
@@ -188,7 +264,18 @@ fn prune_generations_except(current: &Path) -> usize {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        match std::fs::remove_dir_all(entry.path()) {
+        let path = entry.path();
+        let last_used = std::fs::metadata(path.join(IN_USE_MARKER))
+            .or_else(|_| std::fs::metadata(&path))
+            .and_then(|metadata| metadata.modified());
+        let idle = last_used
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|idle| idle >= UNUSED_GENERATION_RETENTION);
+        if !idle {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
             Err(error) => tracing::warn!(
                 %error,
@@ -236,15 +323,69 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_modified_tool() {
+    fn replaces_a_modified_or_wrongly_moded_tool() {
         let root = tempfile::tempdir().expect("root");
         let directory = materialize_into(root.path(), &FILES).expect("materialize");
         std::fs::write(directory.join("rg"), b"changed").expect("modify");
-        assert!(materialize_into(root.path(), &FILES).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory.join("jq"), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+        }
+        assert_eq!(
+            materialize_into(root.path(), &FILES).expect("repair"),
+            directory
+        );
+        assert_eq!(std::fs::read(directory.join("rg")).expect("rg"), FILES[0].1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(directory.join("jq"))
+                .expect("jq")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    /// A link planted where a tool belongs is replaced, never written through.
+    #[cfg(unix)]
+    #[test]
+    fn never_writes_through_a_planted_link() {
+        let root = tempfile::tempdir().expect("root");
+        let directory = materialize_into(root.path(), &FILES).expect("materialize");
+        let target = root.path().join("elsewhere");
+        std::fs::write(&target, b"untouched").expect("target");
+        std::fs::remove_file(directory.join("rg")).expect("remove");
+        std::os::unix::fs::symlink(&target, directory.join("rg")).expect("link");
+        materialize_into(root.path(), &FILES).expect("repair");
+        assert_eq!(std::fs::read(&target).expect("target"), b"untouched");
+        assert!(std::fs::symlink_metadata(directory.join("rg"))
+            .expect("rg")
+            .is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_parents_are_reachable_by_every_user() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("root");
+        let nested = root.path().join("lib/opengeni/shell-tools");
+        let directory = materialize_into(&nested, &FILES).expect("materialize");
+        for path in [
+            root.path().join("lib"),
+            root.path().join("lib/opengeni"),
+            nested.clone(),
+            directory,
+        ] {
+            let mode = std::fs::metadata(&path).expect("mode").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{}", path.display());
+        }
     }
 
     #[test]
-    fn prunes_only_earlier_generations() {
+    fn prunes_only_generations_idle_past_retention() {
         let root = tempfile::tempdir().expect("root");
         let current = materialize_into(root.path(), &FILES).expect("materialize");
         let earlier = root.path().join("0123456789abcdef01234567");
@@ -252,7 +393,13 @@ mod tests {
         for directory in [&earlier, &unrelated] {
             std::fs::create_dir_all(directory).expect("directory");
         }
-        assert_eq!(prune_generations_except(&current), 1);
+        mark_in_use(&earlier);
+        let now = std::time::SystemTime::now();
+        // Recently used by some agent (a handover, another config directory).
+        assert_eq!(prune_generations_except(&current, now), 0);
+        assert!(earlier.is_dir());
+        let later = now + UNUSED_GENERATION_RETENTION + std::time::Duration::from_secs(60);
+        assert_eq!(prune_generations_except(&current, later), 1);
         assert!(current.join("rg").is_file());
         assert!(!earlier.exists());
         assert!(unrelated.is_dir());
