@@ -330,7 +330,8 @@ function LiveSession(props: {
   }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
-  const paused = controller.queue.effectiveControl?.state === "paused";
+  // Archiving stops (and so pauses) a chat's work: it reads as archived, not paused.
+  const paused = !controller.archived && controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
   const title = session ? sessionDisplayTitle(session) : "";

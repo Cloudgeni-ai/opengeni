@@ -323,6 +323,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Moving a capacity-waiting turn onto a new model, or stopping it for Pause,
+  // under the model switch's or Pause's own canonical locks.
+  "packages/db/src/capacity-wait-release.ts#releaseCapacityWaitingTurnInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -411,6 +417,10 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
+  releaseCapacityWaitingTurnInTransaction: [
+    "mutateSessionControlInTransaction",
+    "setSessionModelInTransaction",
+  ],
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCapacityWait",
   ],

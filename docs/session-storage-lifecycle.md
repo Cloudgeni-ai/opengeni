@@ -106,6 +106,14 @@ blocks it only while it runs. The maintenance pass is the backstop: its listing
 also returns archived chats that still have work running, and the worker stops
 that work first, so a chat whose workflow was lost is stored on a later pass.
 
+Cancelling the running work leaves the session status `cancelled`, recorded
+with the reason `SESSION_ARCHIVE_STOP_REASON` (`@opengeni/contracts/session-history`).
+That status is internal: clients present an archived chat (`archived`, or a
+`retention.archive`) as Archived on every surface through `sessionDisplayStatus`,
+and a timeline reads that status change as archived, never as cancelled.
+Compact `session_get` reports the `archive` (state `archiving` until stored) as
+soon as the chat is archived.
+
 Migration 1213 replaced the earlier personal archive (a member hiding a chat
 from their own list, with Restore). Chats people had hidden that way were
 archived for real, unless keep-live, a scheduled task, or a site sign-in

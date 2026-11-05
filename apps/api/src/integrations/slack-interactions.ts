@@ -7350,7 +7350,7 @@ async function slackHumanInputCard(
  * question (or the waiting approval count) plus the child link. The child's own
  * Opengeni card remains the place the human actually answers.
  *
- * Every deferred child lifecycle kind (`child_progress`,
+ * Every other child lifecycle kind (`child_progress`,
  * `child_waiting_capacity`, `child_requires_action_resolved`, `child_paused`)
  * returns null here so Slack stays quiet, and so does every non-child machine
  * input that shares the `system.update.pending` event type.
