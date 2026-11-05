@@ -689,16 +689,20 @@ same ones as the turn before it, and keeps that turn's cached prompt prefix. A
 picked account that can no longer be used leaves its connector out and is
 recorded in `connectionAccountGaps`. An intent naming someone other than that
 turn's person, or, in a private chat, someone other than its owner, resolves
-shared accounts only. A turn whose authority an internal update could not
-borrow (an external link's turn, or one under a credential restriction such as
-developer setup) gives the compaction no connection accounts. Unlike an internal
-update, account resolution never fails the claim: on any error, or if the
-resolver offers a personal account that person may not lend, the claim rolls
-back only its savepoint, records `connectionAccountsUnresolved` (reason, error
-class and SQLSTATE, never the message) in the turn's internal metadata, which
-the worker logs as a warning, and compacts with the session's shared tools. A
-session with no started turn, or a turn accepted before account intent existed,
-compacts without connection accounts.
+shared accounts only. A compaction turn cannot carry an external link's
+permission ceiling or a credential restriction (such as developer setup)
+forward, so after a turn with either it gets no connection accounts and stores
+no intent. Work that later continues the compaction turn, such as a goal
+continuation or a second compaction, then resolves nothing from it. Otherwise
+the compaction turn stores the same intent, and that work resolves it again like
+any continuation. Unlike an internal update, accounts never fail the claim. The
+resolver and the turn's acceptance (its authority-capture and binding-fence
+triggers) each run in a savepoint. If either fails, or the resolver offers an
+account that person may not lend, the claim records `connectionAccountsUnresolved`
+(reason, error class and SQLSTATE, never the message) in the turn's internal
+metadata, the worker logs it as a warning, and the compaction runs with only the
+session's shared tools. A session with no started turn, or a turn accepted
+before account intent existed, compacts without connection accounts.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated

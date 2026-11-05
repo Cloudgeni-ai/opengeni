@@ -283,7 +283,9 @@ such as a goal continuation, a wait wake-up, a command or child result,
 informational input delivered into it, or a compaction-only turn that compacts
 after it, carries the same intent and resolves it again when it is claimed,
 exactly as that person's next message with the same picks would be resolved
-now. A reconnected or newly connected account is
+now (a compaction-only turn has a few exceptions of its own, described under
+manual compaction in `docs/context-compaction.md`). A reconnected or newly
+connected account is
 therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`

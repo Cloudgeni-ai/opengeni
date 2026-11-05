@@ -297,10 +297,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const unresolvedAccounts =
     turn.source === "compaction" ? turn.metadata?.connectionAccountsUnresolved : undefined;
   if (unresolvedAccounts && typeof unresolvedAccounts === "object") {
+    const { reason, errorName, sqlState } = unresolvedAccounts as Record<string, unknown>;
     observability.warn("Compaction turn runs without connection accounts", {
       sessionId: input.sessionId,
       turnId: turn.id,
-      ...(unresolvedAccounts as Record<string, unknown>),
+      reason: typeof reason === "string" ? reason : "unknown",
+      ...(typeof errorName === "string" ? { errorName } : {}),
+      ...(typeof sqlState === "string" ? { sqlState } : {}),
     });
   }
   attempt.dispatchId = dispatchId;

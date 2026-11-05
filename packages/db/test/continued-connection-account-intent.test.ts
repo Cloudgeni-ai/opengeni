@@ -439,8 +439,8 @@ async function compactWithSpy(w: World) {
   });
   expect(compaction.turn.source).toBe("compaction");
   const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings,
-      personal_connection_delegations from session_turns where id=${compaction.turn.id}`;
-  return { seen, row: row! };
+      personal_connection_delegations, metadata from session_turns where id=${compaction.turn.id}`;
+  return { seen, row: row!, compaction };
 }
 
 test("a compaction with no started turn resolves no accounts", async () => {
@@ -529,9 +529,14 @@ test("a compaction never borrows a credential-restricted turn's accounts", async
     await tx`update session_turns set initiator_context = initiator_context
       || '{"credentialRestriction":"developer_setup"}'::jsonb where id = ${origin}`;
   });
-  const { seen, row } = await compactWithSpy(w);
+  const { seen, row, compaction } = await compactWithSpy(w);
   expect(seen).toEqual([]);
   expect(row.personal_connection_delegations).toEqual([]);
+  // The compaction carries no intent, so work continuing it never resolves
+  // the accounts the compacted turn could not lend.
+  expect(row.connection_account_intent).toBeNull();
+  await finish(w, compaction);
+  expect((await compactWithSpy(w)).seen).toEqual([]);
 }, 60_000);
 
 test("a compaction never borrows an external link turn's accounts", async () => {
@@ -544,7 +549,78 @@ test("a compaction never borrows an external link turn's accounts", async () => 
       values (${origin}, ${w.g.accountId}, ${w.g.workspaceId!}, ${w.sessionId},
         ${crypto.randomUUID()}, 1, ${tx.json({})}, 'direct')`;
   });
-  const { seen, row } = await compactWithSpy(w);
+  const { seen, row, compaction } = await compactWithSpy(w);
   expect(seen).toEqual([]);
   expect(row.personal_connection_delegations).toEqual([]);
+  // The compaction carries no intent, so work continuing it never resolves
+  // the accounts the compacted turn could not lend.
+  expect(row.connection_account_intent).toBeNull();
+  await finish(w, compaction);
+  expect((await compactWithSpy(w)).seen).toEqual([]);
+}, 60_000);
+
+test("work continuing after a compaction resolves the compacted turn's intent", async () => {
+  const w = await fixture();
+  const intent = intentOf(w.g.subjectId);
+  const origin = await startedTurnWithIntent(w, intent);
+  const fresh = await account(w, w.g.subjectId);
+  const seen: ConnectionAccountIntent[] = [];
+  const resolver: Resolver = async (_tx, input) => {
+    seen.push(input.intent);
+    return {
+      mcpAccountBindings: [fresh.binding],
+      personalConnectionDelegations: [fresh.delegation],
+    };
+  };
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  await finish(w, await claim(w, resolver));
+  await childResult(w, origin);
+  const next = await claim(w, resolver);
+  expect(seen).toEqual([intent, intent]);
+  const [row] =
+    await shared.admin`select connection_account_intent, mcp_account_bindings from session_turns
+      where id=${next.turn.id}`;
+  expect(row!.connection_account_intent).toEqual(intent);
+  expect(row!.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
+    fresh.binding.connectionId,
+  ]);
+}, 60_000);
+
+test("a compaction whose resolved accounts fail acceptance runs without them", async () => {
+  // The resolver offers the person's own account, but it no longer exists,
+  // so the turn's acceptance triggers refuse it inside their savepoint.
+  const w = await fixture();
+  await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  const missing = await account(w, w.g.subjectId);
+  await shared.admin`delete from connections where id = ${missing.delegation.connectionId}`;
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async () => ({
+    mcpAccountBindings: [missing.binding],
+    personalConnectionDelegations: [missing.delegation],
+  }));
+  expect(compaction.turn.source).toBe("compaction");
+  const [row] =
+    await shared.admin`select mcp_account_bindings, personal_connection_delegations, metadata,
+      connection_account_intent from session_turns where id=${compaction.turn.id}`;
+  expect(row!.mcp_account_bindings).toEqual([]);
+  expect(row!.personal_connection_delegations).toEqual([]);
+  expect(row!.metadata.connectionAccountsUnresolved).toEqual(
+    expect.objectContaining({ reason: "acceptance_refused" }),
+  );
+  expect(row!.connection_account_intent).toEqual(intentOf(w.g.subjectId));
+}, 60_000);
+
+test("a compaction refuses another person's account binding from a resolver", async () => {
+  const w = await fixture();
+  await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  const foreign = await account(w, `other-${crypto.randomUUID()}`);
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async () => ({
+    mcpAccountBindings: [foreign.binding],
+    personalConnectionDelegations: [],
+  }));
+  const [row] = await shared.admin`select mcp_account_bindings, metadata from session_turns
+      where id=${compaction.turn.id}`;
+  expect(row!.mcp_account_bindings).toEqual([]);
+  expect(row!.metadata.connectionAccountsUnresolved).toEqual({ reason: "owner_mismatch" });
 }, 60_000);
