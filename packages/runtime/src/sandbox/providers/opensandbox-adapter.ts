@@ -58,7 +58,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
-import { workspaceTarExcludeArgs } from "../workspace-tar-excludes";
+import {
+  WORKSPACE_RESTORE_SCRATCH_GLOBS,
+  workspaceTarExcludeArgs,
+} from "../workspace-tar-excludes";
 import {
   nextDurableOpId,
   notifyRemoteOperationNotDispatched,
@@ -1514,6 +1517,13 @@ export class OpenSandboxSession {
     );
   }
 
+  /** Top-level globs this session's workspace archive leaves out beyond the
+   * manifest's ephemeral paths. The workspace fingerprint reads the same list,
+   * so what the archive skips and what verification covers never diverge. */
+  workspaceArchiveExcludedGlobs(): readonly string[] {
+    return WORKSPACE_RESTORE_SCRATCH_GLOBS;
+  }
+
   async persistWorkspaceTar(): Promise<Uint8Array> {
     const archivePath = `${PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
     // The same anchored, escaped exclusions as the workspace fingerprint, so
@@ -1521,7 +1531,7 @@ export class OpenSandboxSession {
     // folders are top-level globs.
     const excludeArgs = workspaceTarExcludeArgs(
       [...this.state.manifest.ephemeralPersistencePaths()],
-      [".opengeni-old-*", ".opengeni-restore-*"],
+      this.workspaceArchiveExcludedGlobs(),
     );
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(PRIVATE_ROOT)}

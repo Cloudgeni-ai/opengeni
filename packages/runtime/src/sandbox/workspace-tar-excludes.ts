@@ -35,3 +35,12 @@ export function workspaceTarExcludeArgs(
   ].sort();
   return [...new Set(patterns)].map((pattern) => shellQuoteTarArg(`--exclude=${pattern}`));
 }
+
+/** Top-level folders a compute or OpenSandbox restore stages the new
+ * workspace in and moves the old one to. A failed cleanup can leave one
+ * behind; it is never part of the workspace, so those backends' archives and
+ * the workspace fingerprint both leave these out. */
+export const WORKSPACE_RESTORE_SCRATCH_GLOBS: readonly string[] = Object.freeze([
+  ".opengeni-old-*",
+  ".opengeni-restore-*",
+]);

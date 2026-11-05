@@ -152,6 +152,10 @@ type WorkspaceSession = {
    * primitive on the concrete JS instance. Opengeni uses it only through an
    * explicit provider policy to bypass replacing/unledgered native capture. */
   persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
+  /** Top-level globs the session's own archive leaves out beyond the
+   * manifest's ephemeral paths (compute and OpenSandbox: their restore
+   * staging and backup folders). */
+  workspaceArchiveExcludedGlobs?: () => readonly unknown[];
   state?: {
     workspacePersistence?: unknown;
     workspaceRootPath?: unknown;
@@ -405,6 +409,32 @@ function workspaceFingerprintExcludes(session: WorkspaceSession): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
+/** Top-level globs the session's archive leaves out (see
+ * `WorkspaceSession.workspaceArchiveExcludedGlobs`). Every remote fingerprint,
+ * content manifest and size walk leaves out the same ones: a folder the
+ * archive skips but the fingerprint counts makes a restore unverifiable. Only
+ * a plain top-level name pattern qualifies. */
+function workspaceFingerprintExcludeGlobs(session: WorkspaceSession): string[] {
+  let globs: readonly unknown[] | undefined;
+  try {
+    globs = session.workspaceArchiveExcludedGlobs?.();
+  } catch {
+    globs = undefined;
+  }
+  return [
+    ...new Set(
+      (Array.isArray(globs) ? globs : []).filter(
+        (glob): glob is string =>
+          typeof glob === "string" &&
+          glob.length > 0 &&
+          !/[/\\\u0000-\u001f]/u.test(glob) &&
+          glob !== "." &&
+          glob !== "..",
+      ),
+    ),
+  ].sort();
+}
+
 /** Workspace-relative paths a session never persists (its manifest's
  * ephemeral paths). Archives and fingerprints leave them out. */
 export function workspaceArchiveExcludedPaths(session: unknown): string[] {
@@ -416,21 +446,27 @@ export function workspaceArchiveExcludedPaths(session: unknown): string[] {
  * leaves out. */
 const escapeGlobPattern = escapeWorkspaceGlobPattern;
 
-function findPruneExpression(excludedPaths: readonly string[]): string {
-  const findExcludes = excludedPaths.flatMap((path) => [
-    `-path ${shellQuote(`./${escapeGlobPattern(path)}`)}`,
-    `-path ${shellQuote(`./${escapeGlobPattern(path)}/*`)}`,
-  ]);
+function findPruneExpression(
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
+  const findExcludes = [
+    ...excludedPaths.map((path) => `./${escapeGlobPattern(path)}`),
+    ...topLevelGlobs.map((glob) => `./${glob}`),
+  ].flatMap((pattern) => [`-path ${shellQuote(pattern)}`, `-path ${shellQuote(`${pattern}/*`)}`]);
   return findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
 }
 
-function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
+function workspaceFingerprintCommand(
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
   // Exactly the SDK's archive exclusions (`workspaceTarExcludeArgs`): one
   // escaped pattern anchored at `./`. A bare `--exclude=<name>` would also
   // match the same name deeper in the tree (`docs/target` for a top-level
   // `target`), which the archive keeps, so a restore could never verify.
-  const tarExcludes = workspaceTarExcludeArgs(excludedPaths);
-  const findPrefix = findPruneExpression(excludedPaths);
+  const tarExcludes = workspaceTarExcludeArgs(excludedPaths, topLevelGlobs);
+  const findPrefix = findPruneExpression(excludedPaths, topLevelGlobs);
   const script = String.raw`set -eu
 cd /workspace
 digest=$(LC_ALL=C tar ${tarExcludes.join(" ")} --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf - . | sha256sum | awk "{print \$1}")
@@ -467,7 +503,10 @@ export async function probeRemoteWorkspaceSize(
   // snapshot's size compares with a captured one. An unreadable folder makes
   // find exit 1 with the rest counted, which still measures the workspace;
   // only a timeout (124) or a missing tool discards the walk.
-  const prune = findPruneExpression(workspaceFingerprintExcludes(target));
+  const prune = findPruneExpression(
+    workspaceFingerprintExcludes(target),
+    workspaceFingerprintExcludeGlobs(target),
+  );
   const script = String.raw`set -u
 cd /workspace 2>/dev/null || exit 0
 out=$(timeout ${seconds} find . -xdev ${prune}-type f -printf "%s\n" 2>/dev/null | awk "{n+=1; s+=\$1} END {printf \"%d %.0f\", n, s}")
@@ -924,7 +963,10 @@ async function fingerprintRemoteWorkspace(
       "sandbox session cannot execute the workspace fingerprint probe",
     );
   }
-  const cmd = workspaceFingerprintCommand(workspaceFingerprintExcludes(target));
+  const cmd = workspaceFingerprintCommand(
+    workspaceFingerprintExcludes(target),
+    workspaceFingerprintExcludeGlobs(target),
+  );
   let result: unknown;
   let match: RegExpMatchArray | null = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1012,8 +1054,12 @@ function workspaceRoot(target: WorkspaceSession): string {
   return typeof root === "string" && isAbsolute(root) ? root : "/workspace";
 }
 
-function workspaceContentManifestCommand(root: string, excludedPaths: readonly string[]): string {
-  const prune = findPruneExpression(excludedPaths);
+function workspaceContentManifestCommand(
+  root: string,
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
+  const prune = findPruneExpression(excludedPaths, topLevelGlobs);
   const script = String.raw`set -eu
 cd ${shellQuote(root)}
 digest=$( { find . -xdev -mindepth 1 ${prune}-type d -printf "d  %P\0"; find . -xdev -mindepth 1 ${prune}-type f -printf "%P\0" | xargs -0 -r sha256sum -z --; } | LC_ALL=C sort -z | sha256sum | awk "{print \$1}")
@@ -1041,6 +1087,7 @@ export async function readRemoteWorkspaceContentManifest(
     cmd: workspaceContentManifestCommand(
       workspaceRoot(target),
       workspaceFingerprintExcludes(target),
+      workspaceFingerprintExcludeGlobs(target),
     ),
     yieldTimeMs: 300_000,
     maxOutputTokens: 1_000,
