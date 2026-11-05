@@ -359,9 +359,12 @@ fn recreate_directory_staged(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Re
 
 /// Makes an empty staging directory in `parent`, under a short name so even
 /// a parent with a long name has room for it. A name left behind by an
-/// earlier agent process with the same process id is skipped.
+/// earlier agent process with the same process id is skipped. It starts
+/// private to the agent (0700), whatever the umask leaves, until
+/// [`prepare_stage`] sets its final mode.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn create_stage(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static STAGES: AtomicU64 = AtomicU64::new(0);
@@ -371,7 +374,7 @@ fn create_stage(parent: &Path) -> std::io::Result<PathBuf> {
             std::process::id(),
             STAGES.fetch_add(1, Ordering::Relaxed)
         ));
-        match std::fs::create_dir(&stage) {
+        match std::fs::DirBuilder::new().mode(0o700).create(&stage) {
             Ok(()) => return Ok(stage),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
