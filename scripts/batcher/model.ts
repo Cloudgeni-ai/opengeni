@@ -335,7 +335,9 @@ export function readyAt(pull: QueuedPull): number {
  * batch is being split, priority batches and its halves take turns: after a
  * priority batch went ahead of a half, that half goes next, so a steady stream
  * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
- * CI and batcher changes run alone. A priority PR already in a failed batch's
+ * CI and batcher changes run alone; while a failed batch is being split, the
+ * oldest one outside its halves takes turns with them when no priority PR
+ * waits. A priority PR already in a failed batch's
  * halves keeps its place there: building every priority PR again would retest
  * the batch that just failed, unsplit, on every pass.
  */
@@ -392,6 +394,25 @@ export function nextBatch(
     );
     return { kind: "build", members, pending, ...ahead };
   }
+
+  // A CI or batcher change outside the halves runs alone, so no priority fill
+  // can carry it, and new failures can keep a bisection going for as long as PRs
+  // keep arriving. When no priority PR is waiting, the oldest such change takes
+  // the turn a priority batch would: it goes ahead of the next half, and that
+  // half goes after it, so the two take turns.
+  const starved =
+    pending.length && !halvesFirst
+      ? ready.find((p) => alone(p) && !bisecting.has(p.number))
+      : undefined;
+  // It carries what the bisection blamed, so the half after it keeps it.
+  if (starved)
+    return {
+      kind: "build",
+      members: [starved],
+      pending,
+      aheadOfBisection: true,
+      ...(blame.length ? { blame } : {}),
+    };
 
   // A half holding a priority PR runs before the other halves; the halves are
   // independent, so their order only decides which PRs land sooner.
@@ -571,7 +592,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
             : "its CI failed",
         });
-        blame = blamed(blame, result.runs);
+        // What a batch built ahead of a bisection failed in says nothing about
+        // the bisection's halves.
+        if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
         halvesFirst = manifest.aheadOfBisection === true;
         if (numbers.length === 1) {
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
@@ -586,18 +609,27 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so
           // a broken fill delays them one round and a broken one is found in one.
+          // The fill is halved too once it has at least two PRs and at least as
+          // many as the priority group: it is then at least as likely to hold
+          // what broke the batch, and testing it whole again would usually only
+          // fail once more (with a retry when no blame is carried) before the
+          // same split.
           const urgent = numbers.filter((n) => byNumber.get(n)?.priority);
-          const [first, second] =
-            urgent.length && urgent.length < numbers.length
-              ? [urgent, numbers.filter((n) => !urgent.includes(n))]
+          const fill = numbers.filter((n) => !urgent.includes(n));
+          const halves =
+            urgent.length && fill.length
+              ? [
+                  urgent,
+                  ...(fill.length >= 2 && fill.length >= urgent.length ? split(fill) : [fill]),
+                ]
               : split(numbers);
           // A batch that went ahead of a bisection queues its halves behind
           // that bisection's halves, so new failures cannot keep pushing older
           // halves back. Its blame belongs to its own halves, not the older ones.
           if (manifest.aheadOfBisection === true) {
-            pending = [...manifest.pending, first, second];
+            pending = [...manifest.pending, ...halves];
             blame = [];
-          } else pending = [first, second, ...manifest.pending];
+          } else pending = [...halves, ...manifest.pending];
         }
       }
     }

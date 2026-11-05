@@ -701,7 +701,7 @@ describe("server-side default model resolution", () => {
     });
   }, 180_000);
 
-  test("an API create without a model uses the resolved default; an explicit model wins", async () => {
+  test("an API create defaults to credits and refuses explicit subscriptions; an explicit credit model wins", async () => {
     if (!available) return;
     const settings = hostedSettings();
     const grant = await workspaceFixture();
@@ -729,7 +729,23 @@ describe("server-side default model resolution", () => {
 
     await connectCodex(settings, grant);
     const withSubscription = await create();
-    expect(withSubscription.model).toBe("codex/gpt-6-astra");
+    expect(withSubscription.model).toBe("gpt-6-luna");
+    await expect(create("codex/gpt-6-astra")).rejects.toMatchObject({
+      status: 403,
+      cause: {
+        allowed: false,
+        code: "subscription_api_unavailable",
+      },
+    });
+
+    // A subscription saved in the app must not become an API default either.
+    await shared!.admin`
+      update workspaces
+      set settings = settings || ${shared!.admin.json({
+        sessionDefaults: { model: "codex/gpt-6-astra", reasoningEffort: "high" },
+      })}
+      where id = ${grant.workspaceId}`;
+    expect((await create()).model).toBe("gpt-6-luna");
 
     // A saved workspace default is read from the workspace row and wins.
     await shared!.admin`

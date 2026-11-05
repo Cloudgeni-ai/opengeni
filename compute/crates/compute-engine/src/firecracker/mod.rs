@@ -1183,6 +1183,14 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("set_only_copy", error))
     }
 
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        // The guard freezes each VM's own group, or the one holding them
+        // all; either holds it.
+        self.cgroup_of(spec)
+            .is_held_frozen()
+            .map_err(|error| EngineError::io("held_frozen", error))
+    }
+
     async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
         drives::resize(vm, spec).await
     }

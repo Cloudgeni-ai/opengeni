@@ -19,10 +19,12 @@ import {
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
-import { projectErrorCauseAttributes } from "./error-cause";
+import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
+  errorCauseMessage,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,
   type ErrorCauseAttributes,
@@ -456,6 +458,9 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "credentialToIndex",
   "credentialCandidates",
   "credentialStale",
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the provider's
+  // HTTP status for the failed request.
+  "providerStatus",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
@@ -465,6 +470,8 @@ const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const CPU_PROFILE_FRAMES_PATTERN = /^[\w$<>()[\]:./@ |#*,-]{0,2000}$/;
 const HTTP_REJECTION_REASON_PATTERN =
   /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
+const REALTIME_PROVIDER_ERROR_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/;
+const REALTIME_PROVIDER_VALUE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
@@ -514,6 +521,19 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["databasePool", /^[a-z][a-z0-9-]{0,63}$/],
   ["credentialFile", /^(?:current|previous)$/],
   ["credentialFileErrorCode", /^[A-Z][A-Z0-9_]{0,31}$/],
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the failing
+  // stage, the adapter's own code-authored failure message, identifier-shaped
+  // provider error fields, and the provider call parameters with their source.
+  // Never a provider response body, credential, account or request content.
+  ["realtimeStage", /^(?:request|config|call)$/],
+  ["realtimeFailureMessage", /^[A-Za-z][A-Za-z0-9 ._:()/-]{0,159}$/],
+  ["providerErrorCode", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorType", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorParam", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["realtimeConfigSource", /^(?:remote|fallback)$/],
+  ["realtimeAdvertisedVersion", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderModel", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderArchitecture", REALTIME_PROVIDER_VALUE_PATTERN],
 ]);
 
 /**
@@ -1984,6 +2004,8 @@ function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
       ? { diagnosticId }
       : {}),
     ...projectErrorCauseAttributes(attributes),
+    // Only an unclassified internal error logs its scrubbed cause message.
+    ...(attributes.errorCode === "internal_error" ? projectErrorCauseMessage(attributes) : {}),
   };
 }
 

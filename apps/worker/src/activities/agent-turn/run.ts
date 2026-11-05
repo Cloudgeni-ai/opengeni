@@ -154,7 +154,6 @@ import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings"
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 import { assertTurnSandboxBackendServed } from "./sandbox-route";
-import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -2365,16 +2364,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          // One known-secret memory per attempt: tool results, model input and
-          // every durable write of this attempt are masked with it.
-          const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
-          // Work that outlives the attempt (process-wide caches started inside
-          // it) neither keeps these values nor masks with them afterwards.
           // EU-only inference: model requests are refused until the claim
           // binds this context to the turn's settings.
-          return runWithAttemptSecretValues(secretValues, () =>
-            withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span)),
-          ).finally(() => secretValues.dispose());
+          return withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span));
         }),
       );
     } catch (error) {

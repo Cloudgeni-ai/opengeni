@@ -9,6 +9,7 @@ import {
   selectCodexCredentialId,
   type CodexAuthHeaders,
   type CodexFetch,
+  type CodexRealtimeDiagnostics,
   type CodexRealtimeInitialItem,
   type CodexRealtimeCallInput,
 } from "@opengeni/codex";
@@ -48,6 +49,12 @@ export class CodexRealtimeBrokerError extends Error {
     readonly reason: CodexRealtimeBrokerFailureReason,
     message: string,
     readonly providerStatus: number | null = null,
+    /**
+     * Server-only cause of a provider failure: the adapter's own message and
+     * its closed-grammar diagnostics. Logged for operators, never returned to
+     * the client, whose message stays the safe one above.
+     */
+    readonly providerCause?: { message: string; diagnostics: CodexRealtimeDiagnostics },
   ) {
     super(message);
     this.name = "CodexRealtimeBrokerError";
@@ -280,6 +287,7 @@ export async function brokerSessionCodexRealtime(
         "reconnect_required",
         "Codex subscription must be reconnected for realtime",
         error.providerStatus,
+        { message: error.message, diagnostics: error.diagnostics },
       );
     }
     throw brokerProviderError(error);
@@ -475,7 +483,10 @@ function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
                     : error.code === "network"
                       ? "network_error"
                       : "provider_error";
-  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus);
+  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus, {
+    message: error.message,
+    diagnostics: error.diagnostics,
+  });
 }
 
 function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {
@@ -504,4 +515,36 @@ function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {
     case "credential_unavailable":
       return "No connected Codex subscription is available for this session";
   }
+}
+
+/**
+ * One operator log line for a refused realtime negotiation: the broker
+ * reason, the provider status, and, for provider failures, the adapter's own
+ * message and diagnostics (stage, provider error identifiers, the call
+ * parameters and where they came from). The observability boundary admits
+ * each field only under its reviewed name and grammar.
+ */
+export function codexRealtimeFailureLogAttributes(
+  error: CodexRealtimeBrokerError,
+): Record<string, string | number> {
+  const cause = error.providerCause;
+  const diagnostics = cause?.diagnostics;
+  const attributes: Record<string, string | number | undefined> = {
+    reason: error.reason,
+    providerStatus: error.providerStatus ?? undefined,
+    realtimeFailureMessage: cause?.message ?? error.message,
+    realtimeStage: diagnostics?.stage,
+    providerErrorCode: diagnostics?.providerErrorCode,
+    providerErrorType: diagnostics?.providerErrorType,
+    providerErrorParam: diagnostics?.providerErrorParam,
+    realtimeConfigSource: diagnostics?.configSource,
+    realtimeAdvertisedVersion: diagnostics?.advertisedVersion,
+    realtimeProviderModel: diagnostics?.providerModel,
+    realtimeProviderArchitecture: diagnostics?.providerArchitecture,
+  };
+  return Object.fromEntries(
+    Object.entries(attributes).filter((entry): entry is [string, string | number] => {
+      return entry[1] !== undefined;
+    }),
+  );
 }

@@ -68,6 +68,13 @@ pub trait PointerStore: Send + Sync + fmt::Debug {
     fn check(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Whether every host that may read the copies these pointers name
+    /// reads chunks in packs (ADR 31), so an archive may write them. A host
+    /// on its own is the only reader of its copies; a fleet's service says.
+    fn writes_packs(&self) -> bool {
+        true
+    }
 }
 
 /// Whether `name` may name a pointer: 1 to 128 ASCII letters, digits, `-`

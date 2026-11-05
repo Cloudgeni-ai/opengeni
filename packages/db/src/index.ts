@@ -50,8 +50,6 @@ export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
 export * from "./personal-connection-approval";
 export * from "./credential-profiles";
-export * from "./secret-value-masking";
-export * from "./secret-use-history";
 export * from "./connected-machine-audience";
 export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
@@ -111,6 +109,9 @@ export {
 } from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
 export * from "./subscription-plans";
+export * from "./billing-auto-top-up";
+export { applyCreditLedgerEntry, applyCreditLedgerEntryOnce } from "./credit-ledger";
+export { getBillingCustomer } from "./billing-customer";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
@@ -118,7 +119,6 @@ import {
   chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
-  paidCreditReceipt,
   receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
@@ -1143,8 +1143,6 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
-import { maskSecretValuesForStorage } from "./secret-value-masking";
-import { maskSerializedRunStateForStorage } from "./lossless-columns";
 export {
   isStoredVerbatimAsLosslessJsonString,
   LOSSLESS_TEXT_PREFIX,
@@ -6687,81 +6685,6 @@ export async function sumUsageQuantity(
   });
 }
 
-type CreditLedgerEntryInput = {
-  accountId: string;
-  workspaceId?: string | null;
-  type: string;
-  amountMicros: number;
-  eligibleModelIds?: string[] | undefined;
-  sourceType?: string | null;
-  sourceId?: string | null;
-  idempotencyKey: string;
-  metadata?: Record<string, unknown>;
-  occurredAt?: Date;
-};
-
-export async function applyCreditLedgerEntry(
-  db: Database,
-  input: CreditLedgerEntryInput,
-): Promise<BillingBalance> {
-  return (await applyCreditLedgerEntryOnce(db, input)).balance;
-}
-
-/**
- * {@link applyCreditLedgerEntry} that also reports whether this call inserted
- * the row. `inserted` is false when the idempotency key already existed, so a
- * caller can count a purchase exactly once even when two deliveries race.
- */
-export async function applyCreditLedgerEntryOnce(
-  db: Database,
-  input: CreditLedgerEntryInput,
-): Promise<{ balance: BillingBalance; inserted: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      // Funding and usage adjustments share the expiry boundary too.
-      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
-      // Paid-for credit, refunds of it and unpaid credit record what they
-      // change in paid credit (paid-credit.ts).
-      const receipt = await paidCreditReceipt(scopedDb, {
-        accountId: input.accountId,
-        settledAt,
-        type: input.type,
-        amountMicros: input.amountMicros,
-        eligibleModelIds: input.eligibleModelIds ?? null,
-        metadata: input.metadata,
-        sourceType: input.sourceType ?? null,
-        sourceId: input.sourceId ?? null,
-      });
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: input.amountMicros,
-          eligibleModelIds: input.eligibleModelIds ?? null,
-          sourceType: input.sourceType ?? null,
-          sourceId: input.sourceId ?? null,
-          idempotencyKey: input.idempotencyKey,
-          metadata: { ...input.metadata, ...receipt.metadata },
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: receipt.createdAt,
-        })
-        .onConflictDoNothing({
-          target: schema.creditLedgerEntries.idempotencyKey,
-        })
-        .returning({ id: schema.creditLedgerEntries.id });
-      return {
-        balance: await getBillingBalance(scopedDb, input.accountId),
-        inserted: inserted.length > 0,
-      };
-    },
-  );
-}
-
 const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -7187,38 +7110,6 @@ export async function getCreditLedgerEntry(
       )
       .limit(1);
     return row ?? null;
-  });
-}
-
-export async function getBillingCustomer(
-  db: Database,
-  accountId: string,
-  provider = "stripe",
-): Promise<{
-  accountId: string;
-  provider: string;
-  providerCustomerId: string;
-  email: string | null;
-} | null> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.billingCustomers)
-      .where(
-        and(
-          eq(schema.billingCustomers.accountId, accountId),
-          eq(schema.billingCustomers.provider, provider),
-        ),
-      )
-      .limit(1);
-    return row
-      ? {
-          accountId: row.accountId,
-          provider: row.provider,
-          providerCustomerId: row.providerCustomerId,
-          email: row.email,
-        }
-      : null;
   });
 }
 
@@ -32689,8 +32580,6 @@ async function createSessionInTransaction(
   input: SessionCreateInput,
   id: string,
 ): Promise<SessionCreateResult> {
-  // A session an agent starts never stores a secret value its attempt knows.
-  input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = withSessionUnattendedMetadata(
     metadataWithSelectedInstalledSkillCreateIdentity(
@@ -44268,15 +44157,6 @@ export async function appendSessionHistoryItems(
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
-  // Secret backstop: mask before the insert and before the idempotency
-  // comparison below, so a retried append compares like with like.
-  input = {
-    ...input,
-    items: input.items.map((entry) => ({
-      ...entry,
-      item: maskSecretValuesForStorage(entry.item, "history_append"),
-    })),
-  };
   let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
@@ -44400,17 +44280,9 @@ export async function appendSessionHistoryItems(
         if (
           !row ||
           row.turnId !== input.turnId ||
-          // Both sides as stored: the column masks again after truncation,
-          // and the attempt may have learned a value since the first write.
           !isDeepStrictEqual(
-            maskSecretValuesForStorage(
-              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-              "history_append",
-            ),
-            maskSecretValuesForStorage(
-              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
-              "history_append",
-            ),
+            fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+            canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
           )
         ) {
           throw new Error(
@@ -47463,6 +47335,10 @@ type LeaseRow = {
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
   untracked_writer_since?: Date | string | null;
+  drain_capture_failures?: number | string | null;
+  drain_capture_failure_epoch?: number | string | null;
+  drain_capture_first_failed_at?: Date | string | null;
+  drain_capture_last_failed_at?: Date | string | null;
   deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -47539,6 +47415,10 @@ export interface LeaseSnapshot {
    * generation admissions) that no capture taken with none attached has
    * covered yet. Null when every such write is in the archive. */
   untrackedWriterSince: Date | null;
+  /** Consecutive settled drain snapshot failures of THIS lease epoch since
+   * its last published save (zero after a new box or a save). Drives the
+   * drain retry backoff and its alerts. */
+  drainCaptureFailures?: SandboxDrainCaptureFailures;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -48331,6 +48211,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
                   ? row.archive_capture_published_at
                   : new Date(row.archive_capture_published_at),
           },
+    drainCaptureFailures: drainCaptureFailuresFromLeaseRow(row),
     reaperHold:
       row.reaper_hold_id === null ||
       row.reaper_hold_until === null ||
@@ -48372,6 +48253,32 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
+  };
+}
+
+export type SandboxDrainCaptureFailures = {
+  count: number;
+  firstFailedAt: Date | null;
+  lastFailedAt: Date | null;
+};
+
+function drainCaptureFailuresFromLeaseRow(row: LeaseRow): SandboxDrainCaptureFailures {
+  const count = Number(row.drain_capture_failures ?? 0);
+  if (
+    row.drain_capture_failure_epoch === null ||
+    row.drain_capture_failure_epoch === undefined ||
+    Number(row.drain_capture_failure_epoch) !== Number(row.lease_epoch) ||
+    !Number.isSafeInteger(count) ||
+    count <= 0
+  ) {
+    return { count: 0, firstFailedAt: null, lastFailedAt: null };
+  }
+  const date = (value: Date | string | null | undefined) =>
+    value === null || value === undefined ? null : value instanceof Date ? value : new Date(value);
+  return {
+    count,
+    firstFailedAt: date(row.drain_capture_first_failed_at),
+    lastFailedAt: date(row.drain_capture_last_failed_at),
   };
 }
 
@@ -63575,6 +63482,10 @@ export async function releaseWorkspaceArchiveCapture(
      * without this a dead checkpoint worker's claim fenced every later turn
      * and checkpoint until the provider deadline. */
     onlyExpiredWarmTakeover?: boolean;
+    /** The released draining capture settled as a failure: count it toward
+     * this lease epoch's consecutive drain snapshot failures, atomically with
+     * the release (a fenced, already replaced claim counts nothing). */
+    recordDrainCaptureFailure?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -63614,6 +63525,30 @@ export async function releaseWorkspaceArchiveCapture(
           archive_capture_started_at = null,
           archive_capture_deadline_at = null,
           archive_capture_published_at = null,
+          ${
+            input.recordDrainCaptureFailure === true
+              ? sql`drain_capture_failures = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failures
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then sandbox_leases.drain_capture_failures + 1
+                  else 1
+                end,
+                drain_capture_first_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_first_failed_at
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then coalesce(sandbox_leases.drain_capture_first_failed_at, now())
+                  else now()
+                end,
+                drain_capture_last_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_last_failed_at
+                  else now()
+                end,
+                drain_capture_failure_epoch = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failure_epoch
+                  else sandbox_leases.lease_epoch
+                end,`
+              : sql``
+          }
           rotation_requested_at = case
             when rotation_reason = 'teardown_claim' then null
             else rotation_requested_at
@@ -65172,6 +65107,12 @@ async function foldWorkspaceArchiveOntoLease(
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
+      -- A published save ends any run of drain snapshot failures: the count
+      -- means failures since this box's last successful save.
+      drain_capture_failures = 0,
+      drain_capture_failure_epoch = null,
+      drain_capture_first_failed_at = null,
+      drain_capture_last_failed_at = null,
       ${
         input.livenessGuard === "warm"
           ? sql`
@@ -71128,11 +71069,6 @@ export async function saveRunState(
     pendingApprovals: unknown[];
   },
 ): Promise<boolean> {
-  // Masked before the size check, so the limit applies to what is stored.
-  input = {
-    ...input,
-    serializedRunState: maskSerializedRunStateForStorage(input.serializedRunState),
-  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -71309,7 +71245,6 @@ export async function createSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<SessionGoal> {
-  input = maskSecretValuesForStorage(input, "goal");
   const rootConstraints = normalizeAndAssertSessionGoalRootConstraints(input.rootConstraints ?? []);
   return await withRlsContext(
     db,
@@ -71815,7 +71750,6 @@ export async function upsertSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<{ goal: SessionGoal; replaced: boolean }> {
-  input = maskSecretValuesForStorage(input, "goal");
   const suppliedRootConstraints =
     input.rootConstraints === undefined
       ? null
@@ -72694,7 +72628,6 @@ export async function updateSessionGoalWithEvent(
   outcome: "applied" | "proposed";
   proposalId: string | null;
 }> {
-  input = maskSecretValuesForStorage(input, "goal");
   if (input.text !== undefined) {
     assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
   }
@@ -86221,9 +86154,11 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        // Masked before the size check, so the limit applies to what is stored.
-        const runStateText = maskSerializedRunStateForStorage(input.runState.serializedRunState);
-        await assertApprovalRunStateForSave(tx, runStateText, input.runState.pendingApprovals);
+        await assertApprovalRunStateForSave(
+          tx,
+          input.runState.serializedRunState,
+          input.runState.pendingApprovals,
+        );
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(
@@ -86233,7 +86168,7 @@ export async function applySessionTurnSettlement(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 stateVersion: Number(maxVersion) + 1,
-                serializedRunState: runStateText,
+                serializedRunState: input.runState.serializedRunState,
                 pendingApprovals: input.runState.pendingApprovals,
               },
               "serializedRunState",

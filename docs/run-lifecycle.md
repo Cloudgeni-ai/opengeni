@@ -2358,6 +2358,16 @@ bounded file inventories. Configured `skill_read` stays sandbox-free and does
 not resolve repository names. Identifiers cannot silently switch between these
 sources, even when names match. Repository metadata uses the same YAML parser as
 portable Skills, retaining multiline description text in the JSON descriptor.
+When that strict parse fails, `parseLenientSkillFrontmatter`
+(`packages/contracts/src/skill-metadata.ts`) recovers the top-level `name` and
+`description` lines of common hand-written headers (an unquoted `: ` in a
+description, tab indentation, unindented continuation lines, values starting
+with a YAML indicator) and logs the bounded parser code plus key names, never
+values. It never invents a name: a header without exactly one usable `name:`
+line (an unquoted `null`, boolean or number is not a name, and stray
+unindented text is never borrowed) is still skipped, and the "Skipped
+repository skills" notice carries a `reason` for every omitted entry. Managed
+and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
@@ -2551,6 +2561,24 @@ in flight. A permanent failure atomically fails the exact still-runnable turn
 compaction/internal-update obligation), session, events, maintenance, and child
 terminal outbox without fabricating an attempt row or looping. Raw SQL and
 invariant messages never enter workflow history.
+
+The workflow's approval/human-input wait (`approval-wait` peek) baselines its
+wake counters from before the peek that chose it, behind
+`session-approval-wait-pre-peek-baseline-v1`. A decision can commit after the
+peek read PostgreSQL but before the workflow handles the peek result; its
+signal is then already counted, and a post-peek baseline would wait forever on
+an untimed wait (the API's signal marks that wake revision delivered, so the
+outbox does not resend it). A signal that lands mid-peek now costs one extra
+peek. Histories recorded without the marker keep the post-peek baseline, so a
+workflow already parked that way stays parked until its next wake.
+
+The two other peek-chosen waits with a far deadline use the same pre-peek
+snapshot: a `capacity-wait` (until the provider's reset; its interruption
+baseline too, so Pause/Steer wins at once) behind
+`session-capacity-wait-pre-peek-baseline-v1`, and the recovering turn's
+durable backoff behind `session-recovery-backoff-pre-peek-baseline-v1`. The
+short waits (input-wait, sandbox lifecycle, unavailable attempt) already close
+against the pre-peek `closeSignalVersion` and are bounded.
 
 Migration 0483 is additive rolling storage. Its attempt-insert trigger prevents
 old binaries from claiming through a stored block, but old workers can still
@@ -4643,6 +4671,16 @@ completed model/tool truth, closes only the unresolved tool suffix, records
 from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
+
+The turn-start route itself is decided only from facts that were actually
+read. The active pointer and the sandbox row it names are read before any box
+is touched; a failed read is retried briefly and then fails the attempt into
+the exact-attempt database recovery lane. It is never read as "no machine",
+so a chat whose pointer names a Connected Machine never starts setup,
+credential seeding or file downloads on its managed home because a read failed
+(for example while connections are re-established after a redeploy). Only a
+genuinely absent or structurally unestablishable target is reset to home,
+under the epoch fence and with a visible `session.route.reconciled` event.
 
 The same boundary recognizes the home resolver's typed
 `RoutingBackendRecoveryRequiredError` only for `resolve_home_backend` with

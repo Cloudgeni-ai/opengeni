@@ -251,9 +251,7 @@ export async function setCredentialProfile(
 /**
  * The per-command credential environment of one attempt: the session's
  * effective profile, read again at most every few seconds, resolved through
- * the attempt's resolver for every command. Never fails a command. The
- * attempt's resolver remembers what it resolves, so profile values are
- * masked like any other resolved value (docs/secrets.md, Masking).
+ * the attempt's resolver for every command. Never fails a command.
  */
 export function createSessionCredentialEnvironment(input: {
   db: Database;

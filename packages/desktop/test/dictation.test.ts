@@ -28,7 +28,7 @@ import {
   type DictationPlatform,
   type DictationTarget,
 } from "../src/main/dictation";
-import { parseDictationReport } from "../src/main/dictation/ipc";
+import { handleDictationIpc, parseDictationReport } from "../src/main/dictation/ipc";
 import { linuxPasteArguments, linuxPasteTool } from "../src/main/dictation/linux";
 import { macKeyWatchArgument, parseKeyLine } from "../src/main/dictation/mac";
 import { ENGLISH_DICTATION_WORDS, type DictationWords } from "../src/main/dictation/words";
@@ -1402,5 +1402,40 @@ describe("the dictation pill outlives its page", () => {
     expect(p.windows().every((window) => window.destroyed)).toBe(true);
     expect(p.logged).toHaveLength(2);
     FakeWebContents.answer = async () => 200;
+  });
+});
+
+describe("handleDictationIpc", () => {
+  test("a cancelled navigation keeps the page listening; leaving its document doesn't", () => {
+    const listening: boolean[] = [];
+    const handlers = new Map<string, (event: unknown, arg?: unknown) => unknown>();
+    handleDictationIpc({
+      ipcMain: {
+        handle: (channel: string, run: (event: unknown, arg?: unknown) => unknown) =>
+          handlers.set(channel, run),
+        on: (channel: string, run: (event: unknown, arg?: unknown) => unknown) =>
+          handlers.set(channel, run),
+      } as never,
+      dictation: {
+        onChange: () => () => {},
+        listen: (_page: unknown, value: boolean) => listening.push(value),
+      } as never,
+      allow: () => {},
+    });
+    const page = new FakeWebContents();
+    handlers.get(DESKTOP_IPC.dictationListen)!({ sender: page }, true);
+    // A link the app opens in the browser starts a navigation, then cancels it.
+    page.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+    page.emit("did-fail-provisional-load", {}, -3, "ERR_ABORTED", "https://example.com/", true);
+    expect(listening).toEqual([true]);
+    page.emit(
+      "did-fail-provisional-load",
+      {},
+      -106,
+      "ERR_INTERNET_DISCONNECTED",
+      "https://x/",
+      true,
+    );
+    expect(listening).toEqual([true, false]);
   });
 });

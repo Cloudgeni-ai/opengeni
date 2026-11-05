@@ -409,6 +409,9 @@ pub struct HostView {
     /// Processor time in millicores a wake can still reserve on it.
     pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
+    /// Disk in MiB it frees for a sandbox without losing anything, by
+    /// disk relief (ADR 30); placement counts it as free.
+    pub disk_reclaimable_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
 }
@@ -740,6 +743,7 @@ async fn hosts<S: Store>(
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,
+            disk_reclaimable_mib: known.capacity.disk_reclaimable_mib,
             sandboxes: known.capacity.sandboxes,
             awake: known.capacity.awake,
         })

@@ -4,7 +4,7 @@
 appId: ai.opengeni.desktop
 productName: Opengeni
 copyright: Copyright © Opengeni
-electronVersion: 44.7.2
+electronVersion: 44.10.1
 directories:
   output: release
   buildResources: resources

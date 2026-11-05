@@ -34,7 +34,15 @@ export function stableToolId(value: string, seen?: Map<string, number>): string 
     .slice(0, 54);
   const base = normalized || "tool";
   if (!seen) return base;
-  const count = (seen.get(base) ?? 0) + 1;
+  // A numbered repeat (`x_2`) must not take an ID another name normalizes to,
+  // or one tool's binding would replace the other's. Claim every ID issued.
+  let count = seen.get(base) ?? 0;
+  let id: string;
+  do {
+    count += 1;
+    id = count === 1 ? base : `${base}_${count}`;
+  } while (count > 1 && seen.has(id));
   seen.set(base, count);
-  return count === 1 ? base : `${base}_${count}`;
+  if (id !== base && !seen.has(id)) seen.set(id, 1);
+  return id;
 }

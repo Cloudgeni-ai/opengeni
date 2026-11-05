@@ -193,6 +193,15 @@ remain compatible throughout; use a forward migration for database rollback.
 Changes to payer classification or captured-measure formulas must rebuild the
 affected historical hours before activating the corresponding reader.
 
+A rollup row never stores a negative amount; readers reject one instead of
+reporting a wrong total. Since migration 1252 a fact delete subtracts from its
+group only when every measure stays non-negative. A missing or smaller group
+(for example rollup rows removed by hand before their facts) is queued in
+`opengeni_private.insights_usage_hourly_repairs`, and a deferred constraint
+trigger rebuilds that one group from its facts at commit, after every row
+trigger of the transaction. `insights_usage_hourly_repair_negative_hours()`
+rebuilds every hour that holds a negative row; the migration runs it once.
+
 ### Local scale evidence (2026-10-17)
 
 PostgreSQL 16, `work_mem=16MB`, JIT off, 4,000,000 facts over 80 days,

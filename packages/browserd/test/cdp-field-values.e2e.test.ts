@@ -14,7 +14,7 @@ import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e(
-  "observations show form field values but never passwords or typed secrets",
+  "observations show form field values, and an ordinary field shows what was filled into it, but never passwords",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-field-values-");
     const runner = await ManagedBrowserRunner.create({
@@ -68,15 +68,13 @@ second line</textarea></label>
         }),
         secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
       } as BrowserActionCommand);
-      expect(JSON.stringify(typed)).not.toContain(secret);
-      expect(valueOf(typed, "textbox", "API key")).toBe("[secret]");
-
-      // A later observation and a DOM read, with no secret in their own
-      // command, still never show the typed value or its page echo.
+      // The reference resolves where the fill runs. An ordinary field is not
+      // a protected field: it, its page echo and the title show what it holds.
+      expect(valueOf(typed, "textbox", "API key")).toBe(secret);
       const later = await driver.observe(start.target.id);
-      expect(JSON.stringify(later)).not.toContain(secret);
-      expect(valueOf(later, "textbox", "API key")).toBe("[secret]");
+      expect(valueOf(later, "textbox", "API key")).toBe(secret);
       expect(valueOf(later, "textbox", "Name")).toBe("Ada Lovelace");
+      expect(JSON.stringify(later)).not.toContain("hunter22-secret");
       const read = await driver.readDom(start.target.id, {
         kind: "element",
         locator: { kind: "css", selector: "#echo" },
@@ -84,46 +82,9 @@ second line</textarea></label>
         expectedDocumentGeneration: later.target.documentGeneration!,
         expectedFrameId: later.frameId!,
       });
-      expect(read.text).toBe("Key ends [secret]");
-
-      // A read clipped partway through the value still hides its start.
-      const clipped = await driver.readDom(start.target.id, {
-        kind: "element",
-        locator: { kind: "css", selector: "#echo" },
-        maxChars: "Key ends ".length + secret.length - 1,
-        expectedTargetGeneration: later.target.targetGeneration,
-        expectedDocumentGeneration: later.target.documentGeneration!,
-        expectedFrameId: later.frameId!,
-      });
-      expect(clipped.text).toBe("Key ends [secret]");
-
-      // The page put the value into its title and address: the tab list and
-      // the observed target hide it there too.
+      expect(read.text).toBe(`Key ends ${secret}`);
       const tabs = await driver.listTargets();
-      expect(JSON.stringify(tabs)).not.toContain(secret);
-      expect(tabs.find((tab) => tab.id === start.target.id)?.title).toBe("Key [secret]");
-      expect(JSON.stringify(await driver.target(start.target.id))).not.toContain(secret);
-
-      // A console message clipped partway through the value, with more text
-      // after it, still hides the value's start.
-      const consoleEntries = (await driver.debug(start.target.id, { kinds: ["console"] })).entries;
-      const logged = consoleEntries.find((entry) => entry.message.endsWith(" marker"));
-      expect(logged?.message).toBe(`${"x".repeat(4088)}[secret] marker`);
-      expect(JSON.stringify(consoleEntries)).not.toContain(secret.slice(0, 8));
-
-      // Another controller of the same session (a reattach after recovery)
-      // still hides what this one typed.
-      const reattached = new AgentBrowserDriver({
-        browserSessionId: start.browserSessionId,
-        controllerGeneration: `controller-${randomUUID()}`,
-        runner,
-      });
-      expect(reattached).toBeDefined();
-      expect(
-        JSON.stringify(
-          redactWith(reattached, { echo: `Key ends ${secret}`, url: `https://x/?k=${secret}` }),
-        ),
-      ).not.toContain(secret);
+      expect(tabs.find((tab) => tab.id === start.target.id)?.title).toBe(`Key ${secret}`);
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });
@@ -131,12 +92,6 @@ second line</textarea></label>
   },
   60_000,
 );
-
-function redactWith(driver: AgentBrowserDriver, value: unknown): unknown {
-  return (
-    driver as unknown as { typedSecrets: { redact(value: unknown): unknown } }
-  ).typedSecrets.redact(value);
-}
 
 function valueOf(observation: BrowserObservation, role: string, name: string): unknown {
   const node = nodes(observation).find(

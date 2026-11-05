@@ -10,6 +10,16 @@ enrolls all organizations in Free, including embedded organizations; only actual
 verified-signup eligibility-receipt holders receive monthly Free credit. Enterprise is
 operator-assigned only.
 
+Free is a trial: eligible accounts receive $10 monthly app credit. Pro remains
+the $20/month entry plan. Pro, Max and Enterprise include connected AI
+subscriptions with no inference or platform fee, subject to the provider's
+own limits. Free, absent and past-due plans cannot use them. Connected
+subscriptions are for app use, not API/SDK or embedded-product requests;
+API use spends credits, never plan credit. Own provider API keys are separate:
+their fee follows `OPENGENI_BYOK_PLATFORM_FEE_BPS`, which is paused at `0` in
+production and staging. At zero, own keys need no paid credit for a fee.
+See [billing-origin.md](billing-origin.md) for admission and legacy terms.
+
 Migration 0797 is **maintenance**, despite adding only new structures: the
 preceding binary's closed readiness contract rejects unknown RLS tables and
 their runtime SELECT privileges. A rolling deployment would require an earlier

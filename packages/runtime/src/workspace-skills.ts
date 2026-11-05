@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { ErrorCode } from "@opengeni/agent-proto";
-import { parseSkillFrontmatter } from "@opengeni/contracts";
+import { parseLenientSkillFrontmatter, SkillFrontmatterError } from "@opengeni/contracts";
 import { z } from "zod";
 import {
   assertSkillRelativePath,
@@ -114,6 +114,8 @@ export type WorkspaceSkillWarning = Readonly<{
     | "conflicting_definitions";
   paths: readonly string[];
   name?: string;
+  /** Bounded, content-free explanation of why the entry was omitted. */
+  reason?: string;
 }>;
 
 export type WorkspaceSkillSearchPath = Readonly<{
@@ -386,30 +388,44 @@ async function discoverWorkspaceSkillsUnmeasured(
       if (!isMissingSkillPath(error)) throw error;
       return null;
     }
-    const warning = (code: WorkspaceSkillWarning["code"], name?: string) => ({
-      warning: { code, paths: [skillMarkdownPath], ...(name ? { name } : {}) },
+    const warning = (code: WorkspaceSkillWarning["code"], reason: string, name?: string) => ({
+      warning: { code, paths: [skillMarkdownPath], ...(name ? { name } : {}), reason },
     });
-    let frontmatter: ReturnType<typeof parseSkillFrontmatter>;
+    let frontmatter: ReturnType<typeof parseLenientSkillFrontmatter>;
     try {
-      frontmatter = parseSkillFrontmatter(markdown);
-    } catch {
+      frontmatter = parseLenientSkillFrontmatter(markdown);
+    } catch (error) {
       // Only repository metadata parsing is degradable. Transport, permission,
       // cancellation and managed/explicit Skill validation still fail normally.
       // Do not log YAML parser messages: they may include repository content.
-      return warning("invalid_metadata");
+      return warning(
+        "invalid_metadata",
+        error instanceof SkillFrontmatterError ? error.reason : "unreadable_header",
+      );
+    }
+    if (frontmatter.fallbackReason) {
+      // Key names and the bounded parser code only, never values.
+      console.info("Repository skill metadata read with the lenient fallback", {
+        path: skillMarkdownPath,
+        reason: frontmatter.fallbackReason,
+        keys: frontmatter.keys ?? [],
+      });
     }
     const name = frontmatter.name?.trim() || entry.name;
     if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
-      return warning("invalid_name");
+      return warning(
+        "invalid_name",
+        "name must be 1-64 letters, digits, dots, underscores or hyphens, starting with a letter or digit",
+      );
     }
     const key = name.toLowerCase();
     if (shadowedNames.has(key)) return null;
     const description = frontmatter.description?.trim() || "No description provided.";
     if (description.length > 2_048) {
-      return warning("invalid_description", name);
+      return warning("invalid_description", "description is longer than 2048 characters", name);
     }
     if (reservedNames.has(key)) {
-      return warning("configured_name_conflict", name);
+      return warning("configured_name_conflict", "a configured Skill already uses this name", name);
     }
     const candidate: DiscoveredWorkspaceSkill = {
       name,
@@ -448,7 +464,12 @@ async function discoverWorkspaceSkillsUnmeasured(
     if (existingFingerprint !== candidateFingerprint) {
       discovered.delete(key);
       conflictingNames.add(key);
-      warn({ code: "conflicting_definitions", name, paths: [existing.path, candidate.path] });
+      warn({
+        code: "conflicting_definitions",
+        name,
+        paths: [existing.path, candidate.path],
+        reason: "two skill folders define this name with different files",
+      });
       continue;
     }
     existing.fingerprint = existingFingerprint;
