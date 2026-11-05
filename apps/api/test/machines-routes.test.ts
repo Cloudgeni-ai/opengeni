@@ -2608,9 +2608,13 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
     expect((await machine()).agentUpdatePendingSince).toBe(waitingSince);
     expect(await connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id)).toBeNull();
 
-    // A day later, the next postponement announces a closing time.
+    // A day later, the next postponement announces a closing time. (Move the
+    // whole wait a day into the past: the last postponement stays an ordinary
+    // one, recorded early in the wait.)
     await admin`update enrollments
-      set agent_update_pending_since = agent_update_pending_since - interval '1 day'
+      set agent_update_pending_since = agent_update_pending_since - interval '1 day',
+        agent_update_requested_at = agent_update_requested_at - interval '1 day',
+        agent_update_updated_at = agent_update_updated_at - interval '1 day'
       where id = ${enrollment.id}`;
     clock.now += 11 * 60_000;
     await heartbeat();
