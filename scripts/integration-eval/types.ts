@@ -112,6 +112,15 @@ export type EvalCase = {
   decision?: "approve" | "reject";
   /** Write: name of the verifier in verify.ts that confirms the result in the service. */
   verify?: string;
+  /**
+   * Write on a personal ("Only me") connection: only its owner may approve.
+   * The harness first tries to approve with a workspace key
+   * (`OPENGENI_EVAL_WORKSPACE_API_KEY`), which must be refused with the
+   * owner-only 403, then approves with the main key (the owner's).
+   */
+  ownerOnlyApproval?: boolean;
+  /** Write: the approved call's tool name must match, e.g. the personal Slack tool rather than the bot's. */
+  approvedTool?: RegExp;
   /** Included in the model × effort grid (the core set). */
   core?: boolean;
   /** Free-form note shown in reports. */
@@ -199,4 +208,20 @@ export type RunRecord = {
   finalAnswerExcerpt: string;
   usage: Receipts["usage"];
   error: string | null;
+  /** Approval decisions the harness sent, with the key used and the HTTP status (0: key not configured). */
+  approvalAttempts?: ApprovalAttempt[];
+};
+
+export type ApprovalAttempt = {
+  approvalId: string;
+  /** The tool the approval was for. */
+  tool?: string;
+  key: "main" | "workspace";
+  decision: "approve" | "reject";
+  /** HTTP status; 0 when the key wasn't configured, -1 when the request failed. */
+  status: number;
+  /** Start of the error body, for refusals. */
+  detail?: string;
+  /** The error's reason code (`error.details.code`), e.g. APPROVAL_REQUIRES_ACCOUNT_OWNER. */
+  code?: string;
 };

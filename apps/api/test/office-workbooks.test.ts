@@ -270,6 +270,61 @@ describe("office workbook relay", () => {
     expect(clampTimeout(30_000)).toBe(30_000);
     expect(clampTimeout(10_000_000)).toBe(120_000);
   });
+
+  test("hands files and a copy request to the add-in, across instances, and returns its copy", async () => {
+    const stream = new FakeOpStream();
+    const bus = new SharedBus(stream);
+    const holder = new OfficeWorkbookRelay(bus, SECRET, { presenceWindowMs: 20 });
+    const other = new OfficeWorkbookRelay(bus, SECRET, { presenceWindowMs: 20 });
+    const connection = new OfficeWorkbookConnection(holder);
+    const addin = fakeAddin(connection, (frame) => ({
+      type: "result",
+      id: frame.id,
+      ok: true,
+      value: null,
+      copy: { fileId: "33333333-3333-4333-8333-333333333333", filename: "Model.xlsx" },
+    }));
+    hello(connection, A, "Budget.xlsx");
+    const files = [
+      { name: "Teaser.xlsx", artifact: { artifactId: "44444444-4444-4444-8444-444444444444" } },
+    ] as never;
+    const outcome = await other.run(A, connection.id, "", 5_000, {
+      files,
+      saveCopy: { filename: "Model", scope: "workspace" },
+    });
+    expect(outcome).toEqual({
+      kind: "ok",
+      value: null,
+      logs: [],
+      durationMs: 0,
+      copy: { fileId: "33333333-3333-4333-8333-333333333333", filename: "Model.xlsx" },
+    });
+    expect(addin.sent.find((frame) => frame["type"] === "run")).toMatchObject({
+      code: "",
+      files,
+      saveCopy: { filename: "Model", scope: "workspace" },
+    });
+  });
+
+  test("a plain run sends no file fields, and a failed copy keeps the code's result", async () => {
+    const relay = new OfficeWorkbookRelay(new MemoryEventBus(), SECRET);
+    const connection = new OfficeWorkbookConnection(relay);
+    const addin = fakeAddin(connection, (frame) => ({
+      type: "result",
+      id: frame.id,
+      ok: true,
+      value: 1,
+      copy: { error: "Office could not read the workbook file." },
+    }));
+    hello(connection, A, "Budget.xlsx");
+    expect(await relay.run(A, connection.id, "return 1", 5_000)).toMatchObject({
+      kind: "ok",
+      value: 1,
+      copy: { error: "Office could not read the workbook file." },
+    });
+    const run = addin.sent.find((frame) => frame["type"] === "run")!;
+    expect("files" in run || "saveCopy" in run).toBe(false);
+  });
 });
 
 describe("chooseWorkbook", () => {

@@ -755,12 +755,18 @@ describe("Codex pool Prometheus alerts", () => {
     const expression = alertExpression(template, "OpenGeniCodexPromptCacheTelemetryMissing");
     // HTTP-200 headers can arrive before streamed usage, or the stream can fail
     // without usage. These counters are not a matched numerator/denominator.
-    // Explicit missing fields must still alert even while other calls report;
-    // absent usage must alert on active traffic but never on an idle provider.
+    // Explicit missing fields alert even while other calls report, but only
+    // from 3 calls and over 5% of calls that reported usage: one call never
+    // pages. A call with no usage at all (status="no_usage") is neither a
+    // missing field nor a usage observation. Absent usage must alert on
+    // active traffic but never on an idle provider.
+    const usage = `opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription"`;
     expect(expression.replace(/\s+/g, " ").trim()).toBe(
-      `(sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ` +
+      `( sum(increase(${usage},status="missing"}[30m])) >= 3 ` +
+        `and on() sum(increase(${usage},status="missing"}[30m])) ` +
+        `/ clamp_min(sum(increase(${usage},status=~"reported|missing"}[30m])), 1) > 0.05 ) ` +
         `or ( sum(increase(opengeni_model_calls_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",outcome="completed"}[30m])) >= 20 ` +
-        `and on() (sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription"}[30m])) or vector(0)) == 0 )`,
+        `and on() (sum(rate(${usage},status=~"reported|missing"}[30m])) or vector(0)) == 0 )`,
     );
   });
 

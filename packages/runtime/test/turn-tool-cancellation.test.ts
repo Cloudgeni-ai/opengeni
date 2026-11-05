@@ -2173,6 +2173,70 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(processAlive).toBe(false);
   });
 
+  test("a setup command that exits as the turn is paused still settles the fence", async () => {
+    // A lifecycle command yields, then the turn is paused while its eager
+    // read is in flight and the command finishes on its own. Its wrapper
+    // removes the identity marker on exit, so only a provider read can prove
+    // the exit. That read is control, not the cancelled eager observation.
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let processAlive = true;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const reads: Array<{ aborted: boolean }> = [];
+    const session = {
+      supportsPty: () => true,
+      exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          // The EXIT trap already removed the marker.
+          return { exitCode: processAlive ? 0 : 1, output: processAlive ? "4600 4600\n" : "" };
+        }
+        if (input.cmd.includes("command kill")) return { exitCode: 0, output: "" };
+        markStarted();
+        return { sessionId: 14, output: "installing\n" };
+      },
+      writeStdin: async ({ signal }: { chars?: string; signal?: AbortSignal }) => {
+        reads.push({ aborted: signal?.aborted === true });
+        // A conforming provider read stops at once when its signal is aborted.
+        signal?.throwIfAborted();
+        if (!processAlive) return exited(0, "installed\n");
+        return await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(running(14)), 5_000);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    };
+
+    const command = controller.runSandboxCommand(session, {
+      cmd: "install-client",
+      yieldTimeMs: 120_000,
+    });
+    await started;
+    await Bun.sleep(5);
+    processAlive = false;
+    abort.abort(new Error("paused during setup"));
+    await expect(command).rejects.toThrow("paused during setup");
+
+    expect(
+      await Promise.race([
+        controller.waitForQuiescence().then(() => "quiesced"),
+        Bun.sleep(1_000).then(() => "stalled"),
+      ]),
+    ).toBe("quiesced");
+    expect(controller.outstandingWriters()).toEqual([]);
+    // The proving read was not bound to the cancelled eager observation.
+    expect(reads.at(-1)).toEqual({ aborted: false });
+  });
+
   test("preserves explicit non-TTY lifecycle commands and cancels them without Ctrl-C", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);

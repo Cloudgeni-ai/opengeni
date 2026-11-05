@@ -8,7 +8,9 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
 /**
  * `length:sha256` of each case, recorded from the composer before the
  * pay-for-what-is-relevant gates. A session with every gated feature present
- * must keep these bytes; only a reviewed instruction change updates them.
+ * must keep these bytes; only a reviewed instruction change updates them. The
+ * "none-with-features" cases gained documents when the chat-by-default rule
+ * began to follow them; their bytes come from the composer just before that.
  */
 const LOCKED: Record<string, string> = {
   "all/none": "33399:df282f2185182985f997d4ca829b4c6ce88ce1dd91061cd6fe1e184a63cded56",
@@ -73,12 +75,6 @@ const LOCKED: Record<string, string> = {
     "37687:40228ae2a4408e18cc98fb5ec2858ff3fa2e4eb2e093bfee0658f542022c0bbc",
   "all-without-browser/selfhosted":
     "39361:26b61bf3e024fd76b9ddf9414ec6f34d54da2157dae2f9218647474d2121448e",
-  "all-without-artifacts/none":
-    "29941:054c9782053b330510aba3b3142c9ded783bc190bfa2379fa2ee7180a7049dca",
-  "all-without-artifacts/docker":
-    "34229:2366f9609c8195b864e6c78c1dc771ba62510832dc5235fcda9499076aea05bf",
-  "all-without-artifacts/selfhosted":
-    "35903:2f5386ae9530530d99ba6dd5fc49a77a4be264eaafdff3317b4b6c334a6c9eec",
   "all-without-secrets/none":
     "33245:895b43f847ebb64b9543b2f3b51891c6d98d32b822fbc6c0c99dfc66850229db",
   "all-without-secrets/docker":
@@ -110,13 +106,13 @@ const LOCKED: Record<string, string> = {
   "all-without-workspaceAdmin/selfhosted":
     "38042:9f71180aa11e78e3c9365e1d2f216debb7cf225e2b703e46f35d25be9ff4cbef",
   "none-with-features/docker":
-    "25542:ac2b464e5d372d5e0020cbd9f32ee96af97e7ea05906aa63552a8bb546eb3c28",
+    "29000:0dd6189eca99e2e8d940096f510980fe1c7376388287a98d70ab6c34571cb8bd",
   "none-with-features/selfhosted":
-    "27216:a586abd084290d41bc8b623bbc7b92a19848d87a364bbfa235e237cda6346f6a",
+    "30674:261da084d2d268c86b029a93417d808fc47c1de9a65fbb4d0279ea7b342e5f26",
   "none-with-features-and-workspace/none":
     "24792:928b7aeea9c26b8ae12147059d841844baaedf187fddaf4a03397d950c9bd00b",
   "none-with-features-manage/none":
-    "20086:9185dc67c51c07d48671cd98ebd2c388a1a6b5e6cde0299841c2a670f31b85e7",
+    "23544:930b980ffffbd967d6ac3d3e94a9a49fe4b8908015852a09d0f76051a8681883",
 };
 
 function digest(options: BuildAgentOptions): string {
@@ -169,7 +165,16 @@ describe("an absent feature only omits its own text", () => {
   // Goals and waiting already had their own alternate wording before these
   // gates, so for them the check is the gated text alone.
   const variants: Record<string, { options: BuildAgentOptions; gone: string[]; pure: boolean }> = {
-    webSearch: { options: without({ webSearch: false }), gone: ["Web searches take"], pure: true },
+    webSearch: {
+      options: without({ webSearch: false }),
+      gone: ["Web searches take", "link the source next to each study or figure you cite"],
+      pure: true,
+    },
+    artifacts: {
+      options: without({ artifacts: false }),
+      gone: ["Answer in chat by default", "documents, Sites, and visuals"],
+      pure: false,
+    },
     learning: { options: without({ knowledge: false }), gone: ["learning"], pure: true },
     privacyFacts: {
       options: without({ privacyFacts: false }),
@@ -184,10 +189,13 @@ describe("an absent feature only omits its own text", () => {
       gone: ["## Tool discovery"],
       pure: true,
     },
-    sandbox: {
-      options: without({}, { activeSandboxBackend: "none" }),
+    build: {
+      options: without(
+        { artifacts: false, workspaceAdmin: false },
+        { activeSandboxBackend: "none" },
+      ),
       gone: ["Decide the design before building it."],
-      pure: true,
+      pure: false,
     },
     skillIndex: {
       options: without({}, { skillCatalog: [] }),
@@ -219,6 +227,8 @@ describe("an absent feature only omits its own text", () => {
         "Web searches take",
         "Decide the design before building it.",
         "share one workspace",
+        "link the source next to each study or figure you cite",
+        "Answer in chat by default",
       ],
       pure: false,
     },

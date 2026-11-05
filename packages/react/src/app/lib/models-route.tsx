@@ -4,6 +4,7 @@
    Back, reload and shared links land on the same page:
      ?section=models                                     accounts, workspaces, settings
      ?section=models&account=org:codex:<id>              an organization account's page
+     ?section=models&account=org:compatible:<id>         one of its OpenAI-compatible endpoints
      ?section=models&view=connect                        Connect account
      ?section=models&view=connect-org:codex              one provider's step
      ?section=models&workspace=<id>                      one workspace's model page
@@ -26,7 +27,8 @@ export type ModelsProvider =
   | "openai"
   | "azure_openai"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "openai_compatible";
 
 export type ModelsView =
   | "connect"
@@ -50,9 +52,14 @@ const PROVIDERS: readonly ModelsProvider[] = [
 
 /**
  * Connected for the organization only: a workspace's own OpenAI or Azure key is
- * a direct connection with its own section.
+ * a direct connection with its own section. An OpenAI-compatible endpoint is
+ * always the organization's; it can connect several.
  */
-const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = ["openai", "azure_openai"];
+const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = [
+  "openai",
+  "azure_openai",
+  "openai_compatible",
+];
 
 const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect",
@@ -72,7 +79,7 @@ export function parseModelsView(value: unknown): ModelsView | undefined {
 }
 
 const ACCOUNT_KEY =
-  /^((org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))|org:gateway:(openai|azure_openai))$/;
+  /^((org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))|org:gateway:(openai|azure_openai)|org:compatible:[0-9a-f-]{36})$/;
 
 export function parseModelsAccount(value: unknown): string | undefined {
   return typeof value === "string" && ACCOUNT_KEY.test(value) ? value : undefined;
@@ -94,6 +101,8 @@ export type WorkspaceGatewayId = Exclude<GatewayId, "openai" | "azure_openai">;
 export type AccountKey = (
   | { provider: "codex" | "supergrok" | "claude"; id: string }
   | { provider: "gateway"; id: GatewayId }
+  /** An organization's OpenAI-compatible endpoint, by its connection id. */
+  | { provider: "compatible"; id: string }
 ) & {
   /** An organization account ("Everyone in <organization>"), not this workspace's own. */
   organization: boolean;
@@ -105,6 +114,9 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
   const rest = organization ? value.slice("org:".length) : value;
   const [provider, id] = rest.split(":", 2) as [string, string];
   if ((provider === "codex" || provider === "supergrok" || provider === "claude") && id) {
+    return { provider, id, organization };
+  }
+  if (provider === "compatible" && organization && /^[0-9a-f-]{36}$/.test(id ?? "")) {
     return { provider, id, organization };
   }
   if (
@@ -123,7 +135,7 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
 
 /** The account key for a row: `codex:<id>`, or `org:codex:<id>` for an organization account. */
 export function accountKey(
-  provider: "codex" | "supergrok" | "claude" | "gateway",
+  provider: "codex" | "supergrok" | "claude" | "gateway" | "compatible",
   id: string,
   organization = false,
 ): string {

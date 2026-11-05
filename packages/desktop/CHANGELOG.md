@@ -1,5 +1,30 @@
 # @opengeni/desktop
 
+## 6.10.0
+
+### Patch Changes
+
+- c19768e: Not now on the desktop app's meeting card now ends the question for the whole call. An app that drops the microphone for a while, for example when muted or switching devices, is no longer asked about again. Inside a calendar meeting the question doesn't come back until the meeting ends. Outside one, it comes back only after the app has been off the microphone for five minutes. Not now on a call that started shortly before a calendar meeting also covers that meeting, so its "Join and start recording" reminder no longer appears for a meeting the person is already in. The card no longer holds itself up after Not now. Chromium replays the pointer onto a window shown again, which made the next card never time out. The pointer's position now comes from the main process, so a card holds only once the pointer moves onto it. Escape closes the question like Not now does, and a card window closed from outside counts as Not now. `MeetingPromptCard` takes an optional `pointerMs`.
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+- 15763a2: Stop recording on the desktop meeting card now stops the recording in the account where it started, even while the window shows another account. Before, the stop could go to the account on screen, which ignored it, and the meeting kept recording. If a recording hasn't stopped a few seconds after Stop, the app shows its account, asks it again and logs this. Meeting detection, system audio and dictation now forget a page only when it really leaves its document (a committed navigation, an error page or a lost renderer), not when a navigation starts and is cancelled, such as a link opened in the browser. With several accounts, the stop card names the account that records and the account menu marks it.
+
+  API: `MeetingDetection` and `createMeetingDetection` take optional `revealPage`, `describePage`, `recordingChanged` and `stopConfirmMs`. `MeetingDetection` adds `isRecording()`. The stop prompt has an optional `where`, `MeetingWords` an optional `callEndedIn` and `DesktopAccount` an optional `recording`. Code that declares a `Required<MeetingWords>` object must now include `callEndedIn`.
+
+- f2b5205: Picking the wrong account no longer forces a sign-in. In the phone app, picking a signed-out account opens its sign-in over the account in use, so Cancel goes back. The account menus mark signed-out accounts. When the account in use is signed out, the sign-in screen lists the other accounts, so one tap returns to a signed-in one. In the desktop app, Cancel on the sign-in page returns to the account you came from, not the first signed-in one.
+- Updated dependencies [b72f388]
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [fb37d99]
+- Updated dependencies [f619179]
+- Updated dependencies [6900fce]
+- Updated dependencies [15763a2]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/agent-host@6.10.0
+  - @opengeni/sdk@6.10.0
+
 ## 6.9.0
 
 ### Minor Changes

@@ -243,10 +243,26 @@ export class OpenGeniRecordingsClient {
   async listRecordingTranscriptVersions(
     workspaceId: string,
     recordingId: string,
+    options: {
+      /**
+       * Hold the answer until this version (or, without `waitFor`, the newest)
+       * is complete or failed, for at most this many seconds (at most 25).
+       */
+      waitSeconds?: number | undefined;
+      /** The version to wait for. */
+      waitFor?: string | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<RecordingTranscriptVersion[]> {
+    const query: Record<string, string> = {};
+    if (options.waitSeconds !== undefined) query.waitSeconds = String(options.waitSeconds);
+    if (options.waitFor !== undefined) query.waitFor = options.waitFor;
     const response = await this.client.requestJson<ListRecordingTranscriptVersionsResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/transcripts`,
+      undefined,
+      query,
+      options.signal ? { signal: options.signal } : {},
     );
     return response.versions;
   }

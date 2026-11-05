@@ -375,7 +375,7 @@ export const SlackAgent = /* @__PURE__ */ defineSchema(() =>
     instructions: z.string().nullable(),
     /** The agent's Memory: a Knowledge collection in its workspace. */
     knowledgeCollectionId: z.string().uuid().nullable(),
-    /** Anyone in Slack can use it, not only members of its workspace. */
+    /** Linked members of the organization can use it in Slack, not only members of its workspace. */
     open: z.boolean(),
     version: z.number().int().positive(),
     /** Null for readers who cannot read the agent's workspace. */
@@ -425,7 +425,8 @@ export const UpdateSlackAgentRequest = /* @__PURE__ */ defineSchema(() =>
       avatar: SessionAvatar.optional(),
       instructions: SlackAgentInstructions.optional(),
       /**
-       * Anyone in Slack can use the agent. Only an organization admin can turn
+       * Linked members of the organization can use the agent in Slack, even
+       * without access to its workspace. Only an organization admin can turn
        * it on; an admin of the agent's workspace can turn it off.
        */
       open: z.boolean().optional(),
@@ -434,8 +435,8 @@ export const UpdateSlackAgentRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSlackAgentRequest = z.input<typeof UpdateSlackAgentRequest>;
 
-/** The label of the switch that opens an agent to anyone in Slack. */
-export const SLACK_AGENT_OPEN_LABEL = "Anyone in Slack can use this agent";
+/** The label of the switch that opens an agent to the organization's people in Slack. */
+export const SLACK_AGENT_OPEN_LABEL = "Organization members can use this agent in Slack";
 
 /** What turning an agent open means, shown with the switch. */
 export function slackAgentOpenDisclosure(agentName: string, workspaceName: string): string {
@@ -443,8 +444,15 @@ export function slackAgentOpenDisclosure(agentName: string, workspaceName: strin
   const workspace = workspaceName.trim()
     ? `the ${workspaceName.trim()} workspace`
     : "its workspace";
-  return `Anyone in Slack can ask ${agent}. Its answers can use anything it can read in ${workspace} (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.`;
+  return `People in your organization can ask ${agent} after linking their Slack account, even without access to ${workspace}. Its answers can use anything it can read there (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.`;
 }
+
+/**
+ * Shown with the switch of an agent that is open now: open use used to take
+ * anyone in the Slack workspace.
+ */
+export const SLACK_AGENT_OPEN_NARROWED_NOTICE =
+  "Changed: only linked organization members can use it now.";
 
 export const SlackAgentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ agent: SlackAgent }),

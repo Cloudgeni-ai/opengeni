@@ -465,7 +465,7 @@ function fakeSlack(
           is_restricted: guest,
           is_ultra_restricted: false,
           ...(SLACK_TEST_DISPLAY_NAMES.has(userId)
-            ? { profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
+            ? { name: "sam.lee", profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
             : {}),
         },
       });
@@ -3189,6 +3189,159 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         cancelSlackUserId,
       ),
     ).toBeNull();
+  });
+
+  test("an organization member links a Slack account without workspace access only after confirming which one", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const memberId = `slack-org-member-${crypto.randomUUID()}`;
+    const outsiderId = `slack-org-outsider-${crypto.randomUUID()}`;
+    for (const userId of [memberId, outsiderId]) {
+      await shared!.admin`
+        insert into auth_users (id, name, email, email_verified)
+        values (${userId}, 'Slack linker', ${`${userId}@example.test`}, true)`;
+      await shared!.admin`
+        insert into auth_identities (id, user_id, provider_id, account_id)
+        values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+      const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      await shared!.admin`
+        insert into auth_sessions (
+          id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+        ) values (
+          ${`session-${userId}`}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+          ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+        )`;
+    }
+    await activeOrganizationMember(value.owner.accountId, `user:${memberId}`);
+    Reflect.set(value.deps, "managedAuth", {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const userId = headers.get("x-test-managed-user");
+          return {
+            headers: new Headers(),
+            response: userId
+              ? {
+                  session: {
+                    id: `session-${userId}`,
+                    userId,
+                    expiresAt: new Date(Date.now() + 60_000),
+                  },
+                  user: { id: userId, email: `${userId}@example.test`, name: "Slack linker" },
+                }
+              : null,
+          };
+        },
+      },
+    });
+    const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
+    const as = (userId: string) => ({
+      "content-type": "application/json",
+      "x-test-managed-user": userId,
+    });
+    const prepare = async (userId: string, slackUserId: string) => {
+      const response = await value.app.request(basePath, {
+        method: "POST",
+        headers: as(userId),
+        body: JSON.stringify({
+          linkToken: createSlackUserLinkToken(signingMaterial, {
+            workspaceId: value.owner.workspaceId,
+            connectionId: value.connectionId,
+            slackTeamId: value.teamId,
+            slackUserId,
+          }),
+        }),
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as {
+        id: string;
+        status: string;
+        version: number;
+        organizationMemberLink?: { slackAccountLabel: string | null } | null;
+      };
+    };
+    const link = (userId: string, requestId: string, expectedVersion: number) =>
+      value.app.request(`${basePath}/${requestId}/link`, {
+        method: "POST",
+        headers: as(userId),
+        body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
+      });
+
+    // Opening the link links nothing; it offers the link, naming the account.
+    const prepared = await prepare(memberId, "U0SAM");
+    expect(prepared).toMatchObject({
+      status: "prepared",
+      version: 1,
+      organizationMemberLink: {
+        slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
+      },
+    });
+    expect(
+      await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
+    ).toBeNull();
+    const polled = await value.app.request(`${basePath}/${prepared.id}`, {
+      headers: as(memberId),
+    });
+    expect(await polled.json()).toMatchObject({
+      status: "prepared",
+      organizationMemberLink: {
+        slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
+      },
+    });
+
+    // A stale confirmation changes nothing.
+    expect((await link(memberId, prepared.id, 2)).status).toBe(409);
+    const linked = await link(memberId, prepared.id, 1);
+    expect(linked.status).toBe(200);
+    expect(await linked.json()).toMatchObject({ status: "completed", version: 2 });
+    expect(
+      await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
+    ).toMatchObject({ subjectId: `user:${memberId}` });
+    // It grants no workspace access.
+    expect(
+      await getWorkspaceGrant(client.db, `user:${memberId}`, value.owner.workspaceId),
+    ).toBeNull();
+    // A retry reports the same link.
+    expect(await (await link(memberId, prepared.id, 1)).json()).toMatchObject({
+      status: "completed",
+      version: 2,
+    });
+
+    // A cancelled request asks for a fresh link rather than refusing the member.
+    const cancelledSlackUserId = `U_CANCELLED_${crypto.randomUUID()}`;
+    const toCancel = await prepare(memberId, cancelledSlackUserId);
+    const cancelled = await value.app.request(`${basePath}/${toCancel.id}/cancel`, {
+      method: "POST",
+      headers: as(memberId),
+      body: JSON.stringify({ expectedVersion: 1, idempotencyKey: crypto.randomUUID() }),
+    });
+    expect(cancelled.status).toBe(200);
+    const afterCancel = await link(memberId, toCancel.id, 2);
+    expect(afterCancel.status).toBe(400);
+    expect(await afterCancel.text()).toContain("Request a fresh link from Slack");
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        cancelledSlackUserId,
+      ),
+    ).toBeNull();
+
+    // Someone outside the organization is not offered it and can't force it.
+    const outsiderSlackUserId = `U_OUTSIDER_${crypto.randomUUID()}`;
+    const outsider = await prepare(outsiderId, outsiderSlackUserId);
+    expect(outsider).toMatchObject({ status: "prepared", organizationMemberLink: null });
+    expect((await link(outsiderId, outsider.id, 1)).status).toBe(403);
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        outsiderSlackUserId,
+      ),
+    ).toBeNull();
+    // Nor can anyone confirm another person's request.
+    expect((await link(memberId, outsider.id, 1)).status).toBe(400);
   });
 
   test("reaction ingress filters disabled, legacy-scope, wrong-emoji, and disallowed-channel events before content fetch", async () => {
@@ -12162,6 +12315,40 @@ describe("Slack agents", () => {
     expect(session!.initial_message).not.toContain("churn");
   }, 90_000);
 
+  test("handing off again for someone who can't use the agent still refuses, telling them once", async () => {
+    if (!available) return;
+    const { value } = await agentFixture({ linkOther: true });
+    await mention(
+      value,
+      "C_DENIED_TWICE",
+      "1765000009.000100",
+      "+ops-desk how did revenue do? Ask Analytics.",
+      undefined,
+      value.otherSlackUserId,
+    );
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const [turn] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    const grant = { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant;
+    const handOff = () =>
+      handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      });
+    expect(await handOff()).toMatchObject({ status: "refused" });
+    // A later attempt mints a different link; the person was already told.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(await handOff()).toMatchObject({ status: "refused" });
+    const refusals = value.slack.posts.filter(
+      (post) =>
+        post.channel === `D_${value.otherSlackUserId}` &&
+        post.text.includes("which you don't have access to"),
+    );
+    expect(refusals).toHaveLength(1);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
   test("a chat whose thread was moved to another agent cannot hand it off", async () => {
     if (!available) return;
     const { value, create } = await agentFixture();
@@ -13052,11 +13239,15 @@ describe("Open Slack agents", () => {
   const STRANGER = "U_STRANGER";
   const GUEST = "U_GUEST";
   const EXTERNAL = "U_EXTERNAL";
+  const MEMBER = "U_ORG_MEMBER";
+  const SUSPENDED = "U_ORG_SUSPENDED";
 
   /**
    * An install whose "Front Desk" agent works in Analytics. The owner is a
    * member of Analytics; the other linked person is a member of the home
-   * workspace only; STRANGER never linked.
+   * workspace only, not of the organization; MEMBER is linked to an active
+   * organization member with no access to either workspace; SUSPENDED is
+   * linked to a suspended one; STRANGER never linked.
    */
   async function openFixture(options: { open?: boolean } = {}) {
     const value = await fixture({
@@ -13064,11 +13255,19 @@ describe("Open Slack agents", () => {
       routedWorkspaceName: "Analytics",
       linkOther: true,
       mpimChannels: ["G_MPIM_OPEN"],
+      sharedChannels: ["C_SHARED_OPEN"],
       guestSlackUserIds: [GUEST],
       externalSlackUserIds: [EXTERNAL],
       grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
     });
     const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const memberSubjectId = `user:org-member-${crypto.randomUUID()}`;
+    await activeOrganizationMember(value.owner.accountId, memberSubjectId);
+    await linkSlackUser(value, MEMBER, memberSubjectId);
+    const suspendedSubjectId = `user:org-suspended-${crypto.randomUUID()}`;
+    await activeOrganizationMember(value.owner.accountId, suspendedSubjectId);
+    await setOrganizationMembershipStatus(value.owner.accountId, suspendedSubjectId, "suspended");
+    await linkSlackUser(value, SUSPENDED, suspendedSubjectId);
     const created = await insertSlackAgent(client.db, home, {
       connectionId: value.connectionId,
       slackTeamId: value.teamId,
@@ -13093,7 +13292,33 @@ describe("Open Slack agents", () => {
       agent = updated;
     };
     if (options.open !== false) await setOpen(true);
-    return { value, home, agent: () => agent, setOpen };
+    return { value, home, agent: () => agent, setOpen, memberSubjectId };
+  }
+
+  async function linkSlackUser(
+    value: Awaited<ReturnType<typeof fixture>>,
+    slackUserId: string,
+    subjectId: string,
+  ) {
+    await saveSlackBotUserLink(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackUserId,
+      subjectId,
+      linkedBySubjectId: subjectId,
+    });
+  }
+
+  async function setOrganizationMembershipStatus(
+    accountId: string,
+    subjectId: string,
+    status: "active" | "suspended",
+  ) {
+    await shared!.admin`
+      update organization_memberships set status = ${status}
+      where account_id = ${accountId} and subject_id = ${subjectId}`;
   }
 
   async function ask(
@@ -13171,12 +13396,12 @@ describe("Open Slack agents", () => {
   const dmTexts = (value: Awaited<ReturnType<typeof fixture>>, user: string) =>
     value.slack.posts.filter((post) => post.channel === `D_${user}`).map((post) => post.text);
 
-  test("someone outside the workspace gets a chat that runs as the agent, never as a person", async () => {
+  test("an organization member outside the workspace gets a chat that runs as the agent, never as a person", async () => {
     if (!available) return;
-    const { value, agent } = await openFixture();
+    const { value, agent, memberSubjectId } = await openFixture();
     const analytics = value.routed!.workspaceId;
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN",
       ts: "1766000000.000100",
       text: "+front-desk what is the refund policy?",
@@ -13187,7 +13412,7 @@ describe("Open Slack agents", () => {
     expect(chat).toMatchObject({
       owning_subject_id: service,
       visibility: "workspace",
-      initiating_slack_user_id: STRANGER,
+      initiating_slack_user_id: MEMBER,
     });
     const session = await sessionRow(chat!.session_id!);
     expect(session).toMatchObject({
@@ -13205,7 +13430,7 @@ describe("Open Slack agents", () => {
     expect(session.created_by_context).toMatchObject({
       slackAgentId: agent().id,
       slackTeamId: value.teamId,
-      slackUserId: STRANGER,
+      slackUserId: MEMBER,
       slackChannelId: "C_OPEN",
     });
     // Read-only tools and permissions: no secrets, writes, schedules, Slack
@@ -13222,7 +13447,7 @@ describe("Open Slack agents", () => {
       expect(permission).not.toMatch(/:(write|manage|admin|publish)$/u);
     }
     expect(session.instructions).toContain("You are Front Desk");
-    expect(session.instructions).toContain("never anyone's personal accounts");
+    expect(session.instructions).toContain("never personal accounts");
 
     const [turn] = await turns(chat!.session_id!);
     expect(turn).toMatchObject({
@@ -13230,7 +13455,11 @@ describe("Open Slack agents", () => {
       initiator_subject_id: service,
       personal_connection_delegations: [],
     });
-    expect(turn!.initiator_context).toMatchObject({ slackUserId: STRANGER });
+    // The linked person is on the record as context, never as the actor.
+    expect(turn!.initiator_context).toMatchObject({
+      slackUserId: MEMBER,
+      opengeniSubjectId: memberSubjectId,
+    });
 
     // The first message: no link (only members can open the chat), no button,
     // and the one-time notice.
@@ -13246,7 +13475,7 @@ describe("Open Slack agents", () => {
 
     // The notice is shown once per person and agent.
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN",
       ts: "1766000000.000300",
       text: "+front-desk and shipping?",
@@ -13256,23 +13485,113 @@ describe("Open Slack agents", () => {
     expect(starts[1]!.text).not.toContain("visible to members");
   }, 90_000);
 
-  test("a non-member cannot open the chat; nobody can sign in as the agent", async () => {
+  test("Opengeni must know the person: unlinked people, non-members and suspended members are refused on every message", async () => {
     if (!available) return;
-    const { value, agent } = await openFixture();
+    const { value, agent, memberSubjectId } = await openFixture();
     const analytics = value.routed!.workspaceId;
-    // The linked person is a member of the home workspace only.
+    // Never linked: one private reply with the link, nothing starts.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000100",
+      text: "+front-desk hello",
+    });
+    // Linked, and a member of the home workspace, but not of the organization.
     await ask(value, {
       user: value.otherSlackUserId,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000200",
+      text: "+front-desk hello",
+    });
+    // Linked to a suspended organization member.
+    await ask(value, {
+      user: SUSPENDED,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000300",
+      text: "+front-desk hello",
+    });
+    expect(await chats(analytics)).toHaveLength(0);
+    const [linkPrompt, ...moreStranger] = dmTexts(value, STRANGER);
+    expect(moreStranger).toHaveLength(0);
+    expect(linkPrompt).toStartWith("To ask Front Desk, link your Slack account to Opengeni: ");
+    expect(linkPrompt).toContain("https://app.example.test/");
+    expect(linkPrompt).toEndWith(". No chat was started.");
+    const membersOnly =
+      "Front Desk only answers members of this Opengeni organization. No chat was started.";
+    expect(dmTexts(value, value.otherSlackUserId)).toEqual([membersOnly]);
+    expect(dmTexts(value, SUSPENDED)).toEqual([membersOnly]);
+    // Nothing about the agent's workspace leaks to them.
+    for (const text of [linkPrompt!, membersOnly]) expect(text).not.toContain("Analytics");
+
+    // An active member can ask...
+    await ask(value, {
+      user: MEMBER,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000400",
+      text: "+front-desk hello",
+    });
+    const [chat] = await chats(analytics);
+    expect(chat!.owning_subject_id).toBe(openSlackAgentSubjectId(agent().id));
+    expect(await turns(chat!.session_id!)).toHaveLength(1);
+    // ...and nobody else continues their open chat without being known.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000500",
+      text: "and me?",
+      threadTs: "1766000001.000400",
+    });
+    await ask(value, {
+      user: value.otherSlackUserId,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000600",
+      text: "and me?",
+      threadTs: "1766000001.000400",
+    });
+    expect(await turns(chat!.session_id!)).toHaveLength(1);
+    expect(dmTexts(value, STRANGER).at(-1)).toStartWith("To ask Front Desk, link your Slack");
+    expect(dmTexts(value, value.otherSlackUserId).at(-1)).toBe(membersOnly);
+
+    // Checked on every message: once suspended, the member's next reply is refused.
+    await setOrganizationMembershipStatus(value.owner.accountId, memberSubjectId, "suspended");
+    await ask(value, {
+      user: MEMBER,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000700",
+      text: "one more thing",
+      threadTs: "1766000001.000400",
+    });
+    expect(await turns(chat!.session_id!)).toHaveLength(1);
+    expect(dmTexts(value, MEMBER).at(-1)).toBe(membersOnly);
+    // Reactivated, they can continue.
+    await setOrganizationMembershipStatus(value.owner.accountId, memberSubjectId, "active");
+    await ask(value, {
+      user: MEMBER,
+      channel: "C_OPEN_WHO",
+      ts: "1766000001.000800",
+      text: "one more thing",
+      threadTs: "1766000001.000400",
+    });
+    expect(await turns(chat!.session_id!)).toHaveLength(2);
+  }, 90_000);
+
+  test("asking gives an organization member no workspace access; nobody can sign in as the agent", async () => {
+    if (!available) return;
+    const { value, agent, memberSubjectId } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    // The linked organization member has no access to Analytics.
+    await ask(value, {
+      user: MEMBER,
       channel: "C_OPEN_LINKED",
       ts: "1766000001.000100",
       text: "+front-desk hello",
     });
     const [chat] = await chats(analytics);
     expect(chat!.owning_subject_id).toBe(openSlackAgentSubjectId(agent().id));
-    expect(await getWorkspaceGrant(client.db, value.otherSubjectId, analytics)).toBeNull();
+    expect(await getWorkspaceGrant(client.db, memberSubjectId, analytics)).toBeNull();
     expect(
       await resolveSlackTargetAuthority(client.db, {
-        subjectId: value.otherSubjectId,
+        subjectId: memberSubjectId,
         targetAccountId: value.owner.accountId,
         targetWorkspaceId: analytics,
       }),
@@ -13334,7 +13653,7 @@ describe("Open Slack agents", () => {
     });
 
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN_MAIL",
       ts: "1766000002.000100",
       text: "+front-desk summarize the inbox",
@@ -13364,9 +13683,10 @@ describe("Open Slack agents", () => {
     // personal connection is ever its own.
     const grant = openSlackAgentGrant(agent(), {
       slackTeamId: value.teamId,
-      slackUserId: STRANGER,
+      slackUserId: MEMBER,
       slackChannelId: "C_OPEN_MAIL",
       providerEventId: "E_PROBE",
+      opengeniSubjectId: value.owner.subjectId,
     });
     expect(personalConnectionDelegationSourceForGrant(grant)).toEqual({ kind: "none" });
     const own = await listOwnConnectionAccountsForGrant(client.db, grant);
@@ -13378,6 +13698,13 @@ describe("Open Slack agents", () => {
     if (!available) return;
     const { value } = await openFixture();
     const analytics = value.routed!.workspaceId;
+    // Being a linked, active organization member doesn't make a Slack guest
+    // or an external person eligible: Slack's facts are checked first.
+    for (const slackUserId of [GUEST, EXTERNAL]) {
+      const subjectId = `user:org-member-${crypto.randomUUID()}`;
+      await activeOrganizationMember(value.owner.accountId, subjectId);
+      await linkSlackUser(value, slackUserId, subjectId);
+    }
     await ask(value, {
       user: GUEST,
       channel: "C_OPEN_GUEST",
@@ -13391,9 +13718,16 @@ describe("Open Slack agents", () => {
       text: "+front-desk hi",
     });
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "G_MPIM_OPEN",
       ts: "1766000003.000300",
+      text: "+front-desk hi",
+    });
+    // So is a channel shared with another organization (Slack Connect).
+    await ask(value, {
+      user: MEMBER,
+      channel: "C_SHARED_OPEN",
+      ts: "1766000003.000400",
       text: "+front-desk hi",
     });
     expect(await chats(analytics)).toHaveLength(0);
@@ -13403,8 +13737,10 @@ describe("Open Slack agents", () => {
     expect(dmTexts(value, EXTERNAL)).toEqual([refusal]);
     // A group DM is shared under the workspace's shared-conversation policy,
     // which refuses first; an open agent never relaxes it.
-    expect(dmTexts(value, STRANGER)).toHaveLength(1);
-    expect(dmTexts(value, STRANGER)[0]).toContain("No conversation content was read");
+    expect(dmTexts(value, MEMBER)).toHaveLength(2);
+    for (const text of dmTexts(value, MEMBER)) {
+      expect(text).toContain("No conversation content was read");
+    }
   }, 90_000);
 
   test("a member's chat stays theirs, and a closed agent's open chat stops", async () => {
@@ -13431,7 +13767,8 @@ describe("Open Slack agents", () => {
     expect(memberStart!.text).toContain("https://app.example.test/");
     expect(memberStart!.text).not.toContain("visible to members");
 
-    // Someone outside the workspace can't continue or take over it.
+    // Someone outside the workspace can't continue or take over it, even an
+    // organization member.
     await ask(value, {
       user: STRANGER,
       channel: "C_OPEN_MEMBER",
@@ -13446,16 +13783,24 @@ describe("Open Slack agents", () => {
       text: "+front-desk what did it find?",
       threadTs: "1766000004.000100",
     });
+    await ask(value, {
+      user: MEMBER,
+      channel: "C_OPEN_MEMBER",
+      ts: "1766000004.000400",
+      text: "+front-desk what did it find?",
+      threadTs: "1766000004.000100",
+    });
     expect(await turns(memberChat!.session_id!)).toHaveLength(1);
     expect(await chats(analytics)).toHaveLength(1);
     const membersOnly =
       "Only members of the Analytics workspace can continue this chat. Ask Front Desk in a new message instead.";
     expect(dmTexts(value, STRANGER)).toEqual([membersOnly]);
     expect(dmTexts(value, value.otherSlackUserId)).toEqual([membersOnly]);
+    expect(dmTexts(value, MEMBER)).toEqual([membersOnly]);
 
     // An open chat ends when the agent is closed.
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN_CLOSE",
       ts: "1766000005.000100",
       text: "+front-desk hello",
@@ -13488,15 +13833,15 @@ describe("Open Slack agents", () => {
     );
     await setOpen(false);
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN_CLOSE",
       ts: "1766000005.000200",
       text: "still there?",
       threadTs: "1766000005.000100",
     });
     expect(await turns(openChat!.session_id!)).toHaveLength(1);
-    expect(dmTexts(value, STRANGER).at(-1)).toBe(
-      "Front Desk no longer answers everyone in Slack, so this chat can't continue. Start a new message to ask again.",
+    expect(dmTexts(value, MEMBER).at(-1)).toBe(
+      "Front Desk no longer answers people outside its workspace, so this chat can't continue. Start a new message to ask again.",
     );
     // And closed, it answers only members again.
     await ask(value, {
@@ -13526,7 +13871,7 @@ describe("Open Slack agents", () => {
     });
     expect(other).not.toBe("name_taken");
     await ask(value, {
-      user: STRANGER,
+      user: MEMBER,
       channel: "C_OPEN_HANDOFF",
       ts: "1766000006.000100",
       text: "+front-desk the site is down",
@@ -13558,5 +13903,89 @@ describe("Open Slack agents", () => {
     expect(dmTexts(value, STRANGER)[0]).toStartWith(
       "Link your Slack identity to Opengeni before starting work:",
     );
+  }, 90_000);
+
+  test("suggesting or handing off to an open agent needs a linked organization member too", async () => {
+    if (!available) return;
+    const { value, home, agent } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    const ops = await insertSlackAgent(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      name: "Ops Desk",
+      nameKey: slackAgentNameKey("Ops Desk"),
+      description: "Handles incidents.",
+      avatar: { kind: "emoji", emoji: "📟", hue: 10 },
+      instructions: "",
+      createdBySubjectId: value.owner.subjectId,
+    });
+    expect(ops).not.toBe("name_taken");
+    // The other person is a member of the home workspace, not of the organization.
+    await ask(value, {
+      user: value.otherSlackUserId,
+      channel: "C_OPEN_PASS",
+      ts: "1766000008.000100",
+      text: "+ops-desk what is the refund policy? Ask Front Desk.",
+    });
+    const [opsChat] = await chats(value.owner.workspaceId);
+    expect(opsChat!.owning_subject_id).toBe(value.otherSubjectId);
+    const [turnRow] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    expect(turnRow).toBeDefined();
+    const otherGrant = await getWorkspaceGrant(
+      client.db,
+      value.otherSubjectId,
+      value.owner.workspaceId,
+    );
+    const grant = { ...otherGrant!, metadata: { turnId: turnRow!.id } } as unknown as AccessGrant;
+
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Front Desk",
+      }),
+    ).toMatchObject({ status: "refused" });
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Front Desk",
+      }),
+    ).toMatchObject({ status: "refused" });
+    await drainAll(value.deps);
+    expect(await chats(analytics)).toHaveLength(0);
+    expect(dmTexts(value, value.otherSlackUserId).at(-1)).toBe(
+      "Front Desk only answers members of this Opengeni organization. No chat was started.",
+    );
+
+    // Once they are an active member of the organization, both work, and the
+    // passed-on chat runs as the agent.
+    await activeOrganizationMember(value.owner.accountId, value.otherSubjectId);
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Front Desk",
+      }),
+    ).toMatchObject({ status: "suggested", agent: "Front Desk" });
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Front Desk",
+      }),
+    ).toMatchObject({ status: "passed_on", agent: "Front Desk" });
+    await drainAll(value.deps);
+    const [openChat] = await chats(analytics);
+    expect(openChat!.owning_subject_id).toBe(openSlackAgentSubjectId(agent().id));
+    const [openTurn] = await turns(openChat!.session_id!);
+    expect(openTurn!.initiator_context).toMatchObject({
+      slackUserId: value.otherSlackUserId,
+      opengeniSubjectId: value.otherSubjectId,
+    });
+    expect(openTurn!.personal_connection_delegations).toEqual([]);
   }, 90_000);
 });
