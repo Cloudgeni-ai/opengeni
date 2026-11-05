@@ -128,7 +128,7 @@ const rootRoute = createRootRoute({
           onCreateWorkspace={async () => null}
           onDeleteWorkspace={async () => {}}
         >
-          <main data-canvas className="min-h-dvh bg-canvas px-6 py-8 text-fg">
+          <main data-canvas className="h-dvh overflow-y-auto bg-canvas px-6 py-8 text-fg">
             <div className="mx-auto max-w-[960px]">
               <p className="mb-4 text-xs text-fg-muted">
                 Implementation preview · Sample data · No payments
