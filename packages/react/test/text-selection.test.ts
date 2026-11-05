@@ -91,4 +91,13 @@ describe("text selection", () => {
       ]);
     }
   });
+
+  test("no component overrides the selection colour with a utility", async () => {
+    const offenders: string[] = [];
+    for await (const file of new Bun.Glob("**/*.{ts,tsx}").scan(`${import.meta.dir}/../src`)) {
+      const source = await Bun.file(`${import.meta.dir}/../src/${file}`).text();
+      if (/(?<![\w-])selection:(?:bg|text)-/.test(source)) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
 });

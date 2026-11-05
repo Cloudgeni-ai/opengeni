@@ -6648,36 +6648,6 @@
       color: var(--og-color-fg-subtle);
     }
   }
-:where(.og-root).selection\:bg-brand\/25,:where(.og-root) .selection\:bg-brand\/25 {
-    & *::selection {
-      background-color: var(--color-brand);
-      @supports (color: color-mix(in lab, red, red)) {
-        background-color: color-mix(in oklab, var(--color-brand) 25%, transparent);
-      }
-    }
-    &::selection {
-      background-color: var(--color-brand);
-      @supports (color: color-mix(in lab, red, red)) {
-        background-color: color-mix(in oklab, var(--color-brand) 25%, transparent);
-      }
-    }
-  }
-:where(.og-root).selection\:bg-primary,:where(.og-root) .selection\:bg-primary {
-    & *::selection {
-      background-color: var(--color-primary);
-    }
-    &::selection {
-      background-color: var(--color-primary);
-    }
-  }
-:where(.og-root).selection\:text-primary-foreground,:where(.og-root) .selection\:text-primary-foreground {
-    & *::selection {
-      color: var(--color-primary-foreground);
-    }
-    &::selection {
-      color: var(--color-primary-foreground);
-    }
-  }
 :where(.og-root).file\:inline-flex,:where(.og-root) .file\:inline-flex {
     &::file-selector-button {
       display: inline-flex;
