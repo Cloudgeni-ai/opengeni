@@ -47,6 +47,7 @@ export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.React
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
   return (
     <ClaudeUsageReadout
+      plan={account.plan}
       state={{
         value: account.usage ?? null,
         loading: false,
@@ -96,7 +97,7 @@ export function ClaudeAccountUsageReadout({
   });
   if (account.status !== "active") return null;
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
-  return <ClaudeUsageReadout state={usage} />;
+  return <ClaudeUsageReadout state={usage} plan={account.plan} />;
 }
 export function ClaudeRow({
   claude,
@@ -219,7 +220,7 @@ function AccountUsage({
     onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
-  return <ClaudeUsage state={usage} onReconnect={onReconnect} />;
+  return <ClaudeUsage state={usage} plan={account.plan} onReconnect={onReconnect} />;
 }
 export function ClaudeAccountPage({
   claude,

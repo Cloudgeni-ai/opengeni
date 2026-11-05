@@ -10,6 +10,7 @@ import { isCodexProductModel } from "../../lib/session-model";
 import {
   subscriptionLimit,
   subscriptionPlanLabel,
+  subscriptionPlanWindows,
   subscriptionWindows,
   type SubscriptionLimit,
   type SubscriptionWindow,
@@ -164,14 +165,20 @@ export type SubscriptionAccountUsageView = {
   note: string | null;
 };
 
-/** The reading as the provider reported it: every window, labelled, never completed. */
+/**
+ * The reading as the provider reported it: every window the plan has,
+ * labelled, never completed. A window the plan doesn't have (Ultra's 5h) is
+ * not shown, but a refusal on it still reads as a limit in words.
+ */
 export function subscriptionAccountUsage(
   provider: string,
   usage: SubscriptionAccountUsage | null | undefined,
   now = Date.now(),
+  plan?: string | null,
 ): SubscriptionAccountUsageView {
-  const windows = subscriptionWindows(provider, usage?.windows ?? [], now);
-  const limit = subscriptionLimit(windows, usage?.exhaustedUntil ?? null, now);
+  const reported = subscriptionWindows(provider, usage?.windows ?? [], now);
+  const windows = subscriptionPlanWindows(provider, plan, reported);
+  const limit = subscriptionLimit(reported, usage?.exhaustedUntil ?? null, now);
   const until = time(limit.until);
   const observed = time(usage?.observedAt ?? null);
   return {
@@ -255,7 +262,9 @@ export function subscriptionAccountMenuContent(
         : current
           ? "Current account"
           : "Account selection";
-  const currentUsage = current ? subscriptionAccountUsage(provider, current.usage, now) : null;
+  const currentUsage = current
+    ? subscriptionAccountUsage(provider, current.usage, now, current.plan)
+    : null;
   const limitTone = currentUsage?.limit.reached || currentUsage?.limit.near;
   const tone: "ok" | "warn" | "bad" =
     current?.status === "needs_relogin" || current?.status === "error"
@@ -292,7 +301,7 @@ export function subscriptionAccountMenuContent(
     const rowUsage =
       account.id === current?.id || state.usageCheck === "checking"
         ? null
-        : subscriptionAccountUsage(provider, account.usage, now);
+        : subscriptionAccountUsage(provider, account.usage, now, account.plan);
     return {
       id: account.id,
       label,

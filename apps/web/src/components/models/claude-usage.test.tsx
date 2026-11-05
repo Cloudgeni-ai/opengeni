@@ -94,6 +94,47 @@ test("an account row shows every reported window with its reset", async () => {
   expect(windows[0]).toMatch(/^5h: Limit reached, until .*2099/);
   expect(windows[1]).toMatch(/^Week: 50% left, resets .*Oct 2099/);
 });
+test("an account row shows the week alone: no Fable week, and no 5h on Ultra", async () => {
+  const value = usage();
+  value.windows = [
+    { ...value.windows[0]!, usedPercent: 0, status: "allowed" },
+    value.windows[1]!,
+    {
+      id: "seven_day_fable",
+      usedPercent: 0,
+      resetsAt: "2099-10-03T22:00:00Z",
+      status: "allowed",
+      observedAt: "2026-09-30T14:00:00Z",
+    },
+  ];
+  const state: ClaudeUsageState = {
+    value,
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  };
+  const labels = () =>
+    [...container.querySelectorAll('[data-slot="subscription-usage-window"]')].map(
+      (window) => window.getAttribute("aria-label")?.split(":")[0],
+    );
+  for (const plan of ["claude_max_20x", "claude_max", "claude_max_5x"]) {
+    await act(async () => root.render(<ClaudeUsageReadout state={state} plan={plan} />));
+    expect(labels()).toEqual(["Week"]);
+  }
+  // The account page keeps every window the plan has; Ultra has no 5h.
+  const now = Date.parse("2026-09-30T14:00:00Z");
+  expect(claudeUsageReadings(value, now, "claude_max_20x").map((item) => item.label)).toEqual([
+    "Week",
+    "Fable week",
+  ]);
+  expect(claudeUsageReadings(value, now, "claude_max_5x").map((item) => item.label)).toEqual([
+    "5h",
+    "Week",
+    "Fable week",
+  ]);
+});
 test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
   const value = usage();
   value.windows = [{ ...value.windows[0]!, usedPercent: 99.6, status: "allowed" }];

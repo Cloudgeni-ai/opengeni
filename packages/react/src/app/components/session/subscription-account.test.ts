@@ -342,6 +342,40 @@ describe("usage readings", () => {
     );
     expect(pro.windows.map((window) => [window.label, window.leftPercent])).toEqual([["Week", 60]]);
   });
+
+  test("an Ultra plan never shows a 5h window, but a refusal on it still reads as a limit", () => {
+    const now = Date.parse("2026-11-05T14:00:00Z");
+    const ultra = account("ultra", {
+      plan: "claude_max_20x",
+      usage: snapshot([
+        {
+          id: "five_hour",
+          usedPercent: 100,
+          resetsAt: "2026-11-05T17:19:00Z",
+          status: "exhausted",
+        },
+        { id: "seven_day", usedPercent: 71, resetsAt: "2026-11-10T00:00:00Z", status: "ok" },
+      ]),
+    });
+    const max = account("max", { plan: "claude_max" });
+    const content = subscriptionAccountMenuContent(
+      state({ accounts: [ultra, max], current: ultra }),
+      now,
+    );
+    expect(content.usage.windows?.map((window) => window.label)).toEqual(["Week"]);
+    expect(content.usage.message).toStartWith("Limit reached until ");
+    expect(content.tone).toBe("warn");
+    // A bare Max (Max or Ultra) keeps the 5h window its reading reports.
+    const rows = subscriptionAccountMenuContent(
+      state({ accounts: [ultra, max], current: null }),
+      now,
+    ).accounts;
+    expect(rows.map((row) => row.windows?.map((window) => window.label))).toEqual([
+      ["Week"],
+      ["5h", "Week"],
+    ]);
+    expect(rows[0]!.usageMessage).toStartWith("Limit reached until ");
+  });
 });
 
 describe("plans and marks in the account list", () => {

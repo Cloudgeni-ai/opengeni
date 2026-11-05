@@ -5,7 +5,9 @@ import { createRoot } from "react-dom/client";
 import {
   codexWindowInputs,
   subscriptionLimit,
+  subscriptionListWindows,
   subscriptionPlanLabel,
+  subscriptionPlanWindows,
   subscriptionWindowLabel,
   subscriptionWindows,
 } from "../src/app/lib/subscription-accounts";
@@ -185,5 +187,121 @@ describe("the shared usage display", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  test("a list row's lines share one grid and a reached limit's time needs no until", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const windows = subscriptionListWindows(
+      "claude",
+      "claude_max_20x",
+      subscriptionWindows(
+        "claude",
+        [
+          { id: "five_hour", usedPercent: 100, resetsAt: NOW + 3 * HOUR },
+          { id: "seven_day", usedPercent: 71, resetsAt: NOW + 96 * HOUR },
+        ],
+        NOW,
+      ),
+    );
+    try {
+      await act(async () =>
+        root.render(
+          <SubscriptionUsageWindows windows={windows} layout="stack" align="end" now={NOW} />,
+        ),
+      );
+      const cell = container.querySelector<HTMLElement>('[data-slot="subscription-usage"]')!;
+      expect(cell.className).toContain("grid-cols-[auto_auto_auto_auto]");
+      const rendered = [
+        ...container.querySelectorAll<HTMLElement>('[data-slot="subscription-usage-window"]'),
+      ];
+      // Ultra's refused 5h reads as the account's limit, without a 5h label.
+      expect(rendered).toHaveLength(1);
+      expect(rendered[0]!.className).toContain("grid-cols-subgrid");
+      expect(rendered[0]!.getAttribute("aria-label")).toMatch(/^Limit reached, until /);
+      expect(rendered[0]!.textContent).not.toContain("5h");
+      expect(rendered[0]!.textContent).not.toContain("until");
+      // Every line has the same four cells, so the columns line up.
+      expect(rendered[0]!.children).toHaveLength(4);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+describe("account list rows", () => {
+  const claude = (inputs: Array<[id: string, used: number]>) =>
+    subscriptionWindows(
+      "claude",
+      inputs.map(([id, usedPercent]) => ({ id, usedPercent, resetsAt: NOW + 30 * HOUR })),
+      NOW,
+    );
+  const labels = (windows: { label: string }[]) => windows.map((window) => window.label);
+
+  test("only the week: never a model-scoped week or extra usage", () => {
+    const windows = claude([
+      ["seven_day", 40],
+      ["seven_day_fable", 100],
+      ["seven_day_opus", 20],
+      ["overage", 0],
+    ]);
+    expect(labels(subscriptionListWindows("claude", "claude_max_5x", windows))).toEqual(["Week"]);
+  });
+
+  test("Ultra never lists a 5h window; other plans only while it holds the account back", () => {
+    const roomy = claude([
+      ["five_hour", 0],
+      ["seven_day", 100],
+    ]);
+    for (const plan of ["claude_max_20x", "claude_ultra", "claude_max", "claude_max_5x", null]) {
+      expect(labels(subscriptionListWindows("claude", plan, roomy))).toEqual(["Week"]);
+    }
+    const near = claude([
+      ["five_hour", 95],
+      ["seven_day", 72],
+    ]);
+    expect(labels(subscriptionListWindows("claude", "claude_max_5x", near))).toEqual([
+      "5h",
+      "Week",
+    ]);
+    expect(labels(subscriptionListWindows("claude", "claude_max", near))).toEqual(["5h", "Week"]);
+    expect(labels(subscriptionListWindows("claude", "claude_max_20x", near))).toEqual(["Week"]);
+    // A spent week already says the account is limited: nothing is added.
+    const spent = claude([
+      ["five_hour", 100],
+      ["seven_day", 100],
+    ]);
+    expect(labels(subscriptionListWindows("claude", "claude_max_20x", spent))).toEqual(["Week"]);
+  });
+
+  test("the plan's windows: Ultra drops 5h everywhere, an unknown Max tier keeps it", () => {
+    const windows = claude([
+      ["five_hour", 10],
+      ["seven_day", 10],
+      ["seven_day_fable", 10],
+    ]);
+    expect(labels(subscriptionPlanWindows("claude", "claude_max_20x", windows))).toEqual([
+      "Week",
+      "Fable week",
+    ]);
+    expect(labels(subscriptionPlanWindows("claude", "claude_max", windows))).toEqual([
+      "5h",
+      "Week",
+      "Fable week",
+    ]);
+  });
+
+  test("ChatGPT rows keep their 5h and week", () => {
+    const windows = subscriptionWindows(
+      "codex",
+      [
+        { id: "five_hour", usedPercent: 10, resetsAt: NOW + HOUR },
+        { id: "seven_day", usedPercent: 10, resetsAt: NOW + 30 * HOUR },
+      ],
+      NOW,
+    );
+    expect(labels(subscriptionListWindows("codex", "plus", windows))).toEqual(["5h", "Week"]);
   });
 });

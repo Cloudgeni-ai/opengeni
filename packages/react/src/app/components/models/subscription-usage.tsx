@@ -28,7 +28,7 @@ export function subscriptionWindowSentence(window: SubscriptionWindow, now: numb
     window.resetsAt === null
       ? ""
       : `, ${window.limitReached ? "until" : "resets"} ${formatAbsoluteTime(window.resetsAt, { now })}`;
-  return `${window.label}: ${subscriptionWindowValue(window)}${reset}`;
+  return `${window.label ? `${window.label}: ` : ""}${subscriptionWindowValue(window)}${reset}`;
 }
 
 function windowLevel(window: SubscriptionWindow) {
@@ -38,7 +38,9 @@ function windowLevel(window: SubscriptionWindow) {
 /**
  * Every reported window of one account. `inline` flows the windows on one
  * line and wraps rather than truncating (menus); `stack` puts one window per
- * line (list rows, right-aligned with `align="end"`).
+ * line (list rows, right-aligned with `align="end"`), on one grid so labels,
+ * bars, values and reset times line up, and short enough for a row's usage
+ * column (a reached limit's time needs no "until" there).
  */
 export function SubscriptionUsageWindows({
   windows,
@@ -69,13 +71,16 @@ export function SubscriptionUsageWindows({
       </span>
     ) : null;
   }
+  const stack = layout === "stack";
   return (
     <span
       data-slot="subscription-usage"
       className={cn(
-        "flex min-w-0 text-2xs leading-4",
-        layout === "inline" ? "flex-wrap gap-x-3 gap-y-0.5" : "flex-col gap-0.5",
-        align === "end" ? "items-end justify-end" : "items-start",
+        "min-w-0 text-2xs leading-4",
+        stack
+          ? "inline-grid max-w-full grid-cols-[auto_auto_auto_auto] items-center gap-x-1.5 gap-y-0.5 text-left align-top"
+          : "flex flex-wrap gap-x-3 gap-y-0.5",
+        !stack && (align === "end" ? "items-end justify-end" : "items-start"),
         className,
       )}
     >
@@ -98,15 +103,24 @@ export function SubscriptionUsageWindows({
                 }
               : { role: "group" })}
             aria-label={subscriptionWindowSentence(window, now)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap tabular-nums"
+            className={cn(
+              "items-center whitespace-nowrap tabular-nums",
+              stack ? "col-span-4 grid grid-cols-subgrid" : "inline-flex gap-1.5",
+            )}
           >
-            <span className="text-fg-muted">{window.label}</span>
+            {window.label || stack ? (
+              <span className={cn("text-fg-muted", stack && "justify-self-end")}>
+                {window.label}
+              </span>
+            ) : null}
             {known || window.limitReached ? (
               <UsageTrack
                 level={level}
                 fill={window.limitReached ? 0 : Math.round(window.leftPercent!)}
                 className="w-8 shrink-0"
               />
+            ) : stack ? (
+              <span />
             ) : null}
             <span
               className={cn(
@@ -118,9 +132,11 @@ export function SubscriptionUsageWindows({
             </span>
             {window.resetsAt !== null ? (
               <span className="text-fg-subtle">
-                {window.limitReached ? "until " : ""}
+                {window.limitReached && !stack ? "until " : ""}
                 {formatShortTime(window.resetsAt, { now })}
               </span>
+            ) : stack ? (
+              <span />
             ) : null}
           </span>
         );

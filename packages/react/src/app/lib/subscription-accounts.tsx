@@ -62,6 +62,13 @@ type SubscriptionAdapter = {
   /** The plan's own name without the brand ("Ultra", "Plus"), or null when unknown. */
   planName(plan: string): string | null;
   windows: Record<string, WindowSpec>;
+  /** Windows a plan doesn't have, whatever a reading still carries (Ultra: no 5h). */
+  planLacks?(plan: string): readonly string[];
+  /**
+   * Windows an account list shows only while they hold the account back
+   * (reached or near their limit): the week is the row's reading.
+   */
+  listedWhenLimited?: readonly string[];
 };
 
 /** "claude_team" → "Team", "k12" → "K12": a provider id read as words. */
@@ -91,6 +98,10 @@ const CLAUDE_PLANS: Record<string, string> = {
   claude_enterprise: "Enterprise",
 };
 
+// Ultra (formerly Max 20x) has no 5-hour limit. A bare `claude_max` may be
+// either tier, so it keeps whatever its readings show.
+const CLAUDE_ULTRA_PLANS = new Set(["claude_max_20x", "claude_ultra"]);
+
 // ChatGPT renamed Team to Business; the id stays `team`.
 const CHATGPT_PLANS: Record<string, string> = {
   free: "Free",
@@ -114,6 +125,8 @@ const ADAPTERS: Record<string, SubscriptionAdapter> = {
       seven_day_sonnet: { label: "Sonnet week", order: 23, scoped: true },
       seven_day_overage_included: { label: "Included extra", order: 80, extra: true },
     },
+    planLacks: (plan) => (CLAUDE_ULTRA_PLANS.has(plan.toLowerCase()) ? ["five_hour"] : []),
+    listedWhenLimited: ["five_hour"],
   },
   codex: {
     planBrand: "ChatGPT",
@@ -230,6 +243,48 @@ export function subscriptionWindows(
 
 /** Below this share left, an included-usage window counts as near its limit. */
 export const SUBSCRIPTION_NEAR_LIMIT_LEFT = 10;
+
+/**
+ * The windows the account's plan has: a window the plan doesn't have (an
+ * Ultra plan's 5h) is never shown, whatever a reading still carries. Limits
+ * are still read from every window (`subscriptionLimit`), so a refusal on
+ * one is reported in words, not as a window.
+ */
+export function subscriptionPlanWindows(
+  provider: string,
+  plan: string | null | undefined,
+  windows: readonly SubscriptionWindow[],
+): SubscriptionWindow[] {
+  const id = plan?.trim();
+  const lacks = id ? (adapter(provider).planLacks?.(id) ?? []) : [];
+  return windows.filter((window) => !lacks.includes(window.id));
+}
+
+/**
+ * What an account row in a list shows: the plan's account-wide windows (the
+ * week), never a model-scoped week (Fable, Opus, Sonnet) or paid extra usage,
+ * which the account's own page still shows. A short window the list keeps
+ * quiet (Claude's 5h) appears only while it holds the account back. When a
+ * limit no listed window shows refuses the account, the row reads that limit
+ * alone, unlabelled, so it never looks available.
+ */
+export function subscriptionListWindows(
+  provider: string,
+  plan: string | null | undefined,
+  windows: readonly SubscriptionWindow[],
+): SubscriptionWindow[] {
+  const quiet = adapter(provider).listedWhenLimited ?? [];
+  const accountWide = windows.filter((window) => !window.scoped && !window.extra);
+  const listed = subscriptionPlanWindows(provider, plan, accountWide).filter(
+    (window) => !quiet.includes(window.id) || window.limitReached || window.nearLimit,
+  );
+  if (listed.some((window) => window.limitReached)) return listed;
+  // The latest reset is when the account serves again.
+  const refusing = accountWide
+    .filter((window) => window.limitReached && !listed.includes(window))
+    .sort((left, right) => (right.resetsAt ?? Infinity) - (left.resetsAt ?? Infinity))[0];
+  return refusing ? [{ ...refusing, label: "" }] : listed;
+}
 
 /**
  * The account's limit state from its included-usage windows and a stored
