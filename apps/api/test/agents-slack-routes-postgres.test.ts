@@ -307,6 +307,29 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     });
     expect(back.status).toBe(409);
     expect(back.json.error.details.code).toBe("agent_slack_name_taken");
+    // An agent in Slack stays shared: making it Only me waits until Slack is off.
+    const hidden = await call(install.admin, "PATCH", `${install.base}/${second.json.agent.id}`, {
+      expectedVersion: joined.json.agent.version,
+      visibility: "private",
+    });
+    expect(hidden.status).toBe(409);
+    expect(hidden.json.error.details.code).toBe("agent_slack_requires_workspace_visibility");
+    expect(hidden.json.error.message).toContain("Turn Slack off first");
+    const off = await call(
+      install.admin,
+      "DELETE",
+      `${install.base}/${second.json.agent.id}/slack/${install.connectionId}`,
+    );
+    expect(off.status).toBe(200);
+    const current = await call(install.admin, "GET", `${install.base}/${second.json.agent.id}`);
+    const madePrivate = await call(
+      install.admin,
+      "PATCH",
+      `${install.base}/${second.json.agent.id}`,
+      { expectedVersion: current.json.agent.version, visibility: "private" },
+    );
+    expect(madePrivate.status).toBe(200);
+    expect(madePrivate.json.agent.visibility).toBe("private");
 
     // For now, one Slack workspace per agent.
     const otherConnection = await slackConnection(install.accountId, install.home, `${label}-b`);
