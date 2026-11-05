@@ -238,11 +238,15 @@ describe("backend workspace tar exclusions", () => {
   // An entry that isn't a plain top-level name throws on both sides instead
   // of being dropped by one of them, which would make them disagree.
   test("an invalid top-level glob throws for the archive and the fingerprint alike", async () => {
+    const source = workspaceTree();
     for (const glob of [".cache/*", "a\\b", "", ".", "..", "x\ny"]) {
       expect(() => workspaceTopLevelExcludeGlobs([glob])).toThrow(TypeError);
       expect(() => workspaceTarExcludeArgs([], [glob])).toThrow(TypeError);
-      const session = fingerprintSession({ workspaceArchiveExcludedGlobs: () => [glob] }, "/");
+      const session = fingerprintSession({ workspaceArchiveExcludedGlobs: () => [glob] }, source);
       await expect(fingerprintSandboxWorkspace(session)).rejects.toThrow(TypeError);
+      await expect(readRemoteWorkspaceContentManifest(session)).rejects.toThrow(TypeError);
+      // The size walk is observability only: no measurement, not an error.
+      expect(await probeRemoteWorkspaceSize(session)).toBeNull();
     }
     expect(workspaceTopLevelExcludeGlobs(["b*", "a*", "b*"])).toEqual(["a*", "b*"]);
   });

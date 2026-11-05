@@ -491,10 +491,15 @@ export async function probeRemoteWorkspaceSize(
   // snapshot's size compares with a captured one. An unreadable folder makes
   // find exit 1 with the rest counted, which still measures the workspace;
   // only a timeout (124) or a missing tool discards the walk.
-  const prune = findPruneExpression(
-    workspaceFingerprintExcludes(target),
-    workspaceFingerprintExcludeGlobs(target),
-  );
+  let prune: string;
+  try {
+    prune = findPruneExpression(
+      workspaceFingerprintExcludes(target),
+      workspaceFingerprintExcludeGlobs(target),
+    );
+  } catch {
+    return null;
+  }
   const script = String.raw`set -u
 cd /workspace 2>/dev/null || exit 0
 out=$(timeout ${seconds} find . -xdev ${prune}-type f -printf "%s\n" 2>/dev/null | awk "{n+=1; s+=\$1} END {printf \"%d %.0f\", n, s}")
