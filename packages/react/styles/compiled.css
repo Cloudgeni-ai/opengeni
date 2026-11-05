@@ -2290,9 +2290,6 @@
 :where(.og-root).max-w-\[180px\],:where(.og-root) .max-w-\[180px\] {
     max-width: 180px;
   }
-:where(.og-root).max-w-\[200px\],:where(.og-root) .max-w-\[200px\] {
-    max-width: 200px;
-  }
 :where(.og-root).max-w-\[220px\],:where(.og-root) .max-w-\[220px\] {
     max-width: 220px;
   }
