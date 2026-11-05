@@ -261,13 +261,11 @@ v2 functions withheld; 1239 grants all six to every configured application
 role and removes the privilege probes and v1 caller fallbacks. The v1 SQL
 functions and grants stay intact for rolling binaries. 1239 follows the
 production baseline pin that contains 1107 (`d91058a8b8` or later). 1218
-created the organization vault list
-withheld, with the same caller check; until it is granted the API lists only
-the organization vaults that work in the requested workspace and says the
-list is incomplete. 1211 created the names-only organization member list
+created the organization vault list and 1224 the organization machine and rig
+list withheld, with the same caller check, and 1272 granted both and removed
+the check. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
-list as unavailable. 1224 created the organization machine and rig list
-withheld the same way as the vault list.
+list as unavailable.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

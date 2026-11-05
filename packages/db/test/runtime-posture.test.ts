@@ -4143,7 +4143,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210, 1239 and 1274 grant what 0937, 0946, 1103, 1060, 1107 and 0988 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218 and 1224 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1211's and 1240's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4286,16 +4286,22 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239 and 1274 grant what 093
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "read_external_identity_v1(uuid, text, text)",
-      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
-      "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     );
+    for (const granted of [
+      "list_organization_vaults_v1(uuid, jsonb)",
+      "list_organization_compute_v1(uuid, uuid, text)",
+    ]) {
+      expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+        `runtime role lacks EXECUTE on private routine ${granted}`,
+      );
+    }
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
     );

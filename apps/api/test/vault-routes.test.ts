@@ -14,11 +14,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -189,15 +185,6 @@ describe("vault routes", () => {
     );
     expect(denied.status).toBe(403);
 
-    // Until the routine is granted: the ones that work here, marked incomplete.
-    const before = await call("GET", `${ownerBase}/organization-vaults`, asOwner);
-    expect(before.status).toBe(200);
-    expect(before.json.complete).toBe(false);
-    const beforeIds = before.json.vaults.map((vault: { id: string }) => vault.id);
-    expect(beforeIds).toContain(everywhere.json.id);
-    expect(beforeIds).not.toContain(elsewhere.json.id);
-
-    await grantDeferredRuntimeAccess(shared!.admin);
     const after = await call("GET", `${ownerBase}/organization-vaults`, asOwner);
     expect(after.status).toBe(200);
     expect(after.json.complete).toBe(true);
