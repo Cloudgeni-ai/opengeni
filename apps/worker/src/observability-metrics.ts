@@ -1930,11 +1930,13 @@ export function recordSandboxDrainCaptureFallback(
     outcome: "reduced_saved" | "reduced_failed" | "reduced_unavailable" | "abandoned";
   },
 ): void {
-  observability.incrementCounter({
-    name: "opengeni_sandbox_drain_capture_fallback_total",
-    help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
-    labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
-  });
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_fallback_total",
+      help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
+      labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
+    }),
+  );
 }
 
 const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
