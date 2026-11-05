@@ -1027,8 +1027,9 @@ the turn when its access is gone.
 
 The clone hook runs again on every turn and never deletes a repository folder
 that may hold work. A folder that another user owns (Git reports "dubious
-ownership", for example after `chown -R` inside the box) is added to the box's
-global `safe.directory` and kept as it is. A folder that is not a readable work
+ownership", for example after `chown -R` on the chat's workspace machine) is
+added to that machine's global `safe.directory` and kept as it is. A folder that
+is not a readable work
 tree (a corrupt `.git`, or an interrupted clone), or that was cloned for a
 different `expectedCommitSha` than the repository now has, is renamed to the
 sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>` (with a
