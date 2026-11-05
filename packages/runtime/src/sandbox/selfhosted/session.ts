@@ -46,7 +46,7 @@ import {
 // Manifest (see the `state` field below); selfhosted exec routes over NATS and
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
-import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
+import { formatExecResponse, truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   BROWSER_CONTROL_HTTP_REPLY_GRACE_MS,
@@ -1795,16 +1795,27 @@ export class SelfhostedSession {
    *  stdout/stderr). This path must match that contract: returning raw stdout
    *  made `ls` ENOENT and `npx --help` look like success with empty output.
    *  The structured `exec()` result stays split for Channel-A parsers; the
-   *  deadline hint already lands on stderr there and is included in this body. */
+   *  deadline hint already lands on stderr there and is included in this body.
+   *
+   *  `maxOutputTokens` bounds the body in both branches with the same head-and-
+   *  tail `truncateOutput` (and "Original token count" line) that the SDK local
+   *  shell, Modal and OpenSandbox use. The status header, the background handles
+   *  and the child-cleanup notice stay outside the bound so they are never cut. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
     const result = await this.execWithYield(this.withExecCommandDefaultShell(args));
+    const output = truncateOutput(
+      joinExecCommandOutput(result.stdout, result.stderr),
+      args.maxOutputTokens,
+    );
     if (result.backgroundCommandId && result.backgroundOpId) {
-      const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
         `Command running in background with command ID ${result.backgroundCommandId}.`,
         `Connected Machine operation ${result.backgroundOpId} remains pinned to its launch daemon.`,
-        ...(output ? ["", "Output:", output] : []),
+        ...(output.originalTokenCount !== undefined
+          ? [`Original token count: ${output.originalTokenCount}`]
+          : []),
+        ...(output.text ? ["", "Output:", output.text] : []),
       ].join("\n");
     }
     const exitCode =
@@ -1812,9 +1823,12 @@ export class SelfhostedSession {
         ? result.exitCode
         : 1;
     const formatted = formatExecResponse({
-      output: joinExecCommandOutput(result.stdout, result.stderr),
+      output: output.text,
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
+      ...(output.originalTokenCount !== undefined
+        ? { originalTokenCount: output.originalTokenCount }
+        : {}),
     });
     return result.backgroundChildrenStopped
       ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`

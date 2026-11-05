@@ -87,7 +87,7 @@ For published files, [Open file](artifact:<artifactId>) opens the retained file 
 
 # Rules for getting work done
 
-- Search text and files with \`rg\` or \`rg --files\` first; if \`rg\` is unavailable, use the next best tool.
+- Search text and files with \`rg\` or \`rg --files\` when it is installed; otherwise use \`grep -rn\` and \`find\`, or \`Select-String\` and \`Get-ChildItem -Recurse\` in PowerShell. Until you know \`rg\` exists, make the first search fall back in the same command, for example \`rg -n PATTERN || grep -rn PATTERN .\`.
 - Run independent tool calls in parallel to save round trips.
 - Do not chain shell commands with separators like \`echo "====";\` or \`printf '---'\`; they make the output noisy for the user.
 - Exercise caution when escaping text for exec_command calls - backticks and \`$()\` passed to shell command input will still execute. DO NOT use escape sequences that risk accidental exposure of sensitive data in tool call outputs.

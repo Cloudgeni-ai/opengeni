@@ -523,6 +523,74 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(structured.exitCode).toBe(2);
   });
 
+  test("execCommand bounds output to maxOutputTokens with head, tail and the original count", async () => {
+    const lines = Array.from({ length: 3000 }, (_, index) => `${index + 1}`).join("\n") + "\n";
+    const mock = new MockAgentResponder({
+      exec: () => ({
+        exitCode: 3,
+        stdout: new TextEncoder().encode(lines),
+        stderr: new TextEncoder().encode("warning: tail\n"),
+        timedOut: false,
+        durationMs: "4",
+        backgroundChildrenStopped: true,
+      }),
+    });
+    const session = sessionWith(mock);
+
+    const bounded = await session.execCommand({ cmd: "seq 1 3000", maxOutputTokens: 50 });
+    expect(parseExecBannerExitCode(bounded)).toBe(3);
+    expect(bounded).toMatch(/\nOriginal token count: \d+\nOutput:\n/);
+    const body = bounded.slice(bounded.indexOf("\nOutput:\n") + "\nOutput:\n".length);
+    const [output, notice] = body.split("\n\nStopped background child processes");
+    expect(notice).toBeDefined();
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(50 * 4);
+    expect(output).toContain("\n1\n2\n");
+    expect(output).toContain("warning: tail");
+    expect(output).toContain("tokens truncated");
+    expect(output).not.toContain("\n1500\n");
+
+    const full = await session.execCommand({ cmd: "seq 1 3000" });
+    expect(full).not.toContain("Original token count");
+    expect(full).toContain(lines);
+  });
+
+  test("a backgrounded execCommand keeps its handles and bounds the early output", async () => {
+    const early = Array.from({ length: 3000 }, (_, index) => `${index + 1}`).join("\n") + "\n";
+    const session = sessionWith(new MockAgentResponder());
+    session.execWithYield = async () => ({
+      output: early,
+      stdout: early,
+      stderr: "",
+      exitCode: null,
+      backgroundCommandId: "cmd-1",
+      backgroundOpId: "op-1",
+    });
+
+    const bounded = await session.execCommand({
+      cmd: "seq 1 3000; sleep 600",
+      maxOutputTokens: 50,
+    });
+    const [header, output] = bounded.split("\n\nOutput:\n");
+    expect(header).toMatch(
+      /^Command running in background with command ID cmd-1\.\nConnected Machine operation op-1 remains pinned to its launch daemon\.\nOriginal token count: \d+$/,
+    );
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(50 * 4);
+    expect(output).toContain("\n1\n2\n");
+    expect(output).toContain("\n3000\n");
+    expect(output).toContain("tokens truncated");
+
+    const full = await session.execCommand({ cmd: "seq 1 3000; sleep 600" });
+    expect(full).toBe(
+      [
+        "Command running in background with command ID cmd-1.",
+        "Connected Machine operation op-1 remains pinned to its launch daemon.",
+        "",
+        "Output:",
+        early,
+      ].join("\n"),
+    );
+  });
+
   test("native child cleanup appends a notice without changing structured output", async () => {
     const mock = new MockAgentResponder({
       exec: () => ({

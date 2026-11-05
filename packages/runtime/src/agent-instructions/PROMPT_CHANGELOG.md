@@ -1,5 +1,19 @@
 # Modular prompt changelog
 
+The search rule no longer assumes `rg` exists. Many user, task and Connected
+Machine images ship without ripgrep, and "`rg` … first" made the agent spend
+its first search on `rg: not found`. Nothing in a turn's prompt inputs says
+which search tools a machine has (the prompt can be composed before a lazy
+sandbox exists, and a machine's PATH can change), so the sentence names both
+paths in fixed text instead of detecting one: it is byte-identical on every
+backend and attachment. Legacy and modular compositions change the same way;
+their locks are updated.
+
+```text
+- Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.
++ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find`, or `Select-String` and `Get-ChildItem -Recurse` in PowerShell. Until you know `rg` exists, make the first search fall back in the same command, for example `rg -n PATTERN || grep -rn PATTERN .`.
+```
+
 A configured agent with nothing to wait for or run code in no longer carries
 that guidance, and two answer rules follow the features they describe. As
 before, only text for an absent feature is omitted: compositions with the

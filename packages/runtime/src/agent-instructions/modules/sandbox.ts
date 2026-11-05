@@ -44,7 +44,7 @@ export const sandboxModule: AgentPromptModule = {
       "# Working in the sandbox",
       "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
       bullets(
-        "Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.",
+        "Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find`, or `Select-String` and `Get-ChildItem -Recurse` in PowerShell. Until you know `rg` exists, make the first search fall back in the same command, for example `rg -n PATTERN || grep -rn PATTERN .`.",
         "Do not chain shell commands with separators like `echo \"====\";` or `printf '---'`; they make the output noisy for the user.",
         "Exercise caution when escaping text for exec_command calls - backticks and `$()` passed to shell command input will still execute. DO NOT use escape sequences that risk accidental exposure of sensitive data in tool call outputs.",
         "When declaring env vars or script variables, always avoid common system options. Never repurpose `$HOME` or `$home`. Instead, use a task-specific variable name.",

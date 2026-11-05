@@ -599,6 +599,18 @@ describe("compute sandbox client", () => {
     );
   });
 
+  test("exec_command on a compute box honours maxOutputTokens", async () => {
+    const { client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const cmd = `printf '%s' ${"word ".repeat(3000)}`;
+    const bounded = await session.execCommand({ cmd, maxOutputTokens: 50 });
+    expect(bounded).toContain("Process exited with code 0\nOriginal token count: ");
+    const output = bounded.slice(bounded.indexOf("\nOutput:\n") + "\nOutput:\n".length);
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(50 * 4);
+    expect(output).toContain("tokens truncated");
+    expect(await session.execCommand({ cmd })).not.toContain("Original token count");
+  });
+
   test("create retries an uncertain control service answer with the same request id and body", async () => {
     const { control, client } = setup();
     control.failCreates = [503, 504];
