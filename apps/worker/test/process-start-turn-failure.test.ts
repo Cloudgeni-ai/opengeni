@@ -5,7 +5,7 @@ import { agentErrorToControlError } from "@opengeni/runtime/sandbox";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 
 // Regression for the 4 Nov incident: a compute box whose /dev/null was removed
-// could not start programs, and its agent (up to 0.1.150) put the whole
+// could not start programs, and its agent (up to 0.1.151) put the whole
 // Codemode client install script into the error, which the turn failure then
 // showed to the person verbatim.
 const INSTALL_SCRIPT = `node -e '

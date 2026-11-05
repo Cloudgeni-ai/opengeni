@@ -1,7 +1,7 @@
 // A machine agent that cannot start a program reports
 // "spawn or apply execution containment for program "<program>": <OS error>",
 // with a null-device note before the OS error when it had to open a missing
-// /dev/null by path. Agents up to 0.1.150 wrote the first command element there,
+// /dev/null by path. Agents up to 0.1.151 wrote the first command element there,
 // unquoted, which for a shell command is the whole script, so that text could
 // reach events, tool output and the person's failure banner. Everything here is
 // pure string work on that one stable marker, so older agents get the same

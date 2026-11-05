@@ -20,7 +20,7 @@ import {
 } from "../src/activities/agent-turn/sandbox-setup-agent-failure";
 
 // The script the Codemode client install sends as one shell command; agents
-// up to 0.1.150 put it whole into their spawn error (the 4 Nov incident).
+// up to 0.1.151 put it whole into their spawn error (the 4 Nov incident).
 const INSTALL_SCRIPT = `node -e '
 const fs = require('\\''node:fs'\\''), crypto = require('\\''node:crypto'\\'');
 const transferred = fs.readFileSync(process.argv[1]);
@@ -31,7 +31,7 @@ if (crypto.createHash('\\''sha256'\\'').update(raw).digest('\\''hex'\\'') !== "f
 const NULL_DEVICE_MISSING = " (the null device /dev/null is missing)";
 
 /** The agent's answer when it cannot start a program. A newer agent quotes
- * the program it started; an older one (up to 0.1.150) wrote the first
+ * the program it started; an older one (up to 0.1.151) wrote the first
  * command element unquoted, which for a shell command was the whole script. */
 function processStartError(program: string, note = "") {
   const reported = program === INSTALL_SCRIPT ? program : `program "${program}"`;
