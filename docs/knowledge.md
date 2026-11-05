@@ -55,7 +55,7 @@ under the usual learning policy. No separate ingestion workflow or integration
 scheduler decides what the company should remember.
 
 Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) was
-removed. Migration 1236 deleted the leftover source sync tasks with their runs,
+removed. Migration 1261 deleted the leftover source sync tasks with their runs,
 sync state and wakes, and the stored `knowledge_source` facets. Requests that
 still carry `agentConfig.knowledgeSource`, or call the remaining source routes
 of the public SDK, answer 410 with the message in
