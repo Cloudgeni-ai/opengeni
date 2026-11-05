@@ -60,6 +60,10 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  workspaceSizeFromArchiveDescriptor,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 

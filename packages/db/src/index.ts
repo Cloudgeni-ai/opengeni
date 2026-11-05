@@ -51645,6 +51645,9 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
             sessionId: input.sessionId,
             status: "accepted",
             attempt: lane.attempt,
+            // The verified warm commit tells the people in the group which
+            // save their files came back from (see commitWarmingToWarm).
+            capturedAt: selection.capturedAt,
           },
           ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
         })}::jsonb,
@@ -52711,7 +52714,7 @@ export async function commitWarmingToWarm(
     | "fresh_workspace_required"
     | "fresh_workspace_mismatch";
 }> {
-  return await withRlsContext(
+  const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -52966,9 +52969,63 @@ export async function commitWarmingToWarm(
             reason: "stale_epoch" as const,
           };
         }
-        return { committed: true, lease: mapLeaseRow(updated[0]) };
+        // The model learned of the older snapshot from its receipt when the
+        // restore was authorized. The people in the group are told once, after
+        // this commit, when that restore is verified, so a restore that fails,
+        // retries or ends on an empty workspace never claims their files came
+        // back. Only an archive restore qualifies, never an empty workspace or
+        // same-box continuity.
+        const restoredFrom =
+          automaticVerified &&
+          rematerialization !== undefined &&
+          !freshWorkspace &&
+          !continuityRecovery
+            ? (automatic as Record<string, unknown>).capturedAt
+            : undefined;
+        const restoredNotice =
+          typeof restoredFrom === "string"
+            ? {
+                operationId: (automatic as Record<string, unknown>).operationId,
+                mode: "checkpoint" as const,
+                capturedAt: restoredFrom,
+              }
+            : null;
+        return { committed: true, lease: mapLeaseRow(updated[0]), restoredNotice };
       }),
   );
+  const { restoredNotice, ...outcome } = result as typeof result & {
+    restoredNotice?: Record<string, unknown> | null;
+  };
+  if (outcome.committed && restoredNotice) {
+    // Its own transaction, after the commit: appending locks every member's
+    // session row, and this commit already holds the lease row, which
+    // recovery authorization takes after its own session row. Best-effort:
+    // the verified restore must never be undone for a notice.
+    try {
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (txRaw) => {
+            const tx = txRaw as unknown as Database;
+            await withCompleteSandboxGroupScope(tx, () =>
+              appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+                type: "sandbox.recovery.selected",
+                payload: restoredNotice,
+              }),
+            );
+          }),
+      );
+    } catch (error) {
+      // The model's restore receipt is durable; only the person's notice is lost.
+      console.warn("sandbox restore: older-save notice write failed (restore unaffected)", {
+        sandboxGroupId: input.sandboxGroupId,
+        operationId: restoredNotice.operationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return outcome;
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -63595,17 +63652,29 @@ export async function releaseWorkspaceArchiveCapture(
      * this lease epoch's consecutive drain snapshot failures, atomically with
      * the release (a fenced, already replaced claim counts nothing). */
     recordDrainCaptureFailure?: boolean;
+    /** Called with the epoch's new consecutive failure count when
+     * `recordDrainCaptureFailure` counted this failure (the lease was still
+     * draining), after the release commits. */
+    onDrainCaptureFailureCounted?: (consecutiveFailures: number) => void;
   },
 ): Promise<boolean> {
-  return await withRlsContext(
+  let counted: number | null = null;
+  const released = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const rows = await tx.execute<{ id: string; rotation_requested_at: Date | null }>(sql`
+        const rows = await tx.execute<{
+          id: string;
+          rotation_requested_at: Date | null;
+          current_rotation_requested_at: Date | null;
+          drain_capture_failures: number | null;
+          liveness: string;
+        }>(sql`
         with owned as (
-          select id, rotation_requested_at as prior_rotation_requested_at
+          select id, rotation_requested_at as prior_rotation_requested_at,
+            liveness as prior_liveness
           from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
@@ -63669,8 +63738,16 @@ export async function releaseWorkspaceArchiveCapture(
           updated_at = now()
         from owned
         where sandbox_leases.id = owned.id
-        returning sandbox_leases.id, owned.prior_rotation_requested_at as rotation_requested_at, sandbox_leases.rotation_requested_at as current_rotation_requested_at
+        returning sandbox_leases.id, owned.prior_rotation_requested_at as rotation_requested_at, sandbox_leases.rotation_requested_at as current_rotation_requested_at,
+          sandbox_leases.drain_capture_failures, owned.prior_liveness as liveness
       `);
+        if (
+          input.recordDrainCaptureFailure === true &&
+          rows.length === 1 &&
+          rows[0]!.liveness === "draining"
+        ) {
+          counted = Number(rows[0]!.drain_capture_failures);
+        }
         if (
           rows.length === 1 &&
           rows[0]!.rotation_requested_at !== null &&
@@ -63681,6 +63758,10 @@ export async function releaseWorkspaceArchiveCapture(
         return rows.length === 1;
       }),
   );
+  if (counted !== null && Number.isSafeInteger(counted) && counted > 0) {
+    input.onDrainCaptureFailureCounted?.(counted);
+  }
+  return released;
 }
 
 /**

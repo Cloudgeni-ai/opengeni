@@ -1333,6 +1333,36 @@ spec:
             user_impact: 'No direct user impact; the sandbox is stuck releasing and still costs money.'
             next_step: 'Check archive capture, provider termination, checkpoint publication and reaper errors.'
             description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
+        - alert: OpenGeniSandboxDrainExpiredLong
+          expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},age_bucket=~"1h_1d|gte_1d"}) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'A sandbox has been stuck shutting down for over an hour.'
+            headline: 'Sandbox stuck shutting down for over an hour'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) stuck over 1h'
+            user_impact: 'Files changed since its last good snapshot are at risk: the provider ends the box at its lifetime limit and the next turn restores an older snapshot.'
+            next_step: 'Check the box''s drain snapshot failures (opengeni_sandbox_drain_capture_consecutive_failures), its /workspace size and the reaper''s persistWorkspace warnings.'
+            description: An idle sandbox has kept failing to drain for over an hour. Drain snapshots back off after failures, so a box this old usually has a workspace snapshot that cannot finish. Check the reaper's "persistWorkspace failed" warnings for the sandbox group, opengeni_sandbox_workspace_snapshot_bytes and the provider snapshot timeout settings.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        - alert: OpenGeniSandboxDrainSnapshotFailing
+          expr: |
+            (
+              sum(increase(opengeni_sandbox_drain_capture_consecutive_failures_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[1h]))
+              -
+              sum(increase(opengeni_sandbox_drain_capture_consecutive_failures_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},le=~"3(\\.0)?"}[1h]))
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A sandbox''s drain snapshot has failed more than three times in a row.'
+            headline: 'Sandbox snapshot keeps failing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} repeated failure(s) in 1h'
+            user_impact: 'The box cannot save its workspace or shut down; its newest files are at risk if the provider ends it.'
+            next_step: 'Find the sandbox group in the reaper''s "persistWorkspace failed" warnings and check its /workspace size and the provider''s snapshot errors.'
+            description: One sandbox lease epoch reached its fourth or later consecutive settled drain snapshot failure in the last hour. The reaper backs off between attempts, so a persistent failure keeps this firing. Check the reaper's "persistWorkspace failed" warnings, opengeni_sandbox_workspace_snapshot_bytes and opengeni_sandbox_workspace_snapshot_files by outcome, and provider snapshot errors.
         {{- if $modalEnabled }}
         - alert: OpenGeniModalSandboxesWithoutLease
           expr: opengeni:modal_sandbox_inventory:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="unleased"} > 0

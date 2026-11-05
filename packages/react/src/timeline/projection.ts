@@ -1354,6 +1354,22 @@ export function buildTimeline(
             text: payload.text,
             occurredAt: event.occurredAt,
           });
+        else if (payload.mode === "checkpoint" && typeof payload.capturedAt === "string") {
+          const capturedAt = new Date(payload.capturedAt);
+          if (!Number.isNaN(capturedAt.getTime()))
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              text: t("timeline.projection.restoredFromOlderSave", {
+                time: capturedAt.toLocaleString(t.locale, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                }),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
         break;
       }
 
