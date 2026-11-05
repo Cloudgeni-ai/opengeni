@@ -1,0 +1,64 @@
+name: Grok Client Version Pin
+
+# xAI refuses SuperGrok requests from Grok CLI versions below its minimum.
+# This keeps the version Opengeni presents on the current Grok CLI stable
+# release by opening (or refreshing) one pull request.
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: xai-client-version-pin
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update the Grok client version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Resolve and rewrite the pin
+        run: bun scripts/xai-client-version-pin.ts
+
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "The Grok client version is current."
+            exit 0
+          fi
+          branch=chore/xai-client-version-auto
+          summary="$(bun scripts/xai-client-version-pin.ts --describe)"
+          printf -- '---\n"@opengeni/xai-subscription": patch\n---\n\nSuperGrok requests present the current Grok CLI stable release (%s), so xAI does not refuse them as an outdated client.\n' "${summary#Grok client version: }" > .changeset/xai-client-version-auto.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add -A packages/xai-subscription/src/constants.ts .changeset/xai-client-version-auto.md
+          git commit -m "chore(xai): update the Grok client version" -m "$summary"
+          git push --force origin "$branch"
+          body="$(printf 'Automated pin refresh from the Grok CLI stable channel.\n\n%s' "$summary")"
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$branch" --body "$body"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "chore(xai): update the Grok client version" --body "$body"
+          fi

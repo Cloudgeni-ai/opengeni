@@ -180,6 +180,26 @@ count/type, last-progress duration, and terminal outcome, but never request
 bodies, credentials, output, or the provider error text. Worker stdout/OTEL
 stay sanitized.
 
+### Grok client version
+
+Subscription requests present a Grok CLI client version
+(`XAI_CLIENT_VERSION` in `packages/xai-subscription/src/constants.ts`), and xAI
+refuses versions below its current minimum with "Grok CLI version (X) is
+outdated, update to Y". Three things keep that from taking Grok down:
+
+- the pin tracks the Grok CLI stable channel: the daily
+  `xai-client-version-pin.yml` workflow runs
+  `scripts/xai-client-version-pin.ts` and opens a pull request when a newer
+  stable release exists;
+- when a refusal names a newer minimum than the version presented, the
+  transport adopts it for the rest of the process and sends the refused
+  request once more presenting it (the refusal is definite, so its custody
+  settles `refused` and the retry is a new physical request);
+- a refusal that persists fails the turn with the non-retryable code
+  `xai_client_outdated` and a plain message naming both versions. It is a
+  platform release fault, so it never marks the account `needs_relogin` or
+  `error`.
+
 ## Failure and durable capacity semantics
 
 Only definitive account refusal may walk the pool:
