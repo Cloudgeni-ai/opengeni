@@ -139,6 +139,9 @@ export const recordingTracks = pgTable(
     preparedBytes: bigint("prepared_bytes", { mode: "number" }),
     // Migration 0945.
     preparedSha256: text("prepared_sha256"),
+    // Migration 1240. When the track's uploaded pieces were deleted because
+    // its kept file holds everything they did; null while they are kept.
+    chunkObjectsDeletedAt: timestamp("chunk_objects_deleted_at", { withTimezone: true }),
     videoWidth: integer("video_width"),
     videoHeight: integer("video_height"),
     videoFrameCount: integer("video_frame_count"),

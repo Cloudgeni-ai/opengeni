@@ -5,7 +5,10 @@
 // the kit ships nothing extra. The main process waits on the page's
 // `answer()`, which settles with `action/token` once a button is pressed or
 // the time runs out. (Chromium won't let a data: page change its own address,
-// so the answer can't travel that way.)
+// so the answer can't travel that way.) Whether the pointer is on the card,
+// which holds it, comes from the main process (`hold()`): when a window shows
+// again, Chromium replays the pointer where it last was, often on the Not now
+// just pressed, though it is long gone.
 
 /** Room around the card, inside the window, for its shadow. */
 export const MEETING_CARD_MARGIN = 14;
@@ -98,10 +101,15 @@ let timer = null;
 let hovering = false;
 let settle = null;
 let answered = Promise.resolve(null);
+// Every way a question ends (a button, Escape, the time running out) goes
+// through here; the main process hides the card when it hears the answer.
+// (The card's window takes no focus, so Escape only reaches it if something
+// focuses it, such as an accessibility tool.)
 function report(action) {
   clearTimeout(timer);
   timer = null;
   left = 0;
+  hovering = false;
   const done = settle;
   settle = null;
   if (done) done(action + "/" + token);
@@ -119,21 +127,31 @@ function schedule() {
 }
 document.getElementById("act").addEventListener("click", () => report("act"));
 document.getElementById("dismiss").addEventListener("click", () => report("dismiss"));
-document.body.addEventListener("mouseenter", () => {
-  hovering = true;
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && settle) report("dismiss");
+});
+// The pointer left the page. A window shown again may get the pointer
+// replayed onto it, but never off it, so leaving is believed.
+document.body.addEventListener("mouseleave", () => hold(false));
+// The pointer is on the card (true) or left it (false), as the main process sees it.
+function hold(on) {
+  if (on === hovering || !settle) return;
+  hovering = on;
+  if (!on) {
+    schedule();
+    return;
+  }
   if (timer) left = Math.max(AFTER_HOVER_MS, left - (Date.now() - since));
   clearTimeout(timer);
   timer = null;
-});
-document.body.addEventListener("mouseleave", () => {
-  hovering = false;
-  schedule();
-});
+}
 // Shows a question; returns the window height it needs.
 function render(state) {
   if (settle) settle(null);
   answered = new Promise((resolve) => { settle = resolve; });
   token = state.token;
+  // Held only once the pointer is on this card.
+  hovering = false;
   document.getElementById("question").textContent = state.question;
   document.getElementById("reason").textContent = state.reason;
   document.getElementById("act").textContent = state.action;

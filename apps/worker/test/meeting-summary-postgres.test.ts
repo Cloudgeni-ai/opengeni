@@ -29,6 +29,7 @@ import {
   saveRecordingNote,
   setScheduledTaskEvents,
   updateWorkspaceSettings,
+  withBillingOriginOverride,
   type DbClient,
   type SessionCreateInput,
 } from "@opengeni/db";
@@ -299,6 +300,19 @@ async function workspace(options: { subscription: boolean }) {
 }
 
 describe("built-in meeting summary", () => {
+  test("an API-origin recording cannot start notes on a connected subscription", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const input = await scope.meeting("private");
+    expect(
+      await withBillingOriginOverride("api", () => startMeetingSummary(services(), input)),
+    ).toEqual({
+      started: false,
+      reason: "subscription_api_unavailable",
+    });
+    expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
+  });
   test("a ready transcript starts exactly one Only me chat for the owner, on the chat's subscription model", async () => {
     if (!realDb) return;
     serveCodex();
@@ -335,9 +349,9 @@ describe("built-in meeting summary", () => {
       firstPartyMcpTools: ["meeting_read", "meeting_notes_save"],
       resources: [],
     });
-    // What the agent can call: the two meeting tools and the runtime's own
-    // wait_for_input and privacy_facts (agent-config: mechanics every agent
-    // has, reaching nothing).
+    // What the agent can call: the two meeting tools and privacy_facts, which
+    // the chat turns on. No wait_for_input: with no compute, children, goal,
+    // automation, browser, media or question to answer, nothing could wake it.
     const projected = projectAgentEffectiveTools(
       sessionEffectiveToolProjectionInput(session as never, session!.tools, {
         settings,
@@ -349,7 +363,6 @@ describe("built-in meeting summary", () => {
     expect(projected.tools.map((tool) => tool.name).sort()).toEqual([
       "opengeni__meeting_notes_save",
       "opengeni__meeting_read",
-      "opengeni__wait_for_input",
       "privacy_facts",
     ]);
     const [turn] = await shared!.admin<{ count: number; authority: string; codex: string }[]>`

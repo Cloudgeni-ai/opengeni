@@ -43,7 +43,7 @@ function setClipboard(writeText: (value: string) => Promise<void>): void {
 }
 
 describe("Codex remaining allowance meters", () => {
-  test("reads percent left, weekly first, and never invents a missing window", () => {
+  test("reads percent left and shows only the windows the plan reports", () => {
     const now = Date.parse("2026-09-27T10:00:00Z");
     const readings = codexUsageReadings(
       {
@@ -60,11 +60,11 @@ describe("Codex remaining allowance meters", () => {
       },
       now,
     );
-    expect(readings.map((reading) => reading.label)).toEqual(["Weekly", "5-hour"]);
+    // A Pro account reports no 5-hour window: none is invented.
+    expect(readings.map((reading) => reading.label)).toEqual(["Week"]);
     expect(readings[0]!.percent).toBe(78);
     expect(readings[0]!.resetsLabel).toMatch(/Oct/);
-    expect(readings[1]!.percent).toBeNull();
-    expect(codexUsageReadings(null, now).every((reading) => reading.percent === null)).toBe(true);
+    expect(codexUsageReadings(null, now)).toEqual([]);
   });
 
   for (const remaining of [100, 90, 10, 0]) {
@@ -78,7 +78,7 @@ describe("Codex remaining allowance meters", () => {
         resetAfterSeconds: null,
         limitWindowSeconds: 18000,
       };
-      const reading = codexUsageReadings({ fiveHour: window, weekly: null }, 0)[1]!;
+      const reading = codexUsageReadings({ fiveHour: window, weekly: null }, 0)[0]!;
       const container = document.createElement("div");
       document.body.append(container);
       const root = createRoot(container);

@@ -383,7 +383,7 @@ function routeSegmentIsParam(segment: string): boolean {
 }
 
 /** 2 = SDK dynamic on route param, 1 = SDK dynamic on route literal, 0 = no match. */
-function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
+export function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
   const sdk = sdkPath.split("/");
   const route = routePath.split("/");
   if (route.at(-1) === "*") {
@@ -1187,7 +1187,8 @@ function signatureFindings(before: Snapshot, after: Snapshot): Finding[] {
 // Generation
 // ---------------------------------------------------------------------------
 
-function sdkSourceFiles(root: string): string[] {
+/** SDK source files under `root` (a package `src` directory), excluding tests and declarations. */
+export function sdkSourceFiles(root: string): string[] {
   const files: string[] = [];
   const visit = (directory: string) => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
@@ -1712,19 +1713,34 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
 // Allowlist (the breaking-change log)
 // ---------------------------------------------------------------------------
 
+/**
+ * One entry of `scripts/public-api/breaking-changes.json`.
+ *
+ * Since the November 3, 2026 policy revision, a major release, a changeset or an
+ * elapsed deprecation period never authorizes a breaking change. An entry
+ * admits a breaking finding only when it records an emergency security
+ * exception (`securityException: true`) or an explicit owner-approved
+ * exception (`approval`: the link to that recorded decision). Entries written
+ * under the earlier major-based policy carry `removedInMajor`; they are kept as
+ * history and admit nothing new.
+ */
 export type AllowlistEntry = {
   /** Finding id(s) this entry covers; a trailing `*` matches a prefix. */
   ids: string[];
-  /** Where the deprecation was announced: changeset, docs URL, or ADR log anchor. */
-  deprecation: string;
-  /** SDK/API major that removes the old behaviour; must exceed the base major. */
-  removedInMajor: number;
-  /** Earliest removal date on the managed service (Sunset), ISO date. */
-  sunset: string;
   reason: string;
-  /** Optional emergency security exception (ADR (d)); still logged here. */
+  /** Emergency security exception (policy (d)); also logged in the policy's exception log. */
   securityException?: boolean;
+  /** Link (URL or docs path) to the recorded owner approval of this exception. */
+  approval?: string;
+  /** Historical (pre-November 2026) entries: where the deprecation was announced. */
+  deprecation?: string;
+  /** Historical (pre-November 2026) entries: the major that removed the old behaviour. */
+  removedInMajor?: number;
+  /** Historical (pre-November 2026) entries: the earliest removal date, ISO date. */
+  sunset?: string;
 };
+
+const REFERENCE = /(\.changeset\/|https?:\/\/|docs\/)/;
 
 export function validateAllowlist(entries: unknown): AllowlistEntry[] {
   if (!Array.isArray(entries)) throw new Error(`${ALLOWLIST_PATH} must be a JSON array`);
@@ -1737,34 +1753,58 @@ export function validateAllowlist(entries: unknown): AllowlistEntry[] {
       !entry.ids.every((id) => typeof id === "string" && id)
     )
       throw new Error(`${where}.ids must be a non-empty string array`);
+    if (typeof entry.reason !== "string" || entry.reason.trim().length < 10)
+      throw new Error(`${where}.reason must explain the change`);
+    if (entry.securityException !== undefined && typeof entry.securityException !== "boolean")
+      throw new Error(`${where}.securityException must be a boolean`);
     if (
-      typeof entry.deprecation !== "string" ||
-      !/(\.changeset\/|https?:\/\/|docs\/)/.test(entry.deprecation)
+      entry.approval !== undefined &&
+      (typeof entry.approval !== "string" || !REFERENCE.test(entry.approval))
+    )
+      throw new Error(
+        `${where}.approval must link (URL or docs path) to the recorded owner approval`,
+      );
+    if (
+      entry.deprecation !== undefined &&
+      (typeof entry.deprecation !== "string" || !REFERENCE.test(entry.deprecation))
     )
       throw new Error(
         `${where}.deprecation must reference a changeset, docs path, or URL announcing the deprecation`,
       );
-    if (!Number.isInteger(entry.removedInMajor))
+    if (entry.removedInMajor !== undefined && !Number.isInteger(entry.removedInMajor))
       throw new Error(`${where}.removedInMajor must be an integer major`);
-    if (typeof entry.sunset !== "string" || Number.isNaN(Date.parse(entry.sunset)))
+    if (
+      entry.sunset !== undefined &&
+      (typeof entry.sunset !== "string" || Number.isNaN(Date.parse(entry.sunset)))
+    )
       throw new Error(`${where}.sunset must be an ISO date`);
-    if (typeof entry.reason !== "string" || entry.reason.trim().length < 10)
-      throw new Error(`${where}.reason must explain the change`);
+    if (
+      entry.securityException !== true &&
+      entry.approval === undefined &&
+      entry.removedInMajor === undefined
+    )
+      throw new Error(
+        `${where} must record a security exception (securityException: true) or an owner approval (approval: link). A major release or deprecation period does not authorize a breaking change.`,
+      );
     return entry as AllowlistEntry;
   });
 }
 
+/**
+ * The entry that admits a breaking finding, or null. Only a security exception
+ * or an owner-approved exception admits one; historical major-based entries
+ * never admit a new finding.
+ */
 export function allowlisted(
   finding: Finding,
   entries: readonly AllowlistEntry[],
-  baseMajor: number,
 ): AllowlistEntry | null {
   for (const entry of entries) {
     const matches = entry.ids.some((id) =>
       id.endsWith("*") ? finding.id.startsWith(id.slice(0, -1)) : finding.id === id,
     );
     if (!matches) continue;
-    if (entry.securityException || entry.removedInMajor > baseMajor) return entry;
+    if (entry.securityException === true || entry.approval !== undefined) return entry;
   }
   return null;
 }

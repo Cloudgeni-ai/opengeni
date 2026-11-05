@@ -2092,6 +2092,18 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1243 agents and their Slack installations: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
+          // 1243 agent revisions: one read-and-insert FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1152 Slack agent proposals and Ask forms: two full-DML FORCE-RLS tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -2110,6 +2122,27 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1241 credit alert state/receipts/deliveries: three full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 3
+            : 0) +
+          // 1241 current billing recipients: one runtime read-only FORCE-RLS projection.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1257 automatic top-ups: three FORCE-RLS tables; two mutable journals
+          // and one append-only consent/mutation receipt table, never DELETE.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 3
+            : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+              ? 2
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2182,9 +2215,12 @@ describe("runtime database posture evaluator", () => {
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
         1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
         2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
+        3 + // 1243 agents (full DML), Slack installations (full DML), revisions (read and insert): FORCE-RLS.
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
-        2; // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
+        2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
+        4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
+        3; // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -4107,7 +4143,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 0946, 1103, 1060 and 1107 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4142,6 +4178,8 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     "inbound_events",
     "recording_transcript_versions",
     "recordings",
+    "recording_tracks",
+    "recording_chunks",
     "mcp_event_subscriptions",
     "event_source_feeds",
     "sandboxes",
@@ -4241,23 +4279,19 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "summarize_queued_turns_by_hold()",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "native_push_device_v2(text)",
-      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-      "claim_native_push_deliveries_v2(uuid, integer, integer)",
-      "agent_call_device_count_v1(text, boolean)",
-      "agent_call_ringing_v1(text)",
-      "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
       "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4326,6 +4360,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4349,7 +4384,8 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     beforeRecordings.privateRoutines = beforeRecordings.privateRoutines.filter(
       (entry) =>
         entry.name !== "list_stalled_recording_work_v1(integer)" &&
-        entry.name !== "list_due_recording_retention_v1(integer)",
+        entry.name !== "list_due_recording_retention_v1(integer)" &&
+        entry.name !== "list_uncompacted_recording_tracks_v1(integer, text)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
   });

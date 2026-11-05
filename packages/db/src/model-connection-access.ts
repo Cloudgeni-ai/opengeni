@@ -40,7 +40,9 @@ export type ModelConnectionKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  /** An organization's own OpenAI-compatible endpoint; always named by its connection id. */
+  | "openai_compatible";
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -75,6 +77,11 @@ export function assignedConnectionDefault(
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
   if (subscriptionCoreProviderOfKind(target.kind))
     throw new Error("Subscription access policies use the shared core");
+  if (
+    target.kind === "openai_compatible" &&
+    (target.workspaceId !== null || target.connectionId === "current")
+  )
+    throw new Error("An OpenAI-compatible endpoint's access is set on its organization connection");
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
@@ -83,7 +90,11 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
     };
   // Workspace OpenAI and Azure OpenAI keep their exact direct-connection rail;
   // only the organization connection has an access policy of this kind.
-  if (target.kind === "openai" || target.kind === "azure_openai")
+  if (
+    target.kind === "openai" ||
+    target.kind === "azure_openai" ||
+    target.kind === "openai_compatible"
+  )
     throw new Error("OpenAI access policies exist only for organization connections");
   return {
     table: sql.identifier("connections"),

@@ -313,10 +313,21 @@ export function parseWatchLine(line: string): WatchEvent | null {
 export const PROMPT_AFTER_MS = 3_000;
 /** A call app that lets go of the microphone this long has ended its call. */
 export const ENDED_AFTER_MS = 8_000;
+/**
+ * After Not now, an app off the microphone for less than this is still in
+ * the call the person turned down (a long mute, a rejoin), so it isn't asked
+ * about again. A call during a calendar meeting also stays turned down until
+ * that meeting ends.
+ */
+export const DECLINED_GAP_MS = 5 * 60_000;
 
 export type MeetingPrompt =
   | { kind: "record"; app: CallApp }
-  | { kind: "stop"; app: CallApp }
+  /**
+   * `where` names the account that records when the app has several, such as
+   * "staging.app.opengeni.ai", so the person knows which recording stops.
+   */
+  | { kind: "stop"; app: CallApp; where?: string }
   /** Not a question: a call started recording without asking. Its button stops it. */
   | { kind: "recording"; app: CallApp }
   /**
@@ -388,6 +399,12 @@ export class MeetingPrompter {
   private autoStarted: { at: number; app: CallApp } | null = null;
   /** The recording going on was started without asking. */
   private automatic = false;
+  /**
+   * Apps whose call the person turned down with Not now: until when (the end
+   * of the calendar meeting it was, or null for none) and when they last held
+   * the microphone.
+   */
+  private readonly declinedCalls = new Map<string, { until: number | null; lastSeen: number }>();
 
   constructor(
     private readonly own: OwnApp,
@@ -419,18 +436,25 @@ export class MeetingPrompter {
       if (call.active && !active.has(id)) {
         call.active = false;
         call.lastSeen = now;
+        // Turned down: the gap that ends that runs from when it let go.
+        const declined = this.declinedCalls.get(id);
+        if (declined) declined.lastSeen = now;
       }
     }
     for (const [id, app] of active) {
       const call = this.calls.get(id);
       if (!call) {
-        // A call already going on when recording started isn't asked about.
-        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked: this.recording });
+        // A call already going on when recording started isn't asked about,
+        // nor is the one the person turned down coming back.
+        const asked = this.recording || this.stillDeclined(id, now);
+        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked });
       } else {
         // Back within the grace period (a mute, a device switch): the same call.
         call.active = true;
         call.lastSeen = now;
       }
+      const declined = this.declinedCalls.get(id);
+      if (declined) declined.lastSeen = now;
     }
     if (this.recording) for (const id of active.keys()) this.recorded.add(id);
     this.evaluate(now);
@@ -493,9 +517,41 @@ export class MeetingPrompter {
     if (this.shown?.prompt === prompt) this.shown = null;
   }
 
+  /**
+   * The person chose Not now on the question about `app`'s call: it isn't
+   * asked about again during that call. `until` is the end of the calendar
+   * meeting it is, if any; otherwise the call lasts while the app comes back
+   * to the microphone within {@link DECLINED_GAP_MS}.
+   */
+  declined(app: CallApp, now: number, until: number | null = null): void {
+    this.declinedCalls.set(app.id, { until, lastSeen: now });
+  }
+
+  /**
+   * Where `appId`'s call is: "on" the microphone, or off it only briefly (a
+   * mute); "away" when a call the person turned down has been off it for
+   * less than {@link DECLINED_GAP_MS} (a long mute, or it ended); else "ended".
+   */
+  callState(appId: string, now: number): "on" | "away" | "ended" {
+    if (this.calls.has(appId)) return "on";
+    const declined = this.declinedCalls.get(appId);
+    return declined && now - declined.lastSeen < DECLINED_GAP_MS ? "away" : "ended";
+  }
+
   /** The call apps holding the microphone now. */
   activeCalls(): string[] {
     return [...this.calls.values()].filter((call) => call.active).map((call) => call.app.id);
+  }
+
+  private stillDeclined(id: string, now: number): boolean {
+    const declined = this.declinedCalls.get(id);
+    if (!declined) return false;
+    // A meeting running over keeps its call turned down through a mute too.
+    const still =
+      now - declined.lastSeen < DECLINED_GAP_MS ||
+      (declined.until !== null && now < declined.until);
+    if (!still) this.declinedCalls.delete(id);
+    return still;
   }
 
   private present(prompt: MeetingPrompt): void {
@@ -574,7 +630,10 @@ export function promptText(
   }
   return {
     question: words.stopQuestion,
-    reason: fillMeetingWords(words.callEnded, values),
+    reason:
+      prompt.where && words.callEndedIn
+        ? fillMeetingWords(words.callEndedIn, { ...values, where: prompt.where })
+        : fillMeetingWords(words.callEnded, values),
     action: words.stop,
     dismiss: words.keepRecording,
   };
@@ -742,6 +801,24 @@ export interface MeetingDetectionOptions {
    * to join and start recording. None without it.
    */
   calendar?: MeetingCalendar;
+  /**
+   * A recording didn't stop when the person chose Stop: show the account
+   * whose page records, so its own Stop is in front of them. The window as
+   * it is (`reveal`) by default. This also runs when the call ended on its
+   * own and the stop wasn't acknowledged, so the window can come forward
+   * without the person asking; only then, and it is logged.
+   */
+  revealPage?: (page: MeetingPage) => void;
+  /**
+   * The account a recording page belongs to, as the person knows it, for the
+   * stop card; null when the app has only one, so there is nothing to tell
+   * apart. Nothing by default.
+   */
+  describePage?: (page: MeetingPage) => string | null;
+  /** A page started or stopped recording, so the app can mark the account that records. */
+  recordingChanged?: () => void;
+  /** How long a recording page has to say it stopped. {@link STOP_CONFIRM_MS} by default. */
+  stopConfirmMs?: number;
   /** What detection did, a line at a time. Lines name the call app's id, nothing about the call. */
   log(message: string, error?: unknown): void;
   spawnProcess?: typeof spawn;
@@ -771,6 +848,12 @@ export const REQUEST_WAIT_MS = 60_000;
  * that stops and starts again at once doesn't stop the helper.
  */
 export const CANNOT_RECORD_AFTER_MS = 2_000;
+/**
+ * A page that records says so as soon as its recording stops. One that still
+ * records this long after the person chose Stop didn't get it: its account is
+ * shown and asked again.
+ */
+export const STOP_CONFIRM_MS = 5_000;
 
 /**
  * Runs the helper's microphone watch while detection is on, feeds the
@@ -800,6 +883,10 @@ export class MeetingDetection {
   private recordingSince: number | null = null;
   /** The card's current question, and what to do when another takes its place. */
   private onCard: { prompt: MeetingPrompt; replaced: () => void } | null = null;
+  /** Checks that the pages a Stop went to stopped recording. */
+  private stopCheck: NodeJS.Timeout | null = null;
+  /** The pages a Stop went to that haven't said they stopped since. */
+  private readonly stopping = new Set<MeetingPage>();
 
   constructor(private readonly options: MeetingDetectionOptions) {
     this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt), {
@@ -822,6 +909,8 @@ export class MeetingDetection {
           // Only a recording in the account the meeting would record in is
           // switched; one in another account goes on.
           recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
+          // A meeting whose call the person turned down isn't offered while it goes on.
+          callState: (appId) => this.prompter.callState(appId, this.now()),
           // A call that just started, or one that ended, is asked about first.
           busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
@@ -946,6 +1035,9 @@ export class MeetingDetection {
     recording: boolean,
     meeting: DesktopRecordingMeeting | null = null,
   ): void {
+    const changed = recording !== this.recordingPages.has(page);
+    // Stopped as asked; a recording it starts afterwards is a new one.
+    if (!recording) this.stopping.delete(page);
     const now = this.now();
     const before = this.recordingPages.get(page);
     if (!recording) {
@@ -967,6 +1059,7 @@ export class MeetingDetection {
     else this.recordingSince ??= now;
     this.prompter.setRecording(any, now);
     for (const listener of this.recordingListeners) listener();
+    if (changed) this.options.recordingChanged?.();
   }
 
   /** The meeting being recorded here, the newest when pages record several; null for none. */
@@ -988,12 +1081,12 @@ export class MeetingDetection {
 
   /** Stop the recordings going on, from the app's menu; false when none is. */
   stopRecording(): boolean {
-    const pages = [...this.recordingPages.keys()].filter((page) => !page.isDestroyed());
+    const pages = this.liveRecordingPages();
     if (pages.length === 0) return false;
     this.options.log("Meeting detection: stopping the recording from the menu.");
-    for (const page of pages) {
-      page.send(DESKTOP_IPC.meetingDetectionRequest, { kind: "stop", app: "" });
-    }
+    const request: DesktopMeetingRequest = { kind: "stop", app: "" };
+    for (const page of pages) this.post(page, request);
+    this.confirmStopped(pages, request);
     return true;
   }
 
@@ -1008,6 +1101,11 @@ export class MeetingDetection {
       kind: "open",
     } satisfies DesktopMeetingRequest);
     return true;
+  }
+
+  /** Whether `page` records a meeting. */
+  isRecording(page: MeetingPage): boolean {
+    return this.recordingPages.has(page) && !page.isDestroyed();
   }
 
   /** A page closed or went to another address: it neither records nor listens. */
@@ -1026,6 +1124,9 @@ export class MeetingDetection {
     this.timer = null;
     if (this.restart) clearTimeout(this.restart);
     this.restart = null;
+    if (this.stopCheck) clearTimeout(this.stopCheck);
+    this.stopCheck = null;
+    this.stopping.clear();
     const child = this.child;
     this.child = null;
     if (child) {
@@ -1049,6 +1150,12 @@ export class MeetingDetection {
     return this.showCard(prompt, (outcome) => {
       this.prompter.dismissed(prompt);
       this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
+      if (outcome === "dismissed" && prompt.kind === "record") {
+        // Not now: not during this call, and not for the calendar meeting it is.
+        const now = this.now();
+        const meeting = this.reminders?.declinedCall(now, prompt.app.id) ?? null;
+        this.prompter.declined(prompt.app, now, meeting?.endsAt ?? null);
+      }
       // Stopping a recording that started without asking stays in the background.
       if (outcome === "chosen") {
         this.deliver(promptRequest(prompt), { quiet: prompt.kind === "recording" });
@@ -1073,7 +1180,7 @@ export class MeetingDetection {
       done(outcome);
     };
     this.onCard = { prompt, replaced: () => finish("expired") };
-    const shown = this.options.view.show(prompt, finish);
+    const shown = this.options.view.show(this.describe(prompt), finish);
     return {
       close: () => {
         if (!open) return;
@@ -1083,6 +1190,19 @@ export class MeetingDetection {
         shown.close();
       },
     };
+  }
+
+  /** A stop card names the account that records, when the app can tell several apart. */
+  private describe(prompt: MeetingPrompt): MeetingPrompt {
+    if (prompt.kind !== "stop" || !this.options.describePage) return prompt;
+    const page = this.liveRecordingPages()[0];
+    let where: string | null = null;
+    try {
+      where = page ? this.options.describePage(page) : null;
+    } catch (error) {
+      this.options.log("Meeting detection: couldn't name the account that records.", error);
+    }
+    return where ? { ...prompt, where } : prompt;
   }
 
   /**
@@ -1107,18 +1227,65 @@ export class MeetingDetection {
     this.pending = { request, timer };
   }
 
-  /** Whether a page took it. Stopping goes to the pages that record. */
+  /**
+   * Whether a page took it. Stopping goes to the pages that record, whether
+   * or not they take choices right now and whichever account the window
+   * shows; only when none records does it go to the page that would.
+   */
   private send(request: DesktopMeetingRequest): boolean {
-    const pages = this.livePages();
-    const recording = pages.filter((page) => this.recordingPages.has(page));
-    if (request.kind === "stop" && recording.length > 0) {
-      for (const page of recording) page.send(DESKTOP_IPC.meetingDetectionRequest, request);
-      return true;
+    if (request.kind === "stop") {
+      const recording = this.liveRecordingPages();
+      if (recording.length > 0) {
+        for (const page of recording) this.post(page, request);
+        this.confirmStopped(recording, request);
+        return true;
+      }
     }
+    const pages = this.livePages();
     const page = this.options.chooseTarget ? this.options.chooseTarget(pages) : pages.at(-1);
     if (!page) return false;
-    page.send(DESKTOP_IPC.meetingDetectionRequest, request);
-    return true;
+    return this.post(page, request);
+  }
+
+  /** Hand `request` to `page`; one page failing doesn't keep it from the others. */
+  private post(page: MeetingPage, request: DesktopMeetingRequest): boolean {
+    try {
+      page.send(DESKTOP_IPC.meetingDetectionRequest, request);
+      return true;
+    } catch (error) {
+      this.options.log("Meeting detection: couldn't reach a page.", error);
+      return false;
+    }
+  }
+
+  /**
+   * A page that records says so as soon as it stops. One still recording
+   * after a while didn't get the Stop: show its account, so the recording
+   * and its own Stop are in front of the person, and ask it again.
+   */
+  private confirmStopped(pages: readonly MeetingPage[], request: DesktopMeetingRequest): void {
+    if (this.stopCheck) clearTimeout(this.stopCheck);
+    this.stopping.clear();
+    for (const page of pages) this.stopping.add(page);
+    this.stopCheck = setTimeout(() => {
+      this.stopCheck = null;
+      const still = [...this.stopping].filter((page) => this.isRecording(page));
+      this.stopping.clear();
+      if (still.length === 0) return;
+      this.options.log("Meeting detection: the recording didn't stop; showing it.");
+      try {
+        if (this.options.revealPage) this.options.revealPage(still[0]!);
+        else this.options.reveal();
+      } catch (error) {
+        this.options.log("Meeting detection: couldn't show the recording.", error);
+      }
+      for (const page of still) this.post(page, request);
+    }, this.options.stopConfirmMs ?? STOP_CONFIRM_MS);
+    this.stopCheck.unref?.();
+  }
+
+  private liveRecordingPages(): MeetingPage[] {
+    return [...this.recordingPages.keys()].filter((page) => !page.isDestroyed());
   }
 
   /** Whether the page a choice would go to (the active account's) records. */

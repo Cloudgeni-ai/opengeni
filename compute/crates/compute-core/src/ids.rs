@@ -32,3 +32,9 @@ pub struct BalloonRequest(pub u64);
 /// [`crate::Input::ShrinkFailed`]: a reply to any other changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShrinkRequest(pub u64);
+
+/// Something the host keeps on local disk only to go faster, such as a
+/// template or a cached image (see [`crate::Input::Cache`]). Callers choose
+/// these, one per thing kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CacheId(pub u64);

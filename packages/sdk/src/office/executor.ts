@@ -1,5 +1,6 @@
 // Runs an agent's Office.js code in this workbook: the body of an async
-// function (context, Excel, console) inside Excel.run.
+// function (context, Excel, console, files) inside Excel.run.
+import type { OfficeRunFile } from "./workbook-file";
 
 export type RunResult =
   | { ok: true; value: unknown; logs: string[]; durationMs: number }
@@ -60,6 +61,8 @@ export async function runOfficeCode(
   excelRun: (batch: (context: unknown) => Promise<unknown>) => Promise<unknown>,
   excel: unknown,
   now: () => number = () => performance.now(),
+  /** Chat files the code asked for, as `files` in its scope. */
+  files: readonly OfficeRunFile[] = [],
 ): Promise<RunResult> {
   const logs: string[] = [];
   const log =
@@ -78,8 +81,8 @@ export async function runOfficeCode(
   };
   const started = now();
   try {
-    const body = new AsyncFunction("context", "Excel", "console", STRICT + code);
-    const value = await excelRun((context) => body(context, excel, agentConsole));
+    const body = new AsyncFunction("context", "Excel", "console", "files", STRICT + code);
+    const value = await excelRun((context) => body(context, excel, agentConsole, files));
     return { ok: true, value: jsonSafe(value), logs, durationMs: now() - started };
   } catch (caught) {
     const error = caught as {

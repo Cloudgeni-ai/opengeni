@@ -3,13 +3,17 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useRef } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
+import { RelativeTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
+import { UsageMeterGroup, type UsageWindowReading } from "@opengeni/react/ui/usage-meter";
 import {
-  UsageMeterGroup,
-  UsageReadout,
-  usageResets,
-  type UsageWindowReading,
-} from "@opengeni/react/ui/usage-meter";
+  SubscriptionUsageCell,
+  subscriptionUsageReadings,
+} from "@opengeni/react/app/components/models/subscription-usage";
+import {
+  subscriptionWindows,
+  type SubscriptionWindow,
+  type SubscriptionWindowInput,
+} from "@opengeni/react/app/lib/subscription-accounts";
 import {
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
@@ -170,49 +174,40 @@ export function useClaudeUsage({
   };
 }
 
-const labels: Record<ClaudeUsageWindow["id"], string> = {
-  five_hour: "5-hour",
-  seven_day: "Weekly",
-  seven_day_opus: "Weekly · Opus",
-  seven_day_sonnet: "Weekly · Sonnet",
-  seven_day_overage_included: "Weekly · included extra usage",
-  overage: "Extra usage",
-};
+/**
+ * The windows Claude reported for this account, labelled the shared way.
+ * Only reported windows: a verified Ultra plan has no 5-hour limit, so it
+ * shows none.
+ */
+export function claudeUsageWindows(
+  value: ClaudeSubscriptionUsage | null,
+  now: number,
+): SubscriptionWindow[] {
+  return subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now);
+}
+
+/** Claude's per-window statuses in the shared shape. */
+export function claudeWindowInputs(
+  windows: readonly ClaudeUsageWindow[],
+): SubscriptionWindowInput[] {
+  return windows.map((window) => ({
+    id: window.id,
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    status:
+      window.status === "rejected"
+        ? "exhausted"
+        : window.status === "allowed_warning"
+          ? "warning"
+          : null,
+  }));
+}
 
 export function claudeUsageReadings(
   value: ClaudeSubscriptionUsage | null,
   now: number,
 ): UsageWindowReading[] {
-  const windows = new Map(value?.windows.map((window) => [window.id, window]));
-  const ids: ClaudeUsageWindow["id"][] = [
-    "seven_day",
-    "five_hour",
-    ...[...windows.keys()].filter((id) => id !== "seven_day" && id !== "five_hour"),
-  ];
-  return ids.map((id) => {
-    const window = windows.get(id);
-    const reset = window?.resetsAt ? Date.parse(window.resetsAt) : null;
-    const expired = reset !== null && reset <= now;
-    return {
-      label: labels[id],
-      percent:
-        !expired && window?.usedPercent != null
-          ? Math.min(100, Math.max(0, 100 - window.usedPercent))
-          : null,
-      ...(!expired && window?.status === "rejected" && id !== "overage"
-        ? { limitReached: true }
-        : {}),
-      ...(!expired &&
-      window?.status === "rejected" &&
-      id === "overage" &&
-      window.usedPercent === null
-        ? { valueLabel: "Unavailable" }
-        : {}),
-      ...(reset !== null && !expired
-        ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset }
-        : {}),
-    };
-  });
+  return subscriptionUsageReadings(claudeUsageWindows(value, now), now);
 }
 
 /** Omitted windows retain their own observation time, not the latest response's. */
@@ -239,28 +234,9 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
     state.value?.refreshStatus === "unavailable" ||
     state.value?.refreshStatus === "reconnect";
   // A failed live check is not evidence of no usage (or a fresh old reading).
-  const readings = claudeUsageReadings(unavailable ? null : state.value, now);
-  const planReadings = readings.filter(
-    (item) => item.label !== labels.overage && item.label !== labels.seven_day_overage_included,
-  );
-  const reading =
-    planReadings.find((item) => item.limitReached || item.percent === 0) ??
-    planReadings.find((item) => item.percent !== null) ??
-    readings[0]!;
-  // The shown window's reset, then the plan's other main limit.
-  const resetWindows = [
-    reading,
-    ...readings.filter(
-      (item) =>
-        item !== reading && (item.label === labels.five_hour || item.label === labels.seven_day),
-    ),
-  ];
   return (
-    <UsageReadout
-      window={reading.label.replace(/^Weekly/, "this week").replace(/^5-hour$/, "this period")}
-      percent={reading.percent}
-      limitReached={reading.limitReached}
-      resets={usageResets(resetWindows, reading.label)}
+    <SubscriptionUsageCell
+      windows={claudeUsageWindows(unavailable ? null : state.value, now)}
       loading={state.loading}
       fallback={
         unavailable || state.value?.refreshStatus === "scope_required"

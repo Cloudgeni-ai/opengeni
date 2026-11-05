@@ -490,11 +490,12 @@ test("the Plans section states the two pricing lines", async () => {
     />,
   );
   expect(document.body.textContent).toContain(
-    "Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can bring your own keys.",
+    "Plan credit is for the Opengeni apps. Paid plans include your own AI subscriptions, with no usage fee.",
   );
   expect(document.body.textContent).toContain(
-    "API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.",
+    "API use spends credits, not plan credit, and cannot use connected subscriptions.",
   );
+  expect(document.body.textContent).not.toContain("5%");
 });
 
 test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {

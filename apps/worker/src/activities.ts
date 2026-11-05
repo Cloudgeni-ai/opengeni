@@ -137,6 +137,7 @@ export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
 export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
+export const scanRecordingSpeakers = defaultControlActivities.scanRecordingSpeakers;
 export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
 export const archiveDeletedMeetingSummaries =
   defaultControlActivities.archiveDeletedMeetingSummaries;

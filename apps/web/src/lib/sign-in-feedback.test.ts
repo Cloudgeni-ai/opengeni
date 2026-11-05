@@ -75,8 +75,8 @@ test("a refused social sign-in for an address that isn't allowed says who to ask
   );
 });
 
-test("unchallenged OAuth signup directs the human through signup verification", () => {
-  expect(readSignInCallbackError("?error=signup_challenge_required")).toContain(
-    "complete verification",
+test("unchallenged OAuth signup says no account was created and to try again", () => {
+  expect(readSignInCallbackError("?error=signup_challenge_required")).toBe(
+    "Verification didn't complete, so no account was created. Try again.",
   );
 });

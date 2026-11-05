@@ -23,7 +23,7 @@ use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep};
 
-use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
+use super::{Delays, Lab, NEVER, PAUSE_SOON, id, vm_name};
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
@@ -697,6 +697,115 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
         );
     }
     assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A host whose agent restarts after its lease ran out finds its VMs held
+/// frozen by the guard, their VMMs unable to answer. It lists them under
+/// the owner epochs their records name, so it can register, and carries
+/// out the service's rulings on them before anything could thaw them:
+/// the VMs of those dropped or adopted again are ended, the store's copies
+/// kept, and the one kept is taken back, its guest still running, once
+/// the guard thaws it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_restarted_with_frozen_vms_lists_them_and_carries_out_the_rulings() {
+    let (one, two, shelf) = hosts().await;
+    let (kept, moved, refetched, unlisted) = (id(11), id(12), id(13), id(14));
+    let all = [kept, moved, refetched, unlisted];
+    for sandbox in all {
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &[&format!("set {sandbox}")]).await;
+        one.sleep_to(sandbox, LevelName::Archived).await;
+    }
+    for sandbox in all {
+        one.wait_level(sandbox, LevelName::Archived).await;
+        // Running again, with its copy in the store.
+        assert_eq!(one.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
+    let owner = one.current(kept).await.owner_epoch;
+    let (root, world) = one.stop().await;
+    let started = world.boots.load(Ordering::Relaxed) + world.restores.load(Ordering::Relaxed);
+    // The lease ran out while no agent ran: the guard froze every VM.
+    world.held_frozen.lock().unwrap().extend(all.map(vm_name));
+
+    let one = Lab::start_stored(root, world, Directory::new(&shelf)).await;
+    let status = one.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    let listed: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    let mut expected: Vec<(Id, Option<u64>)> =
+        all.iter().map(|sandbox| (*sandbox, Some(owner))).collect();
+    expected.sort_by_key(|(sandbox, _)| *sandbox);
+    assert_eq!(listed, expected, "listed for the service to rule on");
+    let live = |lab: &Lab, sandbox: Id| lab.world.live.lock().unwrap().contains(&vm_name(sandbox));
+    assert!(
+        all.iter().all(|sandbox| live(&one, *sandbox)),
+        "left as they are"
+    );
+
+    one.handle
+        .reconcile(vec![
+            ruling(kept, Verdict::Keep { owner_epoch: 3 }),
+            ruling(moved, Verdict::Drop),
+            ruling(
+                refetched,
+                Verdict::Refetch {
+                    owner_epoch: 4,
+                    whole: true,
+                },
+            ),
+        ])
+        .await
+        .unwrap();
+    // Answered only once every VM not kept has ended, as the deadline
+    // that thaws the rest is written only then.
+    for sandbox in [moved, refetched, unlisted] {
+        assert!(!live(&one, sandbox), "{sandbox} still runs");
+    }
+    assert!(live(&one, kept), "the kept VM is left as it is");
+    let status = one.status().await;
+    let blocked: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    assert_eq!(blocked, [(kept, Some(3))], "kept under its new epoch");
+    let held: Vec<(Id, u64, LevelName)> = status
+        .sandboxes
+        .iter()
+        .map(|sandbox| (sandbox.id, sandbox.owner_epoch, sandbox.level))
+        .collect();
+    assert_eq!(held, [(refetched, 4, LevelName::Remote)]);
+
+    // Thawed, the kept VM is taken back with its guest as it was.
+    one.world.held_frozen.lock().unwrap().clear();
+    one.wait_until("the kept VM to be taken back", |status| {
+        status.blocked.is_empty()
+            && status.sandboxes.iter().any(|sandbox| {
+                (sandbox.id, sandbox.owner_epoch, sandbox.level) == (kept, 3, LevelName::Running)
+            })
+    })
+    .await;
+    assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    assert_eq!(
+        one.world.boots.load(Ordering::Relaxed) + one.world.restores.load(Ordering::Relaxed),
+        started,
+        "nothing started again"
+    );
+    assert_eq!(
+        one.run(refetched, &["get"]).await,
+        [refetched.to_string()],
+        "adopted again from the store"
+    );
+    // What was dropped is still in the store for whoever gets it next.
+    for sandbox in [moved, unlisted] {
+        assert_eq!(adopt(&two, sandbox, 5).await, Reply::Done);
+        assert_eq!(two.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
     one.assert_clean();
     two.assert_clean();
 }

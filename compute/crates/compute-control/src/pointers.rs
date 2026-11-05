@@ -34,6 +34,10 @@ const READ_AT_ONCE: usize = 16;
 /// on by its own monotonic clock, before it reads the fleet's again.
 const CLOCK_FOR: Duration = Duration::from_secs(30);
 
+/// How long a replica believes what it last found about whether every live
+/// host reads packs.
+const PACKS_FOR: Duration = Duration::from_secs(30);
+
 /// How far a replica's clock may be from the fleet's before it warns.
 const CLOCK_WARN_MS: i64 = 60_000;
 
@@ -55,6 +59,9 @@ pub struct Pointers<S> {
     /// When this replica last read the fleet's clock, on its monotonic
     /// clock, and what it read then, in milliseconds since 1970.
     compared: Mutex<Option<(Instant, u64)>>,
+    /// When this replica last asked whether every live host reads packs,
+    /// and the answer.
+    packs: Mutex<Option<(Instant, bool)>>,
 }
 
 impl<S> fmt::Debug for Pointers<S> {
@@ -72,7 +79,28 @@ impl<S: Store> Pointers<S> {
             store,
             imported: AtomicBool::new(false),
             compared: Mutex::new(None),
+            packs: Mutex::new(None),
         }
+    }
+
+    /// Whether every live host says it reads copies whose chunks are in
+    /// packs, so hosts may write them (ADR 31): asked of the store again
+    /// every [`PACKS_FOR`]. A host of an earlier release that registers
+    /// meanwhile finds such copies refused, never misread, until then.
+    pub async fn packs(&self) -> Result<bool, Unanswered> {
+        let asked = *self.packs.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, packs)) = asked
+            && at.elapsed() < PACKS_FOR
+        {
+            return Ok(packs);
+        }
+        let hosts = self.store.hosts_changed(0).await?;
+        let packs = hosts
+            .iter()
+            .filter(|host| host.state != HostState::Lost)
+            .all(|host| host.capacity.reads_packs);
+        *self.packs.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), packs));
+        Ok(packs)
     }
 
     /// The fleet's clock now, in milliseconds since 1970: the store's,

@@ -1,6 +1,7 @@
 import {
   ActivityFailure,
   ApplicationFailure,
+  continueAsNew,
   patched,
   proxyActivities,
   sleep,
@@ -29,6 +30,10 @@ export function recordingTranscriptWorkflowId(versionId: string): string {
 
 export function recordingDeletionWorkflowId(recordingId: string): string {
   return `recording-deletion:${recordingId}`;
+}
+
+export function recordingSpeakerScanWorkflowId(recordingId: string): string {
+  return `recording-speaker-scan:${recordingId}`;
 }
 
 export type BrowserRecordingVideoWorkflowInput = BrowserRecordingVideoInput;
@@ -82,6 +87,21 @@ const deletionActivity = proxyActivities<
 const stopChatActivity = proxyActivities<Pick<typeof activities, "stopArchivedSessionWork">>({
   startToCloseTimeout: "2 minutes",
   retry: { initialInterval: "5 seconds", backoffCoefficient: 2, maximumInterval: "2 minutes" },
+});
+
+/**
+ * A scan goes through a few minutes of new audio: seconds of CPU. Missing
+ * one only leaves more for the final transcript, so it isn't retried long.
+ */
+const speakerScanActivity = proxyActivities<Pick<typeof activities, "scanRecordingSpeakers">>({
+  startToCloseTimeout: "20 minutes",
+  heartbeatTimeout: "2 minutes",
+  retry: {
+    initialInterval: "30 seconds",
+    backoffCoefficient: 2,
+    maximumInterval: "5 minutes",
+    maximumAttempts: 3,
+  },
 });
 
 /** Encoding an hour of mostly still pages takes seconds; a long busy one, minutes. */
@@ -183,4 +203,25 @@ export async function recordingDeletionWorkflow(
     }
   }
   await deletionActivity.deleteRecordingMedia(input);
+}
+
+/**
+ * Tell a meeting's speakers apart while it is still being recorded, about
+ * every half minute, so the transcript after it ends has little left to do.
+ * Ends with the recording; a failed scan only leaves more for the end.
+ */
+export async function recordingSpeakerScanWorkflow(
+  input: RecordingDeletionWorkflowInput,
+): Promise<void> {
+  for (let scans = 0; scans < 120; scans += 1) {
+    let again = true;
+    try {
+      ({ again } = await speakerScanActivity.scanRecordingSpeakers(input));
+    } catch {
+      // Tried again on the next round, from what was kept.
+    }
+    if (!again) return;
+    await sleep("30 seconds");
+  }
+  await continueAsNew<typeof recordingSpeakerScanWorkflow>(input);
 }

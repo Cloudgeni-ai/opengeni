@@ -135,6 +135,10 @@ type MutableModalSnapshotSandbox = {
 
 type ModalWorkspaceCaptureOptions = {
   requestId: string;
+  /** Hard provider-side timeout for this one capture. A zero-holder drain
+   * passes its own (longer) budget so the caller's wait never doubles as
+   * Modal's deadline; other captures keep the session's configured value. */
+  providerTimeoutMs?: number;
 };
 
 type MutableModalSandboxSession = {
@@ -178,6 +182,7 @@ const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
 const modalSnapshotRequestIds = new WeakMap<object, string>();
 const modalDirectorySnapshotTimeouts = new WeakMap<object, number | undefined>();
+const modalProviderSnapshotTimeouts = new WeakMap<object, number>();
 const MODAL_TURN_SHELL_MARKER = "/tmp/opengeni-turn-shell/";
 
 type ModalPendingExecStart = {
@@ -467,8 +472,9 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
       if (!requestId) {
         throw new Error("Modal native workspace capture requires a durable request id");
       }
+      const timeoutMs = modalProviderSnapshotTimeouts.get(session) ?? legacyParams;
       return await snapshotFilesystem.call(sandbox, {
-        ...(legacyParams === undefined ? {} : { timeoutMs: legacyParams }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ttlMs: null,
         snapshotId: requestId,
       });
@@ -692,10 +698,20 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     if (options && nativePersistence) {
       modalSnapshotRequestIds.set(session, options.requestId);
     }
+    const providerTimeoutMs =
+      options?.providerTimeoutMs !== undefined &&
+      Number.isSafeInteger(options.providerTimeoutMs) &&
+      options.providerTimeoutMs > 0
+        ? options.providerTimeoutMs
+        : undefined;
+    if (providerTimeoutMs !== undefined && nativePersistence) {
+      modalProviderSnapshotTimeouts.set(session, providerTimeoutMs);
+    }
     const directoryTimeout =
       mutable.state?.workspacePersistence === "snapshot_directory"
-        ? mutable.state.snapshotFilesystemTimeoutMs
+        ? (providerTimeoutMs ?? mutable.state.snapshotFilesystemTimeoutMs)
         : undefined;
+    const savedDirectoryTimeout = mutable.state?.snapshotFilesystemTimeoutMs;
     const directoryTimeoutWasPresent =
       mutable.state?.workspacePersistence === "snapshot_directory" &&
       Object.hasOwn(mutable.state, "snapshotFilesystemTimeoutMs");
@@ -710,9 +726,10 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
       return await persistWorkspace();
     } finally {
       modalSnapshotRequestIds.delete(session);
+      modalProviderSnapshotTimeouts.delete(session);
       if (mutable.state?.workspacePersistence === "snapshot_directory") {
         if (directoryTimeoutWasPresent) {
-          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", directoryTimeout);
+          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", savedDirectoryTimeout);
         } else {
           delete mutable.state.snapshotFilesystemTimeoutMs;
         }

@@ -73,6 +73,50 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(instructions).not.toContain("governance");
   });
 
+  test("a configured session with a search router keeps Tool discovery, as its turn does", () => {
+    const lazySettings = testSettings({ sandboxBackend: "docker", lazyToolSearchEnabled: true });
+    const config = agentConfig();
+    const session = { agent: config, instructions: "SESSION", resources: [] };
+    const turnOptions = {
+      agentConfig: config,
+      workspaceAgentIdentity: context.workspaceAgentIdentity,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      rig: context.rig,
+    };
+    // The turn installs the router: lazy search is on and the route has a transport.
+    const turn = inspectPersistentAgentInstructions(lazySettings, {
+      ...turnOptions,
+      lazyToolTransport: "generic_dispatch",
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(turn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings: lazySettings,
+        session,
+        ...context,
+        lazyToolTransport: "generic_dispatch",
+        toolRouterInHistory: false,
+      }),
+    ).toBe(turn);
+    // Router history installs the router even with lazy search off.
+    const historyTurn = inspectPersistentAgentInstructions(settings, {
+      ...turnOptions,
+      toolRouterInHistory: true,
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(historyTurn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session,
+        ...context,
+        toolRouterInHistory: true,
+      }),
+    ).toBe(historyTurn);
+  });
+
   test("an unattended session keeps its guidance through compaction", () => {
     const metadata = { _opengeniUnattended: true };
     const legacy = { agent: null, instructions: "SESSION", resources: [], metadata };
