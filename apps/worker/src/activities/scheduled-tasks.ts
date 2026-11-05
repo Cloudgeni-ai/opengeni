@@ -1222,7 +1222,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const unreachableHuman = generatedTarget && !causalHumanSubjectId;
       if (unreachableHuman)
         firstPartyMcpTools = firstPartyMcpTools.filter(
-          (tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool] !== "humanInput",
+          (tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool] !== "notifications",
         );
       if (
         xaiAuthoritySubjectId &&

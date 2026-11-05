@@ -53,7 +53,7 @@ const memberPermissions = [
   "scheduled_tasks:manage",
 ];
 const personTools = Object.entries(FIRST_PARTY_MCP_TOOL_CAPABILITIES)
-  .filter(([, owner]) => owner === "humanInput")
+  .filter(([, owner]) => owner === "notifications")
   .map(([tool]) => tool as FirstPartyMcpToolName);
 
 async function host() {
