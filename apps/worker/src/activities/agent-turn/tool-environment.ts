@@ -506,6 +506,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ),
     tools: turnTools,
     resolveCredential,
+    warn: (message, attributes) => observability.warn(message, attributes),
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   // Apps authorization is the exact core designation resolved at claim.

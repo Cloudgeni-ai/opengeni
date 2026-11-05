@@ -5243,6 +5243,7 @@ export const englishMessages = {
   "timeline.commandStep.write.running": "Writing {name}",
   "timeline.commandStep.writeFile.done": "Wrote a file",
   "timeline.commandStep.writeFile.running": "Writing a file",
+  "timeline.compactionCopy.chatHistoryIsUnchanged": "Chat history is unchanged.",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":
