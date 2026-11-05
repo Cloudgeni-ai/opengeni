@@ -616,10 +616,33 @@ test("a compaction never borrows an external link turn's accounts", async () => 
   expect((await compactWithSpy(w)).seen).toEqual([]);
 }, 60_000);
 
+// Work whose causal turn is the compaction itself, outside a receiving
+// context, continues the intent the compaction stored: the compacted turn's
+// when it could lend it, and nothing when it could not.
+async function continueAfterCompaction(w: World, resolver: Resolver) {
+  const compaction = await claim(w, resolver);
+  expect(compaction.turn.source).toBe("compaction");
+  await finish(w, compaction);
+  // The checkpoint's own settlement normally clears the request; without it the
+  // next claim would be another compaction. Leaving the receiving context also
+  // makes the compaction the continuation's causal turn.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set compact_requested = false, execution_context_turn_id = null
+      where id = ${w.sessionId}`;
+  });
+  await childResult(w, compaction.turn.id);
+  const next = await claim(w, resolver);
+  expect(next.turn.source).not.toBe("compaction");
+  const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings
+      from session_turns where id=${next.turn.id}`;
+  return row!;
+}
+
 test("work continuing after a compaction resolves the compacted turn's intent", async () => {
   const w = await fixture();
   const intent = intentOf(w.g.subjectId);
-  const origin = await startedTurnWithIntent(w, intent);
+  await startedTurnWithIntent(w, intent);
   const fresh = await account(w, w.g.subjectId);
   const seen: ConnectionAccountIntent[] = [];
   const resolver: Resolver = async (_tx, input) => {
@@ -630,17 +653,35 @@ test("work continuing after a compaction resolves the compacted turn's intent", 
     };
   };
   await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
-  await finish(w, await claim(w, resolver));
-  await childResult(w, origin);
-  const next = await claim(w, resolver);
+  const row = await continueAfterCompaction(w, resolver);
+  // Once for the compaction, once for the work continuing it.
   expect(seen).toEqual([intent, intent]);
-  const [row] =
-    await shared.admin`select connection_account_intent, mcp_account_bindings from session_turns
-      where id=${next.turn.id}`;
-  expect(row!.connection_account_intent).toEqual(intent);
-  expect(row!.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
+  expect(row.connection_account_intent).toEqual(intent);
+  expect(row.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
     fresh.binding.connectionId,
   ]);
+}, 60_000);
+
+test("work continuing after a compaction that could not borrow resolves nothing", async () => {
+  const w = await fixture();
+  const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`insert into external_link_turn_authorities
+      (turn_id, account_id, workspace_id, session_id, link_id, link_revision, canonical_snapshot, source_kind)
+      values (${origin}, ${w.g.accountId}, ${w.g.workspaceId!}, ${w.sessionId},
+        ${crypto.randomUUID()}, 1, ${tx.json({})}, 'direct')`;
+  });
+  const seen: ConnectionAccountIntent[] = [];
+  const resolver: Resolver = async (_tx, input) => {
+    seen.push(input.intent);
+    return { mcpAccountBindings: [], personalConnectionDelegations: [] };
+  };
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const row = await continueAfterCompaction(w, resolver);
+  expect(seen).toEqual([]);
+  expect(row.connection_account_intent).toBeNull();
+  expect(row.mcp_account_bindings).toEqual([]);
 }, 60_000);
 
 test("a compaction whose resolved accounts fail acceptance runs without them", async () => {

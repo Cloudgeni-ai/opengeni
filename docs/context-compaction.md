@@ -699,14 +699,13 @@ That maintenance execution continues the latest started turn, so its claim
 resolves that turn's connection account intent again, like an internal update
 continuing the turn (see `docs/remote-mcp-credentials.md`). The compaction
 request therefore carries the person's current account-routed connector tools
-and delegation-based personal tools (personal GitHub, personal connectors), the
+and delegation-based personal tools (personal GitHub, personal connectors),
 normally the same ones as the turn before it, and keeps that turn's cached
 prompt prefix. After a scheduled run, the run's intent is resolved against all
 of the session's connectors rather than the run's own connector subset, so the
 tool list can differ there; it is still the same person's accounts, checked
-live. A
-picked account that can no longer be used leaves its connector out and is
-recorded in `connectionAccountGaps`. An intent naming someone other than that
+live. A picked account that can no longer be used leaves its connector out and
+is recorded in `connectionAccountGaps`. An intent naming someone other than that
 turn's person, or, in a private chat, someone other than its owner, resolves
 shared accounts only. A compaction turn cannot carry an external link's
 permission ceiling or a credential restriction (such as developer setup)

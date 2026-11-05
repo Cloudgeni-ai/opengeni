@@ -234,7 +234,8 @@ the separate `github_app__*` namespace acts as the Opengeni bot. Tool arguments
 cannot choose either actor or a repository outside the accepted resource set.
 A turn that carries no personal GitHub delegation leaves the
 `github_personal__*` tools out instead of failing; any turn other than
-compaction logs a warning to worker telemetry (no visible chat warning yet).
+compaction logs a warning to worker telemetry (no visible chat warning yet),
+and a compaction whose accounts could not be resolved logs its own warning.
 A compaction checkpoint normally carries the person's current delegation, like
 the turn it compacts after (see `docs/context-compaction.md`), and goes without
 it only when that turn could not lend it. A goal continuation with no earlier

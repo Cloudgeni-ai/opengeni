@@ -80023,6 +80023,28 @@ export async function claimSessionWorkForAttempt(
                 connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
               };
             }
+            // In a savepoint, so a failed read lends nothing instead of
+            // failing the claim.
+            const compactedTurnHasNoExternalLink = async (compactedTurnId: string) => {
+              try {
+                const rows = await tx.transaction(
+                  async (savepoint) =>
+                    await savepoint.execute<{ present: number }>(sql`
+                      select 1 as present from external_link_turn_authorities
+                      where account_id = ${session.accountId}
+                        and workspace_id = ${workspaceId}
+                        and turn_id = ${compactedTurnId}
+                      limit 1
+                    `),
+                );
+                return rows.length === 0;
+              } catch (error) {
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+                return false;
+              }
+            };
             const compactionAuthorityBorrowable =
               latestStarted !== null &&
               compactionConnectionAccountIntent !== null &&
@@ -80031,15 +80053,7 @@ export async function claimSessionWorkForAttempt(
                 latestStarted.metadata,
               ) &&
               !carriesCredentialRestriction(null, session.metadata) &&
-              (
-                await tx.execute<{ present: number }>(sql`
-                  select 1 as present from external_link_turn_authorities
-                  where account_id = ${session.accountId}
-                    and workspace_id = ${workspaceId}
-                    and turn_id = ${latestStarted.id}
-                  limit 1
-                `)
-              ).length === 0;
+              (await compactedTurnHasNoExternalLink(latestStarted.id));
             if (
               compactionAuthorityBorrowable &&
               compactionConnectionAccountIntent &&
