@@ -23,7 +23,7 @@ const DELEGATION_TOOL = "delegate_to_session";
  * its call is open has the same gap. This output says plainly that the answer
  * is not known yet.
  */
-export const REALTIME_DELEGATION_PENDING_OUTPUT = JSON.stringify({
+const REALTIME_DELEGATION_PENDING_OUTPUT = JSON.stringify({
   status: "running",
   note: "The request was passed on and is being worked on. You do not have its answer yet. If you have not already said so, tell the user briefly that you are checking. Do not state any answer, cause, status, or other fact about it until its result arrives in <execution_result>.",
 });

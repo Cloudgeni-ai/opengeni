@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { RealtimeControllerTransportStarter } from "../src/codex-realtime-controller";
-import {
-  createRealtimeWebsocketTransportStarter,
-  REALTIME_DELEGATION_PENDING_OUTPUT,
-} from "../src/realtime-websocket-transport";
+import { createRealtimeWebsocketTransportStarter } from "../src/realtime-websocket-transport";
+
+// The exact tool output the voice model reads while a delegation runs.
+const REALTIME_DELEGATION_PENDING_OUTPUT = JSON.stringify({
+  status: "running",
+  note: "The request was passed on and is being worked on. You do not have its answer yet. If you have not already said so, tell the user briefly that you are checking. Do not state any answer, cause, status, or other fact about it until its result arrives in <execution_result>.",
+});
 
 // Controlled browser primitives exercise the actual starter, not a live browser,
 // microphone, CSP policy, provider connection or media device.
