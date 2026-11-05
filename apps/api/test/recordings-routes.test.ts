@@ -99,6 +99,7 @@ async function fixture(
   };
   const started: Started[] = [];
   const speakerScans: string[] = [];
+  const speakerScanInputs: Array<Record<string, unknown>> = [];
   const listening: Array<Record<string, unknown>> = [];
   const settings = testSettings({
     productAccessMode: "configured",
@@ -136,6 +137,7 @@ async function fixture(
       },
       startRecordingSpeakerScan: async (input: { recordingId: string }) => {
         speakerScans.push(input.recordingId);
+        speakerScanInputs.push(input);
       },
       startDictationListening: async (input: Record<string, unknown>) => {
         listening.push(input);
@@ -211,6 +213,7 @@ async function fixture(
     objects,
     started,
     speakerScans,
+    speakerScanInputs,
     listening,
     admin,
     owner: await person(),
@@ -525,6 +528,11 @@ describe("recording routes", () => {
     }
     // Its first audio starts telling the speakers apart while it records.
     expect([...new Set(scope.speakerScans)]).toEqual([recordingId]);
+    // With the model finalizing would choose now, to hear it while it records.
+    expect(scope.speakerScanInputs[0]).toMatchObject({
+      recordingId,
+      choice: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
     expect(
       (await scope.other.call("POST", `/recordings/${recordingId}/finalize`, { tracks: [] }))
         .status,

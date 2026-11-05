@@ -1145,7 +1145,7 @@ export async function listDeletingRecordingObjectKeys(
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
         // The speaker scan saved while a meeting was still recording, and
-        // the pieces of a dictation heard while it was spoken.
+        // the pieces of a dictation or meeting heard while it was recorded.
         ...tracks.flatMap((track) =>
           track.kind === "video"
             ? []
@@ -1229,9 +1229,9 @@ export function recordingSpeakerScanObjectKey(input: {
 }
 
 /**
- * Where the worker keeps the pieces of a dictation it heard while the
- * dictation was still being spoken, so the final transcript only hears the
- * words after them.
+ * Where the worker keeps the pieces of a dictation or meeting it heard while
+ * it was still being recorded, so the final transcript only hears the words
+ * after them.
  */
 export function recordingHeardPiecesObjectKey(input: {
   workspaceId: string;
@@ -4223,7 +4223,7 @@ export async function beginRecordingAudioExpiry(
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
         // Voice features from a scan the final transcript never collected,
-        // and the words of a dictation heard while it was spoken.
+        // and the words of a dictation or meeting heard while it was recorded.
         ...tracks.flatMap((track) =>
           track.kind === "video"
             ? []

@@ -754,19 +754,49 @@ export function registerRecordingRoutes(
     });
   }
 
-  /** Never fails the upload: without it the speakers are only found after the end. */
+  /**
+   * Follow a meeting while it records: its speakers, and its words with the
+   * model and options finalizing would choose now. Never fails the upload:
+   * without it everything is done after the end. A choice that would be
+   * refused (no credits, an unpriced model) only tells the speakers apart.
+   */
   async function startSpeakerScan(
-    actor: { workspaceId: string; subjectId: string; accountId: string },
+    actor: Awaited<ReturnType<typeof actorFor>>,
     recordingId: string,
   ): Promise<void> {
     try {
       const recording = await getRecording(db, { ...actor, recordingId });
       if (recording.purpose !== "meeting" || recording.state !== "capturing") return;
+      const choice = await versionChoice(actor, recording, recording.transcription).catch(
+        (error: unknown) => {
+          if (error instanceof ApiHttpError) return null;
+          throw error;
+        },
+      );
       await deps.workflowClient.startRecordingSpeakerScan?.({
         accountId: actor.accountId,
         workspaceId: recording.workspaceId,
         recordingId,
         ownerSubjectId: recording.ownerSubjectId,
+        ...(choice && !choice.refused
+          ? {
+              choice: {
+                providerId: choice.providerId,
+                model: choice.model,
+                options: {
+                  ...(choice.options.language ? { language: choice.options.language } : {}),
+                  ...(choice.options.maxSpeakers !== undefined
+                    ? { maxSpeakers: choice.options.maxSpeakers }
+                    : {}),
+                  ...(choice.options.speakers !== undefined
+                    ? { speakers: choice.options.speakers }
+                    : {}),
+                  ...(choice.options.keyterms?.length ? { keyterms: choice.options.keyterms } : {}),
+                  ...(choice.options.diarizer ? { diarizer: choice.options.diarizer } : {}),
+                },
+              },
+            }
+          : {}),
       });
     } catch (error) {
       observability?.warn("couldn't start telling a meeting's speakers apart while it records", {
@@ -1249,8 +1279,8 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
-    // About every half minute of a meeting's audio, make sure its speakers
-    // are being told apart while it records (starting it again is a no-op).
+    // Every thirty chunks of a meeting, make sure it is being followed while
+    // it records (starting it again is a no-op).
     if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
       await startSpeakerScan(actor, recordingId);
     }

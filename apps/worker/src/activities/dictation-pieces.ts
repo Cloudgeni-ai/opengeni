@@ -93,10 +93,10 @@ export const DICTATION_PIECES: DictationPiecePlan = {
 };
 
 /** Loudness is measured in frames this long. */
-const FRAME_MILLISECONDS = 20;
+export const FRAME_MILLISECONDS = 20;
 
 /** Each 20 ms frame's loudness (root mean square of its samples). */
-function frameLoudness(wav: PcmWav, endSample = wav.data.byteLength / 2): Float64Array {
+export function frameLoudness(wav: PcmWav, endSample = wav.data.byteLength / 2): Float64Array {
   const perMillisecond = wav.sampleRate / 1_000;
   const frame = Math.max(1, Math.round(FRAME_MILLISECONDS * perMillisecond));
   const frames = Math.floor(endSample / frame);
@@ -117,7 +117,7 @@ function frameLoudness(wav: PcmWav, endSample = wav.data.byteLength / 2): Float6
  * Quiet is relative to the recording: a tenth of the way from its floor to
  * its speech. Audio with no clear floor has no pauses (0).
  */
-function quietLevel(loudness: Float64Array): number {
+export function quietLevel(loudness: Float64Array): number {
   const sorted = Float64Array.from(loudness).sort();
   const floor = sorted[Math.floor(sorted.length * 0.02)] ?? 0;
   const voice = sorted[Math.floor(sorted.length * 0.9)] ?? 0;

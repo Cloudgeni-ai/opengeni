@@ -140,15 +140,28 @@ export type SessionWorkflowClient = {
     ownerSubjectId: string;
   }) => Promise<void>;
   /**
-   * Tell a meeting's speakers apart while it is still being recorded. Starting
-   * it while it runs does nothing. Optional: without it the speakers are told
-   * apart only after the meeting ends, which takes longer.
+   * Follow a meeting while it is still being recorded: tell its speakers
+   * apart and, with `choice` (the model and options finalizing would choose
+   * now), hear its audio in pieces as it arrives, so after it ends only the
+   * last minutes are left. Starting it while it runs does nothing. Optional:
+   * without it everything is done after the meeting ends, which takes longer.
    */
   startRecordingSpeakerScan?: (input: {
     accountId: string;
     workspaceId: string;
     recordingId: string;
     ownerSubjectId: string;
+    choice?: {
+      providerId: string;
+      model: string;
+      options: {
+        language?: string | undefined;
+        maxSpeakers?: number | undefined;
+        speakers?: number | undefined;
+        keyterms?: string[] | undefined;
+        diarizer?: string | undefined;
+      };
+    };
   }) => Promise<void>;
   /**
    * Hear a dictation's pieces while it is still being spoken, with the model

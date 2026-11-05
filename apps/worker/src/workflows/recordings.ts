@@ -8,6 +8,7 @@ import {
 import type * as activities from "../activities";
 import type { BrowserRecordingVideoInput } from "../activities/browser-recordings";
 import type { DictationListeningInput } from "../activities/dictation-listening";
+import type { MeetingFollowingInput } from "../activities/recordings";
 
 export type RecordingTranscriptWorkflowInput = {
   accountId: string;
@@ -88,8 +89,9 @@ const deletionActivity = proxyActivities<
 });
 
 /**
- * A scan goes through a few minutes of new audio: seconds of CPU. Missing
- * one only leaves more for the final transcript, so it isn't retried long.
+ * One run follows a meeting for up to ten minutes, scanning its speakers
+ * and hearing its pieces as they arrive. Missing one only leaves more for
+ * the final transcript, so it isn't retried long.
  */
 const speakerScanActivity = proxyActivities<Pick<typeof activities, "scanRecordingSpeakers">>({
   startToCloseTimeout: "20 minutes",
@@ -227,13 +229,12 @@ export async function dictationListeningWorkflow(
 }
 
 /**
- * Tell a meeting's speakers apart while it is still being recorded, about
- * every half minute, so the transcript after it ends has little left to do.
- * Ends with the recording; a failed scan only leaves more for the end.
+ * Follow a meeting while it is still being recorded: tell its speakers apart
+ * and hear its words in pieces as they arrive, so the transcript after it
+ * ends has little left to do. Each run follows it for minutes. Ends with the
+ * recording; a failed run only leaves more for the end.
  */
-export async function recordingSpeakerScanWorkflow(
-  input: RecordingDeletionWorkflowInput,
-): Promise<void> {
+export async function recordingSpeakerScanWorkflow(input: MeetingFollowingInput): Promise<void> {
   for (let scans = 0; scans < 120; scans += 1) {
     let again = true;
     try {
@@ -242,7 +243,7 @@ export async function recordingSpeakerScanWorkflow(
       // Tried again on the next round, from what was kept.
     }
     if (!again) return;
-    await sleep("30 seconds");
+    await sleep("5 seconds");
   }
   await continueAsNew<typeof recordingSpeakerScanWorkflow>(input);
 }

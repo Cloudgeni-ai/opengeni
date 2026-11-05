@@ -142,6 +142,19 @@ import {
 import type { ControlActivityServices } from "./types";
 import { startMeetingSummary } from "./meeting-summary";
 import {
+  MEETING_LISTENING_CONCURRENCY,
+  meetingListeningPlan,
+  meetingQuestion,
+  nextMeetingPiece,
+  readHeardMeeting,
+  settledLoudness,
+  writeHeardMeeting,
+  type HeardMeeting,
+  type HeardMeetingPiece,
+  type MeetingListeningChoice,
+  meetingCutDue,
+} from "./meeting-listening";
+import {
   createLocalAligner,
   createLocalDiarizer,
   recordingAlignerConfig,
@@ -253,6 +266,12 @@ export type RecordingActivityOptions = {
    * charged; defaults to one, two and four seconds.
    */
   saveRetryDelaysMilliseconds?: readonly number[];
+  /**
+   * How long one run follows a meeting being recorded and how often it
+   * looks for new audio; defaults to ten minutes and ten seconds. A run
+   * always looks once.
+   */
+  meetingFollowing?: { runMilliseconds: number; pollMilliseconds: number };
 };
 
 const SAVE_RETRY_DELAYS_MILLISECONDS = [1_000, 2_000, 4_000] as const;
@@ -567,6 +586,76 @@ async function alignPiece(
 }
 
 /**
+ * Whether our diarizer tells a meeting's speakers apart: when asked, when
+ * the model can't, and when voices are recognized (only ours gives every
+ * speaker's voice vector).
+ */
+function usesOurDiarizer(input: {
+  diarizer: RecordingDiarizer | null;
+  requested: { diarizer?: string | undefined };
+  capabilities: RecordingTranscriptionModelSpec["capabilities"];
+  recognizeVoices: boolean;
+}): boolean {
+  return (
+    input.diarizer !== null &&
+    (input.requested.diarizer === "ours" ||
+      !input.capabilities.diarization ||
+      input.recognizeVoices)
+  );
+}
+
+/**
+ * Whether a meeting's tracks are sent as their stretches with sound, in
+ * pieces of their own: when the speakers come from our diarizer or nowhere.
+ * A model's own speakers don't carry across pieces, so it gets each track
+ * whole, and nothing of it can be heard ahead.
+ */
+function sendsSoundPieces(input: Parameters<typeof usesOurDiarizer>[0]): boolean {
+  return usesOurDiarizer(input) || !input.capabilities.diarization;
+}
+
+/** What each piece of a meeting's track is asked, beside its audio. */
+function meetingPieceRequest(
+  spec: RecordingTranscriptionModelSpec,
+  requested: {
+    language?: string | undefined;
+    maxSpeakers?: number | undefined;
+    speakers?: number | undefined;
+    keyterms?: string[] | undefined;
+  },
+): {
+  model: string;
+  language: string | undefined;
+  diarize: boolean;
+  maxSpeakers: number | undefined;
+  keyterms: string[] | undefined;
+} {
+  return {
+    model: spec.model,
+    language: requested.language,
+    // The model's own diarization is still requested when it has one, so a
+    // failure of ours falls back to it.
+    diarize: spec.capabilities.diarization,
+    maxSpeakers: requested.speakers ?? requested.maxSpeakers,
+    keyterms: spec.capabilities.keyterms ? requested.keyterms : undefined,
+  };
+}
+
+/** One run follows a meeting for this long; the workflow starts the next. */
+const MEETING_FOLLOW_RUN_MILLISECONDS = 10 * 60_000;
+
+/** How often a meeting being followed is looked at for new audio. */
+const MEETING_FOLLOW_POLL_MILLISECONDS = 10_000;
+
+/** How long the final transcript waits for a piece still being heard ahead. */
+const HEARD_PIECE_WAIT_MILLISECONDS = 30_000;
+
+export type MeetingFollowingInput = RecordingWorkInput & {
+  /** The model and options finalizing would choose, to hear the meeting ahead. */
+  choice?: MeetingListeningChoice | undefined;
+};
+
+/**
  * The format a model is sent a track in (null keeps the prepared one) and
  * the longest piece it takes in one request.
  */
@@ -787,6 +876,69 @@ export function createRecordingActivities(
       : activityContext()?.cancellationSignal;
 
   /**
+   * The meeting model a transcript (or the listener before it) sends audio
+   * to, with everything that must hold before any is sent: it is offered
+   * and not pinned away, its words can be placed, its region is allowed,
+   * the workspace may use it and has its key or subscription.
+   */
+  async function meetingModel(
+    settings: Settings,
+    db: Database,
+    scope: { accountId: string; workspaceId: string; ownerSubjectId: string },
+    choice: { providerId: string; model: string },
+    onFunding?: (funding: RecordingTranscriptionProvider["funding"]) => void,
+  ): Promise<{
+    found: NonNullable<ReturnType<typeof findRecordingTranscriptionModel>>;
+    aligner: RecordingWordAligner | null;
+    credentials: RecordingTranscriptionCredentials | null;
+  }> {
+    const deployment = deploymentFor(settings, db);
+    const found = findRecordingTranscriptionModel(
+      deployment.registry,
+      choice.providerId,
+      choice.model,
+    );
+    if (!found) throw new PermanentRecordingFailure("model_unavailable");
+    onFunding?.(found.provider.funding);
+    // A pinned deployment sends audio to no other model, even for an
+    // older version that named one.
+    if (
+      deployment.pinned &&
+      (deployment.pinned.providerId !== found.provider.id ||
+        deployment.pinned.model !== found.spec.model)
+    ) {
+      throw new PermanentRecordingFailure("model_unavailable");
+    }
+    // A meeting transcript places every word in time, to tell speakers
+    // apart and to play from. A model that returns only text needs our
+    // aligner to do it.
+    const aligner = found.spec.capabilities.wordTimestamps ? null : alignerFor(settings);
+    if (!found.spec.capabilities.wordTimestamps && !aligner) {
+      throw new PermanentRecordingFailure("model_unavailable");
+    }
+    const workspace = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    // EU-only: a provider without an EU route never receives the audio,
+    // and the job never moves to another provider.
+    if (!(await deployment.regionAllowed(choice.providerId, workspace))) {
+      throw new PermanentRecordingFailure("region_restricted");
+    }
+    await deployment.assertEligible?.(choice.providerId, workspace);
+    const resolved = await deployment.credentials(choice.providerId, workspace);
+    if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
+    if (
+      found.provider.available &&
+      !(await deployment.available(found.provider.id, {
+        ...workspace,
+        subjectId: scope.ownerSubjectId,
+      }))
+    ) {
+      // A subscription the workspace is no longer signed in to.
+      throw new PermanentRecordingFailure("missing_provider_key");
+    }
+    return { found, aligner, credentials: resolved.credentials };
+  }
+
+  /**
    * Make one transcript version: prepare each track's audio once (later
    * versions reuse it), transcribe each track, then build and store the
    * segments. Permanent failures fail the version here; retryable ones throw
@@ -971,6 +1123,77 @@ export function createRecordingActivities(
     }
 
     /**
+     * The pieces of a track heard while the meeting was recorded that this
+     * transcript keeps: from its start, one after another, of exactly this
+     * audio, asked this question. A piece still being heard is waited for
+     * briefly; the first one missing ends them. Their words are on the
+     * track's timeline, and `endMilliseconds` is where the rest starts.
+     */
+    async function heardAhead(
+      storage: ObjectStorage,
+      trackNumber: number,
+      pcm: Uint8Array,
+      question: string,
+    ): Promise<{
+      endMilliseconds: number;
+      words: RecordingTranscribedWord[];
+      languages: string[];
+      sentMilliseconds: number;
+      pieces: number;
+    } | null> {
+      const wav = readPcmWav(pcm);
+      if (!wav) return null;
+      const key = recordingHeardPiecesObjectKey({
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber,
+      });
+      const started = Date.now();
+      for (;;) {
+        const record = readHeardMeeting(
+          await storage
+            .getObjectBytes(key)
+            .then((found) => found?.bytes ?? null)
+            .catch(() => null),
+        );
+        const kept = keptHeardPieces(record, wav, question);
+        const missing = kept.findIndex((piece) => !piece.heard);
+        const waitFor = missing === -1 ? null : kept[missing]!;
+        if (
+          !waitFor ||
+          Date.now() - started >= HEARD_PIECE_WAIT_MILLISECONDS ||
+          Date.now() - waitFor.cutAt >= HEARD_PIECE_WAIT_MILLISECONDS * 4
+        ) {
+          const usable = missing === -1 ? kept : kept.slice(0, missing);
+          if (usable.length === 0) return null;
+          const perMillisecond = wav.sampleRate / 1_000;
+          const languages = new Set<string>();
+          const words: RecordingTranscribedWord[] = [];
+          let sentMilliseconds = 0;
+          for (const piece of usable) {
+            const heard = piece.heard!;
+            for (const language of heard.languages) languages.add(language);
+            words.push(...shiftWords(heard.words, piece.startSample / perMillisecond));
+            sentMilliseconds += heard.sentMilliseconds;
+          }
+          return {
+            endMilliseconds: usable.at(-1)!.endSample / perMillisecond,
+            words,
+            languages: [...languages],
+            sentMilliseconds,
+            pieces: usable.filter((piece) => !piece.quiet).length,
+          };
+        }
+        heartbeat({
+          phase: "transcribing",
+          trackNumber,
+          waitingForHeardPiece: waitFor.startSample,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    /**
      * A meeting track as speech PCM: from its uploaded pieces while they
      * exist, starting its kept copy from the same downloaded pieces beside
      * the transcript, otherwise from its kept audio. The pieces stay until
@@ -1101,61 +1324,15 @@ export function createRecordingActivities(
         if (job.recording.purpose === "dictation") {
           return await transcribeDictation(objectStorage, job);
         }
-        const deployment = deploymentFor(settings, db);
-        const found = findRecordingTranscriptionModel(
-          deployment.registry,
-          job.version.providerId,
-          job.version.model,
+        const { found, aligner, credentials } = await meetingModel(
+          settings,
+          db,
+          input,
+          job.version,
+          (funding) => {
+            telemetry.funding = funding;
+          },
         );
-        if (!found) throw new PermanentRecordingFailure("model_unavailable");
-        telemetry.funding = found.provider.funding;
-        // A pinned deployment sends audio to no other model, even for an
-        // older version that named one.
-        if (
-          deployment.pinned &&
-          (deployment.pinned.providerId !== found.provider.id ||
-            deployment.pinned.model !== found.spec.model)
-        ) {
-          throw new PermanentRecordingFailure("model_unavailable");
-        }
-        // A meeting transcript places every word in time, to tell speakers
-        // apart and to play from. A model that returns only text needs our
-        // aligner to do it.
-        const aligner = found.spec.capabilities.wordTimestamps ? null : alignerFor(settings);
-        if (!found.spec.capabilities.wordTimestamps && !aligner) {
-          throw new PermanentRecordingFailure("model_unavailable");
-        }
-        // EU-only: a provider without an EU route never receives the audio,
-        // and the job never moves to another provider.
-        if (
-          !(await deployment.regionAllowed(job.version.providerId, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }))
-        ) {
-          throw new PermanentRecordingFailure("region_restricted");
-        }
-        await deployment.assertEligible?.(job.version.providerId, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-        });
-        const resolved = await deployment.credentials(job.version.providerId, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-        });
-        if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
-        const credentials = resolved.credentials;
-        if (
-          found.provider.available &&
-          !(await deployment.available(found.provider.id, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.ownerSubjectId,
-          }))
-        ) {
-          // A subscription the workspace is no longer signed in to.
-          throw new PermanentRecordingFailure("missing_provider_key");
-        }
         const charge = meetingCharge(settings, found.provider, found.spec);
         const plans = planRecordingTracks(job.recording.tracks);
         const capabilities = found.spec.capabilities;
@@ -1269,23 +1446,21 @@ export function createRecordingActivities(
         await everyTrack(
           prepared.map(async ({ plan, track, offsetMilliseconds, audio }) => {
             heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
-            // The model's own diarization is still requested when it has one, so
-            // a failure of ours falls back to it.
-            const diarize = capabilities.diarization;
-            const useOurs =
-              ourDiarizer !== null &&
-              (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
+            const pieceRequest = meetingPieceRequest(found.spec, requested);
+            const diarize = pieceRequest.diarize;
+            const useOurs = usesOurDiarizer({
+              diarizer: ourDiarizer,
+              requested,
+              capabilities,
+              recognizeVoices,
+            });
             const trackAudio = {
               bytes: audio.bytes,
               mimeType: audio.mimeType,
               fileName: `track-${plan.trackNumber}.${audio.extension}`,
             };
             const request = {
-              model: found.spec.model,
-              language: requested.language,
-              diarize,
-              maxSpeakers: requested.speakers ?? requested.maxSpeakers,
-              keyterms: capabilities.keyterms ? requested.keyterms : undefined,
+              ...pieceRequest,
               signal,
               scope: {
                 accountId: input.accountId,
@@ -1326,8 +1501,41 @@ export function createRecordingActivities(
             });
             const silent = sound !== null && sound.length === 0;
             const sendOnly = silent || useOurs || !diarize ? sound : null;
+            // What was heard while the meeting was recorded, in pieces of
+            // exactly this audio asked the same question: only the rest is
+            // sent now.
+            const ahead =
+              sendOnly && !silent
+                ? await heardAhead(
+                    objectStorage,
+                    plan.trackNumber,
+                    audio.bytes,
+                    meetingQuestion({ ...pieceRequest, providerId: job.version.providerId }),
+                  )
+                : null;
+            const rest =
+              sendOnly && ahead
+                ? sendOnly.flatMap((range) =>
+                    range.endMilliseconds <= ahead.endMilliseconds
+                      ? []
+                      : [
+                          {
+                            startMilliseconds: Math.max(
+                              range.startMilliseconds,
+                              ahead.endMilliseconds,
+                            ),
+                            endMilliseconds: range.endMilliseconds,
+                          },
+                        ],
+                  )
+                : sendOnly;
+            if (ahead) {
+              sentMilliseconds += ahead.sentMilliseconds;
+              telemetry.heardWhileSpokenPieces =
+                (telemetry.heardWhileSpokenPieces ?? 0) + ahead.pieces;
+            }
             const runOurs = () =>
-              useOurs && !silent
+              useOurs && ourDiarizer && !silent
                 ? measureRecordingStage("diarize", async () =>
                     ourDiarizer.diarize(trackAudio, {
                       // What was scanned while the meeting was recorded.
@@ -1370,7 +1578,7 @@ export function createRecordingActivities(
                   aligner,
                   onAligned: (aligned) => addAlignment(telemetry, aligned),
                   pieces: piecesFor(plan.trackNumber),
-                  sound: sendOnly,
+                  sound: rest,
                   onSent: (milliseconds) => {
                     sentMilliseconds += milliseconds;
                   },
@@ -1378,9 +1586,11 @@ export function createRecordingActivities(
                 runOurs(),
               ]);
             });
-            let words = result.words;
+            const heardWords = ahead ? [...ahead.words, ...result.words] : result.words;
+            for (const language of ahead?.languages ?? []) languages.add(language);
+            let words = heardWords;
             if (ours) {
-              words = labelWordsFromTurns(result.words, ours.turns);
+              words = labelWordsFromTurns(heardWords, ours.turns);
               ourDiarized = true;
               trackVoices.push({
                 trackNumber: plan.trackNumber,
@@ -1524,20 +1734,21 @@ export function createRecordingActivities(
           return completed ? ({ outcome: "complete" } as const) : ({ outcome: "skipped" } as const);
         });
         if (stage.outcome === "complete") {
-          // The scan made while recording has served its purpose; kept, it
-          // would only store voice features beside the audio.
+          // The scan and the pieces heard while recording have served their
+          // purpose; kept, they would only store voice features and words
+          // beside the audio.
           await Promise.all(
-            plans.map((plan) =>
-              objectStorage
-                .deleteObject(
-                  recordingSpeakerScanObjectKey({
-                    workspaceId: input.workspaceId,
-                    recordingId: input.recordingId,
-                    trackNumber: plan.trackNumber,
-                  }),
-                )
-                .catch(() => undefined),
-            ),
+            plans.flatMap((plan) => {
+              const track = {
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                trackNumber: plan.trackNumber,
+              };
+              return [
+                recordingSpeakerScanObjectKey(track),
+                recordingHeardPiecesObjectKey(track),
+              ].map((key) => objectStorage.deleteObject(key).catch(() => undefined));
+            }),
           );
           await summarize();
         }
@@ -2144,99 +2355,388 @@ export function createRecordingActivities(
   }
 
   /**
-   * Tell the speakers apart in a meeting's audio while it is still being
-   * recorded, so after it ends only the last minutes are left to go through.
-   * Each audio track's windows so far are kept beside its audio, and the
-   * next scan and the final transcript reuse them. `again` is false once
-   * there is nothing more to do: the meeting ended, it never uses our
-   * diarizer, or no audio has arrived for a long while.
+   * Follow a meeting while it is still being recorded, so after it ends only
+   * the last minutes are left to go through. As each audio track arrives it
+   * is decoded once to speech PCM; its speakers are scanned (the windows so
+   * far are kept beside its audio, for the next scan and the final
+   * transcript), and with `choice` its words are heard in pieces cut at the
+   * speakers' pauses, kept beside the audio for the final transcript to
+   * reuse. One run follows it for up to ten minutes. `again` is false once
+   * there is nothing more to do: the meeting ended, there is nothing to do
+   * for it ahead, or no audio has arrived for a long while.
    */
-  async function scanRecordingSpeakers(input: RecordingWorkInput): Promise<{ again: boolean }> {
+  async function scanRecordingSpeakers(input: MeetingFollowingInput): Promise<{ again: boolean }> {
     const { db, objectStorage, settings, observability } = await services();
-    const diarizer = diarizerFor(settings);
-    if (!objectStorage || !diarizer?.scan) return { again: false };
+    if (!objectStorage) return { again: false };
     const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
-    const recording = await getRecording(db, { ...actor, recordingId: input.recordingId }).catch(
-      (error: unknown) => {
+    const current = () =>
+      getRecording(db, { ...actor, recordingId: input.recordingId }).catch((error: unknown) => {
         if (error instanceof RecordingNotFoundError) return null;
         throw error;
-      },
-    );
+      });
+    const recording = await current();
     if (!recording || recording.purpose !== "meeting" || recording.state !== "capturing") {
       return { again: false };
     }
+    const diarizer = diarizerFor(settings);
+    const scan = diarizer?.scan?.bind(diarizer) ?? null;
+    const listening = input.choice
+      ? await meetingListening(settings, db, input, input.choice).catch((error: unknown) => {
+          // The final transcript hears all of it, and says what is wrong.
+          observability.warn("not hearing a meeting while it records", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            error: errorMessage(error),
+          });
+          return null;
+        })
+      : null;
+    if (!scan && !listening) return { again: false };
     const signal = cancellation();
-    let lastArrival = 0;
-    for (const track of recording.tracks) {
-      if (track.kind === "video") continue;
-      const chunks = await listRecordingChunks(db, {
-        ...actor,
-        recordingId: input.recordingId,
-        trackNumber: track.trackNumber,
-      });
-      // The audio from the first chunk up to the first one not uploaded yet.
-      const contiguous: typeof chunks = [];
-      for (const chunk of chunks) {
-        if (chunk.state !== "uploaded" || chunk.chunkNumber !== contiguous.length) break;
-        contiguous.push(chunk);
+    // Chunks never change once uploaded, so each is read once in a run.
+    const read = new Map<number, Map<number, Uint8Array>>();
+    const tracks = new Map<
+      number,
+      {
+        decodedChunks: number;
+        /** Audio decoded at the last look that could cut no piece. */
+        lookedMilliseconds: number;
+        heard: {
+          key: string;
+          record: HeardMeeting;
+          next: number;
+          resumed: boolean;
+          saving: Promise<void>;
+        } | null;
       }
-      for (const chunk of chunks) {
-        lastArrival = Math.max(lastArrival, (chunk.uploadedAt ?? chunk.createdAt).getTime());
+    >();
+    const hearing = new Set<Promise<void>>();
+    const waiting: Array<() => void> = [];
+    let busy = 0;
+    const save = (state: NonNullable<ReturnType<typeof tracks.get>>["heard"]) => {
+      if (!state) return Promise.resolve();
+      const body = writeHeardMeeting(state.record);
+      state.saving = state.saving
+        .then(() =>
+          objectStorage.putObject({
+            key: state.key,
+            contentType: "application/json",
+            body,
+            sha256: createHash("sha256").update(body).digest("hex"),
+          }),
+        )
+        .catch((error: unknown) => {
+          observability.warn("couldn't keep what a meeting's pieces said while it records", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            error: errorMessage(error),
+          });
+        });
+      return state.saving;
+    };
+    const hear = (
+      trackNumber: number,
+      state: NonNullable<NonNullable<ReturnType<typeof tracks.get>>["heard"]>,
+      piece: HeardMeetingPiece,
+      wav: PcmWav,
+    ) => {
+      if (!listening) return;
+      if (piece.quiet) {
+        piece.heard = { languages: [], words: [], sentMilliseconds: 0 };
+        void save(state);
+        return;
       }
-      if (contiguous.length === 0) continue;
-      const first = contiguous[0]!;
-      const last = contiguous[contiguous.length - 1]!;
-      const audioMilliseconds =
-        last.startMilliseconds + last.durationMilliseconds - first.startMilliseconds;
-      const key = recordingSpeakerScanObjectKey({
-        workspaceId: input.workspaceId,
-        recordingId: input.recordingId,
-        trackNumber: track.trackNumber,
-      });
-      const previous = (await objectStorage.getObjectBytes(key))?.bytes ?? null;
-      const scannedMilliseconds = previous ? speakerScanMilliseconds(previous) : 0;
-      if (!speakerScanDue({ audioMilliseconds, scannedMilliseconds })) continue;
-      const started = performance.now();
-      heartbeat({ phase: "scanning", trackNumber: track.trackNumber });
-      const audio = await prepareRecordingTrackAudio({
-        chunks: contiguous,
-        mimeType: track.mimeType,
-        // Decoded only: re-encoding an hour of audio for each scan took most
-        // of a minute, and the speaker models hear 16 kHz PCM anyway.
-        format: SPEECH_PCM_FORMAT,
-        ffmpegPath: settings.voiceInputFfmpegPath,
-        signal,
-        onProgress: () => heartbeat({ phase: "scanning", trackNumber: track.trackNumber }),
-        readChunk: async (chunk) =>
-          (await objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
-      });
-      const scan = await diarizer.scan(
-        {
-          bytes: audio.bytes,
-          mimeType: audio.mimeType,
-          fileName: `track-${track.trackNumber}.${audio.extension}`,
-        },
-        { cache: previous, signal },
-      );
-      await objectStorage.putObject({
-        key,
-        contentType: "application/octet-stream",
-        body: scan,
-        sha256: createHash("sha256").update(scan).digest("hex"),
-      });
-      observability.info("scanned a meeting's speakers while it records", {
-        workspaceId: input.workspaceId,
-        recordingId: input.recordingId,
-        trackNumber: track.trackNumber,
-        audioMilliseconds,
-        previouslyScannedMilliseconds: scannedMilliseconds,
-        scannedMilliseconds: speakerScanMilliseconds(scan),
-        elapsedMilliseconds: Math.round(performance.now() - started),
-      });
+      const work = (async () => {
+        if (busy >= MEETING_LISTENING_CONCURRENCY) {
+          await new Promise<void>((resolve) => waiting.push(resolve));
+        }
+        busy += 1;
+        try {
+          const durationMilliseconds =
+            ((piece.endSample - piece.startSample) * 1_000) / wav.sampleRate;
+          const result = await transcribeTrack({
+            provider: listening.found.provider,
+            spec: listening.found.spec,
+            audio: {
+              bytes: pcmWavPiece(wav, piece.startSample, piece.endSample),
+              mimeType: "audio/wav",
+              fileName: `track-${trackNumber}-${piece.startSample}.wav`,
+              extension: "wav",
+            },
+            durationMilliseconds,
+            ffmpegPath: settings.voiceInputFfmpegPath,
+            credentials: listening.credentials,
+            request: {
+              ...listening.request,
+              signal,
+              scope: {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: input.ownerSubjectId,
+                // Never sent twice: a piece heard again asks afresh.
+                requestId: `${input.recordingId}:heard:${trackNumber}:${piece.startSample}:${randomUUID()}`,
+              },
+            },
+            aligner: listening.aligner,
+          });
+          piece.heard = {
+            languages: result.languages,
+            words: result.words,
+            sentMilliseconds: Math.round(durationMilliseconds),
+          };
+          await save(state);
+        } catch (error) {
+          // The final transcript hears it instead.
+          observability.warn("couldn't hear a piece of a meeting while it records", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            trackNumber,
+            startSample: piece.startSample,
+            error: errorMessage(error),
+          });
+        } finally {
+          busy -= 1;
+          waiting.shift()?.();
+        }
+      })();
+      hearing.add(work);
+      void work.finally(() => hearing.delete(work));
+    };
+    const following = options.meetingFollowing ?? {
+      runMilliseconds: MEETING_FOLLOW_RUN_MILLISECONDS,
+      pollMilliseconds: MEETING_FOLLOW_POLL_MILLISECONDS,
+    };
+    const deadline = Date.now() + following.runMilliseconds;
+    let lastArrival = new Date(recording.startedAt).getTime();
+    let capturing = true;
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        heartbeat({ phase: "following" });
+        const now = await current();
+        if (!now || now.state !== "capturing") {
+          capturing = false;
+          break;
+        }
+        for (const track of now.tracks) {
+          if (track.kind === "video") continue;
+          const chunks = await listRecordingChunks(db, {
+            ...actor,
+            recordingId: input.recordingId,
+            trackNumber: track.trackNumber,
+          });
+          // The audio from the first chunk up to the first one not uploaded yet.
+          const contiguous: typeof chunks = [];
+          for (const chunk of chunks) {
+            if (chunk.state !== "uploaded" || chunk.chunkNumber !== contiguous.length) break;
+            contiguous.push(chunk);
+          }
+          for (const chunk of chunks) {
+            lastArrival = Math.max(lastArrival, (chunk.uploadedAt ?? chunk.createdAt).getTime());
+          }
+          let state = tracks.get(track.trackNumber);
+          if (!state) {
+            state = { decodedChunks: 0, lookedMilliseconds: 0, heard: null };
+            tracks.set(track.trackNumber, state);
+            if (listening) {
+              const key = recordingHeardPiecesObjectKey({
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                trackNumber: track.trackNumber,
+              });
+              const earlier = readHeardMeeting(
+                await objectStorage
+                  .getObjectBytes(key)
+                  .then((found) => found?.bytes ?? null)
+                  .catch(() => null),
+              );
+              const record: HeardMeeting =
+                earlier?.question === listening.question
+                  ? earlier
+                  : {
+                      version: 1,
+                      purpose: "meeting",
+                      sampleRate: 16_000,
+                      question: listening.question,
+                      pieces: [],
+                    };
+              state.heard = {
+                key,
+                record,
+                next: record.pieces.at(-1)?.endSample ?? 0,
+                resumed: false,
+                saving: Promise.resolve(),
+              };
+            }
+          }
+          if (contiguous.length === 0 || contiguous.length === state.decodedChunks) continue;
+          const first = contiguous[0]!;
+          const last = contiguous[contiguous.length - 1]!;
+          const audioMilliseconds =
+            last.startMilliseconds + last.durationMilliseconds - first.startMilliseconds;
+          const scanKey = recordingSpeakerScanObjectKey({
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            trackNumber: track.trackNumber,
+          });
+          const previous = scan
+            ? ((await objectStorage.getObjectBytes(scanKey).catch(() => null))?.bytes ?? null)
+            : null;
+          const scannedMilliseconds = previous ? speakerScanMilliseconds(previous) : 0;
+          const scanDue =
+            scan !== null && speakerScanDue({ audioMilliseconds, scannedMilliseconds });
+          // Decoding all of a track so far is the costly part of a look, so it
+          // waits until a piece could be cut: none can before the shortest
+          // one has settled, nor soon after a look that found no cut.
+          const cutDue =
+            listening !== null &&
+            state.heard !== null &&
+            (!state.heard.resumed ||
+              meetingCutDue({
+                audioMilliseconds,
+                heardMilliseconds: (state.heard.next * 1_000) / state.heard.record.sampleRate,
+                lookedMilliseconds: state.lookedMilliseconds,
+                plan: listening.plan,
+              }));
+          if (!scanDue && !cutDue) continue;
+          state.decodedChunks = contiguous.length;
+          const started = performance.now();
+          heartbeat({ phase: "following", trackNumber: track.trackNumber });
+          const chunkBytes = read.get(track.trackNumber) ?? new Map<number, Uint8Array>();
+          read.set(track.trackNumber, chunkBytes);
+          const audio = await prepareRecordingTrackAudio({
+            chunks: contiguous,
+            mimeType: track.mimeType,
+            // Decoded only: re-encoding an hour of audio for each look took
+            // most of a minute, and the models hear 16 kHz PCM anyway.
+            format: SPEECH_PCM_FORMAT,
+            ffmpegPath: settings.voiceInputFfmpegPath,
+            signal,
+            onProgress: () => heartbeat({ phase: "following", trackNumber: track.trackNumber }),
+            readChunk: (chunk) => readTrackChunk(objectStorage, chunk, chunkBytes),
+          });
+          if (scanDue && scan) {
+            const scanned = await scan(
+              {
+                bytes: audio.bytes,
+                mimeType: audio.mimeType,
+                fileName: `track-${track.trackNumber}.${audio.extension}`,
+              },
+              { cache: previous, signal },
+            );
+            await objectStorage.putObject({
+              key: scanKey,
+              contentType: "application/octet-stream",
+              body: scanned,
+              sha256: createHash("sha256").update(scanned).digest("hex"),
+            });
+            observability.info("scanned a meeting's speakers while it records", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              trackNumber: track.trackNumber,
+              audioMilliseconds,
+              previouslyScannedMilliseconds: scannedMilliseconds,
+              scannedMilliseconds: speakerScanMilliseconds(scanned),
+              elapsedMilliseconds: Math.round(performance.now() - started),
+            });
+          }
+          const heard = state.heard;
+          const wav = heard && listening ? readPcmWav(audio.bytes) : null;
+          if (!heard || !listening || !wav || wav.sampleRate !== heard.record.sampleRate) continue;
+          const nextBefore = heard.next;
+          if (!heard.resumed) {
+            heard.resumed = true;
+            // An earlier run's pieces stand only while their audio is the same.
+            const kept = keptHeardPieces(heard.record, wav, listening.question);
+            if (kept.length !== heard.record.pieces.length) {
+              heard.record.pieces = kept;
+              heard.next = kept.at(-1)?.endSample ?? 0;
+              await save(heard);
+            }
+            for (const piece of kept) if (!piece.heard) hear(track.trackNumber, heard, piece, wav);
+          }
+          const loudness = settledLoudness(wav, listening.plan);
+          for (
+            let cut = nextMeetingPiece(wav, loudness, heard.next, listening.plan);
+            cut !== null;
+            cut = nextMeetingPiece(wav, loudness, heard.next, listening.plan)
+          ) {
+            const piece: HeardMeetingPiece = {
+              startSample: heard.next,
+              endSample: cut.endSample,
+              sha256: pcmSha256(wav, heard.next, cut.endSample),
+              quiet: cut.quiet,
+              cutAt: Date.now(),
+            };
+            heard.record.pieces.push(piece);
+            heard.next = cut.endSample;
+            void save(heard);
+            hear(track.trackNumber, heard, piece, wav);
+          }
+          state.lookedMilliseconds = heard.next === nextBefore ? audioMilliseconds : 0;
+        }
+        // A recorder that stopped sending without ending the meeting.
+        if (Date.now() - lastArrival >= SPEAKER_SCAN_IDLE_MILLISECONDS) break;
+        if (Date.now() + following.pollMilliseconds >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, following.pollMilliseconds));
+      }
+    } finally {
+      // What is being heard is still kept: the final transcript may be waiting for it.
+      while (hearing.size > 0) {
+        heartbeat({ phase: "following" });
+        await Promise.race([
+          Promise.all([...hearing]),
+          new Promise((resolve) => setTimeout(resolve, 10_000)),
+        ]);
+      }
+      for (const state of tracks.values()) await state.heard?.saving;
     }
-    // A recorder that stopped sending without ending the meeting.
-    const lastHeard = Math.max(lastArrival, new Date(recording.startedAt).getTime());
-    return { again: Date.now() - lastHeard < SPEAKER_SCAN_IDLE_MILLISECONDS };
+    // Deleted meanwhile: nothing of it may stay behind.
+    if (!capturing && listening && !(await current())) {
+      for (const state of tracks.values()) {
+        if (state.heard) await objectStorage.deleteObject(state.heard.key).catch(() => undefined);
+      }
+    }
+    return {
+      again: capturing && Date.now() - lastArrival < SPEAKER_SCAN_IDLE_MILLISECONDS,
+    };
+  }
+
+  /**
+   * What hearing a meeting while it records needs, or null when its final
+   * transcript would send each track whole: a model that tells the speakers
+   * apart itself needs all of a track in one request.
+   */
+  async function meetingListening(
+    settings: Settings,
+    db: Database,
+    scope: { accountId: string; workspaceId: string; ownerSubjectId: string },
+    choice: MeetingListeningChoice,
+  ) {
+    const { found, aligner, credentials } = await meetingModel(settings, db, scope, choice);
+    const capabilities = found.spec.capabilities;
+    const recognizeVoices =
+      resolveWorkspaceRecordingSettings((await getWorkspace(db, scope.workspaceId))?.settings)
+        .voiceprints === true;
+    if (
+      !sendsSoundPieces({
+        diarizer: diarizerFor(settings),
+        requested: choice.options,
+        capabilities,
+        recognizeVoices,
+      })
+    ) {
+      return null;
+    }
+    const request = meetingPieceRequest(found.spec, choice.options);
+    return {
+      found,
+      aligner,
+      credentials,
+      request,
+      question: meetingQuestion({ ...request, providerId: choice.providerId }),
+      plan: meetingListeningPlan(pieceShape(found.spec, "wav").maxPieceMilliseconds),
+    };
   }
 
   /**

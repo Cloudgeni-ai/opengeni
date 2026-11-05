@@ -26,6 +26,7 @@ import {
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  recordingHeardPiecesObjectKey,
   recordingSpeakerScanObjectKey,
   rememberRecordingPersonVoice,
   reserveRecordingChunks,
@@ -248,6 +249,8 @@ function activities(
       aligner: () => aligner,
       ...(now ? { now } : {}),
       ...(startMeetingSummary ? { startMeetingSummary } : {}),
+      // A run looks at a meeting being recorded once.
+      meetingFollowing: { runMilliseconds: 0, pollMilliseconds: 10 },
     }),
   };
 }
@@ -1066,6 +1069,111 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(caches).toEqual([scanReaching(64_000)]);
     // Used, it is gone: voice features aren't kept beside the audio.
     expect(storage.objects.has(scanKey)).toBe(false);
+  });
+
+  test("a meeting's words are heard in pieces while it records, so only its end is heard after it stops", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    // Talking, a long quiet stretch, then talking until it is stopped.
+    const audio = gatedOpusWebm(100, [
+      [0, 50],
+      [75, 100],
+    ]);
+    const transcription = {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en", diarizer: "ours" },
+    };
+    const meeting = await capturingMeeting(storage, audio, 100, transcription);
+    const calls: Array<{ requestId: string; milliseconds: number }> = [];
+    const provider = fakeProvider(async (request) => {
+      calls.push({
+        requestId: request.scope!.requestId!,
+        // 16 kHz 16-bit mono WAV after its 44-byte header.
+        milliseconds: (request.audio.bytes.byteLength - 44) / 32,
+      });
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 1_000,
+        diarized: false,
+        words: [
+          {
+            text: `Piece ${calls.length}.`,
+            startMilliseconds: 100,
+            endMilliseconds: 600,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async () => ({
+        turns: [{ startMilliseconds: 0, endMilliseconds: 100_000, speaker: "S0" }],
+        voices: [],
+        voiceModel: "test-voices",
+      }),
+    };
+    const { activities: run } = activities(storage, provider, "key", ours);
+    const choice = {
+      providerId: transcription.providerId,
+      model: transcription.model,
+      options: transcription.options,
+    };
+
+    expect(await run.scanRecordingSpeakers({ ...meeting.work, choice })).toEqual({ again: true });
+    // The talking before the quiet was heard; the quiet is never sent.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.requestId).toMatch(new RegExp(`^${meeting.work.recordingId}:heard:0:0:`));
+    expect(calls[0]!.milliseconds).toBeGreaterThan(50_000);
+    expect(calls[0]!.milliseconds).toBeLessThan(52_000);
+    const heardKey = recordingHeardPiecesObjectKey({ ...meeting.work, trackNumber: 0 });
+    expect(storage.objects.has(heardKey)).toBe(true);
+
+    const input = await meeting.finalize();
+    expect(await run.transcribeRecordingVersion(input)).toEqual({ outcome: "complete" });
+    // Only the talking after the quiet is heard after it stopped.
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.milliseconds).toBeGreaterThan(24_000);
+    expect(calls[1]!.milliseconds).toBeLessThan(28_000);
+    const transcript = await getRecordingTranscriptPage(client.db, {
+      ...meeting.actor,
+      recordingId: input.recordingId,
+    });
+    const words = transcript.segments.map((segment) => segment.text).join(" ");
+    expect(words).toMatch(/Piece 1\..*Piece 2\./u);
+    // Used, it is gone.
+    expect(storage.objects.has(heardKey)).toBe(false);
+  });
+
+  test("a meeting whose model tells its speakers apart itself is heard whole, after it ends", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const transcription = {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en" },
+    };
+    const meeting = await capturingMeeting(
+      storage,
+      gatedOpusWebm(100, [[0, 100]]),
+      100,
+      transcription,
+    );
+    let calls = 0;
+    const provider = fakeProvider(async () => {
+      calls += 1;
+      return { languages: ["eng"], audioMilliseconds: 1_000, diarized: true, words: [] };
+    });
+    const { activities: run } = activities(storage, provider, "key", null);
+    expect(
+      await run.scanRecordingSpeakers({
+        ...meeting.work,
+        choice: { providerId: "elevenlabs", model: "scribe_v2", options: transcription.options },
+      }),
+    ).toEqual({ again: false });
+    expect(calls).toBe(0);
   });
 
   test("a speaker scan is due after a minute of new audio, or a tenth of a long meeting's", () => {
@@ -1913,6 +2021,79 @@ async function speakingDictation(
           options,
           creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
         },
+      });
+      return { ...work, versionId, processingOwner: versionId };
+    },
+  };
+}
+
+/** A meeting still being recorded, its audio so far uploaded as one chunk. */
+async function capturingMeeting(
+  storage: ReturnType<typeof memoryStorage>,
+  audio: Uint8Array,
+  seconds: number,
+  transcription: { providerId: string; model: string; options: Record<string, unknown> },
+) {
+  const db = client!.db;
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(db, {
+    accountExternalSource: "recording-activities",
+    accountExternalId: suffix,
+    accountName: "Meeting activities",
+    workspaceExternalSource: "recording-activities",
+    workspaceExternalId: suffix,
+    workspaceName: "Meeting activities",
+    subjectId: `subject-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const actor = { workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  const recordingId = crypto.randomUUID();
+  await createRecording(db, {
+    ...actor,
+    accountId: grant.accountId,
+    recordingId,
+    title: "Planning",
+    visibility: "private",
+    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+  });
+  const [row] = await reserveRecordingChunks(db, {
+    ...actor,
+    recordingId,
+    trackNumber: 0,
+    chunks: [
+      {
+        chunkNumber: 0,
+        byteLength: audio.length,
+        sha256: createHash("sha256").update(audio).digest("hex"),
+        startMilliseconds: 0,
+        durationMilliseconds: seconds * 1_000,
+      },
+    ],
+  });
+  storage.objects.set(row!.objectKey, { bytes: audio, contentType: "audio/webm" });
+  await markRecordingChunksUploaded(db, {
+    ...actor,
+    recordingId,
+    trackNumber: 0,
+    chunkNumbers: [0],
+  });
+  const work = {
+    accountId: grant.accountId,
+    workspaceId: actor.workspaceId,
+    recordingId,
+    ownerSubjectId: actor.subjectId,
+  };
+  return {
+    actor,
+    work,
+    finalize: async () => {
+      const versionId = crypto.randomUUID();
+      await finalizeRecording(db, {
+        ...actor,
+        recordingId,
+        versionId,
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        transcription,
       });
       return { ...work, versionId, processingOwner: versionId };
     },

@@ -98,19 +98,21 @@ export function writeHeardDictation(record: HeardDictation): Uint8Array {
 }
 
 /**
- * The pieces cut while the dictation was spoken that the final transcript
- * can keep: those from its start, one after another, asked the same
+ * The pieces cut while the dictation (or a meeting's track) was recorded
+ * that the final transcript can keep: those from its start, one after another, asked the same
  * question, whose audio in the whole recording is exactly what was cut.
  * The first that differs ends them; everything after it is cut afresh.
  */
-export function keptHeardPieces(
-  record: HeardDictation | null,
+export function keptHeardPieces<
+  Piece extends { startSample: number; endSample: number; sha256: string },
+>(
+  record: { sampleRate: number; question: string; pieces: Piece[] } | null,
   wav: PcmWav,
   question: string,
-): HeardDictationPiece[] {
+): Piece[] {
   if (!record || record.sampleRate !== wav.sampleRate || record.question !== question) return [];
   const samples = wav.data.byteLength / 2;
-  const kept: HeardDictationPiece[] = [];
+  const kept: Piece[] = [];
   let next = 0;
   for (const piece of record.pieces) {
     if (piece.startSample !== next || piece.endSample <= next || piece.endSample > samples) break;
