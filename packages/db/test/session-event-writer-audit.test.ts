@@ -319,6 +319,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Unarchive reopens a chat its Archive cancelled (session.status.changed to
+  // idle) under the canonical event-row locks; the chat stays paused until the
+  // separate Resume, which takes the control locks itself.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -408,6 +415,9 @@ const genericControlWriters = new Set([
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
   "packages/db/src/index.ts#updateSessionTitleWithEvent",
   "packages/db/src/index.ts#updateSessionProfileWithEvent",
+  // Reopening an archive-cancelled chat does not admit inference: it stays
+  // paused until a Resume through the control path.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions",
 ]);
 
 const callerOwnedControlWriters = new Set([
