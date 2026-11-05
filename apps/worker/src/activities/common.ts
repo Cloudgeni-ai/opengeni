@@ -23,15 +23,6 @@ export function assertReusableSessionRevivable(status: SessionStatus): void {
   }
 }
 
-/**
- * The update's summary is what people see of a run in its chat: the
- * automation's name, never its instructions (the payload carries those for
- * the agent). The chat adds what the trigger's events say happened.
- */
-export function scheduledOccurrenceSummary(task: { name: string }): string {
-  return task.name.trim() || "Automation";
-}
-
 export function scheduledUserMessagePayload(
   prompt: string,
   resources: ResourceRef[],

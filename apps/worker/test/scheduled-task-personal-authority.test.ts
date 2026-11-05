@@ -2043,13 +2043,11 @@ describe("scheduled task personal MCP authority", () => {
       producerKey,
     });
     expect(recovered).toMatchObject({ action: "start", sessionId: session.id });
-    const [stored] = await admin<Array<{ summary: string; text: string }>>`
-      select summary, payload->>'text' as text from session_system_updates
+    const [stored] = await admin<Array<{ summary: string }>>`
+      select summary from session_system_updates
       where scheduled_task_run_id = ${run.id}
     `;
-    // The agent gets the accepted instructions; people see the automation's name.
-    expect(stored?.text).toBe("accepted prompt");
-    expect(stored?.summary).toBe("recover accepted run");
+    expect(stored?.summary).toBe("accepted prompt");
   });
 
   test("a hostile reusable create-key preclaim cannot bind scheduled work", async () => {

@@ -61,6 +61,8 @@ describe("session-only entry", () => {
       "@opengeni/contracts/claude-subscription-model-ids",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
+      // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/no-reply",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
       "@opengeni/contracts/values",
       "@opengeni/sdk",

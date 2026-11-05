@@ -76695,9 +76695,56 @@ function boundedInternalUpdateEventText(
   return { text: `${text}${suffix}`, truncated: true };
 }
 
-function internalUpdateEventMember(update: BoundedSystemUpdate) {
+/**
+ * The names of the automations behind these updates, by update id. An
+ * automation run's own summary is its instructions, which only the agent
+ * reads; people see the automation's name.
+ */
+async function automationNamesForUpdatesInTransaction(
+  tx: Database,
+  workspaceId: string,
+  updates: readonly Pick<BoundedSystemUpdate, "id" | "kind" | "scheduledTaskRunId">[],
+): Promise<ReadonlyMap<string, string>> {
+  const runIds = [
+    ...new Set(
+      updates.flatMap((update) =>
+        update.kind === "scheduled_occurrence" && update.scheduledTaskRunId
+          ? [update.scheduledTaskRunId]
+          : [],
+      ),
+    ),
+  ];
+  const names = new Map<string, string>();
+  if (runIds.length === 0) return names;
+  const rows = await tx
+    .select({ runId: schema.scheduledTaskRuns.id, name: schema.scheduledTasks.name })
+    .from(schema.scheduledTaskRuns)
+    .innerJoin(schema.scheduledTasks, eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId))
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    );
+  const byRun = new Map(rows.map((row) => [row.runId, row.name]));
+  for (const update of updates) {
+    const name = update.scheduledTaskRunId ? byRun.get(update.scheduledTaskRunId) : undefined;
+    if (update.kind === "scheduled_occurrence" && name) names.set(update.id, name);
+  }
+  return names;
+}
+
+function internalUpdateEventMember(
+  update: BoundedSystemUpdate,
+  automationNames?: ReadonlyMap<string, string>,
+) {
+  const automation =
+    update.kind === "scheduled_occurrence"
+      ? automationRunPresentation(update, automationNames?.get(update.id))
+      : null;
   const summary = boundedInternalUpdateEventText(
-    update.summary,
+    // People see what happened; only the agent gets the instructions.
+    automation?.name ?? update.summary,
     MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES,
   );
   const source = boundedInternalUpdateEventText(
@@ -76713,11 +76760,7 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     summary: summary.text,
     summaryTruncated: summary.truncated,
   };
-  if (update.kind === "scheduled_occurrence") {
-    // People see what happened; only the agent gets the instructions.
-    const automation = automationRunPresentation(update);
-    return automation ? { ...preview, automation } : preview;
-  }
+  if (automation) return { ...preview, automation };
   if (update.kind !== "media_generation_result") return preview;
   const payload = SessionSystemUpdatePayload.safeParse(update.payload);
   return payload.success && payload.data.type === "media_generation_result"
@@ -78728,6 +78771,11 @@ export async function claimSessionWorkForAttempt(
             };
           }
           const modelOrdered = systemUpdatesInModelOrder(deliverable);
+          const automationNames = await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            workspaceId,
+            deliverable,
+          );
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
@@ -78882,7 +78930,9 @@ export async function claimSessionWorkForAttempt(
               historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
-              members: modelOrdered.map(internalUpdateEventMember),
+              members: modelOrdered.map((update) =>
+                internalUpdateEventMember(update, automationNames),
+              ),
             },
             occurredAt,
           };
@@ -91440,7 +91490,14 @@ export async function addSessionSystemUpdateWithSourceMutation<
         ]);
 
         const now = new Date();
-        const eventPreview = internalUpdateEventMember(inserted);
+        const eventPreview = internalUpdateEventMember(
+          inserted,
+          await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+            [inserted],
+          ),
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(

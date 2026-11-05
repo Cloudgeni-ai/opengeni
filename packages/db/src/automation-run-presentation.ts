@@ -5,7 +5,7 @@ const MAX_EVENT_SUMMARY_BYTES = 200;
 
 /** What a chat shows for an automation run. Never its instructions. */
 export type AutomationRunPresentation = {
-  /** The automation's name (the update's summary). */
+  /** The automation's name. */
   name: string;
   /** What the first few events that started the run say, oldest first. */
   eventSummaries: string[];
@@ -14,22 +14,21 @@ export type AutomationRunPresentation = {
 };
 
 /**
- * The plain description a delivered `scheduled_occurrence` update carries to
- * the chat: the automation's name and what the events that started it say
- * happened. An update written while its summary still repeated the
- * instructions gets none, so the chat falls back to its plain default rather
- * than showing them.
+ * The plain description a `scheduled_occurrence` update carries to the chat:
+ * the automation's name and what the events that started it say happened.
+ * The update's own summary is the automation's instructions, which only the
+ * agent reads, so the name comes from the automation itself. Without a name
+ * there is none, and the chat falls back to its plain default.
  */
-export function automationRunPresentation(update: {
-  kind: string;
-  summary: string;
-  payload: unknown;
-}): AutomationRunPresentation | null {
+export function automationRunPresentation(
+  update: { kind: string; payload: unknown },
+  automationName: string | null | undefined,
+): AutomationRunPresentation | null {
   if (update.kind !== "scheduled_occurrence") return null;
   const parsed = SessionSystemUpdatePayload.safeParse(update.payload);
   if (!parsed.success || parsed.data.type !== "scheduled_occurrence") return null;
-  const name = boundedUtf8(update.summary.replace(/\s+/g, " ").trim(), 512);
-  if (!name || update.summary === parsed.data.text) return null;
+  const name = boundedUtf8((automationName ?? "").replace(/\s+/g, " ").trim(), 512);
+  if (!name) return null;
   const events = parsed.data.events;
   return {
     name,

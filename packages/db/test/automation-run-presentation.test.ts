@@ -19,13 +19,15 @@ const inbound = (id: string, summary: string) => ({
   dataTruncated: false,
 });
 
-function update(summary: string, events?: { eventCount: number; summaries: string[] }) {
+const instructions = "Continue this conversation when an issue is assigned to the signed-in user.";
+
+function update(events?: { eventCount: number; summaries: string[] }) {
   return {
     kind: "scheduled_occurrence",
-    summary,
+    summary: instructions,
     payload: {
       type: "scheduled_occurrence",
-      text: "Continue this conversation when an issue is assigned to the signed-in user.",
+      text: instructions,
       scheduledTaskId,
       scheduledTaskRunId,
       ...(events
@@ -48,7 +50,8 @@ describe("what a chat shows for an automation run", () => {
   test("the automation's name and what the event says happened", () => {
     expect(
       automationRunPresentation(
-        update("Issue assigned to you", { eventCount: 1, summaries: ["Fix the login page"] }),
+        update({ eventCount: 1, summaries: ["Fix the login page"] }),
+        "Issue assigned to you",
       ),
     ).toEqual({
       name: "Issue assigned to you",
@@ -58,30 +61,31 @@ describe("what a chat shows for an automation run", () => {
   });
 
   test("a scheduled run is its name alone", () => {
-    expect(automationRunPresentation(update("Weekly summary"))).toEqual({
+    expect(automationRunPresentation(update(), "Weekly summary")).toEqual({
       name: "Weekly summary",
       eventSummaries: [],
       eventCount: 0,
     });
   });
 
-  test("never the instructions an older update repeated as its summary", () => {
-    const legacy = update("");
-    legacy.summary = legacy.payload.text;
-    expect(automationRunPresentation(legacy)).toBeNull();
+  test("never the instructions when the automation's name is unknown", () => {
+    expect(automationRunPresentation(update(), null)).toBeNull();
+    expect(automationRunPresentation(update(), "  ")).toBeNull();
   });
 
   test("keeps the first few events, each bounded", () => {
     const presented = automationRunPresentation(
-      update("Issue assigned to you", {
+      update({
         eventCount: 12,
         summaries: ["one", "two", "three", "four", "x".repeat(500)],
       }),
+      "Issue assigned to you",
     );
     expect(presented?.eventSummaries).toEqual(["one", "two", "three"]);
     expect(presented?.eventCount).toBe(12);
     const long = automationRunPresentation(
-      update("Issue assigned to you", { eventCount: 1, summaries: ["é".repeat(300)] }),
+      update({ eventCount: 1, summaries: ["é".repeat(300)] }),
+      "Issue assigned to you",
     );
     expect(Buffer.byteLength(long!.eventSummaries[0]!)).toBeLessThanOrEqual(200);
     expect(long!.eventSummaries[0]!.endsWith("…")).toBe(true);
@@ -89,7 +93,7 @@ describe("what a chat shows for an automation run", () => {
 
   test("other updates carry none", () => {
     expect(
-      automationRunPresentation({ kind: "agent_message", summary: "Hi", payload: {} }),
+      automationRunPresentation({ kind: "agent_message", payload: {} }, "Weekly summary"),
     ).toBeNull();
   });
 });

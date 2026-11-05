@@ -554,13 +554,14 @@ does not necessarily start a new turn. Command-result summaries include the
 bounded command preview; an unavailable exit result is described as unavailable
 rather than asserting that execution failed.
 
-An automation occurrence (`scheduled_occurrence`) is summarized by its
-automation's name, never its instructions, which stay in the payload the agent
-reads. Its delivered member carries `automation: {name, eventSummaries,
-eventCount}` (at most three event summaries of 200 bytes each), and the chat
-draws it as one line: the name and what the first event says. Updates written
-while the summary still repeated the instructions carry no `automation` and
-read "Automation run". Each new occurrence also tells the agent to answer
+An automation occurrence (`scheduled_occurrence`) keeps its instructions as
+the update's summary, which only the agent reads. Its pending and delivered
+session events instead carry the automation's current name as their summary,
+and the delivered member carries `automation: {name, eventSummaries,
+eventCount}` (at most three event summaries of 200 bytes each). The chat draws
+the run as one line: the name and what the first event says. Events written
+before Opengeni recorded the name carry no `automation` and read "Automation
+run". Each new occurrence also tells the agent to answer
 exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
 omits the run's line, work and answer, unless the run asked the person
 something or holds another item that waits on them.

@@ -139,7 +139,6 @@ import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
 import {
   assertReusableSessionRevivable,
-  scheduledOccurrenceSummary,
   scheduledUserMessagePayload,
   workflowIdForSession,
 } from "./common";
@@ -2017,7 +2016,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 classification: "info",
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
-                summary: scheduledOccurrenceSummary(task),
+                summary: task.agentConfig.prompt,
                 payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
                   task,
                   run,
@@ -2156,7 +2155,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 classification: "info",
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
-                summary: scheduledOccurrenceSummary(task),
+                summary: task.agentConfig.prompt,
                 payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
                   task,
                   run,
@@ -3229,7 +3228,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       classification: "info",
       sourceId: input.run.id,
       dedupeKey: `scheduled-task-run:${input.run.id}`,
-      summary: scheduledOccurrenceSummary(task),
+      summary: task.agentConfig.prompt,
       payload: await scheduledOccurrencePayloadForRun(input.db, {
         task,
         run: input.run,
