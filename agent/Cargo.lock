@@ -1993,6 +1993,7 @@ dependencies = [
  "prost",
  "rand 0.8.7",
  "reqwest",
+ "rustls",
  "semver",
  "serde",
  "serde_json",
