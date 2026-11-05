@@ -235,7 +235,7 @@ cannot choose either actor or a repository outside the accepted resource set.
 A turn that carries no personal GitHub delegation (a compaction checkpoint, or a
 goal continuation with no earlier turn to copy from) leaves the
 `github_personal__*` tools out instead of failing; any turn other than
-compaction logs a warning. A delegation that only partly matches, or more than
+compaction logs a warning to worker telemetry (no visible chat warning yet). A delegation that only partly matches, or more than
 one, still fails closed.
 Writes use the attempt-frozen connector Allow/Ask/Block policy. When no explicit
 policy exists, the accepted repository write capability is authoritative and

@@ -642,8 +642,10 @@ the session idle rather than failed, and a still-pending request consumed with
 `session.context.compaction.skipped(reason="summarization_failed")` so the
 execution is not claimed again. Every recovery path runs first. A failed read of
 the pending flag goes to post-claim database recovery instead of settling idle
-with the request still pending. The full diagnostic is logged; the recorded
-reason stays short. The timeline names an automatic compaction's failure
+with the request still pending. The failure's classification (code, error
+class and HTTP status, never the message) goes to worker telemetry; the
+recorded reason stays short and, for an error that is not a provider, quota
+or summary failure, says the checkpoint could not run and names its class. The timeline names an automatic compaction's failure
 (labelled Auto) with "Chat history is unchanged." and keeps "Request it again
 to retry." for a requested `/compact` or an overflow.
 

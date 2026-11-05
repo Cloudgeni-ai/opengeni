@@ -94,6 +94,8 @@ import {
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
   compactionFailureTurnEventPayload,
+  compactionFailureReason,
+  compactionFailureReasonFromError,
 } from "./errors";
 import { selectRejectedProviderArtifactHistoryIds } from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
@@ -1712,17 +1714,30 @@ async function settleFailedCompactionCheckpoint(
   // The turn records a short reason; the classification goes to telemetry.
   // Error class names only: never the message, which may hold content.
   const diagnostic = safeErrorDiagnostic(error);
+  // Many error subclasses keep the inherited name "Error"; their class name
+  // says more.
+  const errorName =
+    error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error;
   observability.warn("Compaction checkpoint failed", {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     failureCode: failureCode ?? "unknown",
-    // Many error subclasses keep the inherited name "Error"; their class
-    // name says more.
-    errorName:
-      error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error,
+    errorName,
     ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
   });
+  // A provider, quota or summary failure keeps its own reason. Anything else
+  // happened before or around the summary, so say the checkpoint could not run
+  // and name the error class rather than a bare "unexpected Error".
+  const unclassifiedReason = compactionFailureReason(
+    `unexpected ${error instanceof Error && error.name ? error.name : "unknown error"}`,
+  );
+  const payload =
+    compactionFailureReasonFromError(error) === unclassifiedReason
+      ? compactionFailureTurnEventPayload(error, {
+          error: compactionFailureReason(`the checkpoint could not run (${errorName})`),
+        })
+      : compactionFailureTurnEventPayload(error);
   // Consuming needs the request to still be pending (settlement is stale
   // otherwise); a checkpoint that already started has consumed it. A failed
   // read throws into the post-claim database recovery like any settlement
@@ -1731,7 +1746,7 @@ async function settleFailedCompactionCheckpoint(
   if (
     !(await eventing.settle!({
       events: [
-        { type: "turn.failed", payload: compactionFailureTurnEventPayload(error) },
+        { type: "turn.failed", payload },
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
       turnStatus: "failed",

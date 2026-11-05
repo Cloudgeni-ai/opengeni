@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import * as database from "@opengeni/db";
+import { AnthropicRequestError } from "@opengeni/runtime";
 import { GitHubRestAuthorityError } from "@opengeni/runtime/github-rest-mcp";
 import * as parentWake from "../src/activities/parent-wake";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
@@ -150,6 +151,9 @@ describe("a compaction checkpoint that fails", () => {
     });
     // The internal authority message is not the recorded reason.
     expect(String(settlement.events[0]!.payload.error)).not.toContain("delegation");
+    expect(settlement.events[0]!.payload.error).toBe(
+      "compaction summarization failed: the checkpoint could not run (GitHubRestAuthorityError)",
+    );
     expect(settlement.events[1]!.payload).toEqual({ status: "idle" });
     expect(control.activityStatus).toBe("idle");
     expect(control.turnMetricOutcome).toBe("failed");
@@ -187,13 +191,36 @@ describe("a compaction checkpoint that fails", () => {
     expect(control.activityStatus).toBe("recovering");
   });
 
-  test("a recoverable error still recovers before the checkpoint is settled", async () => {
+  test("database recovery still wins before the checkpoint is settled", async () => {
     const { pending } = stubDependencies(true);
     const { deps, control, settle } = failureDeps(databaseConnectionLost(), COMPACTION_TRIGGER);
 
     await expect(settleTurnFailure(deps as never)).rejects.toMatchObject({
       type: "OpenGeniPostClaimDatabaseRecovery",
     });
+    expect(settle).not.toHaveBeenCalled();
+    expect(pending).not.toHaveBeenCalled();
+    expect(control.activityStatus).toBe("recovering");
+  });
+
+  test("provider recovery still wins before the checkpoint is settled", async () => {
+    const { pending } = stubDependencies(true);
+    const recovery = spyOn(database, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    restores.push(() => recovery.mockRestore());
+    const overload = new AnthropicRequestError(
+      "Claude request failed (HTTP 529)",
+      529,
+      "anthropic_http_error",
+      { type: "overloaded_error", message: "Synthetic overload" },
+      new Headers({ "retry-after": "5" }),
+    );
+    const { deps, control, settle } = failureDeps(overload, COMPACTION_TRIGGER);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledTimes(1);
     expect(settle).not.toHaveBeenCalled();
     expect(pending).not.toHaveBeenCalled();
     expect(control.activityStatus).toBe("recovering");

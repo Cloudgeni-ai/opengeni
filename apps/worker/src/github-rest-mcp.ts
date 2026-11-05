@@ -71,6 +71,8 @@ export async function buildGitHubRestMcpForTurn(input: {
   resources: ResourceRef[];
   tools: ToolRef[];
   resolveCredential: ResolveCredential;
+  /** Worker telemetry; defaults to the console. */
+  warn?: (message: string, attributes: Record<string, string>) => void;
 }): Promise<GitHubRestMcpRuntime> {
   if (!input.settings.githubRestMcpEnabled) {
     return {
@@ -94,12 +96,15 @@ export async function buildGitHubRestMcpForTurn(input: {
     // A compaction checkpoint never carries personal authority. Any other
     // turn without it (for example a goal continuation with no earlier turn
     // to copy from) is worth seeing, in case a delegation was dropped.
-    console.warn("Personal GitHub tools left out: the turn has no personal GitHub authority", {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turn.id,
-      source: input.turn.source,
-    });
+    (input.warn ?? console.warn)(
+      "Personal GitHub tools left out: the turn has no personal GitHub authority",
+      {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turn.id,
+        source: input.turn.source,
+      },
+    );
   }
   if (appRepositories.length === 0 && personalRepositories.length === 0) {
     return {
