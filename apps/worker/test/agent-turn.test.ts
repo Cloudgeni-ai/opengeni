@@ -3100,22 +3100,26 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     ).toBeUndefined();
   });
 
-  test("never throws: a pointer-load failure falls back to the home backend default", async () => {
-    const backend = await resolveActiveSandboxBackend(
-      true,
-      async () => {
-        throw new Error("db unreachable");
-      },
-      selfhostedKind,
-    );
-    expect(backend).toBeUndefined();
+  // A failed load is not "no machine": answering the home default would start a machine
+  // chat's turn on its managed home box.
+  test("a pointer-load failure propagates instead of choosing the home backend", async () => {
+    await expect(
+      resolveActiveSandboxBackend(
+        true,
+        async () => {
+          throw new Error("db unreachable");
+        },
+        selfhostedKind,
+      ),
+    ).rejects.toThrow("db unreachable");
   });
 
-  test("never throws: a sandbox-kind-load failure falls back to the home backend default", async () => {
-    const backend = await resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
-      throw new Error("db unreachable");
-    });
-    expect(backend).toBeUndefined();
+  test("a sandbox-kind-load failure propagates instead of choosing the home backend", async () => {
+    await expect(
+      resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
+        throw new Error("db unreachable");
+      }),
+    ).rejects.toThrow("db unreachable");
   });
 
   test("reuse contract (Stage D hoist): pre-loaded pointer + record memoized closures are each read at most once", async () => {
@@ -5970,6 +5974,26 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(true);
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
+  });
+
+  test("a statusless stream error that asks for a retry recovers the same turn", () => {
+    // An OpenAI-compatible server's error event mid-stream, after reasoning deltas.
+    const malformed = new Error("model returned malformed tool_call output; please retry");
+    expect(isTransientProviderError(malformed)).toBe(true);
+    expect(agentRunFailurePayload(malformed)).toEqual({
+      error: "model returned malformed tool_call output; please retry",
+      code: "provider_unavailable",
+      providerCondition: "unavailable",
+      retryable: true,
+    });
+    // The same words with a real 4xx status remain a request fault.
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Bad input; please retry"), { status: 400 }),
+      ),
+    ).toBe(false);
+    // Unrelated statusless text does not match.
+    expect(isTransientProviderError(new Error("retry_count must be positive"))).toBe(false);
   });
 
   test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {

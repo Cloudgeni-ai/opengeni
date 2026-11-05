@@ -46,6 +46,7 @@ fn capacity() -> Capacity {
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
+        reads_packs: true,
         info: None,
     }
 }
@@ -2108,6 +2109,7 @@ fn earlier(name: &str) -> Register {
     Register {
         capacity: Capacity {
             pointers_in_service: false,
+            reads_packs: false,
             ..capacity()
         },
         ..register(name, random(), Vec::new())

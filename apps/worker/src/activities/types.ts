@@ -185,8 +185,9 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   /** Host-owned containment: stop polling and checkpoint peer turns before exit.
-   * Bare activity embedders must provide their own worker lifecycle edge. */
-  requestWorkerDrain: () => void;
+   * Bare activity embedders must provide their own worker lifecycle edge. It may
+   * return a release that the caller invokes if its stalled cleanup recovers. */
+  requestWorkerDrain: () => void | (() => void);
   /** Deterministic test clock for the cleanup-only monitor. */
   turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;

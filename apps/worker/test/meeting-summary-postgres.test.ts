@@ -28,6 +28,7 @@ import {
   saveRecordingNote,
   setScheduledTaskEvents,
   updateWorkspaceSettings,
+  withBillingOriginOverride,
   type DbClient,
   type SessionCreateInput,
 } from "@opengeni/db";
@@ -296,6 +297,19 @@ async function workspace(options: { subscription: boolean }) {
 }
 
 describe("built-in meeting summary", () => {
+  test("an API-origin recording cannot start notes on a connected subscription", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const input = await scope.meeting("private");
+    expect(
+      await withBillingOriginOverride("api", () => startMeetingSummary(services(), input)),
+    ).toEqual({
+      started: false,
+      reason: "subscription_api_unavailable",
+    });
+    expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
+  });
   test("a ready transcript starts exactly one Only me chat for the owner, on the chat's subscription model", async () => {
     if (!realDb) return;
     serveCodex();

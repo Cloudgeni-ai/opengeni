@@ -46,6 +46,40 @@ export function machineScopeLabel(t: OpenGeniText, scope: MachineView["scope"]):
   return t("sandboxLabelModel.workspace");
 }
 
+/**
+ * The kind of computer in a person's words: "Mac", "Linux", "Windows". The
+ * processor architecture is detail nobody picks a machine by; callers that
+ * want it can show `machineSystemDetail` in a tooltip.
+ */
+export function machinePlatformLabel(t: OpenGeniText, os: string): string {
+  const normalized = os.toLowerCase();
+  if (normalized === "macos" || normalized === "darwin") return t("sandboxLabelModel.mac");
+  if (normalized === "linux") return t("sandboxLabelModel.linux");
+  if (normalized === "windows" || normalized === "win32") return t("sandboxLabelModel.windows");
+  return os;
+}
+
+/** The exact system, for a tooltip: "macos/aarch64". */
+export function machineSystemDetail(machine: Pick<MachineView, "os" | "arch">): string {
+  return machine.arch ? `${machine.os}/${machine.arch}` : machine.os;
+}
+
+/**
+ * Whether agents can use the machine's screen, the one thing about a machine
+ * that decides whether "use my computer" works there: a machine without a
+ * screen, one with a screen its owner didn't share, or one whose screen agents
+ * may see and use.
+ */
+export function machineScreenLabel(
+  t: OpenGeniText,
+  machine: Pick<MachineView, "hasDisplay" | "allowScreenControl">,
+): string {
+  if (!machine.hasDisplay) return t("sandboxLabelModel.noScreen");
+  return machine.allowScreenControl
+    ? t("sandboxLabelModel.screenShared")
+    : t("sandboxLabelModel.screenNotShared");
+}
+
 type NamedMachine = Pick<MachineView, "sandboxId" | "isSessionGroup" | "kind" | "name" | "scope">;
 
 /**

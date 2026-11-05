@@ -360,12 +360,18 @@ export function registerRecordingRoutes(
     // A request that names its provider takes no default, not even its model.
     const defaults = requested.providerId
       ? null
-      : await meetingModelFor(deployment, settings.transcription, {
-          accountId: actor.accountId,
-          workspaceId: actor.workspaceId,
-          subjectId: actor.subjectId,
-        });
+      : await meetingModelFor(
+          deployment,
+          settings.transcription,
+          {
+            accountId: actor.accountId,
+            workspaceId: actor.workspaceId,
+            subjectId: actor.subjectId,
+          },
+          true,
+        );
     const providerId = requested.providerId ?? defaults!.providerId;
+    await deployment.assertEligible?.(providerId, actor);
     const model = requested.model ?? defaults?.model;
     const pinnedAway =
       deployment.pinned !== null &&
@@ -399,7 +405,12 @@ export function registerRecordingRoutes(
         ...(diarizer ? { diarizer } : {}),
         ...(keyterms.length > 0 ? { keyterms } : {}),
       },
-      automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
+      automatic:
+        !requested.providerId &&
+        deployment.pinned === null &&
+        (!settings.transcription ||
+          settings.transcription.providerId !== providerId ||
+          settings.transcription.model !== found.spec.model),
     };
   }
 
@@ -436,6 +447,7 @@ export function registerRecordingRoutes(
     };
     const asked = recording.transcription?.providerId;
     if (asked) {
+      await deployment.assertEligible?.(asked, actor);
       const named = dictationChoiceOf(deployment, asked, recording.transcription?.model);
       const ready = named ? await service.availableProviderIds?.(context) : null;
       if (!named || (ready && !ready.includes(named.id))) {
@@ -473,7 +485,7 @@ export function registerRecordingRoutes(
         details: { code: "policy_blocked" },
       });
     }
-    if (!deps.transcription || !(await deps.transcription.available({ workspaceId }))) {
+    if (!deps.transcription) {
       throw dictationUnavailable();
     }
     return WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
@@ -1490,11 +1502,16 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
     const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
-      accountId: actor.accountId,
-      workspaceId: actor.workspaceId,
-      subjectId: actor.subjectId,
-    });
+    const defaults = await meetingModelFor(
+      deployment,
+      recordingSettings.transcription,
+      {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      },
+      true,
+    );
     const pinned = deployment.pinned;
     const liveDefault = deployment.liveDefault;
     const offered = pinned

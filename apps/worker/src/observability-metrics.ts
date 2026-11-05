@@ -41,6 +41,8 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  type ModelPreparationMeasurement,
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
   SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
@@ -217,20 +219,6 @@ export function runtimeMetricsHooksForObservability(
         labels: { provider, path, code },
       });
     },
-    onModelToolNameRepair: ({ provider, api, field }) => {
-      observability.incrementCounter({
-        name: "opengeni_model_tool_name_repairs_total",
-        help: "Model requests in which the outbound guard aliased a tool name a provider could reject, by provider, wire API and field.",
-        labels: { provider, api, field },
-      });
-    },
-    onModelToolNameRetry: ({ provider, api, outcome }) => {
-      observability.incrementCounter({
-        name: "opengeni_model_tool_name_retries_total",
-        help: "Strict resends after a provider rejected a tool name, by provider, wire API and outcome.",
-        labels: { provider, api, outcome },
-      });
-    },
     onSandboxCreate: ({ backend, imageSource, outcome, durationSeconds }) => {
       observability.incrementCounter({
         name: "opengeni_sandbox_creates_total",
@@ -308,7 +296,7 @@ export function runtimeMetricsHooksForObservability(
       });
       observability.observeHistogram({
         name: "opengeni_sandbox_setup_operation_duration_seconds",
-        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips. outcome=not_found is a read-only probe that found no such path (an expected answer, not a failure), as in the routed per-operation metric.",
         buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
         labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
@@ -2365,7 +2353,6 @@ export type TurnStartupPhase =
   | "model_prepare_input_filter_base"
   | "model_prepare_input_filter_genesis"
   | "model_prepare_input_filter_host"
-  | "model_prepare_input_filter_secret_mask"
   | "model_prepare_input_filter_tool_output"
   | "model_prepare_input_filter_modality"
   | "model_prepare_input_filter_context"
@@ -2479,6 +2466,78 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET: ReadonlySet<string> = new Set(
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
+);
+const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set(["propagated", "degraded", "unreachable"]);
+
+/** Failed repository skill discovery runs by bounded error class. `handling`
+ * says whether the turn continued without repository skills (`degraded`,
+ * `unreachable`) or the error reached turn recovery (`propagated`). */
+export function recordRepositorySkillDiscoveryFailure(
+  observability: Observability,
+  input: { backend: string; errorClass: string; handling: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_discovery_failures_total",
+    help: "Failed repository skill discovery runs by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills).",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+      handling: REPOSITORY_SKILL_DISCOVERY_HANDLING.has(input.handling) ? input.handling : "other",
+    },
+  });
+}
+
+/** One unusable repository skill search path or skill folder skipped in a
+ * run that otherwise completed. Counts entries, not runs. */
+export function recordRepositorySkillEntrySkipped(
+  observability: Observability,
+  input: { backend: string; errorClass: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_entries_skipped_total",
+    help: "Repository skill search paths or skill folders skipped because the workspace answered but the entry could not be used, by bounded error class. Counts entries, not discovery runs.",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+    },
+  });
+}
+
+/** One model-preparation phase measurement from the runtime: its startup
+ * phase timing, plus the bounded discovery-failure counter when it failed. */
+export function recordModelPreparationPhase(
+  observability: Observability,
+  input: {
+    provider: string;
+    backend: string;
+    measurement: ModelPreparationMeasurement;
+  },
+): void {
+  const { measurement } = input;
+  recordTurnStartupPhase(observability, {
+    phase: `model_prepare_${measurement.phase}`,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: measurement.outcome,
+    durationSeconds: measurement.durationSeconds,
+    ...(measurement.count === undefined ? {} : { count: measurement.count }),
+  });
+  if (measurement.failure)
+    recordRepositorySkillDiscoveryFailure(observability, {
+      backend: input.backend,
+      errorClass: measurement.failure.errorClass,
+      handling: measurement.failure.handling,
+    });
+  for (const errorClass of measurement.skipped ?? [])
+    recordRepositorySkillEntrySkipped(observability, { backend: input.backend, errorClass });
 }
 
 /** Observe an existing dependency only. Child intervals can overlap and are
