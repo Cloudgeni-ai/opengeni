@@ -54,7 +54,12 @@ delivery can be late or missed.
   `docker/github-runner.Dockerfile`, released as
   `opengeni-compute-github-runner`. Its start command counts the runner as
   a running command (ADR 3), so a job that waits quietly is never put to
-  sleep, and runs Docker for the job. A runner takes one job and ends.
+  sleep, and runs Docker for the job. It starts the runner only once
+  Docker answers, and the image's own check (`COMPUTE_RUNNER_READY`, a
+  shell command) succeeds if it sets one: GitHub gives a job only to a
+  runner that has connected, so no job lands where Docker is not up yet.
+  It waits as long as that takes, within the sandbox's timeout, and
+  starts a dockerd that exits again. A runner takes one job and ends.
   A runner's sandbox is never archived or checkpointed, so it is its own
   only copy for as long as it runs: its host's guard never freezes it
   when the host loses touch with the control service
