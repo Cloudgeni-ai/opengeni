@@ -247,8 +247,12 @@ singleton owns membership.
 
 ### Customer OpenAI and Azure OpenAI keys
 
-The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
+The web console offers a workspace's own **OpenAI** and **Azure OpenAI** keys in
+the model step after organization setup. On **Models → Connect provider**, the
+OpenAI API and Azure OpenAI rows connect the organization's key instead (see the
+organization rail below), which owners and admins can limit to selected
+workspaces. A workspace's own keys are listed with its other accounts on its
+Models page, where its admins can disconnect them. OpenAI
 asks for an API key, with the model preselected and an optional Change model
 control. Azure asks for an API key, resource endpoint
 (`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
@@ -263,7 +267,7 @@ this uses no Opengeni credits. Failed checks do not save a connection and show
 safe actionable errors without reflecting upstream response text. Other API
 callers can omit the check for offline provisioning. A successful setup check
 does not establish ongoing provider health. The connected model is selected in
-the current user’s next-chat draft from onboarding and Workspace settings.
+the current user’s next-chat draft from onboarding and Connect provider.
 
 These connections are workspace-owned, including in the onboarding Personal
 workspace. The existing Connections API encrypts the key at rest and returns
@@ -285,9 +289,13 @@ are not enabled implicitly for an arbitrary Azure deployment name.
 
 #### A workspace's own OpenAI-compatible endpoint
 
-**Workspace settings → Models** also offers **Connect an OpenAI-compatible
-endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
-Completions or Responses format. It asks for an optional name, the API's HTTPS
+**Models → Connect provider → Custom endpoint** connects any provider or
+self-run server whose API follows OpenAI's Chat Completions or Responses format.
+The endpoint always belongs to one workspace: organization owners and admins
+choose which of the workspaces they manage (starting with the one they opened
+Connect provider from), and a workspace's own admins connect it to that
+workspace. Connected endpoints are listed with the workspace's other accounts,
+where they can be disconnected. The step asks for an optional name, the API's HTTPS
 base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
 or `/responses` path is trimmed), an API key, the model ID exactly as the
 provider lists it under `/models` (IDs such as `org/model:tag` are accepted),

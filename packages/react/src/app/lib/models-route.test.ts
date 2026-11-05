@@ -17,6 +17,14 @@ describe("Models URLs", () => {
       workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: "compaction" }),
     ).toEqual({ section: "models", workspace: "ws-1", view: "compaction" });
   });
+  test("a custom endpoint is connected for a workspace only, never the organization", () => {
+    expect(parseModelsView("connect:openai_compatible")).toBe("connect:openai_compatible");
+    expect(parseModelsView("connect-org:openai_compatible")).toBeUndefined();
+    expect(connectStepOf("connect:openai_compatible")).toEqual({
+      provider: "openai_compatible",
+      organization: false,
+    });
+  });
   test("organization accounts and connect steps have their own keys", () => {
     expect(parseModelsAccount("org:codex:acct-1")).toBe("org:codex:acct-1");
     expect(parseModelsAccount("org:gateway:openrouter")).toBe("org:gateway:openrouter");

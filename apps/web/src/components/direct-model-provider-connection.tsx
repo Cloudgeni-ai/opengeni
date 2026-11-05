@@ -2,7 +2,6 @@ import {
   DirectModelProviderMetadata,
   directModelBaseUrl,
   directModelConnectionSpec,
-  type CompatibleModelApi,
   type DirectModelProvider,
 } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -11,15 +10,116 @@ import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
-import { Select } from "@opengeni/react/ui/select";
 
 /** How each direct provider is named to the person connecting it. */
 export const DIRECT_MODEL_PROVIDER_LABELS: Record<DirectModelProvider, string> = {
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
-  openai_compatible: "OpenAI-compatible endpoint",
+  openai_compatible: "Custom endpoint",
 };
 
+/** A field of a direct model connection the person typed, keyed as in its metadata. */
+export type DirectModelField = "endpoint" | "baseUrl" | "model" | "label";
+
+/**
+ * Checks a direct connection's settings before anything is sent. Returns the
+ * settings, or what to fix in each field, in words that say how to fix it.
+ */
+export function parseDirectModelSettings(
+  input: unknown,
+  provider: DirectModelProvider,
+):
+  | { ok: true; config: DirectModelProviderMetadata }
+  | { ok: false; errors: Partial<Record<DirectModelField, string>> } {
+  const parsed = DirectModelProviderMetadata.safeParse(input);
+  if (parsed.success) return { ok: true, config: parsed.data };
+  const compatible = provider === "openai_compatible";
+  const errors: Partial<Record<DirectModelField, string>> = {};
+  for (const issue of parsed.error.issues) {
+    const field = String(issue.path[0] ?? (compatible ? "baseUrl" : "endpoint"));
+    if (field === "endpoint")
+      errors.endpoint = "Enter the HTTPS endpoint from your Azure OpenAI resource.";
+    else if (field === "baseUrl")
+      errors.baseUrl = "Enter your API’s public HTTPS base URL, like https://api.example.com/v1.";
+    else if (field === "label") errors.label = "Use a name of up to 60 characters.";
+    else
+      errors.model = compatible
+        ? "Enter the model ID exactly as your provider lists it."
+        : "Enter a valid model or deployment name (letters, numbers, dots, underscores, or hyphens).";
+  }
+  return { ok: false, errors };
+}
+
+/**
+ * Saves a workspace's own model key after one short test message to the
+ * provider. Returns the connected model's ID; throws an Error whose message
+ * is the server's explanation (an unreachable host, a wrong model ID).
+ */
+export async function connectDirectModelProvider(
+  client: OpenGeniBrowserClient,
+  workspaceId: string,
+  config: DirectModelProviderMetadata,
+  apiKey: string,
+  operationId: string,
+): Promise<string> {
+  const label = DIRECT_MODEL_PROVIDER_LABELS[config.provider];
+  const providerDomain = new URL(directModelBaseUrl(config)).hostname;
+  try {
+    const connection = await client.createConnection(workspaceId, {
+      providerDomain,
+      kind: "api_key",
+      subjectId: null,
+      credential: { apiKey },
+      grantedScopes: [],
+      metadata: {
+        credentialRole: `direct_${config.provider}`,
+        credentialLabel:
+          config.provider === "openai_compatible" ? (config.label ?? providerDomain) : label,
+        directModelProvider: config,
+      },
+      operationId,
+      verifyModelAccess: true,
+    });
+    const spec = directModelConnectionSpec(connection);
+    if (!spec) throw new Error("The provider connection could not be loaded");
+    return spec.modelId;
+  } catch (error) {
+    let message = error instanceof Error ? error.message : `Could not connect ${label}`;
+    if (error instanceof OpenGeniApiError) {
+      try {
+        const body = JSON.parse(error.body);
+        if (typeof body.error?.message === "string") message = body.error.message;
+      } catch {
+        /* Retain the safe SDK message when no structured error is present. */
+      }
+    }
+    throw new Error(message, { cause: error });
+  }
+}
+
+/**
+ * One idempotency key per distinct attempt: retrying the same key and
+ * settings reuses it, so a lost response never creates a second connection.
+ */
+export function useConnectOperation() {
+  const operation = useRef<{ signature: string; id: string } | null>(null);
+  return {
+    idFor(signature: string): string {
+      if (operation.current?.signature !== signature)
+        operation.current = { signature, id: crypto.randomUUID() };
+      return operation.current.id;
+    },
+    reset() {
+      operation.current = null;
+    },
+  };
+}
+
+/**
+ * A workspace's own OpenAI or Azure OpenAI key, as the post-signup model step
+ * connects it. A custom OpenAI-compatible endpoint has its own connect step
+ * on the Models page (models/custom-endpoint-connect.tsx).
+ */
 export function DirectModelProviderForm({
   client,
   workspaceId,
@@ -29,22 +129,18 @@ export function DirectModelProviderForm({
 }: {
   client?: OpenGeniBrowserClient;
   workspaceId: string;
-  provider: DirectModelProvider;
+  provider: Exclude<DirectModelProvider, "openai_compatible">;
   onConnected?: (modelId: string) => Promise<void> | void;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const id = useId();
   const label = DIRECT_MODEL_PROVIDER_LABELS[provider];
-  const compatible = provider === "openai_compatible";
   const [apiKey, setApiKey] = useState("");
   const [endpoint, setEndpoint] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [api, setApi] = useState<CompatibleModelApi>("chat");
-  const [name, setName] = useState("");
   const [model, setModel] = useState(provider === "openai" ? "gpt-6-sol" : "");
   const [busy, setBusy] = useState(false);
   const [showModel, setShowModel] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Partial<Record<DirectModelField, string>>>({});
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
@@ -53,77 +149,39 @@ export function DirectModelProviderForm({
       mounted.current = false;
     };
   }, []);
-  const operation = useRef<{ signature: string; id: string } | null>(null);
+  const operation = useConnectOperation();
   async function connect() {
     if (!client || busy) return;
-    const config = DirectModelProviderMetadata.safeParse({
+    const settings = parseDirectModelSettings(
+      { provider, model, ...(provider === "azure_openai" ? { endpoint } : {}) },
       provider,
-      model,
-      ...(provider === "azure_openai" ? { endpoint } : {}),
-      ...(compatible ? { baseUrl, api, ...(name.trim() ? { label: name } : {}) } : {}),
-    });
+    );
     setConnectionError(null);
-    if (!config.success) {
-      const issues: Record<string, string> = {};
-      for (const issue of config.error.issues) {
-        const field = String(issue.path[0] ?? (compatible ? "baseUrl" : "endpoint"));
-        issues[field] =
-          field === "endpoint"
-            ? "Enter the HTTPS endpoint from your Azure OpenAI resource."
-            : field === "baseUrl"
-              ? "Enter your API’s public HTTPS base URL, like https://api.example.com/v1."
-              : field === "label"
-                ? "Use a name of up to 60 characters."
-                : compatible
-                  ? "Enter the model ID exactly as your provider lists it."
-                  : "Enter a valid model or deployment name (letters, numbers, dots, underscores, or hyphens).";
-      }
-      setErrors(issues);
-      if (issues.model) setShowModel(true);
+    if (!settings.ok) {
+      setErrors(settings.errors);
+      if (settings.errors.model) setShowModel(true);
       return;
     }
     setErrors({});
     const key = apiKey.trim();
     if (!key) return;
-    const signature = JSON.stringify([key, config.data]);
-    if (operation.current?.signature !== signature)
-      operation.current = { signature, id: crypto.randomUUID() };
     setBusy(true);
     onBusyChange?.(true);
     try {
-      const providerDomain = new URL(directModelBaseUrl(config.data)).hostname;
-      const connection = await client.createConnection(workspaceId, {
-        providerDomain,
-        kind: "api_key",
-        subjectId: null,
-        credential: { apiKey: key },
-        grantedScopes: [],
-        metadata: {
-          credentialRole: `direct_${provider}`,
-          credentialLabel: compatible ? (config.data.label ?? providerDomain) : label,
-          directModelProvider: config.data,
-        },
-        operationId: operation.current!.id,
-        verifyModelAccess: true,
-      });
+      const modelId = await connectDirectModelProvider(
+        client,
+        workspaceId,
+        settings.config,
+        key,
+        operation.idFor(JSON.stringify([key, settings.config])),
+      );
       if (!mounted.current) return;
-      const spec = directModelConnectionSpec(connection);
-      if (!spec) throw new Error("The provider connection could not be loaded");
       setApiKey("");
-      operation.current = null;
+      operation.reset();
       if (!onConnected) toast.success(`${label} connected`);
-      await onConnected?.(spec.modelId);
+      await onConnected?.(modelId);
     } catch (error) {
-      let message = error instanceof Error ? error.message : `Could not connect ${label}`;
-      if (error instanceof OpenGeniApiError) {
-        try {
-          const body = JSON.parse(error.body);
-          if (typeof body.error?.message === "string") message = body.error.message;
-        } catch {
-          /* Retain the safe SDK message when no structured error is present. */
-        }
-      }
-      setConnectionError(message);
+      setConnectionError(error instanceof Error ? error.message : `Could not connect ${label}`);
     } finally {
       if (mounted.current) {
         setBusy(false);
@@ -134,38 +192,10 @@ export function DirectModelProviderForm({
   return (
     <div className="grid gap-3">
       <p className="text-xs leading-5 text-fg-muted">
-        {compatible
-          ? "Connect any API that follows OpenAI’s Chat Completions or Responses format. Usage is billed by that provider, and only this workspace can use the connection."
-          : `Usage is billed directly to your ${label} account. This connection is available to this workspace.`}
+        {`Usage is billed directly to your ${label} account. This connection is available to this workspace.`}
       </p>
-      {compatible ? (
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${id}-base-url`}>Base URL</Label>
-          <Input
-            id={`${id}-base-url`}
-            value={baseUrl}
-            onChange={(e) => {
-              setBaseUrl(e.target.value);
-              setConnectionError(null);
-            }}
-            placeholder="https://api.example.com/v1"
-            inputMode="url"
-            autoComplete="off"
-            disabled={busy}
-            aria-invalid={!!errors.baseUrl}
-            aria-describedby={`${id}-base-url-help`}
-          />
-          <p
-            id={`${id}-base-url-help`}
-            className={errors.baseUrl ? "text-xs text-danger" : "text-xs text-fg-muted"}
-          >
-            {errors.baseUrl ??
-              "The address your provider’s docs give for its OpenAI-compatible API, usually ending in /v1."}
-          </p>
-        </div>
-      ) : null}
       <div className="grid gap-1.5">
-        <Label htmlFor={`${id}-key`}>{compatible ? "API key" : `${label} API key`}</Label>
+        <Label htmlFor={`${id}-key`}>{`${label} API key`}</Label>
         <Input
           id={`${id}-key`}
           type="password"
@@ -187,11 +217,11 @@ export function DirectModelProviderForm({
           >
             Get an OpenAI API key ↗
           </a>
-        ) : provider === "azure_openai" ? (
+        ) : (
           <p className="text-xs text-fg-muted">
             Find your key and endpoint in Azure portal → your OpenAI resource → Keys and Endpoint.
           </p>
-        ) : null}
+        )}
       </div>
       {provider === "azure_openai" ? (
         <div className="grid gap-1.5">
@@ -228,19 +258,13 @@ export function DirectModelProviderForm({
       {provider !== "openai" || showModel ? (
         <div className="grid gap-1.5">
           <Label htmlFor={`${id}-model`}>
-            {provider === "azure_openai" ? "Deployment name" : compatible ? "Model ID" : "Model"}
+            {provider === "azure_openai" ? "Deployment name" : "Model"}
           </Label>
           <Input
             id={`${id}-model`}
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder={
-              provider === "openai"
-                ? "gpt-6-sol"
-                : compatible
-                  ? "The model’s ID, like provider/model-name"
-                  : "Your model deployment name"
-            }
+            placeholder={provider === "openai" ? "gpt-6-sol" : "Your model deployment name"}
             autoComplete="off"
             disabled={busy}
             aria-invalid={!!errors.model}
@@ -253,49 +277,8 @@ export function DirectModelProviderForm({
             {errors.model ??
               (provider === "azure_openai"
                 ? "In Microsoft Foundry, open Deployments and copy the deployment’s name."
-                : compatible
-                  ? "Copy it exactly as your provider lists it under /models. To use more models, connect each one."
-                  : "Use a model your OpenAI account can access.")}
+                : "Use a model your OpenAI account can access.")}
           </p>
-        </div>
-      ) : null}
-      {compatible ? (
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${id}-api`}>API format</Label>
-          <Select
-            id={`${id}-api`}
-            value={api}
-            onChange={(e) => setApi(e.target.value as CompatibleModelApi)}
-            disabled={busy}
-            aria-describedby={`${id}-api-help`}
-          >
-            <option value="chat">Chat Completions</option>
-            <option value="responses">Responses</option>
-          </Select>
-          <p id={`${id}-api-help`} className="text-xs text-fg-muted">
-            Most compatible APIs support Chat Completions. Choose Responses only if your provider
-            recommends it.
-          </p>
-        </div>
-      ) : null}
-      {compatible ? (
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${id}-name`}>Name (optional)</Label>
-          <Input
-            id={`${id}-name`}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your provider’s name"
-            maxLength={60}
-            disabled={busy}
-            aria-invalid={!!errors.label}
-            aria-describedby={errors.label ? `${id}-name-help` : undefined}
-          />
-          {errors.label ? (
-            <p id={`${id}-name-help`} className="text-xs text-danger">
-              {errors.label}
-            </p>
-          ) : null}
         </div>
       ) : null}
       {connectionError ? (
@@ -313,12 +296,11 @@ export function DirectModelProviderForm({
           busy ||
           !apiKey.trim() ||
           !model.trim() ||
-          (provider === "azure_openai" && !endpoint.trim()) ||
-          (compatible && !baseUrl.trim())
+          (provider === "azure_openai" && !endpoint.trim())
         }
         onClick={() => void connect()}
       >
-        {busy ? "Checking connection…" : compatible ? "Connect endpoint" : `Connect ${label}`}
+        {busy ? "Checking connection…" : `Connect ${label}`}
       </Button>
     </div>
   );

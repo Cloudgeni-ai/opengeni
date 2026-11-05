@@ -9,6 +9,7 @@
      ?section=models&workspace=<id>                      one workspace's model page
      ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
      ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
+     ?section=models&view=connect:openai_compatible      a custom endpoint, for a workspace chosen on its step
      ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
      ?section=models&account=...&view=model-access       Models an account can serve
      ?section=models&view=account-rule-locks             What workspaces can change
@@ -26,7 +27,9 @@ export type ModelsProvider =
   | "openai"
   | "azure_openai"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  /** A custom OpenAI-compatible endpoint: always one workspace's own connection. */
+  | "openai_compatible";
 
 export type ModelsView =
   | "connect"
@@ -49,15 +52,22 @@ const PROVIDERS: readonly ModelsProvider[] = [
 ];
 
 /**
- * Connected for the organization only: a workspace's own OpenAI or Azure key is
- * a direct connection with its own section.
+ * Connected for the organization only: a workspace's own OpenAI or Azure key
+ * (made during onboarding or over the API) is a direct connection, listed on
+ * its workspace's page.
  */
 const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = ["openai", "azure_openai"];
+
+/**
+ * Connected for one workspace only: a custom endpoint belongs to the workspace
+ * it is connected in, so it never has an organization step.
+ */
+const WORKSPACE_ONLY_PROVIDERS: readonly ModelsProvider[] = ["openai_compatible"];
 
 const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect",
   "connect-workspace",
-  ...PROVIDERS.map((provider) => `connect:${provider}` as const),
+  ...[...PROVIDERS, ...WORKSPACE_ONLY_PROVIDERS].map((provider) => `connect:${provider}` as const),
   ...[...PROVIDERS, ...ORGANIZATION_ONLY_PROVIDERS].map(
     (provider) => `connect-org:${provider}` as const,
   ),

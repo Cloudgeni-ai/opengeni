@@ -123,6 +123,12 @@ const client = {
   setCodexAccountAllocator: mock(async () => ({})),
   setCodexRotationSettings: mock(async () => ({})),
   disconnectCodexAccount: mock(async () => ({})),
+  createConnection: mock(
+    async (_workspaceId: string, _request: Record<string, unknown>): Promise<unknown> => {
+      throw new Error("createConnection not expected");
+    },
+  ),
+  deleteConnection: mock(async (_workspaceId: string, _id: string): Promise<void> => undefined),
   requestJson: mock(
     async (_method: string, _path: string, _body?: unknown): Promise<unknown> => ({}),
   ),
@@ -3414,6 +3420,252 @@ describe("One Models page for the organization and the workspace", () => {
         await pickScope(view.container).then((options) => options[0]!.click());
       });
       expect(lastNavigation?.search).toEqual({ section: "models" });
+    } finally {
+      await cleanup(view);
+    }
+  });
+});
+
+describe("Custom endpoint", () => {
+  const ENDPOINT = {
+    id: "conn-endpoint",
+    version: 1,
+    subjectId: null,
+    providerDomain: "api.together.example",
+    kind: "api_key",
+    status: "active",
+    grantedScopes: [],
+    metadata: {
+      credentialRole: "direct_openai_compatible",
+      credentialLabel: "Together",
+      directModelProvider: {
+        provider: "openai_compatible",
+        baseUrl: "https://api.together.example/v1",
+        model: "meta/llama-5-70b",
+        api: "chat",
+        label: "Together",
+      },
+    },
+  } as unknown as ConnectionMetadata;
+
+  async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const key = Object.keys(input).find((candidate) => candidate.startsWith("__reactProps$"));
+      (input as unknown as Record<string, { onChange?: (event: unknown) => void }>)[
+        key ?? ""
+      ]?.onChange?.({ target: input });
+    });
+  }
+
+  function field(container: HTMLElement, label: string): HTMLInputElement {
+    const labelElement = [...container.querySelectorAll("label")].find(
+      (candidate) => candidate.textContent?.replace("Optional", "").trim() === label,
+    )!;
+    return container.querySelector<HTMLInputElement>(`#${CSS.escape(labelElement.htmlFor)}`)!;
+  }
+
+  async function openFromPicker(container: HTMLElement): Promise<void> {
+    await act(async () => button(container, /Connect provider/)!.click());
+    await flush();
+    const row = rowsNamed(container, "Custom endpoint")[0]!;
+    expect(row.textContent).toContain("Pay per token through any OpenAI-compatible API");
+    await act(async () => row.querySelector<HTMLElement>("[data-row-action]")!.click());
+    await flush();
+  }
+
+  test("Connect provider lists it for owners and admins; its step asks which workspace and connects there", async () => {
+    asOrganizationAdmin();
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Research",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      // Owners and admins only connect where they manage the workspace.
+      {
+        id: "workspace-c",
+        name: "Elsewhere",
+        personal: false,
+        canManage: false,
+        savedDefaultModel: null,
+      },
+    ];
+    client.createConnection.mockImplementation(async () => ENDPOINT);
+    const view = await render();
+    try {
+      await openFromPicker(view.container);
+      // A workspace's own connection: the step, not the organization's.
+      expect(lastNavigation?.search.view).toBe("connect:openai_compatible");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect a custom endpoint");
+      const workspace = view.container.querySelector<HTMLElement>("[role=combobox]")!;
+      // Opened from Design preview, it starts there.
+      expect(workspace.textContent).toContain("Design preview");
+      expect(view.container.textContent).toContain(
+        "Only this workspace can use it. To use it in another workspace too, connect it there.",
+      );
+      await act(async () => workspace.click());
+      let options: HTMLElement[] = [];
+      for (let tries = 0; tries < 50 && options.length === 0; tries += 1) {
+        await act(async () => await new Promise((resolve) => setTimeout(resolve, 10)));
+        options = [...document.querySelectorAll<HTMLElement>("[role=option]")];
+      }
+      expect(options.map((option) => option.textContent?.trim())).toEqual([
+        "Design preview",
+        "Research",
+      ]);
+      await act(async () => options[1]!.click());
+      await flush();
+
+      const submit = button(view.container, "Connect endpoint")!;
+      expect(submit.disabled).toBe(true);
+      await typeInto(field(view.container, "Base URL"), "https://api.together.example/v1");
+      await typeInto(field(view.container, "API key"), "endpoint-secret");
+      await typeInto(field(view.container, "Model ID"), "meta/llama-5-70b");
+      await typeInto(field(view.container, "Name"), "Together");
+      expect(field(view.container, "API key").type).toBe("password");
+      expect(submit.disabled).toBe(false);
+      await act(async () => submit.click());
+      await flush();
+      await flush();
+
+      expect(client.createConnection).toHaveBeenCalledTimes(1);
+      expect(client.createConnection).toHaveBeenCalledWith("workspace-b", {
+        providerDomain: "api.together.example",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "endpoint-secret" },
+        grantedScopes: [],
+        metadata: {
+          credentialRole: "direct_openai_compatible",
+          credentialLabel: "Together",
+          directModelProvider: {
+            provider: "openai_compatible",
+            model: "meta/llama-5-70b",
+            baseUrl: "https://api.together.example/v1",
+            api: "chat",
+            label: "Together",
+          },
+        },
+        operationId: expect.any(String),
+        verifyModelAccess: true,
+      });
+      // It lands on the workspace it was connected in.
+      expect(lastNavigation?.search.workspace).toBe("workspace-b");
+      expect(lastNavigation?.search.view).toBeUndefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace's admin connects one to this workspace; a bad address is explained before anything is sent", async () => {
+    client.createConnection.mockImplementation(async () => {
+      throw new Error(
+        "We couldn’t reach that endpoint. Check that the base URL is a public HTTPS address.",
+      );
+    });
+    const view = await render();
+    try {
+      await openFromPicker(view.container);
+      const text = view.container.textContent ?? "";
+      // No workspace choice: it is this one's.
+      expect(view.container.querySelector("[role=combobox]")).toBeNull();
+      expect(text).toContain(
+        "It will belong to Design preview: only Design preview can use it, and its admins can disconnect it.",
+      );
+      await typeInto(field(view.container, "Base URL"), "http://10.0.0.8/v1");
+      await typeInto(field(view.container, "API key"), "endpoint-secret");
+      await typeInto(field(view.container, "Model ID"), "llama");
+      await act(async () => button(view.container, "Connect endpoint")!.click());
+      await flush();
+      expect(view.container.textContent).toContain(
+        "Enter your API’s public HTTPS base URL, like https://api.example.com/v1.",
+      );
+      expect(client.createConnection).not.toHaveBeenCalled();
+
+      // The server's reason for a failed check shows in the form, which stays open.
+      await typeInto(field(view.container, "Base URL"), "https://models.internal.example/v1");
+      await act(async () => button(view.container, "Connect endpoint")!.click());
+      await flush();
+      await flush();
+      expect(client.createConnection).toHaveBeenCalledTimes(1);
+      expect(view.container.textContent).toContain("We couldn’t reach that endpoint.");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect a custom endpoint");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("members who only connect their own accounts aren't offered it", async () => {
+    workspaceSettingsAdmin = false;
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: false,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect your own subscription");
+      expect(rowsNamed(view.container, "Custom endpoint")).toHaveLength(0);
+      // Its step, opened by URL, says who can connect one instead of a form.
+      await act(async () => navigateTo({ view: "connect:openai_compatible" }));
+      await flush();
+      expect(view.container.textContent).toContain(
+        "Only a workspace’s admins can connect a custom endpoint to it.",
+      );
+      expect(button(view.container, "Connect endpoint")!.disabled).toBe(true);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a connected endpoint is a row with the workspace's other accounts, and Disconnect asks first", async () => {
+    client.listConnections.mockImplementation(async () => [ENDPOINT]);
+    const view = await render();
+    try {
+      const row = rowsNamed(view.container, "Together")[0]!;
+      expect(row.textContent).toContain("Design preview only");
+      expect(row.textContent).toContain("API key");
+      expect(row.textContent).toContain("meta/llama-5-70b");
+      expect(view.container.textContent).toContain("Pay as you go");
+      // No separate section for these keys any more.
+      expect(view.container.textContent).not.toContain(
+        "OpenAI, Azure OpenAI and compatible endpoints",
+      );
+      const more = button(view.container, "More actions for Together")!;
+      await act(async () => {
+        more.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+        more.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+      });
+      await flush();
+      const disconnect = [...document.querySelectorAll<HTMLElement>("[data-menu-item]")].find(
+        (item) => item.textContent?.trim() === "Disconnect",
+      )!;
+      await act(async () => disconnect.click());
+      await flush();
+      expect(client.deleteConnection).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("Disconnect Together?");
+      const confirm = [
+        ...document.querySelectorAll<HTMLButtonElement>("[role=dialog] button"),
+      ].find((candidate) => candidate.textContent?.trim() === "Disconnect")!;
+      await act(async () => confirm.click());
+      await flush();
+      expect(client.deleteConnection).toHaveBeenCalledWith("workspace-a", "conn-endpoint");
     } finally {
       await cleanup(view);
     }

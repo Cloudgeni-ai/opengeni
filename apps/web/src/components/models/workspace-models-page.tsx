@@ -14,7 +14,12 @@ import {
   type ClaudePlaces,
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
-import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import {
+  CustomEndpointConnectPage,
+  DirectModelConnectionRows,
+  useDirectModelConnections,
+  type EndpointWorkspace,
+} from "./custom-endpoint-connect";
 import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
 import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
@@ -426,6 +431,9 @@ export function WorkspaceModelsPageBody({
   const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
     organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
+  // This workspace's own model keys: custom endpoints, and OpenAI or Azure
+  // OpenAI keys from onboarding. Listed with its other accounts.
+  const direct = useDirectModelConnections(client, workspaceId, workspacePage);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
   const organizationDefaults = useOrganizationModelDefaults(
@@ -764,6 +772,17 @@ export function WorkspaceModelsPageBody({
   // regular organization member) connects a Claude subscription as their own:
   // the API refuses the workspace's scope without `workspace:admin`.
   const personalOwnConnect = memberConnects && personal && !canAdministerWorkspace;
+  // Where the viewer can connect a custom endpoint: owners and admins choose
+  // among the workspaces they manage; a workspace's own admins connect to it.
+  const endpointWorkspaces: EndpointWorkspace[] = [];
+  if (workspacePage && canManageConnections && (organizationAdmin || canAdministerWorkspace))
+    endpointWorkspaces.push({ id: workspaceId, name: workspaceName, personal });
+  if (organizationAdmin) {
+    for (const each of workspaces) {
+      if (each.canManage && !endpointWorkspaces.some((added) => added.id === each.id))
+        endpointWorkspaces.push({ id: each.id, name: each.name, personal: each.personal });
+    }
+  }
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -781,6 +800,32 @@ export function WorkspaceModelsPageBody({
           {`Ask an owner or admin of ${organizationName} to change the organization's accounts.`}
         </p>
       </DetailPage>
+    );
+  } else if (step?.provider === "openai_compatible") {
+    // A custom endpoint is always one workspace's own: its step asks which
+    // workspace (owners and admins), or connects to this one (its admins).
+    const fixed = endpointWorkspaces.length === 1 ? endpointWorkspaces[0]! : null;
+    page = (
+      <CustomEndpointConnectPage
+        key={`endpoint:${workspaceId}`}
+        client={client}
+        workspaces={endpointWorkspaces}
+        initialWorkspaceId={workspacePage ? workspaceId : undefined}
+        note={
+          fixed ? (
+            <p className="m-0 text-sm leading-5 text-fg-muted">
+              {fixed.personal
+                ? "It will belong to your Personal workspace, so only you can use it."
+                : `It will belong to ${fixed.name}: only ${fixed.name} can use it, and its admins can disconnect it.`}
+            </p>
+          ) : undefined
+        }
+        onClose={backToList}
+        onConnected={(id) => {
+          connectionChanged();
+          nav.openWorkspace(id);
+        }}
+      />
     );
   } else if (
     !claudeEnabled &&
@@ -880,6 +925,7 @@ export function WorkspaceModelsPageBody({
         grok={grok.unavailable ? "hidden" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
         gateways={onlyMe ? undefined : gateways}
+        customEndpoint={endpointWorkspaces.length > 0}
         backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
@@ -898,8 +944,16 @@ export function WorkspaceModelsPageBody({
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
         gateways={orgGateways}
+        customEndpoint
         onClose={backToList}
-        onPick={(provider) => nav.openView(`connect-org:${provider}`)}
+        onPick={(provider) =>
+          nav.openView(
+            // A custom endpoint is a workspace's own; its step asks which.
+            provider === "openai_compatible"
+              ? "connect:openai_compatible"
+              : `connect-org:${provider}`,
+          )
+        }
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
       />
     );
@@ -1363,6 +1417,7 @@ export function WorkspaceModelsPageBody({
       listedGateways.length,
       listedOrgGateways.length,
       readyOrgKeys.length,
+      direct.connections.length,
       // Your own subscriptions, kept in your Personal workspace.
       ownWorkspaceId
         ? codexListedCount(ownCodexRows) +
@@ -1370,8 +1425,8 @@ export function WorkspaceModelsPageBody({
           (claudeEnabled ? claudeListedCount(ownClaudeRows) : 0)
         : 0,
     ];
-    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]! + listed[7]!;
-    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]! + listed[8]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]! + listed[7]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1382,6 +1437,7 @@ export function WorkspaceModelsPageBody({
           (!ownGrok.unavailable && ownGrok.loading) ||
           (claudeEnabled && ownClaude.loading))) ||
       (!organizationAdmin && catalog.loading) ||
+      direct.loading ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
     // Owners and admins add accounts for everyone; others their own (see memberConnects).
     const canConnect = organizationAdmin || memberConnects;
@@ -1489,23 +1545,18 @@ export function WorkspaceModelsPageBody({
                     onOpen={() => nav.openAccount(accountKey("gateway", id))}
                   />
                 ))}
+                <DirectModelConnectionRows
+                  client={client}
+                  workspaceId={workspaceId}
+                  connections={direct.connections}
+                  scope={labels.workspace}
+                  canManage={canManageConnections && (organizationAdmin || canAdministerWorkspace)}
+                  onChange={connectionChanged}
+                />
               </RowList>
             }
             providerSections={
               <>
-                {workspacePage ? (
-                  <Section
-                    title="OpenAI, Azure OpenAI and compatible endpoints"
-                    description="Use your own API key for models in this workspace."
-                  >
-                    <DirectModelProviderConnections
-                      key={workspaceId}
-                      workspaceId={workspaceId}
-                      canManage={canManageConnections && organizationAdmin}
-                      onConnectionChange={connectionChanged}
-                    />
-                  </Section>
-                ) : null}
                 {workspacePage ? (
                   <Section
                     title="Voice"
@@ -1946,7 +1997,8 @@ type ConnectChoice =
   | "openrouter"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1962,6 +2014,7 @@ export function ConnectPickerPage({
   grok,
   claude = "hidden",
   gateways,
+  customEndpoint = false,
   backLabel = "Models",
   onClose,
   onPick,
@@ -1982,6 +2035,8 @@ export function ConnectPickerPage({
   grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
   claude?: "available" | "hidden";
   gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
+  /** Offer a custom OpenAI-compatible endpoint, connected to one workspace. */
+  customEndpoint?: boolean | undefined;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
@@ -2035,6 +2090,15 @@ export function ConnectPickerPage({
             connected: gateways[id]!.connected,
           }),
         )
+      : []),
+    ...(customEndpoint
+      ? [
+          {
+            id: "openai_compatible" as const,
+            title: "Custom endpoint",
+            summary: "Pay per token through any OpenAI-compatible API",
+          },
+        ]
       : []),
   ];
   return (

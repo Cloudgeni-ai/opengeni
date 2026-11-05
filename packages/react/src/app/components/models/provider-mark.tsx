@@ -3,6 +3,7 @@ import { AnthropicMark } from "../../../components/anthropic-mark";
 import { OpenRouterMark } from "../../../components/openrouter-mark";
 import { OpperMark } from "../../../components/opper-mark";
 import { GrokMark } from "../../../components/grok-mark";
+import { ServerIcon } from "lucide-react";
 import type { SVGProps } from "react";
 
 import { BrandMark } from "../brand-mark";
@@ -18,7 +19,9 @@ export type ModelProviderId =
   | "anthropic"
   | "claude_subscription"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  /** A custom OpenAI-compatible endpoint: no brand, so a generic server mark. */
+  | "openai_compatible";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -46,6 +49,8 @@ export function ProviderMark({
 }) {
   if (provider === "codex" || provider === "openai") return <ChatGptMark className={className} />;
   if (provider === "azure_openai") return <AzureMark className={className} />;
+  if (provider === "openai_compatible")
+    return <ServerIcon aria-hidden="true" strokeWidth={1.75} className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
   if (provider === "claude_subscription") return <ClaudeMark className={className} />;
   if (provider === "anthropic") return <AnthropicMark className={className} />;

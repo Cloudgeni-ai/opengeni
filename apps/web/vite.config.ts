@@ -765,7 +765,7 @@ export default defineConfig({
             {
               // Keep customer model setup in its own lazy feature boundary.
               name: "customer-model-setup",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connection\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
