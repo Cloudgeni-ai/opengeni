@@ -171,17 +171,19 @@ fn pty_argv(
     } else if req.command.is_empty() {
         default_shell.to_vec()
     } else {
-        let mut argv = req.command.clone();
         // An explicitly requested `/bin/sh` starts a fallback shell when it
         // is gone, like exec does.
         #[cfg(unix)]
-        if let Some(shell) = argv
+        if let Some(shell) = req
+            .command
             .first()
             .and_then(|program| crate::system_shell::substitute(std::ffi::OsStr::new(program)))
         {
+            let mut argv = req.command.clone();
             argv[0] = shell.to_string_lossy().into_owned();
+            return argv;
         }
-        argv
+        req.command.clone()
     }
 }
 
