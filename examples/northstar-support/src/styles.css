@@ -2,44 +2,82 @@
 @import "@opengeni/react/styles.css";
 @source "../../../packages/react/src";
 
+/* Two products share this screen. Northstar is the host: night-sky navy with a
+   single star-gold signal, set in Schibsted Grotesk. Opengeni is the embed and
+   keeps its own brand (ink, aqua, DM Sans), so viewers can see where the host
+   ends and the agent begins. */
+@theme {
+  --color-ns-paper: #f5f6f8;
+  --color-ns-rail: #eceef2;
+  --color-ns-sheet: #ffffff;
+  --color-ns-line: #e1e4ea;
+  --color-ns-line-strong: #cdd2db;
+  --color-ns-ink: #121a33;
+  --color-ns-muted: #586178;
+  --color-ns-subtle: #8890a2;
+  --color-ns-navy: #16245c;
+  --color-ns-navy-hover: #0f1b4a;
+  --color-ns-navy-tint: #e8ebf5;
+  --color-ns-star: #e9a92b;
+  --color-ns-alert: #c2412d;
+  --color-ns-alert-tint: #fbece8;
+  --color-ns-ok: #2c7a57;
+  --color-ns-note: #fdf6e6;
+  --color-og-ink: #111311;
+  --color-og-aqua: #9fe3d3;
+  --color-og-green: #1f7a66;
+  --color-og-offwhite: #fbfbf8;
+  --font-ns: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-og: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-og-serif: "Instrument Serif", ui-serif, Georgia, serif;
+}
+
 html,
 body,
 #root {
   margin: 0;
   min-height: 100%;
   overflow: hidden;
-  font-family: var(--og-font-sans);
+  font-family: var(--font-ns);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
 body {
-  background: #f7f7f5;
-}
-
-.northstar {
-  --og-color-accent: oklch(0.58 0.19 288);
-  --og-color-accent-strong: oklch(0.52 0.2 288);
-  --og-color-accent-deep: oklch(0.46 0.2 288);
-  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 10%, transparent);
-  --og-color-bg: #f8f8fb;
-  --og-color-surface-1: #ffffff;
-  --og-color-surface-2: #f6f5fa;
-  --og-color-surface-3: #efedf5;
-  --og-color-border: rgba(31, 34, 45, 0.08);
-  --og-color-border-strong: rgba(31, 34, 45, 0.17);
-  --og-color-fg: #292735;
-  --og-color-fg-muted: #6c6877;
-  --og-color-fg-subtle: #9a95a5;
+  background: var(--color-ns-paper);
+  color: var(--color-ns-ink);
 }
 
 .northstar ::selection {
-  background: color-mix(in oklch, var(--og-color-accent) 22%, white);
+  background: var(--color-ns-navy-tint);
 }
 
 .northstar * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(45, 48, 60, 0.15) transparent;
+  scrollbar-color: rgba(18, 26, 51, 0.16) transparent;
+}
+
+/* The embedded agent wears Opengeni's brand, not Northstar's. */
+.northstar-agent-panel {
+  --og-font-sans: var(--font-og);
+  --og-color-accent: #1f7a66;
+  --og-color-accent-strong: #19695a;
+  --og-color-accent-deep: #13564a;
+  --og-color-accent-soft: color-mix(in oklch, #1f7a66 10%, transparent);
+  --og-color-bg: #fbfbf8;
+  --og-color-surface-1: #ffffff;
+  --og-color-surface-2: #f4f5f1;
+  --og-color-surface-3: #eceee8;
+  --og-color-border: rgba(17, 19, 17, 0.08);
+  --og-color-border-strong: rgba(17, 19, 17, 0.16);
+  --og-color-fg: #111311;
+  --og-color-fg-muted: #62655f;
+  --og-color-fg-subtle: #8d9089;
+  font-family: var(--font-og);
+}
+
+.northstar-agent-panel ::selection {
+  background: color-mix(in oklch, #9fe3d3 60%, white);
 }
 
 /* Keep a deliberately hostile host reset around the embedded SDK so this demo
@@ -62,8 +100,12 @@ body {
 .northstar select:focus-visible,
 .northstar input:focus-visible,
 .northstar textarea:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--og-color-accent) 65%, white);
+  outline: 2px solid color-mix(in oklch, var(--color-ns-navy) 55%, white);
   outline-offset: 2px;
+}
+
+.northstar-agent-panel button:focus-visible {
+  outline-color: #1f7a66;
 }
 
 /* The embedded agent is deliberately denser than Opengeni's full-page UI.
@@ -83,4 +125,13 @@ body {
 
 .northstar-agent-conversation [data-og-conversation-composer] textarea:focus-visible {
   outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .northstar *,
+  .northstar *::before,
+  .northstar *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

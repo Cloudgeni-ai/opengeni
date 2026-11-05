@@ -1,4 +1,4 @@
-import { CheckIcon, LifeBuoyIcon, RotateCcwIcon, SparklesIcon } from "lucide-react";
+import { RotateCcwIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { lazy, Suspense, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -11,7 +11,7 @@ import {
   removeAgentPanelReloadParameter,
   shouldRestoreAgentPanel,
 } from "./agent-panel-load";
-import { SupportInbox } from "./support-inbox";
+import { NorthstarMark, SupportInbox } from "./support-inbox";
 import { SupportTicketView } from "./support-ticket";
 import type { SupportCase } from "./types";
 import { useSupportDemo } from "./use-support-demo";
@@ -67,9 +67,9 @@ function NorthstarApp() {
       className={
         agentEnabled
           ? agentPanelExpanded
-            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[240px_minmax(360px,1fr)_620px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
-            : "northstar grid h-dvh min-w-[1120px] grid-cols-[260px_minmax(460px,1fr)_420px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
-          : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[248px_minmax(360px,1fr)_620px] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
+            : "northstar grid h-dvh min-w-[1120px] grid-cols-[264px_minmax(460px,1fr)_430px] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
+          : "northstar grid h-dvh min-w-[980px] grid-cols-[300px_minmax(0,1fr)] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
       }
       data-agent-enabled={agentEnabled}
       data-og-density="compact"
@@ -85,7 +85,7 @@ function NorthstarApp() {
         }}
       />
 
-      <main className="flex min-h-0 min-w-0 flex-col bg-[#f7f7f5]">
+      <main className="flex min-h-0 min-w-0 flex-col bg-ns-sheet">
         <ProductHeader
           supportCase={selectedCase}
           agentEnabled={agentEnabled}
@@ -156,79 +156,55 @@ function ProductHeader({
   onReset: () => void;
 }) {
   return (
-    <header className="flex h-[72px] shrink-0 items-center justify-between border-b border-[#deded9] bg-white px-7">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 text-[11px] font-medium text-[#85857f]">
-          <span>Inbox</span>
-          <span className="text-[#c1beb5]">/</span>
-          <span>{supportCase.ticket.id}</span>
-        </div>
-        <div className="mt-1 flex items-center gap-2.5">
-          <span
-            className={
-              supportCase.ticket.unread
-                ? "size-2 rounded-full bg-[#d86c4f]"
-                : "size-2 rounded-full bg-[#59917e]"
-            }
-          />
-          <p className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[#252a27]">
-            {supportCase.customer.name} · {supportCase.ticket.subject}
-          </p>
-        </div>
-      </div>
+    <header className="flex h-16 shrink-0 items-center justify-between gap-6 border-b border-ns-line bg-ns-sheet px-8">
+      <p className="min-w-0 truncate text-[13px] text-ns-muted">
+        <span className="font-semibold text-ns-ink">{supportCase.ticket.id}</span>
+        <span className="ml-3">{supportCase.customer.name}</span>
+      </p>
 
-      <div className="flex items-center gap-4">
+      <div className="flex shrink-0 items-center gap-2">
         <button
           type="button"
           onClick={onReset}
-          className="inline-flex h-9 items-center gap-2 px-1 text-[12px] font-medium text-[#777771] transition hover:text-[#30332f]"
+          title="Put every ticket back to its starting state"
+          className="inline-flex h-9 items-center gap-2 rounded-md px-3 text-[13px] font-medium text-ns-muted transition-colors hover:bg-ns-paper hover:text-ns-ink"
         >
           <RotateCcwIcon className="size-3.5" />
-          Reset
+          Reset demo
         </button>
 
         <button
           type="button"
           role="switch"
           aria-checked={agentEnabled}
+          aria-label="Opengeni"
           onClick={() => onAgentEnabledChange(!agentEnabled)}
           className={
             agentEnabled
-              ? "group flex h-10 items-center gap-3 border-l border-[#d9d8d3] pl-5 text-left transition"
-              : "group flex h-10 items-center gap-3 border-l border-[#d9d8d3] pl-5 text-left transition"
+              ? "flex h-9 items-center gap-2.5 rounded-full bg-og-ink pl-2 pr-4 text-[13px] font-medium text-white transition-colors"
+              : "flex h-9 items-center gap-2.5 rounded-full border border-ns-line-strong bg-ns-sheet pl-2 pr-4 text-[13px] font-medium text-ns-ink transition-colors hover:border-og-ink"
           }
+          style={{ fontFamily: "var(--font-og)" }}
         >
-          <SparklesIcon
-            className={agentEnabled ? "size-4 text-[#5f50c7]" : "size-4 text-[#96938e]"}
-          />
-          <span className="min-w-[88px]">
-            <span className="block text-[12px] font-semibold text-[#333632]">Opengeni</span>
-            <span
-              className={
-                agentEnabled
-                  ? "mt-0.5 block text-[10px] font-medium text-[#5f50c7]"
-                  : "mt-0.5 block text-[10px] text-[#92918b]"
-              }
-            >
-              {agentEnabled ? "Active" : "Off"}
-            </span>
-          </span>
           <span
             aria-hidden="true"
             className={
               agentEnabled
-                ? "relative h-6 w-10 rounded-full bg-[#6254c7]"
-                : "relative h-6 w-10 rounded-full bg-[#d2d2ce]"
+                ? "relative h-5 w-9 rounded-full bg-og-aqua transition-colors"
+                : "relative h-5 w-9 rounded-full bg-ns-line-strong transition-colors"
             }
           >
             <motion.span
-              className="absolute top-1 grid size-4 place-items-center rounded-full bg-white shadow-sm"
-              animate={{ left: agentEnabled ? 20 : 4 }}
-              transition={{ type: "spring", stiffness: 500, damping: 34 }}
-            >
-              {agentEnabled ? <CheckIcon className="size-2.5 text-[#6255d0]" /> : null}
-            </motion.span>
+              className={
+                agentEnabled
+                  ? "absolute top-0.5 size-4 rounded-full bg-og-ink"
+                  : "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_2px_rgba(18,26,51,0.25)]"
+              }
+              animate={{ left: agentEnabled ? 18 : 2 }}
+              transition={{ type: "spring", stiffness: 520, damping: 36 }}
+            />
           </span>
+          {agentEnabled ? "Opengeni is on" : "Turn on Opengeni"}
         </button>
       </div>
     </header>
@@ -237,10 +213,10 @@ function ProductHeader({
 
 function LoadingScreen() {
   return (
-    <div className="grid h-dvh place-items-center bg-[#f4f6f7] text-[#242b31]">
-      <div className="text-center">
-        <div className="mx-auto size-7 animate-spin rounded-full border-2 border-[#d7dce0] border-t-[#28715f]" />
-        <p className="mt-4 text-sm text-[#7c848b]">Opening Northstar…</p>
+    <div className="grid h-dvh place-items-center bg-ns-paper text-ns-ink">
+      <div className="flex items-center gap-3 text-[14px] text-ns-muted">
+        <NorthstarMark className="size-5 animate-pulse text-ns-navy" />
+        Opening Northstar
       </div>
     </div>
   );
@@ -248,9 +224,9 @@ function LoadingScreen() {
 
 function AgentPanelSkeleton() {
   return (
-    <aside className="flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white">
-      <div className="flex h-[72px] items-center gap-3 border-b border-[#302a40] bg-[#252131] px-5">
-        <div className="size-8 animate-pulse rounded-lg bg-white/15" />
+    <aside className="flex h-full min-h-0 flex-col bg-og-offwhite">
+      <div className="flex h-16 items-center gap-3 bg-og-ink px-5">
+        <div className="size-6 animate-pulse rounded bg-white/15" />
         <div className="h-3 w-24 animate-pulse rounded bg-white/20" />
       </div>
     </aside>
@@ -259,12 +235,20 @@ function AgentPanelSkeleton() {
 
 function BackendError({ message }: { message: string }) {
   return (
-    <div className="grid h-dvh place-items-center bg-[#f4f6f7] px-6 text-[#242b31]">
-      <div className="max-w-md rounded-2xl border border-black/[0.07] bg-white p-6 text-center shadow-sm">
-        <LifeBuoyIcon className="mx-auto size-6 text-[#28715f]" />
-        <h1 className="mt-3 text-lg font-semibold">Start the Northstar backend</h1>
-        <p className="mt-2 text-sm leading-6 text-[#757d84]">{message}</p>
-        <code className="mt-4 block rounded-xl bg-[#f4f5f6] px-3 py-2 text-xs">bun run server</code>
+    <div className="grid h-dvh place-items-center bg-ns-paper px-6 text-ns-ink">
+      <div className="max-w-md">
+        <NorthstarMark className="size-6 text-ns-navy" />
+        <h1 className="mt-4 text-[20px] font-semibold tracking-[-0.01em]">
+          Northstar can&apos;t reach its backend
+        </h1>
+        <p className="mt-2 text-[14px] leading-6 text-ns-muted">{message}</p>
+        <p className="mt-4 text-[14px] leading-6 text-ns-muted">
+          Start it from this example&apos;s folder with{" "}
+          <code className="rounded bg-ns-rail px-1.5 py-0.5 text-[13px] text-ns-ink">
+            bun run server
+          </code>
+          , then reload.
+        </p>
       </div>
     </div>
   );
