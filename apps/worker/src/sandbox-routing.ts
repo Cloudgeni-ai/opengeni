@@ -52,7 +52,10 @@ import {
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
   resolvePersonalMachineConnectionForAttempt,
+  safeDatabaseErrorFacts,
   SandboxRetainedProcessPromotionFencedError,
   SandboxRetainedProcessTerminalError,
   SandboxWorkspaceMutationOutputRejectedError,
@@ -63,6 +66,7 @@ import {
 import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
+import type { Observability } from "@opengeni/observability";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   buildSelfhostedBackendSession,
@@ -159,6 +163,9 @@ export type RoutingWiringServices = {
   /** Wakes a session waiting on a background command this routing settles.
    * Absent: the periodic wake dispatcher delivers the committed wake. */
   wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
+  /** Logs a refused Connected Machine authority check with the database's own
+   * reason. Absent: the refusal is still thrown unchanged, just not logged. */
+  observability?: Pick<Observability, "warn">;
 };
 
 /** Worker-turn routing may final-ack streamed command output, so it must always
@@ -221,16 +228,6 @@ export type RoutingWiringIds = {
    * swap target is built fresh).
    */
   pinnedSelfhosted?: { sandboxId: string; epoch: number };
-  /**
-   * Whether the turn's `defaultBackend` IS the session's home (so the null pointer may
-   * resolve to it). Defaults to TRUE (omitted). Set explicitly FALSE on a machine-primary
-   * turn of a Modal-HOME session (pinned to a machine, no Modal group box established this
-   * turn): the routing resolver's null branch then throws a typed `home_unavailable_this_turn`
-   * error on a mid-turn clear-to-null instead of silently serving the pinned machine — the
-   * detach's pointer commit stands and takes effect next turn. A genuine machine-HOME turn
-   * (home IS the machine) passes true.
-   */
-  defaultIsHome?: boolean;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -1082,7 +1079,7 @@ export function wrapTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
+      const enrollment = await resolveRoutedMachineConnection(services, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -1176,11 +1173,14 @@ export function wrapTurnBoxWithRouting(
     // session points at a sibling modal box the turn cannot resume here) and the
     // op surfaces unresolvable — never a silent wrong-box landing.
     //
-    // For a machine-primary turn of a Modal-HOME session (pinned to a machine, no
-    // group box established this turn), a mid-turn clear-to-null must NOT fall back to
-    // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
-    // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
-    ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
+    // A pinned machine is never this turn's home. A null pointer means the chat's
+    // own managed box, for machine-home chats too: turn start never resolves null to
+    // a machine. So a mid-turn move home must not keep dispatching to the pinned
+    // machine (whose per-operation authority now refuses it, because the machine is
+    // no longer the active sandbox). The null branch throws the typed
+    // `home_unavailable_this_turn` transition, and failure settlement continues the
+    // same logical turn on the home box in a fresh attempt.
+    ...(ids.pinnedSelfhosted ? { defaultIsHome: false } : {}),
     ...(ids.homeLease
       ? {
           resolveDefaultBackend: () =>
@@ -1418,7 +1418,7 @@ export function wrapLazyTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
+      const enrollment = await resolveRoutedMachineConnection(services, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -1759,6 +1759,46 @@ export function connectionBindingFor(
   };
 }
 
+/** One line an operator can read when a Connected Machine authority check is
+ * refused: the SQLSTATE, the fixed reason the database raised, and the
+ * database functions that raised it. Never parameters or SQL text. */
+export function machineAuthorityFailureLog(error: unknown): string {
+  const sqlState = nestedPostgresSqlState(error);
+  const reason = nestedPostgresMessage(error);
+  const functions = safeDatabaseErrorFacts(error).plpgsql?.join(",");
+  return (
+    `Connected Machine authority check failed: sqlState=${sqlState ?? "none"}` +
+    (reason ? ` reason=${reason}` : "") +
+    (functions ? ` functions=${functions}` : "") +
+    (sqlState ? "" : ` error=${error instanceof Error ? error.name : typeof error}`)
+  );
+}
+
+/** The model only sees a failed authority check as tool text, which names the
+ * query but not why PostgreSQL refused it. Log the refusal before rethrowing the
+ * same error unchanged; its driver error stays attached as `cause`. */
+async function resolvePersonalMachineConnectionWithDiagnostics(
+  services: Pick<RoutingWiringServices, "db" | "observability">,
+  input: Parameters<typeof resolvePersonalMachineConnectionForAttempt>[1],
+): Promise<EnrollmentRecord | null> {
+  try {
+    return await resolvePersonalMachineConnectionForAttempt(services.db, input);
+  } catch (error) {
+    try {
+      services.observability?.warn(machineAuthorityFailureLog(error), {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        attemptId: input.attemptId,
+        enrollmentId: input.enrollmentId,
+      });
+    } catch {
+      // Logging must not replace the refusal the caller is about to see.
+    }
+    throw error;
+  }
+}
+
 /** Personal-machine discovery is not execution authority. A machine's audience
  * can change in place while a routed session is cached, so the current scope is
  * read from the enrollment itself, never from the sandbox snapshot taken when
@@ -1767,17 +1807,18 @@ export function connectionBindingFor(
  * visibility-keyed grant immediately before each routed operation resolves a
  * live control-plane connection. */
 async function resolveRoutedMachineConnection(
-  db: Database,
+  services: Pick<RoutingWiringServices, "db" | "observability">,
   ids: RoutingWiringIds,
   sandbox: RoutableSandbox,
 ): Promise<EnrollmentRecord | null> {
+  const { db } = services;
   if (!sandbox.enrollmentId) return null;
   const current = await getLiveEnrollmentConnection(db, sandbox.workspaceId, sandbox.enrollmentId);
   if (!current) return null;
   if (current.scope === "user") {
     const authority = ids.personalMachineAttempt;
     if (!authority) return null;
-    return await resolvePersonalMachineConnectionForAttempt(db, {
+    return await resolvePersonalMachineConnectionWithDiagnostics(services, {
       accountId: authority.accountId,
       workspaceId: ids.workspaceId,
       subjectId: authority.subjectId,
@@ -1847,7 +1888,7 @@ export async function establishSelfhostedTurnSession(
         current?.scope !== "user"
           ? current
           : args.personalMachineAttempt
-            ? await resolvePersonalMachineConnectionForAttempt(db, {
+            ? await resolvePersonalMachineConnectionWithDiagnostics(services, {
                 accountId: args.personalMachineAttempt.accountId,
                 workspaceId: args.workspaceId,
                 subjectId: args.personalMachineAttempt.subjectId,

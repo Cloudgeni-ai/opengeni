@@ -54,6 +54,7 @@ mod observe;
 mod owners;
 mod ready;
 mod recover;
+mod relief;
 mod remove;
 mod requests;
 mod sample;
@@ -507,6 +508,14 @@ enum Event<V> {
         image: ImageId,
         result: Result<(), HostError>,
     },
+    /// A measurement of what disk relief may free ended (see [`relief`]).
+    ReliefMeasured(Box<relief::Measured>),
+    /// The removal disk relief asked for of `cache` ended, having
+    /// `removed` it or not.
+    CacheGone {
+        cache: compute_core::CacheId,
+        removed: bool,
+    },
     /// A create's claim of a ready sandbox ended.
     Claimed {
         id: Id,
@@ -746,12 +755,12 @@ pub struct HostAgent<E: Engine, S: Store> {
     base_image: PathBuf,
     /// The sandbox images creates name (ADR 19).
     rootfs: Arc<Cache>,
-    /// When unused images were last looked for.
-    rootfs_retired: Instant,
     /// Images being fetched for the creates that wait for them.
     fetching: HashMap<ImageId, fetch::Fetch>,
     /// Work waiting for the next disk reading to say whether it fits.
     after_reading: Vec<disk::AfterReading>,
+    /// What disk relief may free besides local copies (see [`relief`]).
+    relief: relief::Relief,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -766,7 +775,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     blocked: BTreeMap<SandboxId, String>,
     /// Blocked sandboxes an agent restart could not take back for a reason
     /// that may pass, with when they are tried again (see
-    /// [`HostAgent::retry_recovery`]).
+    /// [`HostAgent::retry_recovery`]), and whether their VM was found held
+    /// frozen (see [`HostAgent::frozen_owner`]).
     retrying: BTreeMap<SandboxId, recover::Retry>,
     /// The first wait before trying a recovery again; see
     /// [`HostConfig::recovery_retry`].
@@ -1045,7 +1055,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
             base_image: config.base_image,
             rootfs,
-            rootfs_retired: Instant::now(),
             fetching: HashMap::new(),
             warm,
             memory_policy: config.policy.memory,
@@ -1058,6 +1067,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slots: HashMap::new(),
             preparing: HashSet::new(),
             after_reading: Vec::new(),
+            relief: relief::Relief::default(),
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
@@ -1289,11 +1299,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
                 // Also while the lease has run out, as at start: a VM the
                 // guard froze then fails again, but one it killed is found
-                // gone, and the host registers again only once nothing is
-                // blocked.
+                // gone. The host registers again listing the frozen ones
+                // (see `frozen_owner`), and no other blocked sandbox.
                 () = sleep_until_some(retry_at) => self.retry_recovery().await,
-                // Renewed, the core reconsiders every sandbox.
-                () = lease_changed(lease.as_ref()) => self.input(Input::Tick),
+                // Renewed, the core reconsiders every sandbox, and the
+                // frozen ones the service kept are taken back as the guard
+                // thaws them.
+                () = lease_changed(lease.as_ref()) => {
+                    self.thawing();
+                    self.input(Input::Tick);
+                }
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
@@ -1352,14 +1367,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut actions = std::mem::take(&mut self.actions);
         // The inputs after which a sandbox may be at another level.
         let mut moved = Vec::new();
-        let inputs = inputs.into_iter().inspect(|input| match input {
-            Input::Add { sandbox, .. }
-            | Input::Finished { sandbox, .. }
-            | Input::Lost { sandbox } => {
-                moved.push(*sandbox);
-            }
-            _ => {}
-        });
+        let inputs = self
+            .disk_inputs(inputs)
+            .into_iter()
+            .inspect(|input| match input {
+                Input::Add { sandbox, .. }
+                | Input::Finished { sandbox, .. }
+                | Input::Lost { sandbox } => {
+                    moved.push(*sandbox);
+                }
+                _ => {}
+            });
         self.core.handle_all(now, inputs, &mut actions);
         for sandbox in moved {
             self.tell_link(Id(sandbox));

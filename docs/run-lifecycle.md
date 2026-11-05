@@ -209,8 +209,66 @@ its commands, and the cancelled fence refuses every later one, so whatever
 the setup still waits on cannot write to the box. The release then settles
 the admission `rejected` as for every other drained writer, on every backend.
 Any other in-flight mutation, a setup whose outcome is unknown, and a release
-without that drain keep the admission fenced. A hard worker crash runs no
-drain, so its setup admission still waits for the existing physical proofs.
+without that drain keep the admission fenced.
+
+**Setup a worker left behind after its shutdown closure is settled once that
+worker has provably exited.** A turn worker that is shutting down cancels its
+turn with WORKER_SHUTDOWN, closes the attempt `interrupted_recoverable`
+through its own `worker_shutdown` recovery request, and then drains its
+writers. If the process dies before that drain (for example a crash in its
+shutdown path), the attempt's setup admission stays open with no provider
+outcome. The reaper removes a closed attempt's holder and no retained process
+adopted it, but the crashed-worker rule above counts only
+`lease_lost_recoverable` and `failed` owners, and even those are rejected only
+in the cold commit after the box stops. A compute box is never drained for
+being idle, so on a warm box nothing ever settled the admission:
+`writer_pending` stayed true, `reconcileSessionAttemptQuiescence` returned
+`pending` on every wake, and the session never claimed another turn, Steer or
+message.
+
+Neither a settled Temporal activity nor a missing holder proves the worker
+exited. The holder of a closed attempt is removed at once, and Temporal reports
+a cancelled activity settled while its code may still be running, which is the
+live-worker case the drain above protects. Time does: the closure follows the
+worker's shutdown signal, and a standalone worker process exits within its
+process-exit deadline of that signal (`processExitDeadlineMs`, the force time
+plus a margin, about two minutes by default) whatever its drain does. So
+`reconcileSessionAttemptQuiescence`, before it evaluates the attempt, settles
+the attempt's owned-box setup admission (`lazyOwnedSandboxSetup` or
+`eagerOwnedSandboxSetup`) `rejected` only when all of these hold:
+
+- the caller proved through Temporal that the attempt's exact activity is
+  settled;
+- the attempt closed `interrupted_recoverable` through its own
+  `worker_shutdown` recovery request, with no Pause/Steer interruption row, at
+  least the turn worker's process-exit deadline ago (the control worker passes
+  `workerProcessExitDeadlineMs` from the turn shutdown timing; without it
+  nothing is settled);
+- the admission is unsettled with no provider outcome, its holder is gone, no
+  retained process adopted it, and its turn has no `sandboxSetupOutcomeUnknown`
+  marker (that turn deliberately waits for the box to be gone).
+
+Setup writes only through its attempt's command fence, which ended with the
+process, and the replacement attempt runs the same setup again on the box
+before any model work. The attempt then quiesces through the ordinary receipt
+transaction in the same call. A wake reaches it: queued input wakes the
+session, and the quiescence-receipt wake repair wakes a recovering session
+whose attempt closed more than two minutes ago and that had no wake for ten
+minutes.
+
+Everything else keeps today's gate: Pause and Steer closures and cancellation,
+whose replacement attempt resumes the same box; a worker-shutdown closure still
+inside the deadline; other recovery reasons (deadline rotation, route
+transition, failover) and `failed`, which a live worker can record; and every
+non-setup request, such as a model's command, which may still be running and
+whose effects the model must observe. An embedded host that runs the worker
+without the standalone process-exit deadline relies on the same bound: its
+shutting-down worker must stop running turn code within that deadline.
+
+Drains, command containment and the deadline backstop keep
+`crashedWorkerOrphanAdmissionSql` unchanged. They cannot see Temporal, and they
+consider only unsettled admissions, so once the reconciliation settled the
+setup it no longer pins the box for any of them.
 
 **Requests left on a retired box are settled once the box is proven gone.**
 A stopped box's cold commit settles every open request, PTY and process it
@@ -2300,6 +2358,16 @@ bounded file inventories. Configured `skill_read` stays sandbox-free and does
 not resolve repository names. Identifiers cannot silently switch between these
 sources, even when names match. Repository metadata uses the same YAML parser as
 portable Skills, retaining multiline description text in the JSON descriptor.
+When that strict parse fails, `parseLenientSkillFrontmatter`
+(`packages/contracts/src/skill-metadata.ts`) recovers the top-level `name` and
+`description` lines of common hand-written headers (an unquoted `: ` in a
+description, tab indentation, unindented continuation lines, values starting
+with a YAML indicator) and logs the bounded parser code plus key names, never
+values. It never invents a name: a header without exactly one usable `name:`
+line (an unquoted `null`, boolean or number is not a name, and stray
+unindented text is never borrowed) is still skipped, and the "Skipped
+repository skills" notice carries a `reason` for every omitted entry. Managed
+and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
@@ -2309,7 +2377,30 @@ When discovery meets a typed unreachable workspace (a Connected Machine
 `agentOffline` or control-timeout `SelfhostedControlError`), the bound
 capability memoizes an explicitly unavailable, empty index and contributes a
 short notice instead of failing instruction preparation; the next run rebinds
-and discovers again. Every other discovery failure still fails the turn.
+and discovers again. On every backend, including Modal, a failure that proves
+the workspace answered but one search path or skill folder could not be used
+(typed permission or not-a-directory errors, errno codes from a filesystem
+call, a machine's consent, OS, run-as or payload refusal) skips only that entry,
+listed with its `reason` under "Skipped repository skills"; other skills stay
+indexed. A symlinked search path the confined file API refuses is skipped the
+same way, like a symlinked skill entrypoint; it is left out of the notice only
+when a sibling search path under the same root has skill folders (the usual
+`.claude/skills -> ../.agents/skills`). Discovery bounds, no filesystem API, or an unusable folder
+while comparing duplicate skills degrade the whole index to a short notice. Cancellation, fences, route and lease
+transitions, a vanished sandbox (including Modal's bare `NotFoundError`), Channel
+A's `ChannelAUnavailableError`, Connected Machine draining, replaced
+connections and stream errors (`transport`), protocol and unspecified control
+errors (`control_error`), Modal's untyped
+`SandboxFilesystemError` (lost gRPC status or a killed filesystem helper),
+transport loss and unrecognized errors still fail instruction preparation so
+the turn's existing recovery sees them before the model runs
+(`classifyRepositorySkillDiscoveryFailure` in
+`packages/runtime/src/workspace-skills.ts`). Every failed discovery records
+`opengeni_repository_skill_discovery_failures_total{backend, error_class, handling}`
+and a content-free `Repository skill discovery failed` log line. In
+`opengeni_sandbox_setup_operation_duration_seconds`, a read-only probe's
+definite path miss (an absent `.agents/skills`) is `outcome="not_found"`, not
+`failed`.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves
@@ -2493,6 +2584,24 @@ in flight. A permanent failure atomically fails the exact still-runnable turn
 compaction/internal-update obligation), session, events, maintenance, and child
 terminal outbox without fabricating an attempt row or looping. Raw SQL and
 invariant messages never enter workflow history.
+
+The workflow's approval/human-input wait (`approval-wait` peek) baselines its
+wake counters from before the peek that chose it, behind
+`session-approval-wait-pre-peek-baseline-v1`. A decision can commit after the
+peek read PostgreSQL but before the workflow handles the peek result; its
+signal is then already counted, and a post-peek baseline would wait forever on
+an untimed wait (the API's signal marks that wake revision delivered, so the
+outbox does not resend it). A signal that lands mid-peek now costs one extra
+peek. Histories recorded without the marker keep the post-peek baseline, so a
+workflow already parked that way stays parked until its next wake.
+
+The two other peek-chosen waits with a far deadline use the same pre-peek
+snapshot: a `capacity-wait` (until the provider's reset; its interruption
+baseline too, so Pause/Steer wins at once) behind
+`session-capacity-wait-pre-peek-baseline-v1`, and the recovering turn's
+durable backoff behind `session-recovery-backoff-pre-peek-baseline-v1`. The
+short waits (input-wait, sandbox lifecycle, unavailable attempt) already close
+against the pre-peek `closeSignalVersion` and are bounded.
 
 Migration 0483 is additive rolling storage. Its attempt-insert trigger prevents
 old binaries from claiming through a stored block, but old workers can still
@@ -4585,6 +4694,16 @@ completed model/tool truth, closes only the unresolved tool suffix, records
 from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
+
+The turn-start route itself is decided only from facts that were actually
+read. The active pointer and the sandbox row it names are read before any box
+is touched; a failed read is retried briefly and then fails the attempt into
+the exact-attempt database recovery lane. It is never read as "no machine",
+so a chat whose pointer names a Connected Machine never starts setup,
+credential seeding or file downloads on its managed home because a read failed
+(for example while connections are re-established after a redeploy). Only a
+genuinely absent or structurally unestablishable target is reset to home,
+under the epoch fence and with a visible `session.route.reconciled` event.
 
 The same boundary recognizes the home resolver's typed
 `RoutingBackendRecoveryRequiredError` only for `resolve_home_backend` with

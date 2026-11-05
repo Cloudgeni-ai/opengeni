@@ -206,4 +206,41 @@ describe("web management chunk boundary", () => {
       );
     }
   });
+
+  test("keeps the shared subscription account display out of the lazy settings pages", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = (name: string) => {
+      const match = config.match(new RegExp(`name: "${name}",[\\s\\S]*?priority: (\\d+),`, "u"));
+      const pattern = match?.[0].match(/test: \/(.+)\/,/u)?.[1];
+      expect(pattern).toBeDefined();
+      expect(match?.[0]).toContain("includeDependenciesRecursively: false");
+      return { test: new RegExp(pattern!), priority: Number(match?.[1]) };
+    };
+    const display = group("subscription-account-display");
+    const settings = group("settings-pages");
+    // The chat header's account menu draws these; the settings group would
+    // otherwise claim them and load the management surface with every chat.
+    expect(display.priority).toBeGreaterThan(settings.priority);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
+      for (const module of [
+        "packages/react/src/app/components/models/subscription-usage.tsx",
+        "packages/react/src/app/lib/subscription-accounts.tsx",
+      ]) {
+        expect(display.test.test(moduleId(module))).toBe(true);
+      }
+      // It lives beside the settings-only models pages, so both groups match it.
+      expect(
+        settings.test.test(
+          moduleId("packages/react/src/app/components/models/subscription-usage.tsx"),
+        ),
+      ).toBe(true);
+      for (const module of [
+        "packages/react/src/app/components/models/models-ui.tsx",
+        "packages/react/src/app/components/session/subscription-account-menu.tsx",
+      ]) {
+        expect(display.test.test(moduleId(module))).toBe(false);
+      }
+    }
+  });
 });

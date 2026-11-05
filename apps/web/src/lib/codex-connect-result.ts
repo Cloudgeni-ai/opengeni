@@ -1,9 +1,9 @@
 import { toast } from "sonner";
+import { subscriptionPlanLabel } from "@opengeni/react/app/lib/subscription-accounts";
 
-/** Plans come back lowercase ("pro"); show them as the plan name. */
+/** The plan as ChatGPT names it ("ChatGPT Plus", "ChatGPT Business"). */
 export function planLabel(plan: string | null | undefined, provider: string): string {
-  if (!plan) return `${provider} plan`;
-  return `${provider} ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`;
+  return subscriptionPlanLabel("codex", plan) ?? `${provider} plan`;
 }
 
 /**

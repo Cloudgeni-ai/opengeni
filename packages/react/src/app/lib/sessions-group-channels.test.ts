@@ -285,7 +285,7 @@ describe("summarizeRailNodes", () => {
     });
   });
 
-  test("does not count a paused queued child as working", () => {
+  test("shows a paused queued child as paused, not working", () => {
     const forest = buildRailForest([
       session({ id: "root" }),
       session({
@@ -299,10 +299,10 @@ describe("summarizeRailNodes", () => {
 
     expect(forest.running).toEqual([]);
     expect(summarizeRailNodes(nodes)).toEqual({
-      kind: "neutral",
-      count: 0,
+      kind: "paused",
+      count: 1,
       total: 2,
-      label: "Read",
+      label: "1 paused",
     });
   });
 

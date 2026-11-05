@@ -392,6 +392,41 @@ describe("sandbox observability contract", () => {
     );
   });
 
+  test("stuck drains and repeated per-lease snapshot failures alert on emitted series", async () => {
+    const source = await Bun.file(rulePath).text();
+    const releaseScope =
+      "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
+    const rule = (name: string) => {
+      const start = source.indexOf(`- alert: ${name}\n`);
+      expect(start).toBeGreaterThan(-1);
+      const next = source.indexOf("- alert: ", start + 1);
+      return source.slice(start, next === -1 ? undefined : next);
+    };
+    const long = rule("OpenGeniSandboxDrainExpiredLong");
+    expect(long).toContain(
+      `opengeni:sandbox_leases_expired_draining:fresh_max{${releaseScope},age_bucket=~"1h_1d|gte_1d"}`,
+    );
+    expect(long).toContain("severity: critical");
+    const failing = rule("OpenGeniSandboxDrainSnapshotFailing");
+    // The histogram's "3" bucket is one the worker emits, so "count minus
+    // le=3" is exactly the observations of a fourth or later failure.
+    // Prometheus 3 stores that bucket as le="3.0", so the selector takes
+    // both forms (sandbox-drain-alert-promtool.test.ts runs it).
+    const { SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS } =
+      await import("../src/observability-metrics");
+    expect(SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS).toContain(3);
+    expect(failing).toContain(
+      `opengeni_sandbox_drain_capture_consecutive_failures_count{${releaseScope}}[1h]`,
+    );
+    expect(failing).toContain(
+      `opengeni_sandbox_drain_capture_consecutive_failures_bucket{${releaseScope},le=~"3(\\\\.0)?"}[1h]`,
+    );
+    for (const annotation of ["summary", "headline", "value", "user_impact", "next_step"]) {
+      expect(long).toContain(`${annotation}:`);
+      expect(failing).toContain(`${annotation}:`);
+    }
+  });
+
   test("custom chart rules append after the canonical safety catalog", async () => {
     const source = await Bun.file(rulePath).text();
     const canonical = source.indexOf("- alert: OpenGeniSandboxCreateFailureRatio");

@@ -921,6 +921,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createBillingAutoTopUpSetupSession",
+    "method": "POST",
+    "path": "/v1/billing/auto-top-up/setup",
+    "request": [
+      "CreateBillingAutoTopUpSetupSessionRequest"
+    ],
+    "response": [
+      "CreateBillingAutoTopUpSetupSessionResponse"
+    ]
+  },
+  {
     "id": "createBillingCheckout",
     "method": "POST",
     "path": "/v1/billing/checkout",
@@ -3111,6 +3122,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "getBillingAutoTopUp",
+    "method": "GET",
+    "path": "/v1/billing/auto-top-up",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
+    ]
+  },
+  {
     "id": "getBillingCheckout",
     "method": "GET",
     "path": "/v1/billing/checkout/:checkoutSessionId",
@@ -4858,6 +4881,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UserResourceGrantMutationResponse"
+    ]
+  },
+  {
+    "id": "linkSlackUserAsOrganizationMember",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
+    "request": [
+      "SlackUserLinkAccessMutationRequest"
+    ],
+    "response": [
+      "SlackUserLinkAccessRequest"
     ]
   },
   {
@@ -9483,6 +9517,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "updateBillingAutoTopUp",
+    "method": "PUT",
+    "path": "/v1/billing/auto-top-up",
+    "request": [
+      "UpdateBillingAutoTopUpRequest"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {

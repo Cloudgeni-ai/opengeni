@@ -9547,6 +9547,57 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("a generated integration's known-outcome failure is a recoverable tool error on any server", async () => {
+    const sourceFailure = new IntegrationInvocationError(
+      "redirect_rejected",
+      "Integration redirected to an insecure destination",
+      "failed",
+      false,
+      302,
+    );
+    const server: MCPServer = {
+      name: "generated-integration-known-failure",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        throw sourceFailure;
+      },
+      async callToolResult() {
+        throw sourceFailure;
+      },
+      async invalidateToolsCache() {},
+    };
+    const error = {
+      code: "redirect_rejected",
+      message: "Integration redirected to an insecure destination",
+      status: 302,
+      retryable: false,
+    };
+    for (const bestEffort of [false, true]) {
+      const prefixed = new PrefixedMcpServer(
+        server,
+        bestEffort ? "generated-best-effort" : "generated-required",
+        undefined,
+        bestEffort,
+      );
+      const result = await prefixed.executeCatalogTool("read", {});
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ ok: false, error }) }],
+        structuredContent: { ok: false, error },
+      });
+      expect(JSON.stringify(result)).not.toContain("unavailable for the rest of this turn");
+      // A targeted call keeps receiving the typed failure itself.
+      await expect(
+        prefixed.executeCatalogTool("read", {}, undefined, { propagateInvocationErrors: true }),
+      ).rejects.toBe(sourceFailure);
+    }
+  });
+
   test("MCP outcome metrics and projections cannot replace hostile source failures", async () => {
     const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
       [];

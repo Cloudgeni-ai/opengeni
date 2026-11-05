@@ -530,6 +530,67 @@ async fn space_a_guest_trims_as_it_pauses_stays_booked_for_it() {
     lab.assert_clean();
 }
 
+/// A sleeping disk retains allocated blocks after trim. Without a new
+/// sample, a local wake must use that file's headroom, not the reset bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_wake_measures_its_stopped_disk_before_admission() {
+    use std::os::unix::fs::FileExt;
+
+    for level in [LevelName::Paused, LevelName::Saved] {
+        let gauge = DiskGauge::default();
+        let (lab, disk, _) = awake_with_written_disk(&gauge).await;
+        lab.sleep_to(id(1), level).await;
+        lab.wait_level(id(1), level).await;
+        // Leave half the disk allocated, as a trim of only its free
+        // blocks would. No VM writes while it is stopped.
+        trim(&disk);
+        let file = std::fs::OpenOptions::new().write(true).open(&disk).unwrap();
+        file.write_all_at(&ones()[..usize::try_from(WRITTEN / 2).unwrap()], 0)
+            .unwrap();
+        file.sync_all().unwrap();
+        // End the old pause/save bookings. Only half a disk plus its map
+        // fits; booking the whole disk would refuse the wake.
+        gauge.give(DiskSpace {
+            bytes: WRITTEN / 2 + (1 << 20),
+            inodes: PLENTY,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gauge.taken() {
+            assert!(Instant::now() < deadline, "no reading");
+            sleep(Duration::from_millis(5)).await;
+        }
+        lab.status().await;
+        // A previously readable file that goes missing must not leave a
+        // small cached measurement usable for admission.
+        let away = disk.with_extension("away");
+        std::fs::rename(&disk, &away).unwrap();
+        let refused = lab.wake(id(1)).await;
+        assert!(
+            matches!(
+                refused,
+                compute_host::protocol::Reply::Error {
+                    code: compute_host::protocol::ErrorCode::HostFull,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        std::fs::rename(&away, &disk).unwrap();
+        let woken = lab.wake(id(1)).await;
+        assert!(
+            matches!(woken, compute_host::protocol::Reply::Woken { .. }),
+            "{woken:?}"
+        );
+        lab.wait_level(id(1), LevelName::Running).await;
+        let booked = lab.status().await.disk.unwrap().booked;
+        assert!(
+            (WRITTEN / 2..=WRITTEN / 2 + (1 << 20)).contains(&booked),
+            "{level:?}: {booked}"
+        );
+        lab.assert_clean();
+    }
+}
+
 /// A disk that cannot be read as the disk reading is taken, or whose VM's
 /// writes do not return in time, books all it may take for that reading:
 /// what its guest freed may be taken again, and nothing tells how much

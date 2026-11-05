@@ -188,6 +188,9 @@ export function withTurnWorkerActivityTelemetry(
     activityTelemetry,
     worker: {
       shutdown: () => sdkWorker.shutdown(), // Drain never unregisters observation.
+      // Executing activity JavaScript, which outlives SDK force-stop and
+      // workflow-side cancellation alike.
+      inFlightActivities: () => sdkWorker.getStatus().numInFlightActivities,
       run: () => {
         if (!runPromise && runSettled)
           return Promise.reject(new Error("cannot run a closed turn worker"));

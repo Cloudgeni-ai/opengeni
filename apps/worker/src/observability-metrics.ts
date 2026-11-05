@@ -41,6 +41,8 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  type ModelPreparationMeasurement,
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
   SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
@@ -294,7 +296,7 @@ export function runtimeMetricsHooksForObservability(
       });
       observability.observeHistogram({
         name: "opengeni_sandbox_setup_operation_duration_seconds",
-        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips. outcome=not_found is a read-only probe that found no such path (an expected answer, not a failure), as in the routed per-operation metric.",
         buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
         labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
@@ -1873,6 +1875,88 @@ export function recordExpiredDrainingSandboxLeaseGauges(
   }
 }
 
+/** Consecutive settled drain snapshot failures one lease epoch has reached. */
+export const SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS = [1, 2, 3, 5, 8, 13, 21];
+
+function safeSandboxBackend(backend: string): string {
+  return SandboxBackend.safeParse(backend).success ? backend : "unknown";
+}
+
+/** Drain metrics are diagnostics: a sink that lacks a method or throws must
+ * never change a drain's outcome. */
+function bestEffortDrainMetric(record: () => void): void {
+  try {
+    record();
+  } catch {
+    // Ignored: the drain's own result never depends on a metric.
+  }
+}
+
+/** One settled drain snapshot failure, observed with the lease epoch's new
+ * consecutive failure count so alerts can tell one flaky attempt from a box
+ * that keeps failing without a per-lease label. */
+export function recordSandboxDrainCaptureFailure(
+  observability: Observability,
+  input: { backend: string; consecutiveFailures: number },
+): void {
+  const backend = safeSandboxBackend(input.backend);
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_failures_total",
+      help: "Settled workspace snapshot failures while draining an idle sandbox.",
+      labels: { backend },
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_drain_capture_consecutive_failures",
+      help: "Consecutive settled drain snapshot failures of one sandbox lease epoch, observed at each failure.",
+      buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
+      labels: { backend },
+      value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
+}
+
+const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
+  1e6, 1e7, 1e8, 5e8, 1e9, 2e9, 5e9, 1e10, 2e10, 5e10,
+];
+const SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS = [1e3, 1e4, 5e4, 1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6];
+
+/** Size of /workspace when a drain snapshot settled: from the archive itself
+ * when it carries a tree fingerprint, otherwise from a bounded probe taken
+ * only after a failed snapshot. */
+export function recordSandboxWorkspaceSnapshotSize(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "captured" | "failed";
+    fileCount: number;
+    totalFileBytes: number;
+  },
+): void {
+  if (!Number.isFinite(input.fileCount) || !Number.isFinite(input.totalFileBytes)) return;
+  const labels = { backend: safeSandboxBackend(input.backend), outcome: input.outcome };
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_bytes",
+      help: "Total regular-file bytes under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS,
+      labels,
+      value: Math.max(0, input.totalFileBytes),
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_files",
+      help: "Regular files under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS,
+      labels,
+      value: Math.max(0, input.fileCount),
+    }),
+  );
+}
+
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "claim_failed",
   "background_recovered",
@@ -2351,7 +2435,6 @@ export type TurnStartupPhase =
   | "model_prepare_input_filter_base"
   | "model_prepare_input_filter_genesis"
   | "model_prepare_input_filter_host"
-  | "model_prepare_input_filter_secret_mask"
   | "model_prepare_input_filter_tool_output"
   | "model_prepare_input_filter_modality"
   | "model_prepare_input_filter_context"
@@ -2465,6 +2548,78 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET: ReadonlySet<string> = new Set(
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
+);
+const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set(["propagated", "degraded", "unreachable"]);
+
+/** Failed repository skill discovery runs by bounded error class. `handling`
+ * says whether the turn continued without repository skills (`degraded`,
+ * `unreachable`) or the error reached turn recovery (`propagated`). */
+export function recordRepositorySkillDiscoveryFailure(
+  observability: Observability,
+  input: { backend: string; errorClass: string; handling: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_discovery_failures_total",
+    help: "Failed repository skill discovery runs by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills).",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+      handling: REPOSITORY_SKILL_DISCOVERY_HANDLING.has(input.handling) ? input.handling : "other",
+    },
+  });
+}
+
+/** One unusable repository skill search path or skill folder skipped in a
+ * run that otherwise completed. Counts entries, not runs. */
+export function recordRepositorySkillEntrySkipped(
+  observability: Observability,
+  input: { backend: string; errorClass: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_entries_skipped_total",
+    help: "Repository skill search paths or skill folders skipped because the workspace answered but the entry could not be used, by bounded error class. Counts entries, not discovery runs.",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+    },
+  });
+}
+
+/** One model-preparation phase measurement from the runtime: its startup
+ * phase timing, plus the bounded discovery-failure counter when it failed. */
+export function recordModelPreparationPhase(
+  observability: Observability,
+  input: {
+    provider: string;
+    backend: string;
+    measurement: ModelPreparationMeasurement;
+  },
+): void {
+  const { measurement } = input;
+  recordTurnStartupPhase(observability, {
+    phase: `model_prepare_${measurement.phase}`,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: measurement.outcome,
+    durationSeconds: measurement.durationSeconds,
+    ...(measurement.count === undefined ? {} : { count: measurement.count }),
+  });
+  if (measurement.failure)
+    recordRepositorySkillDiscoveryFailure(observability, {
+      backend: input.backend,
+      errorClass: measurement.failure.errorClass,
+      handling: measurement.failure.handling,
+    });
+  for (const errorClass of measurement.skipped ?? [])
+    recordRepositorySkillEntrySkipped(observability, { backend: input.backend, errorClass });
 }
 
 /** Observe an existing dependency only. Child intervals can overlap and are

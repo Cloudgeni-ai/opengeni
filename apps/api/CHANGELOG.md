@@ -1,5 +1,81 @@
 # @opengeni/api-router
 
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- Updated dependencies [ff8b164]
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/db@6.9.0
+  - @opengeni/runtime@6.9.0
+  - @opengeni/contracts@6.9.0
+  - @opengeni/core@6.9.0
+  - @opengeni/documents@6.9.0
+  - @opengeni/events@6.9.0
+  - @opengeni/codemode@6.9.0
+  - @opengeni/artifact-tool@6.9.0
+  - @opengeni/capabilities@6.9.0
+  - @opengeni/codex@6.9.0
+  - @opengeni/config@6.9.0
+  - @opengeni/github@6.9.0
+  - @opengeni/interaction@6.9.0
+  - @opengeni/observability@6.9.0
+  - @opengeni/storage@6.9.0
+  - @opengeni/tool-gateway@6.9.0
+  - @opengeni/vaults@6.9.0
+  - @opengeni/vaults-bitwarden@6.9.0
+  - @opengeni/vaults-keeper@6.9.0
+  - @opengeni/vaults-onepassword@6.9.0
+  - @opengeni/vaults-protonpass@6.9.0
+  - @opengeni/agent-proto@6.9.0
+  - @opengeni/network@6.9.0
+  - @opengeni/xai-subscription@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- 58b04d1: Known-value secret masking no longer rewrites unrelated text. A saved value that is weak (one or two dictionary words, a word with a few digits, a camelCase or snake_case name, a host or an email) is replaced only where it is the credential: alone on its line, as a URL's password, as a whole token that a credential name leads into (`password=…`, `"token": "…"`, `--password …`), after a password option of a program that takes one (`mysql -p…`, `docker login -p …`, `redis-cli -a …`, `ldapsearch -w …`, `curl -u user:…`), in a `.pgpass` line, an XML password element or `IDENTIFIED BY '…'`, printed into a command that reads a password, or as the value under a key that names a credential. File names, paths, imports, identifiers, hosts and URL segments that merely contain the word stay as written. Distinctive values (tokens, keys, random passwords, including random letters, which a letter pair and triple test tells apart from words) are masked everywhere and in every form, as before, and browser typed values and the history scrub still search weak values anywhere. New shape detectors catch Google OAuth client secrets, Hugging Face, SendGrid, Shopify, PyPI, Databricks, DigitalOcean, Linear, Doppler and Atlassian tokens, AWS secret access keys next to their name, and Bearer, token and Basic authorization values. Run-credential and MCP header names still match a credential word anywhere (`PRIVATEKEYPEM`, `AUTHHEADER`), but ordinary words that contain one are set aside, so `GIT_AUTHOR_NAME` and `SESSION_NAME` are no longer treated as secrets. `secret_save` saves a new plain field whose value looks like a secret as concealed and reports it in `fieldNotes`; an explicit `text` kind, and a standard text field such as a login's username, is kept with a note. The item editor offers "Make concealed" under a text field whose value looks secret. `secretValueStrength`, `plainFieldSecretHint`, `credentialNameSaysSecret` and `credentialNameMayHoldSecret` are exported from `@opengeni/contracts`, and the worker counts occurrences in `opengeni_secret_mask_matches_total` (metadata only).
+- b0e03f8: Update Better Auth to 1.7.16, its security release.
+- Updated dependencies [58b04d1]
+- Updated dependencies [b0e03f8]
+- Updated dependencies [fbb70bc]
+- Updated dependencies [15606f6]
+- Updated dependencies [3cd5677]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/core@6.8.0
+  - @opengeni/db@6.8.0
+  - @opengeni/runtime@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/artifact-tool@6.8.0
+  - @opengeni/capabilities@6.8.0
+  - @opengeni/codemode@6.8.0
+  - @opengeni/config@6.8.0
+  - @opengeni/documents@6.8.0
+  - @opengeni/events@6.8.0
+  - @opengeni/github@6.8.0
+  - @opengeni/interaction@6.8.0
+  - @opengeni/observability@6.8.0
+  - @opengeni/storage@6.8.0
+  - @opengeni/tool-gateway@6.8.0
+  - @opengeni/vaults@6.8.0
+  - @opengeni/vaults-bitwarden@6.8.0
+  - @opengeni/vaults-keeper@6.8.0
+  - @opengeni/vaults-onepassword@6.8.0
+  - @opengeni/vaults-protonpass@6.8.0
+  - @opengeni/agent-proto@6.8.0
+  - @opengeni/network@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

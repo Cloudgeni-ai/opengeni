@@ -35,7 +35,6 @@ export type ModelPreparationPhase =
   | "input_filter_base"
   | "input_filter_genesis"
   | "input_filter_host"
-  | "input_filter_secret_mask"
   | "input_filter_tool_output"
   | "input_filter_modality"
   | "input_filter_context"
@@ -47,6 +46,16 @@ export type ModelPreparationMeasurement = {
   outcome: "completed" | "failed";
   durationSeconds: number;
   count?: number;
+  /** Bounded failure class for a failed phase that classifies its errors
+   * (currently repository skill discovery). `handling` says whether the turn
+   * continued without the phase's result or the error reached turn recovery. */
+  failure?: Readonly<{
+    errorClass: string;
+    handling: "propagated" | "degraded" | "unreachable";
+  }>;
+  /** Bounded classes of entries a completed phase skipped (one unusable
+   * repository skill search path or folder each), for the failure counter. */
+  skipped?: readonly string[];
 };
 
 type ModelPreparationObserver = (measurement: ModelPreparationMeasurement) => void;

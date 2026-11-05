@@ -2,7 +2,13 @@ import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { SKILL_MAX_FILES } from "./skill-files";
-export { parseSkillFrontmatter, readSkillMetadata } from "./skill-metadata";
+export {
+  parseLenientSkillFrontmatter,
+  parseSkillFrontmatter,
+  readSkillMetadata,
+  SkillFrontmatterError,
+  type LenientSkillFrontmatter,
+} from "./skill-metadata";
 export * from "./skill-files";
 
 /** Files are UTF-8 text, relative to the Skill root. No executable authority. */

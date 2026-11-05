@@ -49,6 +49,7 @@ import {
 } from "@opengeni/core/transcription-service";
 import {
   beginRecordingAudioExpiry,
+  withCreditDebitAttribution,
   claimRecordingTranscriptVersion,
   completeRecordingAudioExpiry,
   completeRecordingTranscriptVersion,
@@ -777,7 +778,10 @@ export function createRecordingActivities(
     let finishing = false;
     try {
       finished = await withRecordingUsage(usage, () => {
-        const work = transcribeClaimed();
+        const work = withCreditDebitAttribution(
+          job.creditAttribution ?? { kind: "unknown" },
+          transcribeClaimed,
+        );
         // The losing side of the race must not become an unhandled rejection.
         work.catch(() => undefined);
         // A step that doesn't listen for the abort still can't outlast the budget.
@@ -892,6 +896,10 @@ export function createRecordingActivities(
         ) {
           throw new PermanentRecordingFailure("region_restricted");
         }
+        await deployment.assertEligible?.(job.version.providerId, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        });
         const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -1291,6 +1299,7 @@ export function createRecordingActivities(
         // retrying won't change the answer until the payer's credits do.
         if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
         if (error instanceof TranscriptionServiceError) {
+          if (error.subscriptionCode) return await fail(error.subscriptionCode, error);
           if (!error.retryable) return await fail(`voice_${error.code}`, error);
           throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
         }

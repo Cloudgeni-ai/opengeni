@@ -26,7 +26,6 @@ import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { projectHistoryForProvider } from "./provider-history-adapter";
-import { requestFunctionToolNames } from "./provider-tool-names";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
@@ -707,9 +706,7 @@ export function buildAnthropicRequest(
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "anthropic-messages", {
-          knownToolNames: requestFunctionToolNames(request.tools),
-        }) as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "anthropic-messages") as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
     webSearch,

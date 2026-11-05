@@ -7,6 +7,8 @@ import * as database from "../src/database";
 import * as membershipAccess from "../src/workspace-membership-access";
 import * as connectionMetadata from "../src/connection-metadata";
 import * as root from "../src/index";
+import * as creditLedger from "../src/credit-ledger";
+import * as billingCustomer from "../src/billing-customer";
 import type {
   CreateDbOptions as RootCreateDbOptions,
   Database as RootDatabase,
@@ -42,6 +44,9 @@ describe("database foundation boundary", () => {
 
   test("keeps the existing root runtime and type surface compatible", () => {
     expect(root.createDb).toBe(database.createDb);
+    expect(root.applyCreditLedgerEntry).toBe(creditLedger.applyCreditLedgerEntry);
+    expect(root.applyCreditLedgerEntryOnce).toBe(creditLedger.applyCreditLedgerEntryOnce);
+    expect(root.getBillingCustomer).toBe(billingCustomer.getBillingCustomer);
     expect(root.grantWorkspaceAccess).toBe(membershipAccess.grantWorkspaceAccess);
     expect(root.listWorkspaceMembers).toBe(membershipAccess.listWorkspaceMembers);
     expect(root.getConnectionMetadata).toBe(connectionMetadata.getConnectionMetadata);

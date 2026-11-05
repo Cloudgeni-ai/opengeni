@@ -1282,6 +1282,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         },
       );
       if (admissionDenial) {
+        if (admissionDenial === "subscription_api_unavailable") {
+          return await refuseAdmission(
+            "scheduled_model_unavailable",
+            false,
+            "Connected subscriptions are unavailable for API use; choose a credit-billed model.",
+          );
+        }
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
         // A run receipt records API work without credits, an own key

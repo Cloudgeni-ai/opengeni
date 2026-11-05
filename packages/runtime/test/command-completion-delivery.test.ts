@@ -138,6 +138,16 @@ describe("finished commands follow the next tool result", () => {
     expect(withoutAppendedCommandCompletions(withNotice, appended)).toBe("sed output");
     expect(appended.size).toBe(0);
     expect(withoutAppendedCommandCompletions("other", new Set([notice]))).toBe("other");
+    // A result can carry several appended texts in turn (a finished command,
+    // then a setup notice); the audit view strips each of them.
+    const both = new Set([notice, "[Opengeni setup notice] moved"]);
+    expect(
+      withoutAppendedCommandCompletions(
+        `sed output\n\n${notice}\n\n[Opengeni setup notice] moved`,
+        both,
+      ),
+    ).toBe("sed output");
+    expect(both.size).toBe(0);
   });
 
   test("a JSON result takes nothing, so its pending result stays for the next text result", async () => {
@@ -206,18 +216,6 @@ describe("finished commands follow the next tool result", () => {
     expect(results.takes).toEqual([8_192 - 1_000 - 512]);
     expect(commandCompletionRoomBytes(0, 1_000_000)).toBe(16_384);
     expect(commandCompletionRoomBytes(50_000, 40_000)).toBe(0);
-  });
-
-  test("the notice is masked before it is appended, and the timeline strips the masked text", async () => {
-    const results = pendingResults([finished("a", "token=hunter2\n")]);
-    const delivery = new CommandCompletionDelivery({
-      ...results.source,
-      mask: async (text) => text.replaceAll("hunter2", "[masked]"),
-    });
-    const output = String(await invoke(commandCompletionDeliveringTool(textTool("ls"), delivery)));
-    expect(output).toContain("token=[masked]");
-    expect(output).not.toContain("hunter2");
-    expect(withoutAppendedCommandCompletions(output, new Set(results.delivered))).toBe("ls done");
   });
 
   test("a wait in a step whose results already carried commands is refused; the next step may wait", async () => {

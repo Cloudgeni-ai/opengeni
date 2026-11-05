@@ -26,6 +26,7 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { subscriptionPlanLabel } from "@opengeni/react/app/lib/subscription-accounts";
 import { invalidateSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import { organizationReachLabel } from "@opengeni/react/app/components/models/models-ui";
 import {
@@ -38,9 +39,7 @@ export type ClaudePlaces = SubscriptionAccountPlaces;
 export type OrganizationClaudePool = OrganizationSubscriptionRows<ClaudeSubscriptionAccount>;
 export const claudeListedCount = subscriptionListedCount<ClaudeSubscriptionAccount>;
 export function claudePlan(account: ClaudeSubscriptionAccount) {
-  if (!account.plan) return "Claude plan";
-  const words = account.plan.replace(/^claude_/, "").replaceAll("_", " ");
-  return "Claude " + words.charAt(0).toUpperCase() + words.slice(1);
+  return subscriptionPlanLabel("claude", account.plan) ?? "Claude plan";
 }
 /** The usage cell of a Claude account row, from the usage its listing carries. */
 export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {

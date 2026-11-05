@@ -1,5 +1,32 @@
 # @opengeni/sdk
 
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- f1c6437: Document that Opengeni server updates keep existing integrations working: the public API only grows, so a pinned SDK keeps working. The bundled Opengeni client Skill gains versions and upgrade guidance.
+- 54bf495: A paused chat no longer says it is working. Its turn row reads "Paused" with the clock stopped where the pause began, and switches back to working on Resume; paused time is not counted as work. This covers a chat's own Pause, a parent's and the workspace's. Sidebar rows mark paused work with a pause icon instead of the spinner, including a parent whose workers are paused, through the new `treeStats.pausedWorkDescendants` count. A sub-chat's descendant counts now also respect its ancestors' pauses. `MessageTimeline` in both `@opengeni/react` and `@opengeni/react-native` takes the live pause through its new `pause` prop (`timelineLivePause(session.effectiveControl)`); custom timelines can use `useTimelinePauses`.
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/connect@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- feaecf8: Send never does nothing without saying why. The new chat and open chat composers share one Send guard; whenever it blocks Send and no other notice already explains it, one short line under the composer says why, with at most one action. A model choice whose reasoning level or speed the account can't run (for example a saved Ultrafast speed after connecting a ChatGPT Free account, which offers GPT-6 Luna only) shows "This model can't run with the selected reasoning level or speed." with "Use supported settings". When an unavailable model is replaced automatically, the speed now follows the replacement. A Codex refusal of a model the ChatGPT account can't use ("not supported when using Codex with a ChatGPT account") is now treated as a plan refusal: that account skips the model for a while and the chat shows the plan error. Connecting a Codex account now lists the Opengeni models it offers, and warns when it offers none (`CodexConnectPoll.models`). A new chat the server refuses to start now keeps the reason under the composer until the message, model, reasoning level or speed changes, instead of only a passing toast, and the reason is specific (the model policy, an unavailable model, or a speed the model can't run) rather than "Check your input and try again". Session create refusals keep a typed `details.code` for an unavailable model and are logged with their reason and a message fingerprint instead of "unclassified". A device-code sign-in that has waited a minute now shows "Still waiting?" on every Codex and SuperGrok connect surface, not only onboarding; for ChatGPT it names the "Enable device code sign-in for Codex" setting under Settings → Security and login, which ChatGPT checks on its own page without telling Opengeni. A refused new chat words the refusals a person can hit instead of showing developer text: a model that isn't available to them (including "model is not selectable", now typed `details.code: "model_unavailable"`), and the workspace model policy (new `details.code: "model_policy"` with `reason` "credits", "provider" or "model", from the new `ModelPolicyRefusedError` in `@opengeni/contracts`). A refusal that arrives after the composer changed (more typing, or a voice link that set the model) falls back to the toast, so it is never silent, and a model policy refusal no longer offers a retry that would be refused again: every API route now types it as a nonretryable 422 with `details.code: "model_policy"`, including Send in an open chat.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/connect@6.8.0
+
 ## 6.7.0
 
 ### Minor Changes

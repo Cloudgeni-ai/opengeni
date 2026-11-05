@@ -981,7 +981,7 @@ Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.
 Gateway does not publish a separate cache-write rate for these routes, so the
 static fallback prices cache writes at the route's uncached-input rate.
 Managed turns normally debit the exact Gateway-reported inference cost for the
-provider that actually served the response, plus 5%. The static token rates
+provider that actually served the response, plus the configured margin. The static token rates
 above are only a conservative fallback if that response metadata is absent.
 Adding or changing a model requires reviewing the provider order, Responses
 tool/vision transport, cache reporting, pricing, definition, and tests together.
@@ -1215,7 +1215,7 @@ automatic compaction starts at 300,000, the same default as native Claude Opus 5
   `structured_output`.
 
 Price: managed turns debit Opper's exact per-response cost
-(`usage.opper.cost.total`) plus the standard 5% margin. The reviewed list price
+(`usage.opper.cost.total`) plus the configured margin. The reviewed list price
 above is the fallback when cost metadata is absent. Live 2026-10-05 costs equal
 the list rates exactly (706 input + 75 output tokens = $0.0047564, debited
 4,995 micros). The reviewed price table also keeps the earlier
@@ -1253,7 +1253,7 @@ Both use the same strict entry shape: `upstreamModelId`, `label`, optional
 table needs an explicit `OPENGENI_MODEL_PRICING_JSON` entry for its exact
 product id (`opper/<upstream>`, with `marginBps: 500`) before a credits-billed
 managed catalog validates. That price is the fallback; billing still uses
-Opper's reported cost +5%. Adding a paid route still needs review: a live
+Opper's reported cost plus the configured margin. Adding a paid route still needs review: a live
 tool/reasoning probe, the capability definition, cost policy, and price.
 
 ### Workspace rail
@@ -1623,32 +1623,21 @@ tools and in every history item that carries definitions (`tool_search_output`,
 `additional_tools`) or names a tool (a Responses `function_call`, a Chat tool
 call, a Claude `tool_use`); one invalid name fails the whole request. The one
 format every provider and gateway accepts is `^[a-zA-Z0-9_-]{1,64}$`, and
-top-level names already use it, but stored history can hold a name that does
-not: a known secret value inside a tool name was masked into a reference
-before tool identities were exempt from masking
-([Secrets](secrets.md#matching)), and an agent can name a tool in its
-published `server.tool` form. One provider-neutral step,
-`withProviderValidToolNames` (`provider-tool-names.ts`), gives each such name
-one valid name everywhere in the request, and a request tool's own name is
-never rewritten. The lazy tool transport applies it against the complete
-authorized catalog, deferred tools included: a flat name becomes the one tool
-it denotes, so a later call still binds to it, when exactly one does (dotted
-`server.tool`, a published short name, or the one tool that fits where a
-masking label stands for at least eight characters) and any stored
-definition of it has that tool's parameters. Every other name, namespaces and
-the names inside a namespace, and every name when the catalog could not be
-prepared, gets a stable alias with a digest of the whole name, so distinct
-names never collide. `projectHistoryForProvider` applies the same step with
-only the request's tools before the Responses and Claude Messages wire
-projections, so it aliases and never guesses. Chat Completions routes and
-their gateways keep their own treatment: a call whose name is not
-`^[a-zA-Z0-9_-]{1,64}$` replays as a historical fact rather than as a native
-call to a tool the request never declares. A definition that comes to repeat
-an earlier name in the same list is dropped. Valid names and unaffected items keep their identity, and a
-rewritten item keeps its identity across requests while the mapping holds, so
-cached prefixes do not change. Stored history is not rewritten; it is repaired
-on every replay, so Retry works on a chat that already failed. Names inside
-text (a disclosure's or search result's text) are not rewritten.
+top-level names already use it, but a model can call a tool by its published
+`server.tool` form. The lazy tool transport names such a call once, when the
+model's output item is received and before it is stored
+(`providerValidCallName` in `provider-tool-names.ts`): the one authorized
+tool it denotes (dotted `server.tool`, or a published short name), deferred
+tools included, else a stable alias with a digest of the whole name, so
+distinct names never collide. The call is stored and replayed with that name,
+and history is never rewritten later, so every later request repeats the
+earlier items byte for byte. Chat Completions routes keep their own treatment
+of any other invalid name: such a call replays as a historical fact rather
+than as a native call to a tool the request never declares. Names stored
+invalid by earlier releases (secret masking once rewrote a value inside a tool
+name, and dotted calls were stored as written) are fixed once with
+`bun run db:repair-invalid-tool-names`, a dry-run count by default and
+`--apply` to write.
 
 Provider 400 invalid-request answers are counted, for monitoring only, as
 `opengeni_model_invalid_requests_total{provider,path,code}` with the request
@@ -2255,6 +2244,10 @@ provider-rate model credit calculation, including explicit
 `marginBps`. Those rates remain provider costs, not fixed customer tariffs.
 Unset preserves existing per-price behavior; direct fixed credit prices are
 not margin-derived and are unchanged.
+
+Production and staging use `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0` as verified
+November 3, 2026. Historical tables and debit examples above retain their
+then-configured margins; they are not a promise of a current 5% charge.
 
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
 cached input, $5 cache write, and $20 output per million tokens), guaranteed

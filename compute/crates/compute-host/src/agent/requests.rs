@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{
-    CreateRoom, DiskSpace, Durability, HoldId, Input, Level, Priority, SandboxId, Size,
+    CreateRoom, DiskSpace, Durability, HoldId, Host, Input, Level, Priority, SandboxId, Size,
     SleepPolicy, Step,
 };
 use compute_engine::Engine;
@@ -23,7 +23,7 @@ use crate::state::{Change, Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
 
-use super::disk::{AfterReading, Room};
+use super::disk::{AfterReading, Room, unwanted};
 use super::holds::{Write, hold_id};
 use super::observe::{By, Why};
 use super::remove::unmake;
@@ -620,10 +620,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Books the first wake of adopted sandbox `record` as its copy's own
     /// disk needs if this host can wake it now: the adopt booked it
-    /// without that disk, which only the claimed copy shows. Otherwise the
-    /// adopt is refused as a wake that would wait here for room is, even
-    /// for disk only the next reading could show.
-    pub(super) fn adopted_room(&mut self, record: &Record) -> Result<(), HostError> {
+    /// without that disk, which only the claimed copy shows. If it fits
+    /// only once disk relief or the next reading is in, it books that disk
+    /// as wanted meanwhile (see [`Input::Wants`]) and says to wait.
+    /// Otherwise the adopt is refused as a wake that would wait here for
+    /// room is.
+    pub(super) fn adopted_room(&mut self, record: &Record) -> Result<Room, HostError> {
         let (id, size) = (record.id, self.record_size(record));
         let policy = self
             .sleep_policy(&record.config)
@@ -631,33 +633,45 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let room =
             self.core
                 .create_room(self.now(), id.0, size, policy, true, DiskSpace::default());
-        let (CreateRoom::AwaitsReading(resource, needed, free)
-        | CreateRoom::Short(resource, needed, free)) = room
-        else {
-            let by_ms = record
-                .first_wake_by_ms
-                .unwrap_or_else(|| self.first_wake_by_ms());
-            self.input(self.first_wake(id, size, policy, true, by_ms));
-            return Ok(());
-        };
-        Err(HostError::HostFull {
-            id,
-            resource,
-            needed,
-            free,
-        })
+        match room {
+            CreateRoom::Fits => {
+                let by_ms = record
+                    .first_wake_by_ms
+                    .unwrap_or_else(|| self.first_wake_by_ms());
+                self.inputs([
+                    unwanted(id.0),
+                    self.first_wake(id, size, policy, true, by_ms),
+                ]);
+                Ok(Room::Now)
+            }
+            CreateRoom::AwaitsReading(..) => {
+                self.want_disk(id.0, Host::first_wake_disk(size, policy, true));
+                Ok(Room::AfterReading)
+            }
+            CreateRoom::Short(resource, needed, free) => Err(HostError::HostFull {
+                id,
+                resource,
+                needed,
+                free,
+            }),
+        }
     }
 
-    /// Ends the booking of new sandbox `id`'s first wake: its create or
-    /// adopt failed before the sandbox joined the core.
+    /// Ends the booking of new sandbox `id`'s first wake, and of the disk
+    /// it waited for disk relief to free, if it did (see
+    /// [`Input::Wants`]): its create or adopt failed before the sandbox
+    /// joined the core.
     pub(super) fn first_wake_unbooked(&mut self, id: Id) {
-        self.input(Input::Creating {
-            sandbox: id.0,
-            size: Size::default(),
-            policy: SleepPolicy::NEVER,
-            remote: false,
-            until: self.now(),
-        });
+        self.inputs([
+            Input::Creating {
+                sandbox: id.0,
+                size: Size::default(),
+                policy: SleepPolicy::NEVER,
+                remote: false,
+                until: self.now(),
+            },
+            unwanted(id.0),
+        ]);
     }
 
     pub(super) fn create(
@@ -763,7 +777,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Ok(Room::AfterReading) => {
                 self.unwant_template(shape, build);
                 self.hold_room(id, &config);
+                // Booked meanwhile, so disk relief frees it, once it waits
+                // where relief sees what it uses.
+                let wake = Host::first_wake_disk(self.size(&config, None), policy, false);
                 self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
+                self.want_disk(id.0, disk.add(wake));
                 return;
             }
             Err(error) => {
@@ -796,6 +814,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let by_ms = self.first_wake_by_ms();
         self.inputs([
+            unwanted(id.0),
             Input::Writes { key: id.0, disk },
             self.first_wake(id, self.size(&config, None), policy, false, by_ms),
         ]);
@@ -850,6 +869,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let reading = self.after_reading.iter().filter_map(|work| match work {
             AfterReading::Create(id, config, ..) => Some((*id, &**config)),
             AfterReading::Adopt(..)
+            | AfterReading::Claimed(..)
             | AfterReading::Fetch(..)
             | AfterReading::Sleep(..)
             | AfterReading::HandOff(..) => None,
@@ -1021,6 +1041,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .map(|(id, problem)| BlockedSandbox {
                     id: Id(*id),
                     problem: problem.clone(),
+                    frozen_owner_epoch: self.frozen_owner(*id).map(|owner| owner.0),
                 })
                 .collect(),
             capacity: self.core.capacity().map(|capacity| CapacityStatus {
@@ -1042,6 +1063,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     booked: disk.booked.bytes,
                     reserve: disk.reserve.bytes,
                     free: free.bytes,
+                    reclaimable: self.core.reclaimable_disk(self.now()),
                     inodes_available: disk.available.inodes,
                     inodes_booked: disk.booked.inodes,
                     inodes_free: free.inodes,

@@ -307,6 +307,7 @@ const SANDBOX_OPERATION_LABELS: Record<string, string> = {
   "repository-clone": "Preparing repository",
   "file-resource-download": "Preparing files",
   "optional-repository-access": "Unavailable optional repositories skipped",
+  "sandbox.process_start_restart": "Restarting the workspace machine",
 };
 
 /** The named op on a `sandbox.operation.*` payload, or null. */
@@ -337,11 +338,13 @@ export function eventDisplayLabel(event: SessionEvent): string {
       if (opName === "sandbox.provision") return "Sandbox ready";
       if (opName === "repository-clone") return "Repository ready";
       if (opName === "file-resource-download") return "Files ready";
+      if (opName === "sandbox.process_start_restart") return "Workspace machine restarted";
     }
     if (event.type === "sandbox.operation.failed") {
       if (opName === "sandbox.provision") return "Sandbox didn’t start";
       if (opName === "repository-clone") return "Repository preparation failed";
       if (opName === "file-resource-download") return "File preparation failed";
+      if (opName === "sandbox.process_start_restart") return "Workspace machine restart failed";
     }
     return SANDBOX_OPERATION_LABELS[opName]!;
   }

@@ -440,8 +440,8 @@ GitHub's scale set protocol (a long-polled message queue, no webhooks)
 and compute's E2B API, keeps no state of its own, and a second replica
 stands by. Runners start from the pool's template, normally the
 `opengeni-compute-github-runner` image (`docker/github-runner.Dockerfile`),
-which runs Docker for the job and keeps its sandbox awake while the runner
-runs. With `--warm-repo` the pool keeps a warm template: a sandbox with
+which runs Docker for the job, starts the runner only once Docker answers,
+and keeps its sandbox awake while the runner runs. With `--warm-repo` the pool keeps a warm template: a sandbox with
 the repository cloned where `actions/checkout` puts it and a prepare
 command run (dependencies installed, a first build), saved as a template
 whenever the branch moves, at most every `--warm-every-s`. With
