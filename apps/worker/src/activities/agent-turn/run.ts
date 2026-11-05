@@ -53,7 +53,7 @@ import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { sessionTitlePromptFor } from "./session-title";
-import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
+import { createCodexCreditGuard } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
@@ -74,6 +74,7 @@ import {
   recordModelRequestPhase,
   recordResponsesTransportDiagnostic,
   type ModelRequestTransportLabel,
+  type ModelRequestPreDispatchStage,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
   measureTurnStartupPhase,
@@ -116,6 +117,7 @@ import { claimTurnAttempt } from "./claim";
 import { selectServingTurnCapacity } from "./subscription-serving-capacity";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
+  admitCoreCodexDispatch,
   assertTurnModelConnection,
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
@@ -818,6 +820,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let codexModelRequestSequence = 0;
           let firstModelRequestAuditRecorded = false;
           const firstModelRequestCheckpoints = new Set<string>();
+          const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) =>
+            eventing.enterModelRequestStage?.(stage);
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
@@ -910,15 +914,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       });
                     },
                     beforeProviderDispatch: async (request) => {
-                      if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
-                      await assertCodexDispatchAdmission(
-                        creditGuard.assertKnownUsageAllowsDispatch,
-                        () => leases.codex.assertCurrentForDispatch(),
-                      );
-                      if (coreCodex && request) await coreCodex.requests!.reserve(request);
+                      enterModelRequestStage("provider_admission");
+                      await admitCoreCodexDispatch({
+                        lease: leases.codex,
+                        assertSourceConnected: () => assertCoreCodexSourceConnected(db, coreCodex),
+                        assertCredits: creditGuard.assertKnownUsageAllowsDispatch,
+                        reserve: request ? () => coreCodex.requests!.reserve(request) : null,
+                      });
+                      enterModelRequestStage("transport");
                     },
                     ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
+                      enterModelRequestStage(
+                        phase === "transport_entry" ? "credential" : "request_build",
+                      );
                       if (
                         eventing.firstModelRequestCheckpointAt === null ||
                         firstModelRequestCheckpoints.has(phase)
@@ -1024,7 +1033,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         );
                       }
                       if (event.phase === "started") {
+                        enterModelRequestStage("dispatch_checkpoint");
                         await checkpointBeforeProviderDispatch();
+                        enterModelRequestStage("request_audit");
                       }
                       const shouldRecordStartedAudit =
                         event.phase === "started" && !firstModelRequestAuditRecorded;

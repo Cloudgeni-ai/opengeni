@@ -471,6 +471,8 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(preDispatch).toContain("opengeni_model_request_pre_dispatch_seconds_bucket");
     expect(preDispatch).toContain("> {{ $modelRequestPreDispatchP95Seconds }}");
     expect(preDispatch).toContain(">= {{ $modelRequestMinSamples }}");
+    // The first action names the per-stage split, not a guess at the cause.
+    expect(preDispatch).toContain("opengeni_model_request_pre_dispatch_stage_seconds");
     for (const block of [warning, critical, preDispatch]) {
       expect(block).toContain("action:");
       expect(block).toContain(
