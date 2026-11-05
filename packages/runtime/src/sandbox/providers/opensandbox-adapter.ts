@@ -58,6 +58,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
+import { workspaceTarExcludeArgs } from "../workspace-tar-excludes";
 import {
   nextDurableOpId,
   notifyRemoteOperationNotDispatched,
@@ -1515,15 +1516,13 @@ export class OpenSandboxSession {
 
   async persistWorkspaceTar(): Promise<Uint8Array> {
     const archivePath = `${PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
-    const excludes = [
-      ...this.state.manifest.ephemeralPersistencePaths(),
-      ".opengeni-old-*",
-      ".opengeni-restore-*",
-    ].sort();
-    const excludeArgs = excludes.flatMap((path) => [
-      shellQuote(`--exclude=${path}`),
-      shellQuote(`--exclude=./${path}`),
-    ]);
+    // The same anchored, escaped exclusions as the workspace fingerprint, so
+    // a restore of this tar verifies; the restore's own staging and backup
+    // folders are top-level globs.
+    const excludeArgs = workspaceTarExcludeArgs(
+      [...this.state.manifest.ephemeralPersistencePaths()],
+      [".opengeni-old-*", ".opengeni-restore-*"],
+    );
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(PRIVATE_ROOT)}
 cd ${shellQuote(WORKSPACE_ROOT)}
