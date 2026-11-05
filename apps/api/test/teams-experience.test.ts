@@ -146,6 +146,25 @@ describe("Teams Markdown", () => {
     );
     expect(teamsMarkdown("1 < 2 and a<br>b")).toBe("1 < 2 and a<br>b");
     expect(teamsMarkdown("```\nList<string>\n```")).toBe("```\nList<string>\n```");
+    // Link targets keep their URL; long lines are escaped too.
+    expect(teamsMarkdown("[docs](https://x.test/<id>) <b>")).toBe(
+      "[docs](https://x.test/<id>) \\<b>",
+    );
+    const long = `${"word ".repeat(1000)}List<string>`;
+    expect(teamsMarkdown(long)).toBe(long.replace("<", "\\<"));
+  });
+  test("indented code, and code nested in a list item, is left as written", () => {
+    const indented = "Example:\n\n    List<string> xs\n\n    xs.Add(<a>)\n\nList<b>";
+    expect(teamsMarkdown(indented)).toBe(
+      "Example:\n\n    List<string> xs\n\n    xs.Add(<a>)\n\nList\\<b>",
+    );
+    const nested = "1. Build:\n\n    ```cpp\n    #include <vector>\n    ```\n2. Run <it>";
+    expect(teamsMarkdown(nested)).toBe(
+      "1. Build:\n\n    ```cpp\n    #include <vector>\n    ```\n2. Run \\<it>",
+    );
+    // An indented line continuing a paragraph or a list item is text.
+    expect(teamsMarkdown("Text\n    and <b>")).toBe("Text\n    and \\<b>");
+    expect(teamsMarkdown("- item\n\n    more <b>")).toBe("- item\n\n    more \\<b>");
   });
   test("only real tables are converted", () => {
     // Indented code and a setext heading containing pipes stay as written.
@@ -174,6 +193,13 @@ describe("Teams Markdown", () => {
     const started = performance.now();
     for (const input of inputs) teamsMarkdownParts(teamsMarkdown(input));
     expect(performance.now() - started).toBeLessThan(1500);
+    // Many lines just under the structure limit cost no more than one each.
+    for (const separator of ["\u2028", "\u2029"]) {
+      const lines = `#${" \t".repeat(2000)}${separator}\n`.repeat(100);
+      const begun = performance.now();
+      teamsMarkdownParts(teamsMarkdown(lines));
+      expect(performance.now() - begun).toBeLessThan(500);
+    }
   });
   test("a plain split is lossless and within the limit, including multibyte text", () => {
     const text = "🦉 hello\n".repeat(5000);
@@ -324,6 +350,20 @@ describe("Teams activities", () => {
       }),
     );
     expect(long?.comment).toHaveLength(4000);
+    // The limit is in UTF-16 code units, and a surrogate pair is never split.
+    const emoji = normalizeTeamsFeedback(
+      feedback({
+        value: {
+          actionName: "feedback",
+          actionValue: {
+            reaction: "dislike",
+            feedback: JSON.stringify({ feedbackText: `x${"🦉".repeat(5000)}` }),
+          },
+        },
+      }),
+    );
+    expect(emoji?.comment?.length).toBe(3999);
+    expect(emoji?.comment?.endsWith("🦉")).toBe(true);
   });
   test("channel feedback names its channel", () => {
     expect(

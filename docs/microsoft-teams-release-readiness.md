@@ -279,19 +279,27 @@ conversation, organization connected or not, account linked or not).
   logic as the web unlink. Anyone may always remove their own link. In shared
   conversations `unlink` points to the 1:1 chat.
 - **Typing.** After a message is queued, the bot sends Teams typing activities
-  about every three seconds until the chat's session records a reply, a request
-  for input or a failure (the route's `relevant_event_sequence` moves past its
-  value when the message was queued), the message is refused, or five minutes
-  pass. One loop runs per chat; a newer message takes it over and restarts the
-  five minutes. A redelivered message starts none. The loop lives in the process
-  that accepted the message and is best-effort.
+  about every three seconds until the reply, request for input or failure of
+  the turn that answers it is queued for Teams, the message is refused, or five
+  minutes pass. Admission records that turn on the inbox row (`turn_id`) and the
+  drain stamps `replied_at` when it queues that turn's output, so in a busy chat
+  an earlier turn finishing doesn't end typing for a later message. A message
+  admitted without a known turn (by an older release) falls back to the chat:
+  any reply, request or failure after it was queued (the route's
+  `relevant_event_sequence` moving past its value at queue time). A cancelled
+  turn queues nothing, so typing for it ends at the five minutes. One loop runs
+  per chat; a newer message takes it over and restarts the five minutes. A
+  redelivered message starts none. The loop lives in the process that accepted
+  the message and is best-effort.
 - **Markdown.** Messages are sent with `textFormat: "markdown"`. Agent Markdown
   Teams can't show in text messages is rewritten: tables become one list item per
   row, headings below level three become bold lines, setext headings become ATX
   headings, images become links and horizontal rules are dropped. Text that
   looks like an HTML tag (`List<string>`) is backslash-escaped outside code so
-  Teams doesn't swallow it; autolinks and `<br>` are kept. Lines over 4 KB are
-  passed through unchanged. A code block split across 20,000-byte parts is
+  Teams doesn't swallow it; autolinks, link targets and `<br>` are kept. Code is
+  left as written: fenced blocks (including fences nested in list items),
+  indented code blocks and code spans. Lines over 4 KB get only that escaping.
+  A code block split across 20,000-byte parts is
   closed and reopened with only its fence and language, and room for the closing
   fence is kept, so no part exceeds the limit. Verify tag-like text on desktop,
   web and mobile during acceptance.
@@ -307,8 +315,10 @@ conversation, organization connected or not, account linked or not).
   chat alone if the turn is gone), with an idempotency key derived from the
   Teams activity, so a redelivered invoke records once. Each rating is its own
   row, so a person who changes their rating leaves both; the latest is current.
-  Written feedback is kept up to 4,000 characters. The lookup uses the partial
-  index `teams_bot_outbox_delivered_message`.
+  Written feedback is kept up to 4,000 UTF-16 code units, the feedback store's
+  limit, without splitting a character. A chat whose session is gone, or that
+  the person may no longer see, answers the invoke and records nothing. The
+  lookup uses the partial index `teams_bot_outbox_delivered_message`.
 
 ## Publisher verification and Store submission
 

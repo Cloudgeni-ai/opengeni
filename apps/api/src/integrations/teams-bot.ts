@@ -13,6 +13,7 @@ import {
   createSessionForRequest,
   acceptSessionUserMessage,
   requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
   withResolvedSessionAuthorization,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
@@ -43,6 +44,7 @@ import {
   releaseTeamsRoute,
   getTeamsPendingMessage,
   settleTeamsMessage,
+  markTeamsTurnAnswered,
   enqueueTeamsOutput,
   claimTeamsOutput,
   settleTeamsOutput,
@@ -562,7 +564,13 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
     }
     return result.replayed ? "feedback_replayed" : "feedback_recorded";
   } catch (error) {
-    if (error instanceof FeedbackTargetNotFoundError) return "feedback_target_missing";
+    // A deleted session, or one this person can no longer see, is treated
+    // like the HTTP feedback route treats it: not found.
+    if (
+      error instanceof FeedbackTargetNotFoundError ||
+      error instanceof SessionAuthorizationDeniedError
+    )
+      return "feedback_target_missing";
     if (error instanceof FeedbackConflictError) return "feedback_conflict";
     if (error instanceof HTTPException && error.status >= 400 && error.status < 500)
       return "feedback_not_permitted";
@@ -1046,6 +1054,7 @@ async function drainRoute(
     )
       return;
     try {
+      let turnId: string | null;
       if (!r.session_bound) {
         // Personal workspaces were turned off after this 1:1 route was made:
         // refuse with the admission notice; the next message starts in the
@@ -1058,7 +1067,7 @@ async function drainRoute(
           }))
         )
           throw new HTTPException(403, { message: "personal_workspace_closed" });
-        await createSessionForRequest(
+        const created = await createSessionForRequest(
           scoped,
           grant,
           routeSessionWorkspace(r),
@@ -1081,17 +1090,25 @@ async function drainRoute(
             },
           },
         );
+        turnId = created.initialTurnId;
       } else {
-        await acceptSessionUserMessage(scoped, grant, routeSessionWorkspace(r), r.session_id, {
-          text,
-          clientEventId: inbound.event_id,
-          teamsConversation: {
-            routeId: r.route_id,
-            eventId: inbound.event_id,
-            leaseToken: r.lease_token!,
-            installationGeneration: i.generation,
+        const accepted = await acceptSessionUserMessage(
+          scoped,
+          grant,
+          routeSessionWorkspace(r),
+          r.session_id,
+          {
+            text,
+            clientEventId: inbound.event_id,
+            teamsConversation: {
+              routeId: r.route_id,
+              eventId: inbound.event_id,
+              leaseToken: r.lease_token!,
+              installationGeneration: i.generation,
+            },
           },
-        });
+        );
+        turnId = accepted.turn.id;
       }
       if (!r.session_bound)
         await enqueueTeamsOutput(deps.db, i, r, 0, [
@@ -1099,7 +1116,7 @@ async function drainRoute(
             ? `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`
             : `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}`,
         ]);
-      await settleTeamsMessage(deps.db, i, r, inbound.event_id, null);
+      await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
     } catch (error) {
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
@@ -1177,6 +1194,7 @@ async function drainRoute(
             undefined,
             { turnId: event.turnId ?? null },
           );
+          if (event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
           continue;
         }
         if (
@@ -1187,6 +1205,7 @@ async function drainRoute(
         else if (event.type === "turn.failed")
           text = `The task could not finish. Open Opengeni for details: ${sessionUrl(deps, r)}`;
         await enqueueTeamsOutput(deps.db, i, r, event.sequence, text ? teamsReplyParts(text) : []);
+        if (text && event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
       }
     }
     output = await claimTeamsOutput(deps.db, i, r);

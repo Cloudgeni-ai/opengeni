@@ -336,8 +336,14 @@ export function normalizeTeamsFeedback(raw: unknown): TeamsFeedback | null {
   if (form && form.length <= 262_144)
     try {
       const value = JSON.parse(form) as { feedbackText?: unknown } | null;
-      if (value && typeof value.feedbackText === "string" && value.feedbackText.trim())
-        comment = Array.from(value.feedbackText.trim()).slice(0, 4000).join("");
+      if (value && typeof value.feedbackText === "string" && value.feedbackText.trim()) {
+        // At most 4000 UTF-16 code units, the feedback limit, without
+        // splitting a surrogate pair.
+        const text = value.feedbackText.trim();
+        let end = Math.min(text.length, 4000);
+        if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end -= 1;
+        comment = text.slice(0, end);
+      }
     } catch {
       comment = null;
     }

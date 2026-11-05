@@ -421,6 +421,8 @@ export async function settleTeamsMessage(
   r: TeamsRoute,
   eventId: string,
   error: string | null,
+  /** The session turn that answers an admitted message, when known. */
+  turnId: string | null = null,
 ) {
   await teamsScoped(db, i, async (tx) => {
     const owned = await rawRows(
@@ -429,12 +431,28 @@ export async function settleTeamsMessage(
     );
     if (!owned.length) return;
     await tx.execute(
-      sql`update teams_bot_inbox set state=${error ? "failed" : "accepted"},error_code=${error} where event_id=${eventId}`,
+      sql`update teams_bot_inbox set state=${error ? "failed" : "accepted"},error_code=${error},turn_id=${error ? null : turnId}::uuid where event_id=${eventId}`,
     );
     if (!error)
       await tx.execute(
         sql`update teams_bot_routes set session_bound=true where route_id=${r.route_id}`,
       );
+  });
+}
+/**
+ * Records that a turn's reply, request for input or failure was queued for
+ * Teams, which ends typing for the messages that turn answers.
+ */
+export async function markTeamsTurnAnswered(
+  db: Database,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  turnId: string,
+) {
+  await teamsScoped(db, i, async (tx) => {
+    await tx.execute(
+      sql`update teams_bot_inbox set replied_at=now() where route_id=${r.route_id} and turn_id=${turnId}::uuid and replied_at is null`,
+    );
   });
 }
 export async function enqueueTeamsOutput(
@@ -463,9 +481,11 @@ export async function enqueueTeamsOutput(
 }
 /**
  * Whether the reply to one inbound message is still being produced: the
- * message waits to be admitted, or it was admitted and its chat has had no
- * reply, request for input or failure since it was queued (`replySequence`
- * from `enqueueTeamsMessage`). Both lookups are by primary key.
+ * message waits to be admitted, or it was admitted and the turn answering it
+ * has had no reply, request for input or failure queued yet. A message
+ * admitted without a known turn falls back to its chat: no reply, request
+ * or failure since it was queued (`replySequence` from
+ * `enqueueTeamsMessage`). Both lookups are by primary key.
  */
 export async function teamsReplyPending(
   db: Database,
@@ -473,15 +493,19 @@ export async function teamsReplyPending(
   input: { eventId: string; replySequence: number },
 ): Promise<boolean> {
   return teamsScoped(db, i, async (tx) => {
-    const [row] = await rawRows<{ state: string; progress: string | number }>(
+    const [row] = await rawRows<{
+      state: string;
+      turn_id: string | null;
+      replied_at: unknown;
+      progress: string | number;
+    }>(
       tx,
-      sql`select inbox.state,r.relevant_event_sequence as progress from teams_bot_inbox inbox join teams_bot_routes r on r.route_id=inbox.route_id where inbox.event_id=${input.eventId}`,
+      sql`select inbox.state,inbox.turn_id,inbox.replied_at,r.relevant_event_sequence as progress from teams_bot_inbox inbox join teams_bot_routes r on r.route_id=inbox.route_id where inbox.event_id=${input.eventId}`,
     );
-    return Boolean(
-      row &&
-      (row.state === "pending" ||
-        (row.state === "accepted" && Number(row.progress) <= input.replySequence)),
-    );
+    if (!row) return false;
+    if (row.state === "pending") return true;
+    if (row.state !== "accepted") return false;
+    return row.turn_id ? row.replied_at === null : Number(row.progress) <= input.replySequence;
   });
 }
 /** An agent reply the bot delivered in one Teams conversation, found by its Teams message id. */

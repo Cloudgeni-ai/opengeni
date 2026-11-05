@@ -297,11 +297,20 @@ test("an accepted message shows typing until its reply is queued", async () => {
   expect(await pending(inbox!.event_id)).toBe(true);
   const [route] =
     await shared.admin`select session_id,session_workspace_id,workspace_id from teams_bot_routes where route_id=${inbox!.route_id}`;
+  const [admitted] =
+    await shared.admin`select turn_id::text as turn_id from teams_bot_inbox where event_id=${inbox!.event_id}`;
+  expect(admitted!.turn_id).toBeTruthy();
   await appendSessionEvents(
     client.db,
     route!.session_workspace_id ?? route!.workspace_id,
     route!.session_id,
-    [{ type: "turn.completed", payload: { output: "| A | B |\n| - | - |\n| 1 | 2 |" } }],
+    [
+      {
+        type: "turn.completed",
+        turnId: admitted!.turn_id,
+        payload: { output: "| A | B |\n| - | - |\n| 1 | 2 |" },
+      },
+    ],
   );
   await shared.admin`update teams_bot_routes set lease_until=null where route_id=${inbox!.route_id}`;
   await drainTeamsBotOnce(f.deps, send);
@@ -312,7 +321,8 @@ test("an accepted message shows typing until its reply is queued", async () => {
     await shared.admin`select payload from teams_bot_outbox where route_id=${inbox!.route_id} and source_sequence>0`;
   expect(outbox!.payload).toMatchObject({ text: "- **A:** 1; **B:** 2", ai: true });
 
-  // A turn that completes without text still ends typing for the next message.
+  // A message admitted without a known turn (by an older release) falls back
+  // to its chat: a turn that completes, even without text, ends typing.
   await f.handle(f.message("Anything else?"));
   const [next] =
     await shared.admin`select event_id from teams_bot_inbox where route_id=${inbox!.route_id} and event_id<>${inbox!.event_id}`;
@@ -321,6 +331,7 @@ test("an accepted message shows typing until its reply is queued", async () => {
   expect(await pending(next!.event_id, progress!.n)).toBe(true);
   await shared.admin`update teams_bot_routes set lease_until=null where route_id=${inbox!.route_id}`;
   await drainTeamsBotOnce(f.deps, send);
+  await shared.admin`update teams_bot_inbox set turn_id=null where event_id=${next!.event_id}`;
   expect(await pending(next!.event_id, progress!.n)).toBe(true);
   await appendSessionEvents(
     client.db,
@@ -329,6 +340,50 @@ test("an accepted message shows typing until its reply is queued", async () => {
     [{ type: "turn.completed", payload: { output: "" } }],
   );
   expect(await pending(next!.event_id, progress!.n)).toBe(false);
+});
+
+test("typing follows the turn that answers each message, not the chat", async () => {
+  const f = await fixture();
+  await personalWorkspace(f);
+  const send = async () => `sent-${crypto.randomUUID()}`;
+  await f.handle(f.message("First"));
+  const [first] =
+    await shared.admin`select route_id,event_id from teams_bot_inbox where workspace_id=${f.i.workspace_id}`;
+  const tick = async () => {
+    await shared.admin`update teams_bot_routes set lease_until=null where route_id=${first!.route_id}`;
+    await drainTeamsBotOnce(f.deps, send);
+  };
+  await tick();
+  await f.handle(f.message("Second"));
+  await tick();
+  const messages =
+    await shared.admin`select event_id,state,turn_id::text as turn_id from teams_bot_inbox where route_id=${first!.route_id} order by created_at`;
+  expect(messages.map((m: { state: string }) => m.state)).toEqual(["accepted", "accepted"]);
+  const [a, b] = messages as Array<{ event_id: string; turn_id: string }>;
+  expect(a!.turn_id).toBeTruthy();
+  expect(b!.turn_id).toBeTruthy();
+  expect(b!.turn_id).not.toBe(a!.turn_id);
+  const pending = (eventId: string) =>
+    teamsReplyPending(client.db, f.i, { eventId, replySequence: 0 });
+  expect(await pending(a!.event_id)).toBe(true);
+  expect(await pending(b!.event_id)).toBe(true);
+  const [route] =
+    await shared.admin`select session_id,session_workspace_id,workspace_id from teams_bot_routes where route_id=${first!.route_id}`;
+  const complete = (turnId: string) =>
+    appendSessionEvents(
+      client.db,
+      route!.session_workspace_id ?? route!.workspace_id,
+      route!.session_id,
+      [{ type: "turn.completed", turnId, payload: { output: "Done" } }],
+    );
+  // The first turn's reply ends typing for the first message only.
+  await complete(a!.turn_id);
+  await tick();
+  expect(await pending(a!.event_id)).toBe(false);
+  expect(await pending(b!.event_id)).toBe(true);
+  await complete(b!.turn_id);
+  await tick();
+  expect(await pending(b!.event_id)).toBe(false);
 });
 
 test("thumbs up or down on an agent reply is recorded as Opengeni feedback once", async () => {
@@ -425,6 +480,9 @@ test("thumbs up or down on an agent reply is recorded as Opengeni feedback once"
     await shared.admin`select turn_id from feedback_submissions where workspace_id=${f.i.workspace_id} order by created_at desc limit 1`;
   expect(fallback!.turn_id).toBeNull();
   expect(await rows()).toHaveLength(2);
+  // Feedback on a chat whose session is gone is answered, not an error.
+  await shared.admin`delete from sessions where id=${route!.session_id}`;
+  expect(await f.handle(feedback("bot-message-2"))).toEqual({ status: 200 });
   expect(f.outcomes).toEqual([
     "feedback_target_missing",
     "feedback_actor_unlinked",
@@ -434,6 +492,7 @@ test("thumbs up or down on an agent reply is recorded as Opengeni feedback once"
     "feedback_target_missing",
     "channel_disabled",
     "feedback_recorded",
+    "feedback_target_missing",
   ]);
 });
 
@@ -502,5 +561,18 @@ test("only the owner of a 1:1 chat can rate its replies", async () => {
   const rows =
     await shared.admin`select subject_id,sentiment from feedback_submissions where workspace_id=${personal}`;
   expect(rows).toEqual([{ subject_id: f.subject, sentiment: "positive" }]);
-  expect(f.outcomes).toEqual(["feedback_target_missing", "feedback_recorded"]);
+  // A private chat that is no longer this person's is answered as missing.
+  await shared.admin`insert into organization_memberships(account_id,subject_id,role) select account_id,${otherSubject},role from organization_memberships where account_id=${f.i.account_id} and subject_id=${f.subject}`;
+  await shared.admin.begin(async (tx) => {
+    const capability = crypto.randomUUID();
+    await tx`insert into session_visibility_write_capabilities values (pg_backend_pid(), pg_current_xact_id(), ${capability})`;
+    await tx`select set_config('opengeni.session_visibility_write_capability', ${capability}, true)`;
+    await tx`update sessions set owner_subject_id=${otherSubject} where id=${route!.session_id}`;
+  });
+  expect(await f.handle(rate(f.actor))).toEqual({ status: 200 });
+  expect(f.outcomes).toEqual([
+    "feedback_target_missing",
+    "feedback_recorded",
+    "feedback_target_missing",
+  ]);
 });

@@ -179,24 +179,33 @@ export function teamsEventUuid(namespace: string, value: string): string {
  */
 const STRUCTURE_LINE_LIMIT = 4096;
 
-type Fence = { marker: string; info: string };
+type Fence = { marker: string; info: string; indent: number };
 
-/** A code fence line: three or more backticks or tildes, then an info string. */
-function fenceLine(line: string): Fence | null {
+/**
+ * A code fence line: three or more backticks or tildes, then an info string.
+ * Fences indented four or more spaces count only where `deep` is allowed,
+ * such as inside a list item; elsewhere such a line is indented code.
+ */
+function fenceLine(line: string, deep = false): Fence | null {
   if (line.length > 1024) return null;
-  const match = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line.replace(/\n$/, ""));
+  const match = /^( *)(`{3,}|~{3,})([^\n]*)$/.exec(line.replace(/\n$/, ""));
   if (!match) return null;
-  const marker = match[1]!;
-  const info = match[2]!;
+  const indent = match[1]!.length;
+  if (indent > 3 && !deep) return null;
+  const marker = match[2]!;
+  const info = match[3]!;
   // A backtick fence's info string can't contain backticks.
   if (marker[0] === "`" && info.includes("`")) return null;
-  return { marker, info };
+  return { marker, info, indent };
 }
 
+/** A closing fence: the same character, at least as long, no info string,
+ * indented at most three spaces more than its opening fence. */
 function closesFence(line: string, open: Fence): boolean {
-  const fence = fenceLine(line);
+  const fence = fenceLine(line, true);
   return Boolean(
     fence &&
+    fence.indent <= open.indent + 3 &&
     fence.marker[0] === open.marker[0] &&
     fence.marker.length >= open.marker.length &&
     !fence.info.trim(),
@@ -228,7 +237,8 @@ function tableSeparator(line: string | undefined, columns: number): boolean {
 }
 
 function heading(line: string): { level: number; text: string } | null {
-  const match = /^ {0,3}(#{1,6})[ \t]+(.*)$/.exec(line);
+  // `[^]*` matches any character, so the pattern never backtracks.
+  const match = /^ {0,3}(#{1,6})[ \t]+([^]*)$/.exec(line);
   if (!match) return null;
   // An optional closing sequence of #s, after whitespace, isn't part of the text.
   let text = match[2]!.trimEnd();
@@ -242,25 +252,28 @@ function heading(line: string): { level: number; text: string } | null {
 /**
  * Text that looks like an HTML tag, such as `List<string>` or `<name>`, would
  * be read by Teams as markup and disappear. Escape it outside code spans,
- * leaving autolinks such as <https://example.com> alone.
+ * leaving autolinks such as <https://example.com> and link targets alone.
  */
 function escapeTags(line: string): string {
   if (!line.includes("<")) return line;
   let out = "";
   let index = 0;
+  /** Backtick run lengths with no closing run later in the line. */
+  const unclosed = new Set<number>();
   while (index < line.length) {
     const char = line[index]!;
     if (char === "`") {
       let run = 1;
       while (line[index + run] === "`") run += 1;
       const marker = "`".repeat(run);
-      let close = line.indexOf(marker, index + run);
+      let close = unclosed.has(run) ? -1 : line.indexOf(marker, index + run);
       while (close !== -1 && line[close + run] === "`") {
         let skip = close;
         while (line[skip] === "`") skip += 1;
         close = line.indexOf(marker, skip);
       }
       if (close === -1) {
+        unclosed.add(run);
         out += marker;
         index += run;
       } else {
@@ -268,6 +281,15 @@ function escapeTags(line: string): string {
         index = close + run;
       }
       continue;
+    }
+    if (char === "]" && line[index + 1] === "(") {
+      // A link target is a URL, not text: keep it as written.
+      const end = line.indexOf(")", index + 2);
+      if (end !== -1 && end - index <= 2100) {
+        out += line.slice(index, end + 1);
+        index = end + 1;
+        continue;
+      }
     }
     if (char === "\\" && index + 1 < line.length) {
       out += line.slice(index, index + 2);
@@ -305,6 +327,10 @@ export function teamsMarkdown(input: string): string {
   let fence: Fence | null = null;
   /** The index of the last line that was ordinary paragraph text. */
   let plainLine = -1;
+  /** Inside a list, indented lines continue an item instead of being code. */
+  let inList = false;
+  /** The index of the last line of an indented code block. */
+  let codeLine = -1;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
     if (fence) {
@@ -312,14 +338,29 @@ export function teamsMarkdown(input: string): string {
       if (closesFence(line, fence)) fence = null;
       continue;
     }
-    const opened = fenceLine(line);
+    const indented = /^(?: {4}|\t)/.test(line);
+    const blank = !line.trim();
+    if (
+      indented &&
+      !inList &&
+      (codeLine === index - 1 || index === 0 || !lines[index - 1]!.trim())
+    ) {
+      // Indented code: shown as written, so nothing in it is converted.
+      codeLine = index;
+      out.push(line);
+      continue;
+    }
+    if (blank && codeLine === index - 1) codeLine = index;
+    if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/.test(line)) inList = true;
+    else if (!blank && !/^[ \t]/.test(line)) inList = false;
+    const opened = fenceLine(line, inList);
     if (opened) {
       fence = opened;
       out.push(line);
       continue;
     }
     if (line.length > STRUCTURE_LINE_LIMIT) {
-      out.push(line);
+      out.push(escapeTags(line));
       continue;
     }
     if (tableRow(line)) {
@@ -398,7 +439,7 @@ export const TEAMS_PART_BYTES = 20_000;
 export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): string[] {
   /** An open code block. Its reopen line is null when it wouldn't comfortably
    * fit a part; such a block is still tracked, just not closed and reopened. */
-  type OpenFence = { close: string; reopen: string | null };
+  type OpenFence = { fence: Fence; close: string; reopen: string | null };
   const size = (value: string) => Buffer.byteLength(value);
   const parts: string[] = [];
   let part = "";
@@ -408,9 +449,13 @@ export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): s
   const open = (f: Fence): OpenFence => {
     const language = /^[\w#+.-]{1,32}/.exec(f.info.trim())?.[0] ?? "";
     const reopen = `${f.marker}${language}\n`;
+    const close = `${" ".repeat(f.indent)}${f.marker}`;
     return {
-      close: f.marker,
-      reopen: size(reopen) + size(`\n${f.marker}`) <= maxBytes / 4 ? reopen : null,
+      fence: f,
+      close,
+      // A block nested in a list item isn't reopened: the next part has no
+      // list, so its indented lines already show as code there.
+      reopen: f.indent <= 3 && size(reopen) + size(`\n${close}`) <= maxBytes / 4 ? reopen : null,
     };
   };
   const reopened = () => fence?.reopen ?? "";
@@ -426,9 +471,9 @@ export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): s
     // The fence state once this line is in, so its closing fence has room.
     let next: OpenFence | null = fence;
     if (fence) {
-      if (closesFence(line, { marker: fence.close, info: "" })) next = null;
+      if (closesFence(line, fence.fence)) next = null;
     } else {
-      const opened = fenceLine(line);
+      const opened = fenceLine(line, true);
       if (opened) next = open(opened);
     }
     if (bytes + lineBytes + closeBytes(next) > maxBytes) flush();
