@@ -18,12 +18,12 @@ const output = [
   "What to try: check whether it already took effect before re-running it.",
 ].join("\n");
 
-const cloudComputerOutput = [
-  "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting",
-  "What happened: the cloud computer this chat runs on did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
-  "Which layer: the cloud computer itself, not your command",
-  "What was preserved: unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
-  "What to try: once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+const workspaceMachineOutput = [
+  "[workspace machine] this chat's workspace machine stopped answering; it is most likely restarting",
+  "What happened: this chat's workspace machine did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
+  "Which layer: the workspace machine itself, not your command",
+  "What was preserved: unknown — the command was in flight when the workspace machine stopped answering, so it may not have run, or may have run fully or partly.",
+  "What to try: once the workspace machine is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
 ].join("\n");
 
 function fixture(errorFlag: boolean, toolOutput = output) {
@@ -75,8 +75,8 @@ test.each([false, true])(
   },
 );
 
-test("a cloud computer's restart receipt is an outcome-unknown failure too", () => {
-  const item = fixture(false, cloudComputerOutput);
+test("a workspace machine's restart receipt is an outcome-unknown failure too", () => {
+  const item = fixture(false, workspaceMachineOutput);
   expect(item.status).toBe("failed");
   const row = toolRowPresentation(t, item, { details: "full" });
   expect(row.failed).toBe(true);

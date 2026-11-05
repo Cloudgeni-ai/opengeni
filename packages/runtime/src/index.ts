@@ -11954,7 +11954,7 @@ export async function runOwnedSandboxSetup(
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-    // CLOUD COMPUTER SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
     // clock or resolver the agent broke is repaired before anything below needs
     // the network (rig setup, clones, the Codemode client). Never on any other
     // backend, and above all never on a connected machine.
@@ -12841,14 +12841,14 @@ async function repairOwnedComputeBox(
     );
   } catch (error) {
     if (error instanceof TurnSandboxCommandCancelledError) throw error;
-    console.warn("[sandbox] cloud computer clock and DNS check failed", {
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
       error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
     return null;
   }
   const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
   if (report.clock || report.dns) {
-    console.warn("[sandbox] cloud computer clock or DNS was broken before the turn", report);
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
   }
   return report;
 }

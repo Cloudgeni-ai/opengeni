@@ -8,7 +8,7 @@ import { createOpenGeniText } from "../src/messages/runtime";
 const englishText = createOpenGeniText();
 
 /*
- * A command that was in flight when the chat's own cloud computer (a compute
+ * A command that was in flight when the chat's own workspace machine (a compute
  * box) restarted, replayed through the production MessageTimeline with the
  * web app's stylesheet. Synthetic events in the worker's exact shapes, no API
  * calls. `?copy=before` shows the old "[connected machine]" receipt,
@@ -33,21 +33,21 @@ const BEFORE = [
 ].join("\n");
 
 const AFTER = [
-  "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting",
-  "What happened: the cloud computer this chat runs on did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
-  "Which layer: the cloud computer itself, not your command",
-  "What was preserved: unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
-  "What to try: once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+  "[workspace machine] this chat's workspace machine stopped answering; it is most likely restarting",
+  "What happened: this chat's workspace machine did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
+  "Which layer: the workspace machine itself, not your command",
+  "What was preserved: unknown — the command was in flight when the workspace machine stopped answering, so it may not have run, or may have run fully or partly.",
+  "What to try: once the workspace machine is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
 ].join("\n");
 
-const SESSION = "cloud-computer-restart";
+const SESSION = "workspace-machine-restart";
 const TURN = "turn-1";
 let sequence = 0;
 const start = Date.now() - 40_000;
 function event(type: string, payload: unknown, at: number, turnId: string | null = TURN) {
   sequence += 1;
   return {
-    id: `cloud-computer-restart-${sequence}`,
+    id: `workspace-machine-restart-${sequence}`,
     workspaceId: "demo",
     sessionId: SESSION,
     sequence,
