@@ -46,6 +46,7 @@ import {
 } from "@openai/agents-core/sandbox/internal";
 import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
+import { workspaceTarExcludeArgs } from "../workspace-tar-excludes";
 import { archiveRestoreScript } from "../providers/opensandbox-adapter";
 import {
   COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
@@ -730,15 +731,13 @@ export class ComputeSandboxSession extends SelfhostedSession {
    * exists only to move a workspace to another backend. */
   async persistWorkspaceTar(): Promise<Uint8Array> {
     const archivePath = `${COMPUTE_PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
-    const excludes = [
-      ...this.state.manifest.ephemeralPersistencePaths(),
-      ".opengeni-old-*",
-      ".opengeni-restore-*",
-    ].sort();
-    const excludeArgs = excludes.flatMap((path) => [
-      shellQuote(`--exclude=${path}`),
-      shellQuote(`--exclude=./${path}`),
-    ]);
+    // The same anchored, escaped exclusions as the workspace fingerprint, so
+    // a restore of this tar verifies; the restore's own staging and backup
+    // folders are top-level globs.
+    const excludeArgs = workspaceTarExcludeArgs(
+      [...this.state.manifest.ephemeralPersistencePaths()],
+      [".opengeni-old-*", ".opengeni-restore-*"],
+    );
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(COMPUTE_PRIVATE_ROOT)}
 cd ${shellQuote(COMPUTE_WORKSPACE_ROOT)}

@@ -52930,6 +52930,29 @@ export async function commitWarmingToWarm(
           (automatic as Record<string, unknown>).status === "accepted" &&
           (automatic as Record<string, unknown>).operationId ===
             row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+        // The model learned of the older snapshot from its receipt when the
+        // restore was authorized. The people in the group are told once, after
+        // this commit, when that restore is verified, so a restore that fails,
+        // retries or ends on an empty workspace never claims their files came
+        // back. Only an archive restore qualifies, never an empty workspace or
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
+        const restoredFrom =
+          automaticVerified &&
+          rematerialization !== undefined &&
+          !freshWorkspace &&
+          !continuityRecovery
+            ? (automatic as Record<string, unknown>).capturedAt
+            : undefined;
+        const restoredNotice =
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
+            ? {
+                operationId: (automatic as Record<string, unknown>).operationId,
+                mode: "checkpoint" as const,
+                capturedAt: restoredFrom,
+              }
+            : null;
         const completedResumeState = resumeStateWithRecovery(
           {
             ...(withArchives ?? {}),
@@ -52941,6 +52964,10 @@ export async function commitWarmingToWarm(
                   opengeniAutomaticCheckpointRecovery: {
                     ...(automatic as Record<string, unknown>),
                     status: "verified",
+                    // Durable until the notice is written: a failed write is
+                    // retried (`deliverPendingSandboxRestoreNotice`) and the
+                    // write clears it, so the notice lands exactly once.
+                    ...(restoredNotice ? { noticePending: true } : {}),
                   },
                 }
               : {}),
@@ -53000,29 +53027,6 @@ export async function commitWarmingToWarm(
             reason: "stale_epoch" as const,
           };
         }
-        // The model learned of the older snapshot from its receipt when the
-        // restore was authorized. The people in the group are told once, after
-        // this commit, when that restore is verified, so a restore that fails,
-        // retries or ends on an empty workspace never claims their files came
-        // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity. A box the drain stopped after failed saves
-        // already told them, when it stopped, which files were not saved.
-        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
-        const restoredFrom =
-          automaticVerified &&
-          rematerialization !== undefined &&
-          !freshWorkspace &&
-          !continuityRecovery
-            ? (automatic as Record<string, unknown>).capturedAt
-            : undefined;
-        const restoredNotice =
-          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
-            ? {
-                operationId: (automatic as Record<string, unknown>).operationId,
-                mode: "checkpoint" as const,
-                capturedAt: restoredFrom,
-              }
-            : null;
         return { committed: true, lease: mapLeaseRow(updated[0]), restoredNotice };
       }),
   );
@@ -53032,26 +53036,17 @@ export async function commitWarmingToWarm(
   if (outcome.committed && restoredNotice) {
     // Its own transaction, after the commit: appending locks every member's
     // session row, and this commit already holds the lease row, which
-    // recovery authorization takes after its own session row. Best-effort:
-    // the verified restore must never be undone for a notice.
+    // recovery authorization takes after its own session row. The verified
+    // restore must never be undone for a notice: a failed write leaves the
+    // durable pending flag, and the next turn delivers it.
     try {
-      await withRlsContext(
-        db,
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-        async (scopedDb) =>
-          await scopedDb.transaction(async (txRaw) => {
-            const tx = txRaw as unknown as Database;
-            await withCompleteSandboxGroupScope(tx, () =>
-              appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
-                type: "sandbox.recovery.selected",
-                payload: restoredNotice,
-              }),
-            );
-          }),
-      );
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+      });
     } catch (error) {
-      // The model's restore receipt is durable; only the person's notice is lost.
-      console.warn("sandbox restore: older-save notice write failed (restore unaffected)", {
+      console.warn("sandbox restore: older-save notice write failed; retried on the next turn", {
         sandboxGroupId: input.sandboxGroupId,
         operationId: restoredNotice.operationId,
         error: error instanceof Error ? error.message : String(error),
@@ -53059,6 +53054,104 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/**
+ * Writes the "files were restored from an older save" notice of a verified
+ * automatic restore to every chat sharing the box, exactly once. The warm
+ * commit records it as pending on the lease's recovery marker; this appends
+ * it and clears that flag in one transaction (sessions locked before the
+ * lease, the canonical order), so concurrent or repeated calls write it once.
+ * Called right after the commit and again at each turn start, so a write that
+ * failed is retried rather than lost. Returns whether this call wrote it.
+ */
+export async function deliverPendingSandboxRestoreNotice(
+  db: Database,
+  input: { accountId: string; workspaceId: string } & (
+    | { sandboxGroupId: string; sessionId?: undefined }
+    | { sessionId: string; sandboxGroupId?: undefined }
+  ),
+): Promise<boolean> {
+  const pendingIn = (resumeState: Record<string, unknown> | null | undefined) => {
+    const marker = resumeState?.opengeniAutomaticCheckpointRecovery as
+      | Record<string, unknown>
+      | undefined;
+    return marker &&
+      typeof marker === "object" &&
+      marker.status === "verified" &&
+      marker.noticePending === true &&
+      typeof marker.operationId === "string" &&
+      typeof marker.capturedAt === "string"
+      ? { operationId: marker.operationId, capturedAt: marker.capturedAt }
+      : null;
+  };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        return await withCompleteSandboxGroupScope(tx, async () => {
+          const observed = await tx.execute<{
+            id: string;
+            sandbox_group_id: string;
+            resume_state: Record<string, unknown> | null;
+          }>(
+            input.sandboxGroupId !== undefined
+              ? sql`select id, sandbox_group_id, resume_state from sandbox_leases
+                  where workspace_id = ${input.workspaceId}
+                    and sandbox_group_id = ${input.sandboxGroupId}`
+              : sql`select lease.id, lease.sandbox_group_id, lease.resume_state
+                  from sandbox_leases lease
+                  join sessions session
+                    on session.workspace_id = lease.workspace_id
+                   and session.sandbox_group_id = lease.sandbox_group_id
+                  where session.workspace_id = ${input.workspaceId}
+                    and session.id = ${input.sessionId}
+                  limit 1`,
+          );
+          const lease = observed[0];
+          if (!lease || !pendingIn(lease.resume_state)) return false;
+          const sessionIds = (
+            await tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.sandboxGroupId, lease.sandbox_group_id),
+                ),
+              )
+              .orderBy(asc(schema.sessions.id))
+          ).map((session) => session.id);
+          await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionIds,
+          });
+          const locked = await tx.execute<{ resume_state: Record<string, unknown> | null }>(sql`
+            select resume_state from sandbox_leases where id = ${lease.id} for update
+          `);
+          const pending = pendingIn(locked[0]?.resume_state);
+          if (!pending) return false;
+          await appendSessionEventToSandboxGroup(tx, input.workspaceId, lease.sandbox_group_id, {
+            type: "sandbox.recovery.selected",
+            payload: {
+              operationId: pending.operationId,
+              mode: "checkpoint",
+              capturedAt: pending.capturedAt,
+            },
+          });
+          await tx.execute(sql`
+            update sandbox_leases
+            set resume_state = resume_state #- '{opengeniAutomaticCheckpointRecovery,noticePending}',
+                updated_at = now()
+            where id = ${lease.id}
+          `);
+          return true;
+        });
+      }),
+  );
 }
 
 /** The drain's stop notice already told the people in the chat that changes
@@ -59007,6 +59100,10 @@ export async function confirmDrainCold(
   backgroundCommandEvents?: SessionEvent[];
   /** Committed wakes of sessions waiting on those commands. */
   backgroundCommandWakes?: SessionWorkflowWake[];
+  /** With `captureAbandoned`: a save of this exact claim had published after
+   * all, before this commit. It committed an ordinary saved teardown instead:
+   * no loss, no notice. Carries the save the box now restores from. */
+  capturePublishedBeforeStop?: { archiveRevision: string | null };
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
   const backgroundCommandWakes: SessionWorkflowWake[] = [];
@@ -59190,6 +59287,17 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // The drain stopped the box because its save had not published, but
+        // a slow save of this exact claim can land between that decision and
+        // the stop (or report an error after its store committed). The claim
+        // is still ours (checked above), so a publication on it is this box's
+        // save: commit an ordinary saved teardown. The decision is final here,
+        // under the lease lock; nothing can publish on the claim after it.
+        const capturePublishedBeforeStop =
+          input.captureAbandoned === true && row.archive_capture_published_at !== null;
+        const providerMissingBeforeCapture =
+          input.providerMissingBeforeCapture === true && !capturePublishedBeforeStop;
+        const captureAbandoned = input.captureAbandoned === true && !capturePublishedBeforeStop;
         if (blockerScope) {
           // Enrolled commands are contained only when this drain published the
           // current checkpoint before stopping the box; otherwise the truthful
@@ -59197,7 +59305,7 @@ export async function confirmDrainCold(
           // A pre-0547 enrollment records no reason: settle it as plain loss.
           const reason = row.command_containment_reason;
           const contained =
-            !input.providerMissingBeforeCapture &&
+            !providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
               reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
@@ -59235,15 +59343,14 @@ export async function confirmDrainCold(
         // instead of minting a lost-workspace verdict that would block every
         // later turn of the session. A published box keeps the loss contract.
         const unpublishedWarmingLoss =
-          input.providerMissingBeforeCapture === true &&
+          providerMissingBeforeCapture &&
           current.provider.status === "creating" &&
           current.provider.instanceId !== null &&
           current.provider.instanceId === row.instance_id;
-        const workspaceLost =
-          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
+        const workspaceLost = providerMissingBeforeCapture && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
-          input.captureAbandoned !== true &&
+          !captureAbandoned &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59349,7 +59456,7 @@ export async function confirmDrainCold(
                         now,
                         input.providerMaxRemainingLifetimeMs,
                       ),
-                      ...(input.captureAbandoned === true
+                      ...(captureAbandoned
                         ? {
                             captureAbandoned: true as const,
                             ...(input.captureAbandonedNotice
@@ -59434,12 +59541,7 @@ export async function confirmDrainCold(
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
         }
-        if (
-          rows.length > 0 &&
-          workspaceLost &&
-          input.captureAbandoned === true &&
-          input.captureAbandonedNotice
-        ) {
+        if (rows.length > 0 && workspaceLost && captureAbandoned && input.captureAbandonedNotice) {
           const notice = input.captureAbandonedNotice;
           await withCompleteSandboxGroupScope(tx, () =>
             appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
@@ -59454,6 +59556,13 @@ export async function confirmDrainCold(
         return {
           wentCold: rows.length > 0,
           ...(rows.length > 0 && unpublishedWarmingLoss ? { unpublishedProviderLost: true } : {}),
+          ...(rows.length > 0 && capturePublishedBeforeStop
+            ? {
+                capturePublishedBeforeStop: {
+                  archiveRevision: current.archive.current?.revision ?? null,
+                },
+              }
+            : {}),
         };
       },
     );
