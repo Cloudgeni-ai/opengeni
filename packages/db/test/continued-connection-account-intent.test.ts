@@ -15,10 +15,14 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
   listSessionSystemUpdatesForTurn,
   requestSessionCompaction,
   sendAgentMessageInTransaction,
   submitHumanPromptInTransaction,
+  transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type ClaimSessionWorkForAttemptInput,
@@ -389,7 +393,9 @@ test("a compaction resolves the compacted turn's intent and records it unchanged
   const receipts =
     await shared.admin`select connection_id from turn_connection_authority_snapshots where turn_id=${compaction.turn.id}`;
   expect(receipts.map((r) => r.connection_id)).toEqual([fresh.binding.connectionId]);
-  expect(origin).not.toBe(compaction.turn.id);
+  const [previous] =
+    await shared.admin`select initiating_human_subject_id from session_turns where id=${origin}`;
+  expect(previous!.initiating_human_subject_id).toBe(w.g.subjectId);
 }, 60_000);
 
 test("a compaction after a turn whose intent names someone else resolves no personal accounts", async () => {
@@ -420,5 +426,125 @@ test("a compaction never accepts another person's personal account from a resolv
       from session_turns where id=${compaction.turn.id}`;
   expect(row!.mcp_account_bindings).toEqual([]);
   expect(row!.personal_connection_delegations).toEqual([]);
-  expect(row!.metadata.connectionAccountsUnresolved).toBe(true);
+  expect(row!.metadata.connectionAccountsUnresolved).toEqual({ reason: "owner_mismatch" });
+}, 60_000);
+
+/** Request compaction and claim it, recording whether the resolver was asked. */
+async function compactWithSpy(w: World) {
+  const seen: ConnectionAccountIntent[] = [];
+  await requestSessionCompaction(client.db, w.g.workspaceId!, w.sessionId);
+  const compaction = await claim(w, async (_tx, input) => {
+    seen.push(input.intent);
+    return { mcpAccountBindings: [], personalConnectionDelegations: [] };
+  });
+  expect(compaction.turn.source).toBe("compaction");
+  const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings,
+      personal_connection_delegations from session_turns where id=${compaction.turn.id}`;
+  return { seen, row: row! };
+}
+
+test("a compaction with no started turn resolves no accounts", async () => {
+  const w = await fixture();
+  const { seen, row } = await compactWithSpy(w);
+  expect(seen).toEqual([]);
+  expect(row.connection_account_intent).toBeNull();
+  expect(row.personal_connection_delegations).toEqual([]);
+}, 60_000);
+
+test("a compaction after a turn without an intent resolves no accounts", async () => {
+  const w = await fixture();
+  await submit(w, null);
+  await finish(w, await claim(w));
+  const { seen, row } = await compactWithSpy(w);
+  expect(seen).toEqual([]);
+  expect(row.connection_account_intent).toBeNull();
+  expect(row.mcp_account_bindings).toEqual([]);
+}, 60_000);
+
+test("a compaction in a private chat lends only its owner's personal accounts", async () => {
+  // Another member's turn is the latest, and the chat is now private to its
+  // owner: the compaction resolves shared accounts only.
+  const userId = `compaction-owner-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Compaction owner",
+  });
+  const grant = access.workspaceGrants.find(
+    (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+  )!;
+  const settings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+  });
+  if (!settings.enabled) {
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: settings.version,
+      operationId: crypto.randomUUID(),
+    });
+  }
+  const g = { ...grant, subjectId };
+  const session = await createSession(client.db, {
+    accountId: g.accountId,
+    workspaceId: g.workspaceId!,
+    initialMessage: "Work",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId },
+    tools: [{ kind: "mcp", id: "notes" }],
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const w: World = { g, sessionId: session.id };
+  const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  await transitionSessionVisibility(client.db, {
+    workspaceId: g.workspaceId!,
+    sessionId: session.id,
+    actorSubjectId: subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `visibility-${crypto.randomUUID()}`,
+  });
+  const member = `member-${crypto.randomUUID()}`;
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update session_turns set initiating_human_subject_id = ${member},
+      connection_account_intent = ${tx.json(intentOf(member))} where id = ${origin}`;
+  });
+  const { seen } = await compactWithSpy(w);
+  expect(seen).toEqual([{ version: 1, principal: { kind: "none" }, selections: [] }]);
+}, 60_000);
+
+test("a compaction never borrows a credential-restricted turn's accounts", async () => {
+  const w = await fixture();
+  const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update session_turns set initiator_context = initiator_context
+      || '{"credentialRestriction":"developer_setup"}'::jsonb where id = ${origin}`;
+  });
+  const { seen, row } = await compactWithSpy(w);
+  expect(seen).toEqual([]);
+  expect(row.personal_connection_delegations).toEqual([]);
+}, 60_000);
+
+test("a compaction never borrows an external link turn's accounts", async () => {
+  const w = await fixture();
+  const origin = await startedTurnWithIntent(w, intentOf(w.g.subjectId));
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`insert into external_link_turn_authorities
+      (turn_id, account_id, workspace_id, session_id, link_id, link_revision, canonical_snapshot, source_kind)
+      values (${origin}, ${w.g.accountId}, ${w.g.workspaceId!}, ${w.sessionId},
+        ${crypto.randomUUID()}, 1, ${tx.json({})}, 'direct')`;
+  });
+  const { seen, row } = await compactWithSpy(w);
+  expect(seen).toEqual([]);
+  expect(row.personal_connection_delegations).toEqual([]);
 }, 60_000);

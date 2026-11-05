@@ -301,7 +301,10 @@ test.skipIf(!realDb)(
     });
     expect(await w.bound(compaction.turn.id)).toEqual([]);
     expect(await w.delegations(compaction.turn.id)).toEqual([]);
-    expect((await w.metadata(compaction.turn.id)).connectionAccountsUnresolved).toBe(true);
+    // Undefined relation: the class and SQLSTATE are kept, never the message.
+    expect((await w.metadata(compaction.turn.id)).connectionAccountsUnresolved).toEqual(
+      expect.objectContaining({ reason: "resolution_failed", sqlState: "42P01" }),
+    );
   },
   120_000,
 );
@@ -326,7 +329,25 @@ test.skipIf(!realDb)(
     expect(await w.delegations(compaction.turn.id)).toEqual([]);
     expect(await w.bound(compaction.turn.id)).toEqual([]);
     expect(await w.receipts(compaction.turn.id)).toEqual([]);
-    expect((await w.metadata(compaction.turn.id)).connectionAccountsUnresolved).toBe(true);
+    expect((await w.metadata(compaction.turn.id)).connectionAccountsUnresolved).toEqual({
+      reason: "owner_mismatch",
+    });
+  },
+  120_000,
+);
+
+test.skipIf(!realDb)(
+  "a compaction after a compaction keeps the same accounts and tool list",
+  async () => {
+    const w = await world();
+    const connection = await w.connect(w.alice);
+    const { active } = await finishedTurn(w);
+    const first = await w.compact();
+    await w.finish(first);
+
+    const second = await w.compact();
+    expect(await w.bound(second.turn.id)).toEqual([connection]);
+    expect(await w.toolList(second.turn.id)).toEqual(await w.toolList(active.turn.id));
   },
   120_000,
 );

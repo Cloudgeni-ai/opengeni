@@ -681,18 +681,24 @@ does not interrupt it; maintenance records its terminal compaction result and
 completes normally, then the already-admitted Steer is the next runnable work.
 
 That maintenance execution continues the latest started turn, so its claim
-resolves that turn's connection account intent again exactly as an internal
-update continuing the turn would (see `docs/remote-mcp-credentials.md`). The
-compaction request therefore carries the person's current personal and
-connector tools, the same tool list as the turn before it, and keeps that
-turn's cached prompt prefix. A picked account that can no longer be used leaves
-its connector out and is recorded in `connectionAccountGaps`; an intent naming
-someone other than that turn's person resolves shared accounts only. Account
-resolution never blocks maintenance: if it fails, the claim rolls back only its
-savepoint, records `connectionAccountsUnresolved` in the turn's internal
-metadata, and compacts with the session's shared tools. A session with no
-started turn, or a turn accepted before account intent existed, compacts
-without connection accounts.
+resolves that turn's connection account intent again, like an internal update
+continuing the turn (see `docs/remote-mcp-credentials.md`). The compaction
+request therefore carries the person's current account-routed connector tools
+and delegation-based personal tools (personal GitHub, personal connectors), the
+same ones as the turn before it, and keeps that turn's cached prompt prefix. A
+picked account that can no longer be used leaves its connector out and is
+recorded in `connectionAccountGaps`. An intent naming someone other than that
+turn's person, or, in a private chat, someone other than its owner, resolves
+shared accounts only. A turn whose authority an internal update could not
+borrow (an external link's turn, or one under a credential restriction such as
+developer setup) gives the compaction no connection accounts. Unlike an internal
+update, account resolution never fails the claim: on any error, or if the
+resolver offers a personal account that person may not lend, the claim rolls
+back only its savepoint, records `connectionAccountsUnresolved` (reason, error
+class and SQLSTATE, never the message) in the turn's internal metadata, which
+the worker logs as a warning, and compacts with the session's shared tools. A
+session with no started turn, or a turn accepted before account intent existed,
+compacts without connection accounts.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated
