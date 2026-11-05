@@ -440,7 +440,7 @@ function validateMeasurement(
   if (measurement.unit !== budget.unit) {
     errors.push(`${key} measurement unit must be ${budget.unit}`);
   }
-  const minimumSamples = budget.unit === "bytes" ? 1 : 100;
+  const minimumSamples = budget.unit === "bytes" ? 1 : budget.minimumSamples;
   if (
     !Number.isInteger(measurement.sampleCount) ||
     (measurement.sampleCount as number) < minimumSamples

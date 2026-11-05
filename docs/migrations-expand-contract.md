@@ -247,7 +247,8 @@ personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check, and 1101 granted it and
-removed that check. 1002 created the
+removed that check. 0988 created the queued-turn hold summary withheld, with
+the same caller check, and 1274 granted it and removed the check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
 inference change function withheld the same way, and 1210 granted it. 1091

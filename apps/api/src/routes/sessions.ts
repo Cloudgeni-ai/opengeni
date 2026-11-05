@@ -243,7 +243,9 @@ import {
   setSessionPin,
   SessionAttentionVersionConflictError,
   SessionArchiveBlockedError,
+  SessionArchiveBusyError,
   SessionArchiveFinalError,
+  SessionArchiveRestoreRootError,
   SessionPinVersionConflictError,
   SessionArchivedPinError,
   SessionPinAccessError,
@@ -2532,10 +2534,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  // Archive a chat for everyone (one-way once its short undo window ends), or
-  // undo that within the window with archived: false. mode, confirmPause,
-  // expectedVersion and clientEventId are accepted for older clients and
-  // ignored: every Archive is the same, and repeating one changes nothing.
+  // Archive a chat for everyone, or bring it back with archived: false (an
+  // exact undo within the short window; later, stored content is restored in
+  // the background). Archive refuses while a sub-chat is in use unless the
+  // caller confirms it. mode, confirmPause, expectedVersion and clientEventId
+  // are accepted for older clients and ignored.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2563,6 +2566,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         {
           archived: parsed.archived,
+          ...(parsed.confirmActiveSubChats
+            ? { confirmActiveSubChats: parsed.confirmActiveSubChats }
+            : {}),
           personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         },
       );
@@ -2590,8 +2596,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (error instanceof SessionArchiveBlockedError) {
         return c.json({ code: error.code, message: error.message, blockers: error.blockers }, 409);
       }
-      if (error instanceof SessionArchiveFinalError) {
+      if (error instanceof SessionArchiveFinalError || error instanceof SessionArchiveBusyError) {
         return c.json({ code: error.code, message: error.message }, 409);
+      }
+      if (error instanceof SessionArchiveRestoreRootError) {
+        return c.json(
+          { code: error.code, message: error.message, rootSessionId: error.rootSessionId },
+          409,
+        );
       }
       return commandConflictResponse(c, error);
     }

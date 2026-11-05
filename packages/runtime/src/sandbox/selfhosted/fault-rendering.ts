@@ -21,7 +21,7 @@ import {
   SelfhostedControlError,
   START_CONFIRMED_DETAIL_KEY,
 } from "./control-rpc";
-import { processStartFailureNullDeviceNote } from "./process-start-failure";
+import { MISSING_SHELL_NOTE, processStartFailureMachineNote } from "./process-start-failure";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -313,15 +313,18 @@ function renderConnectedMachineFault(
   }
 
   if (error.processStartFailed) {
-    const nullDevice = processStartFailureNullDeviceNote(error.message);
+    const note = processStartFailureMachineNote(error.message);
     return assemble(error, {
       headline: "the machine could not start the program",
       happened: `the machine could not start a process: ${error.message}`,
       layer: "the machine's operating system — not your command",
       preserved: "nothing ran; the command never started.",
-      tryNext: `${
-        nullDevice ? `${nullDevice}, so the machine` : "the machine likely"
-      } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it; for a workspace machine, retrying may restart it, and a new chat gets a fresh one.`,
+      tryNext:
+        note === MISSING_SHELL_NOTE
+          ? `${note}, so the machine cannot start programs, and a restart does not bring the shell back. Stop running commands and tell the person: a connected machine needs /bin/sh put back; for a workspace machine, a new chat gets a fresh one.`
+          : `${
+              note ? `${note}, so the machine` : "the machine likely"
+            } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it; for a workspace machine, retrying may restart it, and a new chat gets a fresh one.`,
     });
   }
 

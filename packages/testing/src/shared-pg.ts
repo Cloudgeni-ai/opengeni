@@ -1225,8 +1225,7 @@ export async function acquireSharedTestDatabase(
 /**
  * Grant the runtime role what a migration withholds until the previous
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES):
- * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
- * summary (0988), the held browser
+ * EXECUTE on the personal-machine owner lookup (0978), the held browser
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the organization vault list (1218), the names-only
@@ -1241,8 +1240,6 @@ export async function grantDeferredRuntimeAccess(
   const grantee = `"${role.replaceAll('"', '""')}"`;
   await admin.unsafe(`
     GRANT EXECUTE ON FUNCTION opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)
-      TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.summarize_queued_turns_by_hold()
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)
       TO ${grantee};

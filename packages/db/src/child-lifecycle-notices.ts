@@ -16,6 +16,7 @@ import {
   type HumanInputQuestion,
   secretUseApprovalIdFromQuestionId,
 } from "@opengeni/contracts";
+import { capacityWaitProviderName, capacityWaitResetText } from "./capacity-wait-attention";
 
 /**
  * Child lifecycle notices (`child_requires_action`,
@@ -279,7 +280,13 @@ export function childWaitingCapacitySummary(
   childSessionId: string,
   payload: ChildWaitingCapacityPayload,
 ): string {
-  return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
+  const name = capacityWaitProviderName(payload.provider);
+  // Rows from before `resetsAt` existed keep their original wording.
+  if (payload.resetsAt === undefined) {
+    return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
+  }
+  const reset = capacityWaitResetText(payload.resetsAt);
+  return `Worker ${childSessionId} is blocked: no ${name} subscription has capacity ${reset ? `until about ${reset}` : "and no reset time is known"}. Its turn resumes by itself then. To continue sooner, switch the worker to a model with capacity with session_set_model; its waiting turn then continues on that model.`;
 }
 
 export function childProgressSummary(

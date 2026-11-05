@@ -7,6 +7,7 @@ import { labelReasoningEffort } from "../../../model-policy";
 import { ModelName } from "../../../components/model-mark";
 import { PreferenceToggleRow } from "../transcription-settings";
 import { SessionStatus as SessionStatusBadge } from "../../../components/session-status";
+import { sessionDisplayStatus } from "../../../session-status-model";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
 import { MACHINES_SESSION_POLL_MS } from "../../../machines";
 import { useNavigate } from "../../lib/navigation";
@@ -207,7 +208,7 @@ export function SessionInspector(props: {
                 <InfoRow label="ID" value={<CopyableMono value={props.session.id} />} />
                 <InfoRow
                   label="Status"
-                  value={<SessionStatusBadge status={props.session.status} />}
+                  value={<SessionStatusBadge status={sessionDisplayStatus(props.session)} />}
                 />
                 <InfoRow
                   label="Workflow"

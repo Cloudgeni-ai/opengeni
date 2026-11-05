@@ -708,6 +708,7 @@ fn launchd_environment(path: &Path) -> Result<std::collections::BTreeMap<String,
     let output = Command::new("/usr/bin/plutil")
         .args(["-convert", "json", "-o", "-"])
         .arg(path)
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output()
         .map_err(|error| format!("read {}: {error}", path.display()))?;
     if !output.status.success() {
@@ -804,6 +805,7 @@ fn activate_launchd_definition_with_capture(
 fn capture_launchctl_activation(args: &[&str]) -> Result<Option<String>, String> {
     let output = Command::new("launchctl")
         .args(args)
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output()
         .map_err(|error| format!("could not run launchctl: {error}"))?;
     if output.status.success() {
@@ -1132,6 +1134,7 @@ fn capture(tool: &str, args: &[&str]) -> Result<String, String> {
 fn capture_path(tool: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new(tool)
         .args(args)
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output()
         .map_err(|e| format!("could not run {}: {e}", tool.display()))?;
     if out.status.success() {
