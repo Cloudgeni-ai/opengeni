@@ -228,9 +228,20 @@ export type RecordingDiarizer = {
       maxSpeakers?: number | undefined;
       /** Exactly this many speakers, when known. */
       speakers?: number | undefined;
+      /** Windows `scan` already went through, reused rather than scanned again. */
+      cache?: Uint8Array | null | undefined;
       signal?: AbortSignal | undefined;
     },
   ): Promise<RecordingDiarizerResult>;
+  /**
+   * Go through the audio so far of a recording still being made, ahead of
+   * `diarize`, and return what it found to pass back as `cache`: the next
+   * scan and the final `diarize` then only go through what is new.
+   */
+  scan?(
+    audio: RecordingTranscriptionAudio,
+    options: { cache?: Uint8Array | null | undefined; signal?: AbortSignal | undefined },
+  ): Promise<Uint8Array>;
 };
 
 // --- Word alignment --------------------------------------------------------

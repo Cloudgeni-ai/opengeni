@@ -4178,6 +4178,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     "inbound_events",
     "recording_transcript_versions",
     "recordings",
+    "recording_tracks",
+    "recording_chunks",
     "mcp_event_subscriptions",
     "event_source_feeds",
     "sandboxes",
@@ -4277,6 +4279,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4288,6 +4291,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4356,6 +4360,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4379,7 +4384,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     beforeRecordings.privateRoutines = beforeRecordings.privateRoutines.filter(
       (entry) =>
         entry.name !== "list_stalled_recording_work_v1(integer)" &&
-        entry.name !== "list_due_recording_retention_v1(integer)",
+        entry.name !== "list_due_recording_retention_v1(integer)" &&
+        entry.name !== "list_uncompacted_recording_tracks_v1(integer, text)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
   });

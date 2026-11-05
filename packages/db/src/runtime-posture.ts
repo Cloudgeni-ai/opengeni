@@ -60,8 +60,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * register, claim, device count, busy check and ring (1107), the lock-free
  * read of a known external identity (1172), the list of every
  * organization vault wherever it works (1218), the organization's
- * names-only member list (1211) and the Slack agent update sweeper's
- * ids-only inventory of installations that send updates (1153). Each is
+ * names-only member list (1211), the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153) and the
+ * recording compaction sweep's inventory of meeting tracks not yet kept
+ * compact (1240). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -92,6 +94,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const;
 
 /**
@@ -126,6 +129,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, the sweeper finds nothing and sends no update messages.
  * 1224 withholds the organization machine and rig list the same way as the
  * vault list.
+ * 1240 withholds the inventory of meeting tracks not yet kept compact; until
+ * it is granted, existing meetings keep their audio as it is and only new
+ * transcripts keep it compact.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -137,6 +143,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -230,6 +237,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
   "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
   "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
+  "list_uncompacted_recording_tracks_v1(integer, text)": [
+    "recordings",
+    "recording_tracks",
+    "recording_chunks",
+    "recording_transcript_versions",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
