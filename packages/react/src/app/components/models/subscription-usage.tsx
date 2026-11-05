@@ -28,7 +28,7 @@ export function subscriptionWindowSentence(window: SubscriptionWindow, now: numb
     window.resetsAt === null
       ? ""
       : `, ${window.limitReached ? "until" : "resets"} ${formatAbsoluteTime(window.resetsAt, { now })}`;
-  return `${window.label ? `${window.label}: ` : ""}${subscriptionWindowValue(window)}${reset}`;
+  return `${window.label}: ${subscriptionWindowValue(window)}${reset}`;
 }
 
 function windowLevel(window: SubscriptionWindow) {
@@ -108,11 +108,7 @@ export function SubscriptionUsageWindows({
               stack ? "col-span-4 grid grid-cols-subgrid" : "inline-flex gap-1.5",
             )}
           >
-            {window.label || stack ? (
-              <span className={cn("text-fg-muted", stack && "justify-self-end")}>
-                {window.label}
-              </span>
-            ) : null}
+            <span className={cn("text-fg-muted", stack && "justify-self-end")}>{window.label}</span>
             {known || window.limitReached ? (
               <UsageTrack
                 level={level}

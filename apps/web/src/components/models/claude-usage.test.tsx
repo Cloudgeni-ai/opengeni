@@ -94,7 +94,7 @@ test("an account row shows every reported window with its reset", async () => {
   expect(windows[0]).toMatch(/^5h: Limit reached, until .*2099/);
   expect(windows[1]).toMatch(/^Week: 50% left, resets .*Oct 2099/);
 });
-test("an account row shows the week alone: no Fable week, and no 5h on Ultra", async () => {
+test("an account row shows the week alone while the 5h has room, and never a Fable week", async () => {
   const value = usage();
   value.windows = [
     { ...value.windows[0]!, usedPercent: 0, status: "allowed" },
@@ -123,7 +123,14 @@ test("an account row shows the week alone: no Fable week, and no 5h on Ultra", a
     await act(async () => root.render(<ClaudeUsageReadout state={state} plan={plan} />));
     expect(labels()).toEqual(["Week"]);
   }
-  // The account page keeps every window the plan has; Ultra has no 5h.
+  // A 5h that holds the account back is listed, on Ultra too.
+  value.windows[0] = { ...value.windows[0]!, usedPercent: 100, status: "rejected" };
+  await act(async () =>
+    root.render(<ClaudeUsageReadout state={{ ...state, value }} plan="claude_max_20x" />),
+  );
+  expect(labels()).toEqual(["5h", "Week"]);
+  value.windows[0] = { ...value.windows[0]!, usedPercent: 0, status: "allowed" };
+  // The account page keeps every window; Ultra's 5h only while it holds it back.
   const now = Date.parse("2026-09-30T14:00:00Z");
   expect(claudeUsageReadings(value, now, "claude_max_20x").map((item) => item.label)).toEqual([
     "Week",

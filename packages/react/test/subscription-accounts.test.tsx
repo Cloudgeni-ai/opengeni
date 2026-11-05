@@ -216,14 +216,17 @@ describe("the shared usage display", () => {
       const rendered = [
         ...container.querySelectorAll<HTMLElement>('[data-slot="subscription-usage-window"]'),
       ];
-      // Ultra's refused 5h reads as the account's limit, without a 5h label.
-      expect(rendered).toHaveLength(1);
-      expect(rendered[0]!.className).toContain("grid-cols-subgrid");
-      expect(rendered[0]!.getAttribute("aria-label")).toMatch(/^Limit reached, until /);
-      expect(rendered[0]!.textContent).not.toContain("5h");
+      // Ultra's refused 5h holds the account back, so it is listed, labelled.
+      expect(rendered.map((window) => window.getAttribute("aria-label"))).toEqual([
+        expect.stringMatching(/^5h: Limit reached, until /),
+        expect.stringMatching(/^Week: 29% left, resets /),
+      ]);
       expect(rendered[0]!.textContent).not.toContain("until");
-      // Every line has the same four cells, so the columns line up.
-      expect(rendered[0]!.children).toHaveLength(4);
+      // Every line is a subgrid with the same four cells, so the columns line up.
+      for (const line of rendered) {
+        expect(line.className).toContain("grid-cols-subgrid");
+        expect(line.children).toHaveLength(4);
+      }
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -250,7 +253,7 @@ describe("account list rows", () => {
     expect(labels(subscriptionListWindows("claude", "claude_max_5x", windows))).toEqual(["Week"]);
   });
 
-  test("Ultra never lists a 5h window; other plans only while it holds the account back", () => {
+  test("the 5h is listed only while it holds the account back, on every plan", () => {
     const roomy = claude([
       ["five_hour", 0],
       ["seven_day", 100],
@@ -267,16 +270,21 @@ describe("account list rows", () => {
       "Week",
     ]);
     expect(labels(subscriptionListWindows("claude", "claude_max", near))).toEqual(["5h", "Week"]);
-    expect(labels(subscriptionListWindows("claude", "claude_max_20x", near))).toEqual(["Week"]);
-    // A spent week already says the account is limited: nothing is added.
-    const spent = claude([
-      ["five_hour", 100],
-      ["seven_day", 100],
+    expect(labels(subscriptionListWindows("claude", "claude_max_20x", near))).toEqual([
+      "5h",
+      "Week",
     ]);
-    expect(labels(subscriptionListWindows("claude", "claude_max_20x", spent))).toEqual(["Week"]);
+    const refused = claude([
+      ["five_hour", 100],
+      ["seven_day", 71],
+    ]);
+    expect(labels(subscriptionListWindows("claude", "claude_ultra", refused))).toEqual([
+      "5h",
+      "Week",
+    ]);
   });
 
-  test("the plan's windows: Ultra drops 5h everywhere, an unknown Max tier keeps it", () => {
+  test("the plan's windows: Ultra's 5h only while it holds the account back, Max keeps it", () => {
     const windows = claude([
       ["five_hour", 10],
       ["seven_day", 10],
@@ -290,6 +298,14 @@ describe("account list rows", () => {
       "5h",
       "Week",
       "Fable week",
+    ]);
+    const near = claude([
+      ["five_hour", 92],
+      ["seven_day", 10],
+    ]);
+    expect(labels(subscriptionPlanWindows("claude", "claude_max_20x", near))).toEqual([
+      "5h",
+      "Week",
     ]);
   });
 

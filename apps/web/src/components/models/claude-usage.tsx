@@ -178,8 +178,8 @@ export function useClaudeUsage({
 
 /**
  * The windows Claude reported for this account, labelled the shared way.
- * Only reported windows the plan has: Ultra has no 5-hour limit, so it shows
- * none even when a reading still carries one.
+ * Only reported windows, and on Ultra (sold without a 5-hour limit) the 5h
+ * only while it holds the account back.
  */
 export function claudeUsageWindows(
   value: ClaudeSubscriptionUsage | null,
@@ -248,7 +248,7 @@ export function claudeUsageReportedAt(
   );
 }
 
-/** The usage cell of an account row; `plan` hides windows the plan doesn't have. */
+/** The usage cell of an account row: the week, and the 5h only while it holds the account back. */
 export function ClaudeUsageReadout({
   state,
   plan,
@@ -281,7 +281,7 @@ export function ClaudeUsage({
   onReconnect,
 }: {
   state: ClaudeUsageState;
-  /** The account's plan: a window it doesn't have (Ultra's 5h) is not shown. */
+  /** The account's plan: Ultra's 5h shows only while it holds the account back. */
   plan?: string | null | undefined;
   onReconnect?: (() => void) | undefined;
 }) {

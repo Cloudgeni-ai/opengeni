@@ -166,9 +166,9 @@ export type SubscriptionAccountUsageView = {
 };
 
 /**
- * The reading as the provider reported it: every window the plan has,
- * labelled, never completed. A window the plan doesn't have (Ultra's 5h) is
- * not shown, but a refusal on it still reads as a limit in words.
+ * The reading as the provider reported it: every window, labelled, never
+ * completed. A window the plan keeps quiet (Ultra's 5h) shows only while it
+ * holds the account back; limits are read from every window.
  */
 export function subscriptionAccountUsage(
   provider: string,

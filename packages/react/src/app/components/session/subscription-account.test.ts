@@ -343,7 +343,7 @@ describe("usage readings", () => {
     expect(pro.windows.map((window) => [window.label, window.leftPercent])).toEqual([["Week", 60]]);
   });
 
-  test("an Ultra plan never shows a 5h window, but a refusal on it still reads as a limit", () => {
+  test("an Ultra plan shows its 5h only while it holds the account back", () => {
     const now = Date.parse("2026-11-05T14:00:00Z");
     const ultra = account("ultra", {
       plan: "claude_max_20x",
@@ -362,19 +362,28 @@ describe("usage readings", () => {
       state({ accounts: [ultra, max], current: ultra }),
       now,
     );
-    expect(content.usage.windows?.map((window) => window.label)).toEqual(["Week"]);
-    expect(content.usage.message).toStartWith("Limit reached until ");
+    // Refused on its 5h: the window says so itself, labelled.
+    expect(content.usage.windows?.map((window) => window.label)).toEqual(["5h", "Week"]);
+    expect(content.usage.message).toBeUndefined();
     expect(content.tone).toBe("warn");
-    // A bare Max (Max or Ultra) keeps the 5h window its reading reports.
+    // With room in its 5h, an Ultra row shows its week alone; a bare Max
+    // (Max or Ultra) keeps the 5h window its reading reports.
+    const roomy = account("roomy", {
+      plan: "claude_max_20x",
+      usage: snapshot([
+        { id: "five_hour", usedPercent: 35, resetsAt: "2026-11-05T21:20:00Z", status: "ok" },
+        { id: "seven_day", usedPercent: 74, resetsAt: "2026-11-09T23:00:00Z", status: "ok" },
+      ]),
+    });
     const rows = subscriptionAccountMenuContent(
-      state({ accounts: [ultra, max], current: null }),
+      state({ accounts: [roomy, ultra, max], current: null }),
       now,
     ).accounts;
     expect(rows.map((row) => row.windows?.map((window) => window.label))).toEqual([
       ["Week"],
       ["5h", "Week"],
+      ["5h", "Week"],
     ]);
-    expect(rows[0]!.usageMessage).toStartWith("Limit reached until ");
   });
 });
 
