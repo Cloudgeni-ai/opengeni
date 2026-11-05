@@ -2009,9 +2009,9 @@ A workspace Pause leaves the waiter intact and lets the workflow close;
 Resume's revisioned `signalWithStart` wake reconstructs it. Session and workspace Resume, and a
 Steer that automatically resumes a paused branch, register that wake for
 every unblocked session with a shared-core waiter, a legacy waiter, or an
-active turn still `waiting_capacity`. While the waiter is
-effectively paused (direct, ancestor or workspace Pause under the override
-algebra), capacity changes still advance its wake revision but deliver neither
+active turn still `waiting_capacity`. While a waiter is
+effectively paused (only a workspace Pause keeps one; a direct or ancestor
+session Pause released it), capacity changes still advance its wake revision but deliver neither
 the typed capacity wake nor a generic session wake, so a paused waiter starts
 no workflow run per capacity change; the run Resume starts sees the unobserved
 revision as an immediately due check. Steer, cancellation, and changes to the
