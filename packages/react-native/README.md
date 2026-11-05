@@ -58,6 +58,20 @@ still show.
 <NativeSessionScreen controller={controller} agentSignals={false} />
 ```
 
+To lead the live "Working" / "Waiting" / "Paused" turn row with your own mark,
+such as a small animated mascot, pass `renderLiveMark` to `NativeSessionScreen`
+(or `MessageTimeline`). It receives the row's state (`working`, `waiting` with
+`waitingOn: "you"` for an approval or question, or `paused`) and is no longer
+drawn once the turn settles. Keep it about 20 pt tall; it is hidden from
+screen readers. The default is no mark.
+
+```tsx
+<NativeSessionScreen
+  controller={controller}
+  renderLiveMark={(state) => <Mascot state={state.kind} />}
+/>
+```
+
 ### Labels and languages
 
 The native components read their text from the same catalog as

@@ -182,5 +182,24 @@ describe("persistent stock conversation controller", () => {
         expect(await goalPill(page).count()).toBe(0);
       });
     }, 60_000);
+
+    test(`a host mark leads the live turn row at ${width}px`, async () => {
+      await open(width, "scenario=running&mark=1", async (page) => {
+        const slot = page.locator("[data-og-live-mark]");
+        await slot.waitFor();
+        expect(await slot.getAttribute("data-og-live-mark")).toBe("working");
+        expect(await slot.getAttribute("aria-hidden")).toBe("true");
+        expect(await page.locator('[data-demo-mark="working"]').count()).toBe(1);
+        const mark = await slot.boundingBox();
+        const row = await page.locator("[data-og-exchange-status]").boundingBox();
+        // Leading edge of the row, no taller than the row's line.
+        expect(mark!.height).toBeLessThanOrEqual(20);
+        expect(mark!.x).toBeLessThan(row!.x);
+      });
+      await open(width, "scenario=running", async (page) => {
+        await page.locator("[data-og-exchange-status]").waitFor();
+        expect(await page.locator("[data-og-live-mark]").count()).toBe(0);
+      });
+    }, 60_000);
   }
 });

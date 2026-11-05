@@ -106,6 +106,35 @@ Queued messages, approvals and the agent's questions still show. React Native's
 `NativeSessionScreen` takes the same `agentSignals={false}` to hide its goal,
 agents and commands chips.
 
+## Lead the live turn row with your mark
+
+While the agent works, the turn shows one live row, such as "Working · 8s".
+`turnSummary.renderLiveMark` puts your own small mark, for example an animated
+mascot, at the start of that row. It is called with the row's state:
+`{ kind: "working" }`, `{ kind: "waiting", waitingOn: "you" }` when the wait
+needs the reader (an approval or a question), `{ kind: "waiting" }` for other
+waits, or `{ kind: "paused" }`. The mark goes away when the turn settles. Draw
+it about 20 px tall so it fits the row; it is hidden from screen readers
+because the row's words already say what is happening. By default there is no
+mark.
+
+```tsx
+<SessionConversation
+  baseUrl="/api/opengeni"
+  sessionId={sessionId}
+  timelineProps={{
+    turnSummary: { rolling: true, renderLiveMark: (state) => <Mascot state={state.kind} /> },
+  }}
+/>
+
+// The full chat takes it through conversationProps.timelineProps.
+```
+
+Keep `rolling: true` when you pass `turnSummary`: it selects the per-turn
+presentation that has the live row. On React Native, pass
+`renderLiveMark={(state) => <Mascot state={state.kind} />}` to
+`NativeSessionScreen` or `MessageTimeline`.
+
 ## Keep a conversation across layouts
 
 The default component needs no controller setup. If a conversation moves between

@@ -12,7 +12,8 @@
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
    messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
    `&signals=off` mounts it with `agentSignals: false`, as a product for end
-   users would. */
+   users would. `&mark=1` leads the live turn row with a host mark
+   (`turnSummary.renderLiveMark`). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -22,6 +23,7 @@ import {
   NewConversation,
   SessionConversationView,
   useSessionConversation,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react";
 import { fakeClient, fakeGoal, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
@@ -38,6 +40,7 @@ const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
 const pausedGoal = params.get("goal") === "paused";
 const agentSignals = params.get("signals") !== "off";
+const liveMark = params.get("mark") === "1";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -504,6 +507,13 @@ function PersistentConversationDemo() {
 }
 
 /** A plain host product around the stock component, as a customer would ship it. */
+/** A stand-in for a host's animated mascot at the start of the live turn row. */
+function demoLiveMark(state: TurnSummaryLiveMarkState) {
+  return (
+    <span data-demo-mark={state.kind} className="size-4 animate-pulse rounded-full bg-og-accent" />
+  );
+}
+
 function HostApp() {
   const nav = ["Inbox", "Tickets", "Customers", "Billing"];
   const narrow = window.innerWidth < 640;
@@ -578,6 +588,16 @@ function HostApp() {
               defaultSessionId={scenario === "empty" ? null : SELECTED}
               conversationProps={{
                 agentSignals,
+                ...(liveMark
+                  ? {
+                      timelineProps: {
+                        turnSummary: {
+                          rolling: true,
+                          renderLiveMark: demoLiveMark,
+                        },
+                      },
+                    }
+                  : {}),
                 ...(oneSend ? { composerOptions: { busySend: "steer" as const } } : {}),
               }}
             />
