@@ -1,6 +1,7 @@
 # 31. An archive stores its chunks in packs
 
-Status: Accepted, 2026-11-04. Amends
+Status: Accepted, 2026-11-04; amended 2026-11-05 to drop the forced
+migration of chunk objects into packs. Amends
 [7](0007-never-delete-the-only-good-copy.md) (how a stored copy is proven),
 [25](0025-pointers-in-the-control-service-and-objects-by-day.md) (what a
 name is), [28](0028-stored-objects-carry-their-hour.md) (what an archive
@@ -89,11 +90,28 @@ The cost is per object, not per byte. Fewer, larger objects fix it.
   of an earlier release never deletes a pack a copy names.
 - **What was stored before stays readable and sweepable.** A reference
   without `pack` reads its chunk object as now, and a sweep lists and
-  deletes `chunks/` and `manifests/` as now. An archive treats a chunk
-  object it would reuse like a sparse pack: it stores it again in its
-  packs from the local bytes, unless the image names it. So after one
-  archive with its files local, a sandbox's copy names only packs and its
-  image's chunks, and the old objects become garbage.
+  deletes `chunks/` and `manifests/` as now.
+- **A chunk object is a pack of one chunk.** A copy that names it names
+  all of it, so under the half rule it is reused where it is, never
+  stored again. New and changed chunks go into packs. The old objects
+  leave only as a sandbox's data changes and the sweep takes the ones no
+  copy names any more.
+
+  This replaces a forced migration, which stored a chunk object again in
+  packs from the local bytes at a sandbox's next archive. That freed the
+  old objects within about two hours only on a store that frees bytes
+  when an object is deleted. Garage does not: it frees a block only when
+  each node's resync worker deletes it, later. On the three-node store
+  above (replication 3), block deletes ran at 0.1 to 1 a second on a node
+  bound by its drive, 6 to 14 on another, and 0 on a third whose worker
+  was busy fetching blocks it lacked. Meanwhile about 25 new blocks a
+  second arrived at peak, 5 to 6 GB an hour per node. Each node already
+  held 90 to 176 GB of garbage not yet freed, and had 23 to 86 GB free.
+  Storing every sandbox again would add about the live bytes (225 GiB)
+  on every node before any old block was freed. At 1 MiB blocks that is
+  about 230,000 block deletes per node: about 4.5 hours at 14 a second,
+  64 hours at 1 a second, and 27 days at 0.1 a second. It would fill
+  every disk first.
 
 ## Why it is safe
 
@@ -148,24 +166,15 @@ before the sweep began. ADR 25, 28 and 29's argument holds with "pack" for
   at most what was replaced, since a pack falls below half only once more
   than half of it was replaced. Packs an image names are kept by the
   image, as its chunks are now.
-- **The first archive after the change stores a sandbox again in full**,
-  from its local files: once, then only what changes. A sandbox asleep
-  stays as it is until it next archives. A woken memory image whose
-  chunks are not all local yet reuses those that are not.
-- **Migration needs little extra space.** A sandbox's old objects become
-  garbage once its new pointer publishes. Their periods ended long before,
-  so the next hourly sweep takes them: about two hours at most, counting
-  the sweep's own run. So the extra space at any moment is about the full
-  copies re-stored in the last two hours, not the whole store. If each
-  sandbox archives about once a day, that is about 2/24 of the live bytes,
-  about 22 GiB of the 260 GiB above; it is the whole store only if every
-  sandbox archives within the same two hours.
-- **The old objects go once, as the sweep takes them**: about 3.8 million
-  objects on the store above, as sandboxes archive. With deletes one key
-  at a time, 16 in flight, at 0.1 to 1.2 s each, that is 13 to 160
-  deletes a second: about 7 to 80 hours of sweeping in total, spread over
-  the days it takes every sandbox to archive again, and faster as the
-  store's queues drain.
+- **The change needs no extra space.** An archive after it stores only
+  what changed, as before, now in packs. Nothing is stored twice to move
+  it, so the store grows no faster than it did.
+- **The old objects go slowly, as data changes.** The store above holds
+  about 3.8 million of them. Each goes once no copy names it any more,
+  when the chunk it holds is replaced, the way garbage went before. A
+  sandbox whose data rarely changes keeps its chunk objects for as long
+  as it lives, and reading those still costs a GET per chunk. Object
+  counts fall to the figures above only as old sandboxes change or end.
 - **Range reads on Garage read whole blocks.** A 68 KB range reads the one
   or two 1 MiB blocks around it from disk. A wake reads a pack's chunks
   in order, so a node's page cache serves most of that, but a cold read
