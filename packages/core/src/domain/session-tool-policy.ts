@@ -333,11 +333,6 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
-  /**
-   * Whether a person can answer the turn being projected (see the worker's
-   * `turnHasHumanRecipient`). Omitted projects a turn a person started.
-   */
-  humanRecipient?: boolean;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -551,9 +546,6 @@ export function sessionEffectiveToolProjectionInput(
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, {
           sandboxAttached: sandboxAvailable,
-          ...(context.humanRecipient === undefined
-            ? {}
-            : { humanRecipient: context.humanRecipient }),
         })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)

@@ -294,7 +294,9 @@ Every built-in tool and prompt section follows what the session can use, so
 without a shared workspace; `request_human_input` with the secret kind only
 under `secrets` and Skill reviews only under `skills: "manage"`;
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
-`browser`, `media` or a user-started turn; tool search only when a tool is
+`browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
+on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
+search only when a tool is
 deferred (an `optional` or connection-backed eager server still counts as
 deferred); no Skill index without Skills. Sessions with a feature get the same
 prompt as before. Saved workspace defaults and schedules keep notifications
