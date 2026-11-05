@@ -261,6 +261,25 @@ describe("an absent feature only omits its own text", () => {
   }
 });
 
+describe("the setup-card sentence follows capabilities that show a card", () => {
+  const base = MODULAR_PARITY_CASES["none-with-features/docker"]!;
+  const config = base.agentConfig as ResolvedAgentConfig;
+  const render = (capabilities: Partial<ResolvedAgentConfig["capabilities"]>) =>
+    inspectPersistentAgentInstructions(testSettings(PARITY_SETTINGS), {
+      ...base,
+      agentConfig: {
+        ...config,
+        capabilities: { ...config.capabilities, workspaceConnectors: false, ...capabilities },
+      },
+    }).composed;
+  test("a secret question shows one only with the question tool", () => {
+    expect(render({ secrets: true, humanInput: true })).toContain("show its setup card");
+    expect(render({ secrets: true, humanInput: false })).not.toContain("show its setup card");
+    expect(render({ browser: true })).toContain("show its setup card");
+    expect(render({})).toContain("offer the fix in the same reply with the exact next step");
+  });
+});
+
 describe("tool discovery follows the router", () => {
   const options = MODULAR_PARITY_CASES["all/none"]!;
   test("no router without a transport or with tool search off", () => {

@@ -117,14 +117,15 @@ function autonomy(context: AgentPromptContext): string {
   // A setting the person could change in the app is changed here through an
   // app action (confirmed in the chat) whenever the app-action tools may exist.
   // Only a tool shows a setup card: integration setup (workspaceAdmin), or a
-  // connector, browser or secret question the session can use. A card that
-  // a refused tool posts by itself brings its own instructions in the result.
+  // connector, browser or secret question the session can use (a secret
+  // question needs the question tool). A card that a refused tool posts by
+  // itself brings its own instructions in the result.
   const { capabilities } = context;
   const setupCards =
     capabilities.workspaceAdmin ||
     capabilities.workspaceConnectors ||
     capabilities.browser ||
-    capabilities.secrets;
+    (capabilities.secrets && capabilities.humanInput);
   const blockedFix =
     context.capabilities.workspaceAdmin &&
     toolsAvailable(context, ["admin_actions_search", "admin_action_call"])

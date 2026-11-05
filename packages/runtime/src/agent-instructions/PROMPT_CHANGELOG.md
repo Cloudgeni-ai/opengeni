@@ -17,7 +17,7 @@ source, which adds no other text). Nothing was reworded.
   tool surface keeps it.
 - The blocked-tool sentence names a setup card only when the agent has a
   capability whose tools show one (workspace admin, workspace connectors,
-  browser or secrets). A card a refused tool posts by itself carries its own
+  browser, or secrets with the question tool). A card a refused tool posts by itself carries its own
   instructions in that tool's result.
 
 ```text
