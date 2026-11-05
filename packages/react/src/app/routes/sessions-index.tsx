@@ -2190,13 +2190,13 @@ function SessionsIndexRouteContent({
                           : voiceSendBlocker === "agent"
                             ? composerAgent.blocker
                             : voiceSendBlocker !== null &&
-                              composerSendBlockerIsLoading(voiceSendBlocker)
-                            ? "Wait for the chat to finish loading."
-                            : voiceSendBlocker !== null
-                              ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
-                              : personalMachineSelected
-                                ? "Start with a message so personal machine access can attach to an accepted turn."
-                                : null
+                                composerSendBlockerIsLoading(voiceSendBlocker)
+                              ? "Wait for the chat to finish loading."
+                              : voiceSendBlocker !== null
+                                ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
+                                : personalMachineSelected
+                                  ? "Start with a message so personal machine access can attach to an accepted turn."
+                                  : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />

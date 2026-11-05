@@ -94,7 +94,7 @@ export function ComposerAgentChip({
           className={cn(
             "h-8 min-w-0 max-w-[14rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg data-[state=open]:border-border data-[state=open]:bg-surface-2 data-[state=open]:text-fg",
             selection !== null && "border-border bg-surface text-fg",
-            selection?.kind === "error" && "border-danger/40 text-danger",
+            selection?.kind === "error" && "border-danger/50 text-danger",
             className,
           )}
         >
