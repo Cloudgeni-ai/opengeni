@@ -12193,6 +12193,20 @@ export const enrollments = pgTable(
     agentUpdateCompletedAt: timestamp("agent_update_completed_at", {
       withTimezone: true,
     }),
+    /** When the current run of unsuccessful updates first postponed the
+     * update for managed browsers in use; bounds that wait (migration 1270). */
+    agentUpdateBrowsersWaitSince: timestamp("agent_update_browsers_wait_since", {
+      withTimezone: true,
+    }),
+    /** Attempts of the current run for the current target that failed for a
+     * reason other than a busy machine, before the current operation.
+     * Automatic retries back off from it (migration 1270). */
+    agentUpdateFailedAttempts: integer("agent_update_failed_attempts").notNull().default(0),
+    /** The announced time at which an automatic update closes an older
+     * agent's managed browsers; kept through busy refusals (migration 1270). */
+    agentUpdateBrowsersCloseAt: timestamp("agent_update_browsers_close_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -19,6 +19,7 @@ import {
   browserTabDiagnosisError,
   browserRouteError,
   browserCreateInput,
+  agentBrowserClosingNotice,
   withInitialView,
 } from "../src/routes/browser-sessions";
 
@@ -2737,3 +2738,72 @@ async function workingCopyRoutesFixture() {
     await server.stop(true);
   }
 }
+
+describe("an announced agent update that closes a Connected Machine's browsers", () => {
+  const machineId = "33333333-3333-4333-8333-333333333333";
+  const onMachine = { session: { placement: { kind: "connected_machine", sandboxId: machineId } } };
+  const grant = (principalKind: AccessGrant["principalKind"]): AccessGrant => ({
+    accountId: "11111111-1111-4111-8111-111111111111",
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    subjectId: "subject",
+    permissions: [],
+    principalKind,
+  });
+  const lookups: string[] = [];
+  const lookup = async (_db: unknown, workspaceId: string, sandboxId: string) => {
+    lookups.push(`${workspaceId}:${sandboxId}`);
+    return "Closing.";
+  };
+
+  test("is told to an agent's browser tools, never to a person's viewer", async () => {
+    const notice = (principalKind: AccessGrant["principalKind"], record = onMachine) =>
+      agentBrowserClosingNotice(
+        {} as never,
+        grant(principalKind),
+        "workspace",
+        record as never,
+        lookup as never,
+      );
+    expect(await notice("agent_attempt")).toBe("Closing.");
+    expect(lookups).toEqual([`workspace:${machineId}`]);
+    expect(await notice("human_session")).toBeNull();
+    expect(await notice("api_key")).toBeNull();
+    expect(await notice("service")).toBeNull();
+    expect(
+      await notice("agent_attempt", {
+        session: { placement: { kind: "sandbox_group", sandboxGroupId: machineId } as never },
+      }),
+    ).toBeNull();
+    expect(lookups).toHaveLength(1);
+    // A failed read never fails the browser step.
+    expect(
+      await agentBrowserClosingNotice(
+        {} as never,
+        grant("agent_attempt"),
+        "workspace",
+        onMachine as never,
+        (async () => {
+          throw new Error("database unavailable");
+        }) as never,
+      ),
+    ).toBeNull();
+  });
+
+  test("reaches every observation an agent gets: observe, select and action receipts", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const route = (path: string) => {
+      const start = source.indexOf(path);
+      expect(start).toBeGreaterThanOrEqual(0);
+      return source.slice(start, source.indexOf("\n  app.", start + path.length));
+    };
+    for (const path of [
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    ]) {
+      const handler = route(path);
+      expect(handler).toContain("agentBrowserClosingNotice(deps.db, grant, workspaceId, record)");
+      expect(handler).toContain("withBrowserClosingNotice(");
+    }
+  });
+});

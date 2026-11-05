@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { stableAgentVersion } from "../sandbox/agent-release";
+import { publishedAgentReleasesFor, stableAgentVersion } from "../sandbox/agent-release";
 
 // The get.<domain> install-serving routes. These are
 // UNAUTHENTICATED (see http/auth.ts isAuthExempt — the `installExemptPaths` set)
@@ -214,7 +214,12 @@ const VERSION_SEG = /^v[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   const releasesBase = deps.settings.agentReleasesBaseUrl.replace(/\/+$/, "");
-  const stableVersion = stableAgentVersion(deps.settings);
+  const releases = publishedAgentReleasesFor(deps.settings);
+  // The newest published stable release (see createPublishedAgentReleases).
+  // When the release host cannot confirm one, the promoted build is served as
+  // before: a client that reaches the host may still find it.
+  const stableVersion = async (): Promise<string | null> =>
+    (await releases.resolve("stable")) ?? stableAgentVersion(deps.settings);
 
   for (const [path, { file, contentType }] of Object.entries(TEXT_ASSETS)) {
     app.get(path, async (c) => {
@@ -233,13 +238,13 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Serve a release-binary asset: the BAKED per-SHA file if THIS image carries it
   // (the Linux musl binary + sidecars that match the control plane exactly),
-  // otherwise 302 to the GitHub Release at `redirectUrl` (mac/windows + any
+  // otherwise 302 to the GitHub Release at `redirectTo` (mac/windows + any
   // un-baked asset). The baked path makes the agent the API enrolls against
   // identical to the API that serves it — no version skew, no extra hop. A null
-  // `redirectUrl` (no stable release is known) is a 404, never a guess.
+  // `redirectTo` (no stable release is known) is a 404, never a guess.
   async function serveAsset(
     asset: string,
-    redirectUrl: string | null,
+    redirectTo: string | null | (() => Promise<string | null>),
     allowBaked: boolean,
   ): Promise<Response> {
     const committed = COMMITTED_BINARY_ASSETS[asset];
@@ -270,6 +275,7 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Not baked here → the GitHub Release is the source of truth (the public
     // archive + the documented install.sh fallback). 302 so the client refetches.
+    const redirectUrl = typeof redirectTo === "function" ? await redirectTo() : redirectTo;
     if (!redirectUrl) {
       throw new HTTPException(404, {
         message: "no stable agent release is configured (OPENGENI_AGENT_STABLE_VERSION)",
@@ -292,9 +298,13 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
+    // A baked asset needs no release, so the host is asked only otherwise.
     return serveAsset(
       asset,
-      stableVersion ? `${releasesBase}/download/agent-v${stableVersion}/${asset}` : null,
+      async () => {
+        const version = await stableVersion();
+        return version ? `${releasesBase}/download/agent-v${version}/${asset}` : null;
+      },
       true,
     );
   });
@@ -303,17 +313,18 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   // immutable promotion pointer, so an enrolled machine never depends on the
   // public get.opengeni.ai hostname. The manifest and signature are ordinary
   // assets on the selected immutable agent release.
-  for (const [channel, version] of [
+  for (const [channel, channelVersion] of [
     ["stable", stableVersion],
-    ["beta", deps.settings.agentBetaVersion],
+    ["beta", async () => deps.settings.agentBetaVersion ?? null],
   ] as const) {
-    app.get(`/agent/${channel}/:manifestAsset`, (c) => {
+    app.get(`/agent/${channel}/:manifestAsset`, async (c) => {
       const manifestAsset = c.req.param("manifestAsset");
       if (manifestAsset !== "manifest.json" && manifestAsset !== "manifest.json.minisig") {
         throw new HTTPException(404, {
           message: "update manifest asset not found",
         });
       }
+      const version = await channelVersion();
       if (!version) {
         throw new HTTPException(404, {
           message: `${channel} agent channel is not configured`,
