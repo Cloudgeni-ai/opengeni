@@ -623,9 +623,6 @@ export async function listBrowserSessions(
   );
 }
 
-/** Managed browsers that may still have a live browser process on one
- * Connected Machine: every non-terminal browser except a saved one whose
- * controller binding was already released (its process is gone). */
 function liveConnectedMachineBrowserFilter(input: { workspaceId: string; enrollmentId: string }) {
   return and(
     eq(schema.browserSessions.workspaceId, input.workspaceId),
@@ -644,6 +641,9 @@ function liveConnectedMachineBrowserFilter(input: { workspaceId: string; enrollm
   );
 }
 
+/** Managed browsers that may still have a live browser process on one
+ * Connected Machine: every non-terminal browser except a saved one whose
+ * controller binding was already released (its process is gone). */
 export async function countLiveConnectedMachineBrowsers(
   db: Database,
   input: { accountId: string; workspaceId: string; enrollmentId: string },
@@ -665,8 +665,10 @@ const BROWSER_USING_SESSION_STATUSES = [
 /** The live managed browsers on one Connected Machine (see
  * countLiveConnectedMachineBrowsers), and how many of them a working session
  * may be using now: a session associated with the browser (the one that
- * opened it, or one that attached to it) has a turn underway. A live
- * browser no such session holds is open but idle. */
+ * opened it, or one that attached to it) has a turn underway, or waits for
+ * input within its turn and will continue it. A live browser no such
+ * session holds is open but idle. Counts the machine's browsers in this
+ * workspace only. */
 export async function connectedMachineBrowserUse(
   db: Database,
   input: { accountId: string; workspaceId: string; enrollmentId: string },
@@ -683,10 +685,13 @@ export async function connectedMachineBrowserUse(
            and session.id = association.session_id
           where association.workspace_id = ${schema.browserSessions.workspaceId}
             and association.browser_session_id = ${schema.browserSessions.id}
-            and session.status in (${sql.join(
-              BROWSER_USING_SESSION_STATUSES.map((status) => sql`${status}`),
-              sql`, `,
-            )})
+            and (
+              session.status in (${sql.join(
+                BROWSER_USING_SESSION_STATUSES.map((status) => sql`${status}`),
+                sql`, `,
+              )})
+              or (session.input_wait_turn_id is not null and session.input_wait_until > now())
+            )
         )))::int`,
       })
       .from(schema.browserSessions)

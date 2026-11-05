@@ -66671,6 +66671,12 @@ export type EnrollmentRecord = {
    * attempt since the last success. Null before any attempt, and after a
    * success the next attempt starts a new run. */
   agentUpdatePendingSince: string | null;
+  /** Attempts of the current run that failed for a reason other than a busy
+   * machine (`update_busy_*`), before the current operation. */
+  agentUpdateFailedAttempts: number;
+  /** The announced time at which an automatic update closes an older
+   * agent's managed browsers, or null. */
+  agentUpdateBrowsersCloseAt: string | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -66748,6 +66754,8 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
           }
         : null,
     agentUpdatePendingSince: row.agentUpdatePendingSince?.toISOString() ?? null,
+    agentUpdateFailedAttempts: row.agentUpdateFailedAttempts ?? 0,
+    agentUpdateBrowsersCloseAt: row.agentUpdateBrowsersCloseAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -68542,17 +68550,23 @@ export async function beginEnrollmentAgentUpdate(
     connectionGeneration: number;
     operationId: string;
     targetVersion: string;
-    /** True when this operation only records that the update is postponed
-     * (an `update_busy_*` code) without asking the agent. */
-    postponement?: boolean;
+    /** Announce that this update closes the machine's managed browsers at
+     * this time. Otherwise an announced time is kept while the run of
+     * unsuccessful attempts continues, and cleared when a new run starts. */
+    browsersCloseAt?: Date;
+    /** Reserve only while the machine's latest operation is still this one
+     * (null: none), so a decision made from an older read of the machine
+     * never replaces a newer record. */
+    expectedOperationId?: string | null;
   },
 ): Promise<EnrollmentRecord | null> {
-  const postponement = input.postponement === true;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
+      const continuesRun = sql`${schema.enrollments.agentUpdateStatus} = 'failed'`;
+      const previousFailureWasBusy = sql`starts_with(coalesce(${schema.enrollments.agentUpdateErrorCode}, ''), 'update_busy')`;
       const rows = await scopedDb
         .update(schema.enrollments)
         .set({
@@ -68569,14 +68583,12 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateRequestedAt: now,
           agentUpdateUpdatedAt: now,
           agentUpdateCompletedAt: null,
-          // Postponements continue a run of postponements, and attempts a
-          // run of failed attempts; anything else (a first attempt, one after
-          // a success, or a switch between the two) starts a new run. Rows
-          // from before migration 1270 start theirs at the last request.
+          // An attempt after a failed or postponed one continues the run of
+          // unsuccessful attempts; a first attempt, or one after a success,
+          // starts a new run. Rows from before migration 1270 start theirs at
+          // the last request.
           agentUpdatePendingSince: sql`case
-            when ${schema.enrollments.agentUpdateStatus} = 'failed'
-              and starts_with(coalesce(${schema.enrollments.agentUpdateErrorCode}, ''), 'update_busy')
-                = ${postponement}::boolean
+            when ${continuesRun}
               then coalesce(
                 ${schema.enrollments.agentUpdatePendingSince},
                 ${schema.enrollments.agentUpdateRequestedAt},
@@ -68584,6 +68596,19 @@ export async function beginEnrollmentAgentUpdate(
               )
             else ${now.toISOString()}::timestamptz
           end`,
+          agentUpdateFailedAttempts: sql`case
+            when ${continuesRun} and not ${previousFailureWasBusy}
+              then ${schema.enrollments.agentUpdateFailedAttempts} + 1
+            when ${continuesRun}
+              then ${schema.enrollments.agentUpdateFailedAttempts}
+            else 0
+          end`,
+          agentUpdateBrowsersCloseAt: input.browsersCloseAt
+            ? input.browsersCloseAt
+            : sql`case
+                when ${continuesRun} then ${schema.enrollments.agentUpdateBrowsersCloseAt}
+                else null
+              end`,
           updatedAt: now,
         })
         .where(
@@ -68599,6 +68624,9 @@ export async function beginEnrollmentAgentUpdate(
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
             ),
+            input.expectedOperationId === undefined
+              ? undefined
+              : sql`${schema.enrollments.agentUpdateOperationId} is not distinct from ${input.expectedOperationId}::uuid`,
           ),
         )
         .returning();

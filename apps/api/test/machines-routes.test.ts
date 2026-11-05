@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import postgres from "postgres";
 import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -54,7 +54,7 @@ import {
   connectedMachineBrowserClosingNotice,
   createAutomaticAgentUpdater,
 } from "../src/sandbox/agent-update";
-import { createPublishedAgentReleases } from "../src/sandbox/agent-release";
+import { createPublishedAgentReleases, sourceTreeAgentVersion } from "../src/sandbox/agent-release";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
   for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
@@ -2529,11 +2529,15 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
     );
     await admin`update sessions set status = ${sessionStatus} where id = ${session.id}`;
     const requests: ControlRequest[] = [];
+    const agent: { refusal?: { failureCode: string; retryable: boolean } } = {};
     const bus = busWithAgent({
       workspaceId,
       agentId: enrollment.id,
       online: true,
       onRequest: (request) => requests.push(request),
+      get updateRefusal() {
+        return agent.refusal;
+      },
     });
     const clock = { now: Date.now() };
     const updates = createAutomaticAgentUpdater({
@@ -2561,90 +2565,216 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
         bus,
         updates,
       );
+    const machine = async () => (await getEnrollment(db, workspaceId, enrollment.id))!;
+    /** Run one heartbeat and wait for the machine's next update record. */
+    const nextRecord = async (label: string) => {
+      const before = (await machine()).agentUpdate;
+      await heartbeat();
+      return (await waitForValue(
+        async () => (await machine()).agentUpdate,
+        (update) =>
+          update !== null &&
+          (update.operationId !== before?.operationId || update.status !== before.status) &&
+          update.status !== "requested",
+        label,
+      ))!;
+    };
     return {
       ...seeded,
       browser,
+      agent,
       clock,
       heartbeat,
+      nextRecord,
       updateRequests: () => requests.filter((request) => request.op?.$case === "agentUpdateApply"),
-      machine: async () => (await getEnrollment(db, workspaceId, enrollment.id))!,
+      machine,
+      notice: (at: number) => connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id, at),
     };
   }
 
   test("open browsers no working session holds do not hold the update", async () => {
     if (!available) return;
-    const { heartbeat, updateRequests, machine } = await olderAgentWithBrowser("idle");
-    await heartbeat();
-    await waitForValue(
-      async () => (await machine()).agentUpdate,
-      (update) => update?.status === "accepted",
-      "the automatic update",
-    );
+    const { nextRecord, updateRequests } = await olderAgentWithBrowser("idle");
+    expect((await nextRecord("the automatic update")).status).toBe("accepted");
     expect(updateRequests()).toHaveLength(1);
+  }, 90_000);
+
+  test("a session waiting for input within its turn still holds its browser", async () => {
+    if (!available) return;
+    const { session, nextRecord, updateRequests } = await olderAgentWithBrowser("idle");
+    const turn = await admin<{ id: string }[]>`select gen_random_uuid() as id`;
+    await admin`update sessions set input_wait_turn_id = ${turn[0]!.id},
+        input_wait_until = now() + interval '1 hour', input_wait_reason = 'waiting',
+        input_wait_set_at = now()
+      where id = ${session.id}`;
+    expect((await nextRecord("the postponement")).errorCode).toBe("update_busy_browsers");
+    expect(updateRequests()).toHaveLength(0);
   }, 90_000);
 
   test("browsers always in use: after a day the update is announced to their agents, then made", async () => {
     if (!available) return;
-    const { workspaceId, sandbox, enrollment, clock, heartbeat, updateRequests, machine } =
+    const { enrollment, agent, clock, heartbeat, nextRecord, updateRequests, machine, notice } =
       await olderAgentWithBrowser("running");
-    await heartbeat();
-    const first = await waitForValue(
-      async () => (await machine()).agentUpdate,
-      (update) => update?.status === "failed",
-      "the first postponement",
-    );
-    expect(first?.errorCode).toBe("update_busy_browsers");
+    const first = await nextRecord("the first postponement");
+    expect(first.errorCode).toBe("update_busy_browsers");
     const waitingSince = (await machine()).agentUpdatePendingSince;
     expect(waitingSince).not.toBeNull();
 
     // Each postponement is a new operation, but the machine's wait goes on.
     clock.now += 11 * 60_000;
-    await heartbeat();
-    const second = await waitForValue(
-      async () => (await machine()).agentUpdate,
-      (update) => update?.operationId !== first!.operationId && update?.status === "failed",
-      "the second postponement",
-    );
+    await nextRecord("the second postponement");
     expect((await machine()).agentUpdatePendingSince).toBe(waitingSince);
-    expect(await connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id)).toBeNull();
+    expect((await machine()).agentUpdateBrowsersCloseAt).toBeNull();
+    expect(await notice(clock.now)).toBeNull();
 
-    // A day later, the next postponement announces a closing time. (Move the
-    // whole wait a day into the past: the last postponement stays an ordinary
-    // one, recorded early in the wait.)
+    // A day into the wait, the next postponement announces a closing time.
     await admin`update enrollments
-      set agent_update_pending_since = agent_update_pending_since - interval '1 day',
-        agent_update_requested_at = agent_update_requested_at - interval '1 day',
-        agent_update_updated_at = agent_update_updated_at - interval '1 day'
+      set agent_update_pending_since = agent_update_pending_since - interval '1 day'
       where id = ${enrollment.id}`;
     clock.now += 11 * 60_000;
-    await heartbeat();
-    const announced = await waitForValue(
-      async () => (await machine()).agentUpdate,
-      (update) => update?.operationId !== second!.operationId && update?.status === "failed",
-      "the announcement",
-    );
-    const closingAt = Date.parse(announced!.requestedAt) + 30 * 60_000;
-    expect(
-      await connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id, closingAt - 60_000),
-    ).toContain("the update closes this browser");
+    await nextRecord("the announcement");
+    const closingAt = clock.now + 30 * 60_000;
+    expect(Date.parse((await machine()).agentUpdateBrowsersCloseAt!)).toBe(closingAt);
+    expect(await notice(closingAt - 60_000)).toContain("restarts to update at about");
     expect(updateRequests()).toHaveLength(0);
 
     // Before that time nothing more is recorded or requested.
+    const announced = (await machine()).agentUpdate!;
     clock.now = closingAt - 60_000;
     await heartbeat();
     await Bun.sleep(500);
-    expect((await machine()).agentUpdate?.operationId).toBe(announced!.operationId);
+    expect((await machine()).agentUpdate?.operationId).toBe(announced.operationId);
     expect(updateRequests()).toHaveLength(0);
 
     // At that time the update is requested although the browser is in use.
+    // The agent has work running and refuses it: the announcement holds.
+    agent.refusal = { failureCode: "update_busy_work", retryable: true };
     clock.now = closingAt;
-    await heartbeat();
-    await waitForValue(
-      async () => (await machine()).agentUpdate,
-      (update) => update?.status === "accepted",
-      "the announced update",
-    );
+    expect((await nextRecord("the refused update")).errorCode).toBe("update_busy_work");
     expect(updateRequests()).toHaveLength(1);
+    expect(Date.parse((await machine()).agentUpdateBrowsersCloseAt!)).toBe(closingAt);
+    expect((await machine()).agentUpdatePendingSince).toBe(
+      new Date(Date.parse(waitingSince!) - 24 * 60 * 60_000).toISOString(),
+    );
+    expect(await notice(closingAt + 60_000)).toContain("restarting to update now");
+
+    // It is asked again soon, still under the announcement.
+    agent.refusal = undefined;
+    clock.now = closingAt + 11 * 60_000;
+    expect((await nextRecord("the announced update")).status).toBe("accepted");
+    expect(updateRequests()).toHaveLength(2);
+  }, 90_000);
+
+  test("a closing time that passed without an update is announced again", async () => {
+    if (!available) return;
+    const { enrollment, clock, nextRecord, updateRequests, machine, notice } =
+      await olderAgentWithBrowser("running");
+    await nextRecord("the first postponement");
+    // The announced time passed hours ago while the machine was away.
+    await admin`update enrollments
+      set agent_update_pending_since = agent_update_pending_since - interval '2 days',
+        agent_update_browsers_close_at = ${new Date(clock.now - 3 * 60 * 60_000)}
+      where id = ${enrollment.id}`;
+    expect(await notice(clock.now)).toBeNull();
+    clock.now += 11 * 60_000;
+    expect((await nextRecord("the new announcement")).errorCode).toBe("update_busy_browsers");
+    expect(Date.parse((await machine()).agentUpdateBrowsersCloseAt!)).toBe(clock.now + 30 * 60_000);
+    expect(await notice(clock.now)).toContain("in 30 min");
+    expect(updateRequests()).toHaveLength(0);
+  }, 90_000);
+
+  test("failed downloads are retried with a growing wait", async () => {
+    if (!available) return;
+    const { agent, clock, heartbeat, nextRecord, updateRequests, machine } =
+      await olderAgentWithBrowser("idle");
+    agent.refusal = { failureCode: "manifest_download_failed", retryable: true };
+    expect((await nextRecord("the first failure")).errorCode).toBe("manifest_download_failed");
+    expect((await machine()).agentUpdateFailedAttempts).toBe(0);
+    clock.now += 11 * 60_000;
+    await nextRecord("the second failure");
+    expect((await machine()).agentUpdateFailedAttempts).toBe(1);
+    expect(updateRequests()).toHaveLength(2);
+    // The third attempt waits 20 minutes, not 10.
+    clock.now += 11 * 60_000;
+    await heartbeat();
+    await Bun.sleep(500);
+    expect(updateRequests()).toHaveLength(2);
+    clock.now += 10 * 60_000;
+    await nextRecord("the third failure");
+    expect(updateRequests()).toHaveLength(3);
+    expect((await machine()).agentUpdateFailedAttempts).toBe(2);
+  }, 90_000);
+
+  test('"Update now" and the Machines page name the newest published release while the source tree\'s is unpublished', async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    const source = sourceTreeAgentVersion()!;
+    const [major, minor, patch] = source.split(".");
+    const published = `${major}.${minor}.${Number(patch) - 1}`;
+    const realFetch = globalThis.fetch;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (!url.includes("/releases/download/")) return await realFetch(input, init);
+      return new Response(null, {
+        status: url.endsWith(`/agent-v${published}/manifest.json`) ? 200 : 404,
+      });
+    }) as typeof fetch);
+    try {
+      const requests: ControlRequest[] = [];
+      const bus = busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      });
+      const app = appFor(bus, {
+        settings: {
+          ...settings,
+          agentStableVersion: undefined,
+          publicBaseUrl: "https://dev.opengeni.example",
+        },
+      });
+      const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read", "sessions:read"])}`;
+      const response = await app.request(
+        `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+        { method: "POST", headers: { authorization: auth } },
+      );
+      expect(response.status).toBe(202);
+      expect(((await response.json()) as { targetVersion: string }).targetVersion).toBe(published);
+      expect(
+        requests.find((request) => request.op?.$case === "agentUpdateApply")?.op,
+      ).toMatchObject({ agentUpdateApply: { targetVersion: published } });
+      const list = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+        headers: { authorization: auth },
+      });
+      const machines = (
+        (await list.json()) as {
+          machines: Array<{ enrollmentId: string; runtime: { desiredVersion: string | null } }>;
+        }
+      ).machines;
+      expect(
+        machines.find((machine) => machine.enrollmentId === enrollment.id)?.runtime.desiredVersion,
+      ).toBe(published);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   }, 90_000);
 
   test("an update targets the newest published release, never an unpublished one", async () => {

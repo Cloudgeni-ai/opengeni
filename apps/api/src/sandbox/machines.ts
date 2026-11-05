@@ -20,7 +20,7 @@
 // active pointer.
 
 import type { Settings } from "@opengeni/config";
-import { stableAgentVersion } from "./agent-release";
+import { publishedAgentReleasesFor, stableAgentVersion } from "./agent-release";
 import {
   enrollmentMacPermissions,
   getSession,
@@ -131,7 +131,11 @@ export function agentVersionState(
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
-  const desiredVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
+  // The release updates target, as the updater last confirmed it published;
+  // the promoted build until a check here has.
+  const desiredVersion =
+    publishedAgentReleasesFor(settings).peek(enrollment.agentUpdateChannel) ??
+    promotedAgentVersion(settings, enrollment.agentUpdateChannel);
   const update = enrollment.agentUpdate;
   const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;

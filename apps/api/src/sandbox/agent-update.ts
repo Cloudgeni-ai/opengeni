@@ -57,7 +57,12 @@ export type AgentUpdateRequestResult =
 export async function requestAgentUpdate(
   deps: AgentUpdateDeps,
   live: EnrollmentRecord,
-  input: { releaseBaseUrl: string },
+  input: {
+    releaseBaseUrl: string;
+    /** Reserve only while the machine's latest operation is still this one
+     * (see beginEnrollmentAgentUpdate). */
+    expectedOperationId?: string | null;
+  },
 ): Promise<AgentUpdateRequestResult> {
   const { db, bus } = deps;
   if (!live.connectionInstanceId || !live.agentVersion) {
@@ -93,7 +98,13 @@ export async function requestAgentUpdate(
     operationId,
   };
   if (!reusableRequest) {
-    const reserved = await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion });
+    const reserved = await beginEnrollmentAgentUpdate(db, {
+      ...fence,
+      targetVersion,
+      ...(input.expectedOperationId === undefined
+        ? {}
+        : { expectedOperationId: input.expectedOperationId }),
+    });
     if (!reserved) return refused(409, "machine update state changed; refresh and retry");
   }
 
@@ -191,52 +202,65 @@ export function agentUpdatePreservesBrowsers(agentVersion: string | null): boole
 
 /** How long an automatic update waits for the browsers of an older agent. */
 export const AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS = {
-  /** Once the machine has waited this long, the next postponement for
-   * browsers that are still in use announces a closing time instead. */
+  /** Once the machine has been trying to update this long, browsers that are
+   * still in use no longer postpone it: a closing time is announced. */
   bound: 24 * 60 * 60_000,
-  /** How long after that announcement the update goes ahead. Agents using a
-   * browser there are told in every browser observation until then. */
+  /** How long after the announcement the update closes the browsers. Agents
+   * using a browser there are told in every browser observation. */
   notice: 30 * 60_000,
+  /** How long after the closing time the announcement still holds while the
+   * update is attempted (a busy agent refuses it, and is asked again). Past
+   * it, browsers still in use get a new announcement before any update. */
+  grace: 30 * 60_000,
 } as const;
 
-/** When an announced automatic update will close this machine's browsers, or
- * null when none is announced. The announcement is the first postponement for
- * browsers recorded after the machine has waited the bound; its request time
- * is when the notice began. */
+/** The announced time at which an automatic update closes this older
+ * agent's managed browsers, or null. */
 export function browserClosingUpdateAt(enrollment: EnrollmentRecord): number | null {
-  const update = enrollment.agentUpdate;
-  if (update?.status !== "failed" || update.errorCode !== UPDATE_POSTPONED_FOR_BROWSERS) {
-    return null;
-  }
+  if (!enrollment.agentUpdate || enrollment.agentUpdate.status === "succeeded") return null;
   if (agentUpdatePreservesBrowsers(enrollment.agentVersion)) return null;
-  const waitingSince = Date.parse(enrollment.agentUpdatePendingSince ?? "");
-  const announcedAt = Date.parse(update.requestedAt);
-  if (!Number.isFinite(waitingSince) || !Number.isFinite(announcedAt)) return null;
-  if (announcedAt - waitingSince < AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.bound) return null;
-  return announcedAt + AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.notice;
+  const closingAt = Date.parse(enrollment.agentUpdateBrowsersCloseAt ?? "");
+  return Number.isFinite(closingAt) ? closingAt : null;
 }
 
 /** The model-visible notice an agent using a browser on this machine gets
- * while an announced update is pending, or null. */
+ * from an announcement until its grace period ends, or null. */
 export function agentUpdateBrowserClosingNotice(
   enrollment: EnrollmentRecord,
   now: number,
 ): string | null {
   const closingAt = browserClosingUpdateAt(enrollment);
-  if (closingAt === null || now >= closingAt) return null;
+  if (closingAt === null || now >= closingAt + AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.grace) {
+    return null;
+  }
+  const loss =
+    "The restart closes this browser, so its open pages and unsaved page state, such as form input or downloads in progress, are lost. Finish or save that work first; the next browser action reopens the browser if it can.";
+  if (now >= closingAt) {
+    return `This Connected Machine's agent is restarting to update now. ${loss}`;
+  }
   const at = new Date(closingAt).toISOString().slice(11, 16);
   const minutes = Math.max(1, Math.ceil((closingAt - now) / 60_000));
-  return `This Connected Machine's agent updates at ${at} UTC (in ${minutes} min), and the update closes this browser. Finish or save your browser work before then; open a new browser afterwards if you still need one.`;
+  return `This Connected Machine's agent restarts to update at about ${at} UTC (in ${minutes} min). ${loss}`;
 }
 
-/** Add the closing notice to a browser observation's own notice. */
+const OBSERVATION_NOTICE_LIMIT = 1_024;
+
+/** Add the closing notice to a browser observation's own notice, shortening
+ * the observation's notice when both do not fit. */
 export function withBrowserClosingNotice<T extends { notice?: string | undefined }>(
   observation: T,
   notice: string | null,
 ): T {
   if (!notice) return observation;
-  const combined = observation.notice ? `${observation.notice}\n${notice}` : notice;
-  return { ...observation, notice: combined.length <= 1_024 ? combined : notice };
+  if (!observation.notice) return { ...observation, notice };
+  const room = OBSERVATION_NOTICE_LIMIT - notice.length - 1;
+  const own =
+    observation.notice.length <= room
+      ? observation.notice
+      : room > 1
+        ? `${observation.notice.slice(0, room - 1)}\u2026`
+        : "";
+  return { ...observation, notice: own ? `${own}\n${notice}` : notice };
 }
 
 const CLOSING_NOTICE_ENROLLMENT_TTL_MS = 15_000;
@@ -280,30 +304,45 @@ export async function connectedMachineBrowserClosingNotice(
 
 /** What the automatic updater does about an older agent's managed browsers:
  * - `update` when none would close, when none is in use by a working session
- *   (an idle window), or once an announced closing time has passed;
- * - `wait` while an announced closing time is still ahead;
- * - `postpone` otherwise, which records why and, after the bound, announces
- *   the closing time. */
+ *   (an idle window), or while an announced closing time holds (the due check
+ *   waits for that time to arrive);
+ * - `announce` a closing time when browsers in use have held the update for
+ *   the bound, or an earlier announcement's grace period has passed;
+ * - `postpone` otherwise. */
 export function browserUpdateDecision(
   enrollment: EnrollmentRecord,
   browsers: { live: number; inUse: number },
   now: number,
-): "update" | "wait" | "postpone" {
+): "update" | "announce" | "postpone" {
   if (agentUpdatePreservesBrowsers(enrollment.agentVersion)) return "update";
   if (browsers.live === 0 || browsers.inUse === 0) return "update";
   const closingAt = browserClosingUpdateAt(enrollment);
-  if (closingAt === null) return "postpone";
-  return now >= closingAt ? "update" : "wait";
+  if (closingAt !== null) {
+    return now < closingAt + AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.grace ? "update" : "announce";
+  }
+  // Only a run of unsuccessful attempts still underway has waited.
+  const waitingSince =
+    enrollment.agentUpdate?.status === "failed"
+      ? Date.parse(enrollment.agentUpdatePendingSince ?? enrollment.agentUpdate.requestedAt)
+      : Number.NaN;
+  return Number.isFinite(waitingSince) &&
+    now - waitingSince >= AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.bound
+    ? "announce"
+    : "postpone";
 }
 
 /** Record a postponed automatic update on the machine without asking its
  * agent, so the machine shows why it stays on its current build and the
- * busy backoff decides when to look again. */
+ * busy backoff decides when to look again. With `browsersCloseAt`, the
+ * postponement announces when the update will close the machine's browsers.
+ * Recorded only while the machine's latest operation is still the one the
+ * decision was made from. */
 async function postponeAgentUpdate(
   db: Database,
   live: EnrollmentRecord,
   targetVersion: string,
   errorCode: string,
+  browsersCloseAt?: Date,
 ): Promise<EnrollmentRecord | null> {
   if (!live.connectionInstanceId) return null;
   const fence = {
@@ -317,7 +356,8 @@ async function postponeAgentUpdate(
   const reserved = await beginEnrollmentAgentUpdate(db, {
     ...fence,
     targetVersion,
-    postponement: true,
+    expectedOperationId: live.agentUpdate?.operationId ?? null,
+    ...(browsersCloseAt ? { browsersCloseAt } : {}),
   });
   if (!reserved?.agentUpdate) return null;
   await advanceEnrollmentAgentUpdate(db, {
@@ -347,23 +387,19 @@ export const AUTOMATIC_AGENT_UPDATE_RETRY_MS = {
   /** A request the runner never answered is re-sent under the same operation. */
   unanswered: 10 * 60_000,
   /** Other retryable failures (download, verification, a replaced process)
-   * back off: the next attempt waits as long as the machine has been failing
-   * to update, at least `retryableFirst` and at most `retryableMax`, so the
-   * wait doubles from one attempt to the next. */
+   * back off: `retryableFirst` after the first, doubling after each further
+   * failure of the same run, at most `retryableMax`. */
   retryableFirst: 10 * 60_000,
   retryableMax: 6 * 60 * 60_000,
 } as const;
 
 /** How long after a retryable failure the next automatic attempt waits. */
 export function retryableAgentUpdateBackoffMs(enrollment: EnrollmentRecord): number {
-  const update = enrollment.agentUpdate;
-  const failedAt = Date.parse(update?.updatedAt ?? "");
-  const since = Date.parse(enrollment.agentUpdatePendingSince ?? update?.requestedAt ?? "");
-  const failingFor =
-    Number.isFinite(failedAt) && Number.isFinite(since) ? Math.max(0, failedAt - since) : 0;
+  const recorded = enrollment.agentUpdateFailedAttempts;
+  const earlierFailures = Number.isFinite(recorded) ? Math.max(0, Math.min(recorded, 30)) : 0;
   return Math.min(
     AUTOMATIC_AGENT_UPDATE_RETRY_MS.retryableMax,
-    Math.max(AUTOMATIC_AGENT_UPDATE_RETRY_MS.retryableFirst, failingFor),
+    AUTOMATIC_AGENT_UPDATE_RETRY_MS.retryableFirst * 2 ** earlierFailures,
   );
 }
 
@@ -397,8 +433,12 @@ export function automaticAgentUpdateDue(
   // An announced closing time holds, even for a newer target, so the agents
   // told about it are not surprised earlier.
   const closingAt = browserClosingUpdateAt(enrollment);
-  if (closingAt !== null) return now >= closingAt;
-  if (update.status === "succeeded" || update.targetVersion !== targetVersion) return true;
+  if (closingAt !== null && now < closingAt) return false;
+  if (update.status === "succeeded") return true;
+  // A newer target is worth asking for at once. An older one (another
+  // replica that has not seen the newer release yet) waits like a retry, so
+  // replicas never alternate between targets.
+  if ((compareAgentVersions(targetVersion, update.targetVersion) ?? 1) > 0) return true;
   if (update.errorCode?.startsWith("update_busy")) {
     return age >= AUTOMATIC_AGENT_UPDATE_RETRY_MS.busy;
   }
@@ -422,7 +462,11 @@ export function createAutomaticAgentUpdater(
   if (!settings.agentAutoUpdate || !settings.publicBaseUrl) return null;
   const releaseBaseUrl = settings.publicBaseUrl;
   const now = deps.now ?? Date.now;
-  const releases = releasesFor(deps);
+  const releases =
+    deps.releases ??
+    publishedAgentReleasesFor(settings, {
+      warn: (message, fields) => observability?.warn?.(message, fields),
+    });
   const requestDeps = { ...deps, releases };
   const inFlight = new Set<string>();
   return {
@@ -442,40 +486,51 @@ export function createAutomaticAgentUpdater(
         // An older agent closes its managed browsers when it updates. Wait
         // for a window where no working session is using them; after the
         // bound, announce a closing time to the agents using them and update
-        // then. An explicit "Update now" may still close them at once.
-        if (!agentUpdatePreservesBrowsers(enrollment.agentVersion)) {
+        // then. An explicit "Update now" may still close them at once. An
+        // unanswered request is re-sent as it was decided.
+        if (
+          !agentUpdatePreservesBrowsers(enrollment.agentVersion) &&
+          enrollment.agentUpdate?.status !== "requested"
+        ) {
           const browsers = await connectedMachineBrowserUse(deps.db, {
             accountId: enrollment.accountId,
             workspaceId: enrollment.workspaceId,
             enrollmentId: enrollment.id,
           });
-          const decision = browserUpdateDecision(enrollment, browsers, now());
-          if (decision === "wait") return;
-          if (decision === "postpone") {
+          const decided = now();
+          const decision = browserUpdateDecision(enrollment, browsers, decided);
+          if (decision !== "update") {
+            const closingAt =
+              decision === "announce"
+                ? new Date(decided + AUTOMATIC_AGENT_UPDATE_BROWSER_WAIT_MS.notice)
+                : undefined;
             const postponed = await postponeAgentUpdate(
               deps.db,
               enrollment,
               targetVersion,
               UPDATE_POSTPONED_FOR_BROWSERS,
+              closingAt,
             );
             if (postponed) {
-              const closingAt = browserClosingUpdateAt(postponed);
               observability?.info?.(
-                closingAt === null
-                  ? "Postponed an automatic Connected Machine agent update: the installed agent would close managed browsers that are in use"
-                  : "Announced an automatic Connected Machine agent update that will close managed browsers in use",
+                closingAt
+                  ? "Announced an automatic Connected Machine agent update that will close managed browsers in use"
+                  : "Postponed an automatic Connected Machine agent update: the installed agent would close managed browsers that are in use",
                 {
                   ...fields,
                   liveBrowsers: browsers.live,
                   browsersInUse: browsers.inUse,
-                  ...(closingAt === null ? {} : { closingAt: new Date(closingAt).toISOString() }),
+                  ...(closingAt ? { closingAt: closingAt.toISOString() } : {}),
                 },
               );
             }
             return;
           }
         }
-        const result = await requestAgentUpdate(requestDeps, enrollment, { releaseBaseUrl });
+        const result = await requestAgentUpdate(requestDeps, enrollment, {
+          releaseBaseUrl,
+          expectedOperationId: enrollment.agentUpdate?.operationId ?? null,
+        });
         if (result.kind === "accepted") {
           observability?.info?.("Requested an automatic Connected Machine agent update", fields);
         } else if (result.status !== 409) {

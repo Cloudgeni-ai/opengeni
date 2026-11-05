@@ -155,25 +155,88 @@ describe("the agent release an update targets", () => {
       url: string;
       method: string | undefined;
       redirect: string | undefined;
+      range: string | null;
     }> = [];
-    const answering = (status: number | Error) =>
+    const answering = (head: number | Error, get: number | Error = 500) =>
       httpAgentReleaseProbe({ agentReleasesBaseUrl: RELEASES }, (async (
         url: string | URL | Request,
         init?: RequestInit,
       ) => {
-        requests.push({ url: String(url), method: init?.method, redirect: init?.redirect });
+        requests.push({
+          url: String(url),
+          method: init?.method,
+          redirect: init?.redirect,
+          range: new Headers(init?.headers).get("range"),
+        });
+        const status = init?.method === "HEAD" ? head : get;
         if (status instanceof Error) throw status;
-        return new Response(null, { status });
+        return new Response(status === 206 ? "{" : null, { status });
       }) as typeof fetch);
     expect(await answering(200)("0.1.152")).toBe("published");
+    expect(requests).toEqual([
+      {
+        url: `${RELEASES}/download/agent-v0.1.152/manifest.json`,
+        method: "HEAD",
+        redirect: "follow",
+        range: null,
+      },
+    ]);
     expect(await answering(404)("0.1.152")).toBe("missing");
     expect(await answering(410)("0.1.152")).toBe("missing");
     expect(await answering(503)("0.1.152")).toBe("unknown");
+    expect(await answering(500)("0.1.152")).toBe("unknown");
     expect(await answering(new TypeError("network down"))("0.1.152")).toBe("unknown");
-    expect(requests[0]).toEqual({
-      url: `${RELEASES}/download/agent-v0.1.152/manifest.json`,
-      method: "HEAD",
-      redirect: "follow",
+    expect(
+      await answering(new DOMException("The operation timed out.", "TimeoutError"))("0.1.152"),
+    ).toBe("unknown");
+    // A host that does not answer HEAD is asked for the manifest's first byte.
+    requests.length = 0;
+    expect(await answering(405, 206)("0.1.152")).toBe("published");
+    expect(requests.map(({ method, range }) => [method, range])).toEqual([
+      ["HEAD", null],
+      ["GET", "bytes=0-0"],
+    ]);
+    expect(await answering(403, 200)("0.1.152")).toBe("published");
+    expect(await answering(501, 404)("0.1.152")).toBe("missing");
+    expect(await answering(403, 403)("0.1.152")).toBe("missing");
+    expect(await answering(403, 502)("0.1.152")).toBe("unknown");
+    expect(await answering(405, new TypeError("reset"))("0.1.152")).toBe("unknown");
+  });
+
+  test("the last published target is known without asking again", async () => {
+    const { asked, probe } = probeOf({ "0.1.150": "published" });
+    const releases = createPublishedAgentReleases(unpinned, {
+      probe,
+      sourceTree: () => "0.1.151",
     });
+    expect(releases.peek("stable")).toBeUndefined();
+    expect(await releases.resolve("stable")).toBe("0.1.150");
+    expect(releases.peek("stable")).toBe("0.1.150");
+    expect(releases.peek(null)).toBe("0.1.150");
+    expect(releases.peek("beta")).toBeUndefined();
+    expect(asked).toEqual(["0.1.151", "0.1.150"]);
+    const pinned = createPublishedAgentReleases(
+      { ...unpinned, agentStableVersion: "0.1.140" },
+      { probe, sourceTree: () => "0.1.151" },
+    );
+    expect(pinned.peek("stable")).toBe("0.1.140");
+  });
+
+  test("a release host that cannot be asked is reported, at most every 15 minutes", async () => {
+    let clock = 0;
+    const warnings: Array<Record<string, string>> = [];
+    const releases = createPublishedAgentReleases(unpinned, {
+      probe: async () => "unknown",
+      sourceTree: () => "0.1.152",
+      now: () => clock,
+      warn: (_message, fields) => warnings.push(fields),
+    });
+    expect(await releases.resolve("stable")).toBeNull();
+    clock += 2 * 60_000;
+    expect(await releases.resolve("stable")).toBeNull();
+    expect(warnings).toEqual([{ version: "0.1.152", releasesBaseUrl: RELEASES }]);
+    clock += 15 * 60_000;
+    await releases.resolve("stable");
+    expect(warnings).toHaveLength(2);
   });
 });

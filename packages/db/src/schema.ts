@@ -12181,9 +12181,18 @@ export const enrollments = pgTable(
     }),
     /** When the machine began its current run of unsuccessful updates: the
      * first attempt after its last success. Kept while attempts keep failing
-     * or being postponed, so automatic retries can back off and a postponement
-     * can be bounded (migration 1270). */
+     * or being postponed, so a postponement for browsers can be bounded
+     * (migration 1270). */
     agentUpdatePendingSince: timestamp("agent_update_pending_since", {
+      withTimezone: true,
+    }),
+    /** Attempts of the current run that failed for a reason other than a
+     * busy machine, before the current operation. Automatic retries back off
+     * from it (migration 1270). */
+    agentUpdateFailedAttempts: integer("agent_update_failed_attempts").notNull().default(0),
+    /** The announced time at which an automatic update closes an older
+     * agent's managed browsers; kept through busy refusals (migration 1270). */
+    agentUpdateBrowsersCloseAt: timestamp("agent_update_browsers_close_at", {
       withTimezone: true,
     }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

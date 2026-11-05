@@ -6634,20 +6634,19 @@ function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): st
  * will close its browsers at an announced update, the notice saying when. A
  * person's viewer and other API clients do not get it, and a failed read
  * never fails the browser step. */
-async function agentBrowserClosingNotice(
+export async function agentBrowserClosingNotice(
   db: Database,
   grant: AccessGrant,
   workspaceId: string,
-  record: BrowserSessionControlRecord,
+  record: Pick<BrowserSessionControlRecord, "session">,
+  lookup: typeof connectedMachineBrowserClosingNotice = connectedMachineBrowserClosingNotice,
 ): Promise<string | null> {
   const placement = record.session.placement;
   if (grant.principalKind !== "agent_attempt" || placement?.kind !== "connected_machine") {
     return null;
   }
   if (!placement.sandboxId) return null;
-  return await connectedMachineBrowserClosingNotice(db, workspaceId, placement.sandboxId).catch(
-    () => null,
-  );
+  return await lookup(db, workspaceId, placement.sandboxId).catch(() => null);
 }
 
 /** An agent's own browser tools receive a tab's notice (for example that a
