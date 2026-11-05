@@ -88,7 +88,8 @@ type Operation = {
     | "type_text"
     | "press_key"
     | "hotkey"
-    | "bring_to_front";
+    | "bring_to_front"
+    | "invoke_menu";
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
@@ -570,6 +571,7 @@ export class CuaComputerBackend implements ComputerBackend {
               );
             if (error instanceof CuaFailure && !error.dispatched)
               throw (
+                (operation.name === "invoke_menu" ? menuRefusal(error) : null) ??
                 (command.action.type === "keyboard"
                   ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
                   : null) ??
@@ -847,6 +849,11 @@ export class CuaComputerBackend implements ComputerBackend {
           steps.some((step) => step.stepOptions !== undefined),
           true,
         );
+        // CUA's batch runs input steps only; a menu item is chosen alone.
+        if (operations.some((operation) => operation.name === "invoke_menu"))
+          throw unsupported(
+            "A menu-bar item is chosen in a call of its own, not inside a batch: send this set_value as its own action",
+          );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -2365,6 +2372,12 @@ export class CuaComputerBackend implements ComputerBackend {
         if (!named) throw error;
         return [named];
       }
+      // A macOS menu-bar menu opened through accessibility in an app the
+      // person is not using stays open out of sight, and the app then takes
+      // no click or key until it closes. Its item is chosen straight from the
+      // menu bar instead, without opening any menu.
+      const menuStep = menuBarStep(this.identity.platform, args, node, action);
+      if (menuStep) return [menuStep];
       // A date field's picker button opens a menu that would bring the
       // browser in front; the field itself takes the whole value.
       const picker = this.dateFieldOf(command.targetId, node.ref);
@@ -3429,6 +3442,52 @@ function inputFailures(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** The step for an action on a macOS menu-bar item ("File", "View"), or null
+ * for any other element. Pressing the item would open its menu, which in an
+ * app in the background stays open out of sight and holds every click and
+ * key the person sends that app until it closes. set_value with an item's
+ * name ("Zoom In", or "Developer > JavaScript Console" in a submenu) chooses
+ * that item from the menu bar without opening a menu; invoke and show_menu
+ * open nothing and say so. */
+export function menuBarStep(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  node: InteractionSemanticNodeValue,
+  action: SemanticAction,
+): Operation | null {
+  if (platform !== "macos" || node.role !== "AXMenuBarItem" || !node.name) return null;
+  if (action.action === "set_value" && action.value !== undefined) {
+    const items = String(action.value)
+      .split(">")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment !== "");
+    if (items.length === 0 || items.length > 15)
+      throw unsupported(
+        `Name the item of the "${node.name}" menu to choose, such as "Zoom In", or "Submenu > Item" for an item in a submenu`,
+      );
+    return {
+      name: "invoke_menu",
+      args: { pid: args.pid, window_id: args.window_id, path: [node.name, ...items] },
+    };
+  }
+  if (action.action === "invoke" || action.action === "show_menu")
+    throw unsupported(
+      `A menu opened from the menu bar stays open, out of sight when its app is in the background, and holds every click and key in that app until it closes, so the "${node.name}" menu was not opened: choose its item with set_value on ${node.ref} and the item's name as value, such as "Zoom In", or "Submenu > Item" for an item in a submenu. A name it does not have lists the items it has`,
+    );
+  return null;
+}
+
+/** CUA's refusal of a menu path, worded for set_value on a menu-bar item:
+ * CUA names its own tool and counts path segments. Null when it is not one. */
+export function menuRefusal(error: CuaFailure): ComputerBackendError | null {
+  if (!error.message.includes("invoke_menu:")) return null;
+  const message = error.message
+    .replace(/^.*?invoke_menu:\s*/s, "")
+    .replace(/^path segment \d+ /, "The item ")
+    .replace(/path segment \d+ is/, "that item is");
+  return new ComputerBackendError(error.code, `${message}; nothing was chosen`, false, false);
 }
 
 /** What a person must do before this login session's windows can be read or
