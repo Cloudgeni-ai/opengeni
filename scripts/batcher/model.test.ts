@@ -547,6 +547,23 @@ describe("nextBatch", () => {
     expect(rest?.kind === "build" && rest.members.map((p) => p.number)).toEqual([1, 2, 4]);
   });
 
+  test("a group larger than a batch keeps the PRs it cannot fit next in line", () => {
+    const pulls = [1, 2, 3, 4, 5, 6].map((n) => pull(n));
+    const settings = { ...DEFAULT_SETTINGS, maxBatch: 4 };
+    const first = nextBatch(pulls, [[1, 2, 3, 4, 5], [6]], NOW, settings, ["Lint"]);
+    expect(first).toMatchObject({ kind: "build", pending: [[5], [6]], blame: ["Lint"] });
+    expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([1, 2, 3, 4]);
+    // Once those land, the PR that did not fit is tested before the next half.
+    const next = nextBatch(
+      pulls.filter((p) => p.number > 4),
+      [[5], [6]],
+      NOW,
+      settings,
+    );
+    expect(next).toMatchObject({ kind: "build", pending: [[6]] });
+    expect(next?.kind === "build" && next.members.map((p) => p.number)).toEqual([5]);
+  });
+
   test("keeps PRs that add the same numbered file out of one batch", () => {
     const slot = "packages/db/drizzle/1072";
     const action = nextBatch(

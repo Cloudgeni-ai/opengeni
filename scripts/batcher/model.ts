@@ -443,10 +443,13 @@ export function nextBatch(
         ...carried,
       };
     }
+    // A group larger than a batch runs its first maxBatch PRs; the others stay
+    // next in line as their own group instead of dropping out of the retest.
+    const overflow = group.slice(settings.maxBatch).map((p) => p.number);
     return {
       kind: "build",
       members: group.slice(0, settings.maxBatch),
-      pending: rest,
+      pending: overflow.length ? [overflow, ...rest] : rest,
       ...carried,
     };
   }
