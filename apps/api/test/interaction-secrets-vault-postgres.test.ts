@@ -212,6 +212,45 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       });
     }
 
+    test("hosted passkeys: field approval rules gate only the passkey's own fields", async () => {
+      if (!client) return;
+      const db = client.db;
+      const { principal, subjectId } = await agentAttempt();
+      const scope = { accountId: principal.accountId, workspaceId: principal.workspaceId };
+      const logs: Array<[string, Record<string, unknown>]> = [];
+      const port = createVaultInteractionSecretsPort({
+        db,
+        encryptionKey: key,
+        log: (event, fields) => logs.push([event, fields]),
+      });
+      const store = port.passkeys!;
+      const { itemId } = await store.saveRegistered(principal, { credential, origin: null });
+      const row = await getVaultItem(db, { kind: "principal", principal }, { itemId });
+      const rule = { itemId, vaultId: row.vaultId, item: false, subjectId };
+      const leaseLogs = () => logs.filter(([event]) => event === "browser.passkey.leased");
+
+      expect(await store.lease(principal, "browser-a", 600)).toHaveLength(1);
+      expect(leaseLogs().at(-1)![1]).toEqual({
+        holder: "browser-a",
+        loaded: [{ itemId, rpId: "localhost" }],
+        skipped: [],
+      });
+      // An unchanged outcome is logged once per browser.
+      await store.lease(principal, "browser-a", 600);
+      expect(leaseLogs()).toHaveLength(1);
+
+      // Asking before the private key is used is asking before the passkey is.
+      await setSecretApprovalRules(db, scope, { ...rule, fieldKeys: ["privatekey"] });
+      expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
+      expect(leaseLogs().at(-1)![1]).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId, reason: "approval_required" }],
+      });
+      await setSecretApprovalRules(db, scope, { ...rule, fieldKeys: [] });
+      await store.release("browser-a");
+    });
+
     test("connected password manager passkeys: found, leased live, counted back", async () => {
       if (!client) return;
       const db = client.db;
@@ -289,11 +328,15 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       ]);
 
       const logs: string[] = [];
+      const leases: Array<Record<string, unknown>> = [];
       const port = createVaultInteractionSecretsPort({
         db,
         encryptionKey: key,
         providersFor: () => providers,
-        log: (event) => logs.push(event),
+        log: (event, fields) => {
+          logs.push(event);
+          if (event === "browser.passkey.leased") leases.push(fields);
+        },
       });
       const store = port.passkeys!;
       const leased = await store.lease(principal, "browser-a", 600);
@@ -332,13 +375,34 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       };
       expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
       expect(logs).toContain("browser.passkey.provider_read_failed");
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId: item!.id, reason: "provider_read_failed" }],
+      });
       host.readPasskeys = readPasskeys;
 
       // An item that needs a person's approval for each use is not loaded.
-      const rule = { itemId: item!.id, vaultId: vault.id, fieldKeys: [], subjectId };
-      await setSecretApprovalRules(db, scope, { ...rule, item: true });
+      const rule = { itemId: item!.id, vaultId: vault.id, subjectId };
+      await setSecretApprovalRules(db, scope, { ...rule, item: true, fieldKeys: [] });
       expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
-      await setSecretApprovalRules(db, scope, { ...rule, item: false });
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId: item!.id, reason: "approval_required" }],
+      });
+      // Asking before the login's password is used does not hold back its
+      // passkey, which the password manager holds apart from the password.
+      await setSecretApprovalRules(db, scope, { ...rule, item: false, fieldKeys: ["password"] });
+      expect(await store.lease(principal, "browser-a", 600)).toEqual([
+        { ...providerPasskey, signCount: 12, itemId: item!.id },
+      ]);
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [{ itemId: item!.id, rpId: "example.com" }],
+        skipped: [],
+      });
+      await setSecretApprovalRules(db, scope, { ...rule, item: false, fieldKeys: [] });
       expect(await store.lease(principal, "browser-a", 600)).toHaveLength(1);
       await store.release("browser-a");
 

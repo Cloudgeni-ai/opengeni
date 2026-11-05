@@ -335,6 +335,7 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
+import { registerOrganizationCompatibleModelEndpointRoutes } from "./routes/organization-compatible-model-endpoints";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
 import {
   registerModelAccountSettingsRoutes,
@@ -2611,6 +2612,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerOrganizationCompatibleModelEndpointRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerModelAccountSettingsRoutes(app, routeDeps);
   registerModelAccountChoiceRoutes(app, routeDeps);

@@ -25,9 +25,9 @@ export function sessionAgentsSignal(
     count: agents.length,
     detail:
       running > 0
-        ? `${running} running`
+        ? t("sessionAgentsModel.runningCount", { count: running })
         : paused > 0
-          ? `${paused} paused`
+          ? t("sessionAgentsModel.pausedCount", { count: paused })
           : t("sessionAgentsModel.idle"),
     tone: running > 0 ? "running" : paused > 0 ? "waiting" : "neutral",
   };

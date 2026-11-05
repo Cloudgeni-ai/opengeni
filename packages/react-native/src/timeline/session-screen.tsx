@@ -127,6 +127,13 @@ export interface NativeSessionScreenProps extends Omit<
   inChatConnect?: NativeInChatConnectOptions | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
+  /**
+   * Show how the agent works behind the scenes above the composer: the goal,
+   * agents and commands chips. Defaults to true. Set `false` for end users to
+   * whom a paused goal, a count of helper agents or a running command means
+   * nothing; queued messages, approvals and the agent's questions still show.
+   */
+  agentSignals?: boolean | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
   timelineMessages?: Partial<NativeTimelineMessages> | undefined;
   /**
@@ -157,6 +164,7 @@ export function NativeSessionScreen({
   client,
   inChatConnect,
   models,
+  agentSignals,
   timelineMessages,
   renderComposer,
   renderMessageActions: hostMessageActions,
@@ -191,6 +199,7 @@ export function NativeSessionScreen({
               client={client}
               inChatConnect={inChatConnect}
               models={models}
+              agentSignals={agentSignals}
               renderComposer={renderComposer}
               renderMessageActions={hostMessageActions}
               {...timelineProps}
@@ -258,6 +267,7 @@ function SessionScreenBody({
   client,
   inChatConnect,
   models,
+  agentSignals = true,
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
@@ -531,23 +541,27 @@ function SessionScreenBody({
               onComposerFocus={() => composerInput.current?.focus()}
               onReviewAnnotations={setQueuedReview}
               leading={
-                <SessionSignals
-                  goal={controller.goal}
-                  agents={controller.lineage.lineage?.children ?? []}
-                  commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
-                  onOpenSession={timelineProps.onOpenSession}
-                  models={models}
-                  readOnly={status === "failed" || status === "cancelled"}
-                  renderCommands={() =>
-                    client ? (
-                      <NativeSessionCommands
-                        client={client}
-                        workspaceId={controller.workspaceId}
-                        sessionId={controller.sessionId}
-                      />
-                    ) : null
-                  }
-                />
+                agentSignals ? (
+                  <SessionSignals
+                    goal={controller.goal}
+                    agents={controller.lineage.lineage?.children ?? []}
+                    commandsCount={
+                      controller.session.session?.backgroundCommandActivity?.count ?? 0
+                    }
+                    onOpenSession={timelineProps.onOpenSession}
+                    models={models}
+                    readOnly={status === "failed" || status === "cancelled"}
+                    renderCommands={() =>
+                      client ? (
+                        <NativeSessionCommands
+                          client={client}
+                          workspaceId={controller.workspaceId}
+                          sessionId={controller.sessionId}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : null
               }
             />
             {/* The pause's other approvals stay up while a decision resumes the turn. */}

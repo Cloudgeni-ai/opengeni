@@ -120,7 +120,8 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
     // 12 s pieces with 3 s overlap: windows of 6 s.
     expect(pieces).toEqual([0, 1, 2, 3, 4]);
     expect(sent.every((item) => item.mimeType === "audio/flac" && item.head === "fLaC")).toBe(true);
-    expect(sent.map((item) => item.fileName)).toEqual([
+    // Pieces are sent a few at once, so in any order.
+    expect(sent.map((item) => item.fileName).sort()).toEqual([
       "track-1-0.flac",
       "track-1-1.flac",
       "track-1-2.flac",
@@ -168,7 +169,7 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       request: { ...request, scope },
     });
     expect(long.words.length).toBeGreaterThan(0);
-    expect(identities).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
+    expect(identities.sort()).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
     // A track sent whole keeps the attempt's identity.
     await transcribeTrack({
       provider,

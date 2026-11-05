@@ -4,6 +4,7 @@ import {
 } from "@opengeni/contracts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
+  organizationCompatibleConnectionIdOf,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
@@ -116,6 +117,10 @@ export async function getWorkspaceConnectionModelRestrictions(
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active'
         AND provider_kind IN ('vercel_gateway', 'openrouter', 'anthropic', 'opper', 'openai', 'azure_openai')
       UNION ALL
+      SELECT 'organization-compatible-' || id::text || '/', allowed_model_ids
+        FROM organization_model_provider_connections
+        WHERE status = 'active' AND provider_kind = 'openai_compatible'
+      UNION ALL
       SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' WHEN 'opper' THEN 'workspace-opper/' ELSE 'workspace-openrouter/' END,
         allowed_model_ids FROM (
         SELECT DISTINCT ON (metadata->>'credentialRole') * FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
@@ -177,7 +182,13 @@ export async function assertModelConnectionAllowsTurn(
       );
     return;
   }
-  if (
+  const compatibleConnectionId = organizationCompatibleConnectionIdOf(model);
+  if (compatibleConnectionId) {
+    // One of the organization's own OpenAI-compatible endpoints: that exact
+    // endpoint must still be active and reach this workspace.
+    query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
+      WHERE provider_kind = 'openai_compatible' AND id = ${compatibleConnectionId}::uuid AND status = 'active'`;
+  } else if (
     model.startsWith("claude/") ||
     model.startsWith("workspace-claude-subscription/") ||
     model.startsWith("organization-claude-subscription/") ||

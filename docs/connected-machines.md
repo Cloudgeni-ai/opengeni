@@ -1270,6 +1270,25 @@ to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
 offline. See [Transactional file edits](#transactional-file-edits).
 
+### Machines whose shell or working directory was removed
+
+The agent starts every shell command, and each exec's containment anchor,
+through `/bin/sh`. When `/bin/sh` is missing or not executable (a command ran
+`mv /bin/sh …`), agent 0.1.153 and later start the first of `/bin/dash`,
+`/usr/bin/dash`, `/bin/bash` or `/usr/bin/bash` instead, and, running as root
+on Linux, point `/bin/sh` back at it with a symlink (only an empty path or a
+symlink is replaced, never a file or directory). With no shell at all, the start
+fails with the note "the shell /bin/sh is missing and no dash or bash was found",
+which Opengeni reports as a machine that cannot start programs. A missing
+workspace root or home directory used as a command's working directory is
+created again and the command runs. The workspace root gets mode 0755 and stays
+owned by the agent; a home gets mode 0700 inside an existing parent and belongs
+to its user. Placeholder homes such as `/nonexistent` and `/var/empty` are never
+created, and any other missing working directory is still a not-found error.
+When the agent uses a fallback shell, it passes the shell's path to commands as
+`OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
+`/bin/sh`.
+
 ### Streaming exec (op-stream)
 
 Connected Machine exec requires a runner that advertises the `op_stream`

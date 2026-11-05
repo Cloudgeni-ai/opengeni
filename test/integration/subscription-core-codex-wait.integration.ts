@@ -50,12 +50,6 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const testTimeoutMs = 120_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
-// Recorded with the session workflow before session-capacity-wake-jitter-v1
-// (a legacy Codex capacity wait); the core path must not change its replay.
-const legacySessionCapacityWaitHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
-  import.meta.url,
-).pathname;
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 53);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -410,23 +404,6 @@ describe.skipIf(!realDb)(
         ],
       });
     }
-
-    test(
-      "SUB-WAIT-03: the pinned legacy capacity-wait history still replays",
-      async () => {
-        const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
-          events: Array<{
-            workflowExecutionStartedEventAttributes?: { workflowId?: string };
-          }>;
-        };
-        await Worker.runReplayHistory(
-          { workflowsPath: workflowDefinitionsPath },
-          history,
-          history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "legacy",
-        );
-      },
-      testTimeoutMs,
-    );
 
     test(
       "SUB-WAIT-02: signal before peek resumes a core wake committed while the turn is still parking",

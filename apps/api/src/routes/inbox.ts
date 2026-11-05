@@ -30,6 +30,7 @@ import {
   getSessionRepliesMuted,
   getSessionTitles,
   listInboxItems,
+  listBillingCreditNotifications,
   listWorkspacesForSubject,
   setInboxSettings,
   setMemberNotificationsAllowed,
@@ -192,9 +193,29 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
     );
     c.header("cache-control", "private, no-store");
+    const billingNotifications =
+      workspaceFilter === null
+        ? (
+            await Promise.all(
+              context.accountGrants
+                .filter(
+                  (grant) =>
+                    grant.permissions.includes("billing:read") ||
+                    grant.permissions.includes("account:admin"),
+                )
+                .map((grant) =>
+                  listBillingCreditNotifications(deps.db, {
+                    accountId: grant.accountId,
+                    subjectId,
+                  }),
+                ),
+            )
+          ).flat()
+        : [];
     return c.json(
       ListInboxResponse.parse({
         items,
+        billingNotifications,
         needsYouCount: awake.filter((item) => isNeedsYou(item.kind)).length,
         unreadCount: awake.filter((item) => item.unread).length,
       }),

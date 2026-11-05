@@ -646,6 +646,39 @@ describe("syncBrowserPasskeys", () => {
     expect(calls.filter((call) => call.startsWith("lease:"))).toHaveLength(2);
   });
 
+  test("a write-back after an action logs held passkeys that were not used", async () => {
+    const { store } = fakeStore();
+    const client = fakeClient([]);
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const sync = (refresh: boolean, passkeys: InteractionPasskeyStore = store) =>
+      syncBrowserPasskeys({
+        port: { ...port({}), passkeys },
+        grant: agentGrant,
+        browserSessionId: `${BROWSER}-unused`,
+        controllerGeneration: "controller-1",
+        client,
+        now: () => 3_000_000,
+        refresh,
+        log: (event, fields) => logs.push([event, fields]),
+      });
+    // The takeover before an action stays quiet; the write-back after it says
+    // the browser held a passkey for the site and nothing asserted it.
+    expect(await sync(true)).toEqual({ saved: 0, asserted: 0 });
+    expect(logs).toEqual([]);
+    expect(await sync(false)).toEqual({ saved: 0, asserted: 0 });
+    expect(logs).toEqual([
+      ["browser.passkey.synced", { saved: 0, asserted: 0, loadedRpIds: ["localhost"] }],
+    ]);
+
+    // With no passkey loaded there is nothing to report.
+    resetPasskeySessionCacheForTests();
+    logs.length = 0;
+    const empty: InteractionPasskeyStore = { ...store, lease: async () => [] };
+    await sync(true, empty);
+    await sync(false, empty);
+    expect(logs).toEqual([]);
+  });
+
   test("syncs for one browser run in call order, so a write-back need not be awaited", async () => {
     const { store, calls } = fakeStore();
     const assertion: BrowserPasskeyEvent = {

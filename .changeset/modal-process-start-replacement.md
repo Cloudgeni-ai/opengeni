@@ -1,0 +1,7 @@
+---
+"@opengeni/runtime": patch
+"@opengeni/worker-bundle": patch
+"@opengeni/db": patch
+---
+
+A Modal sandbox whose `/bin/sh` is gone now recovers by itself. Modal runs every command through `/bin/sh`, so once the agent deleted it, every command failed with Modal's raw exec error, which repeats the whole command. The box stayed broken until it had been idle long enough to drain, and an open viewer could keep it alive. Now, when platform setup finds that the box cannot start programs, the worker checks that a trivial command also fails. It then asks the lease to replace that exact box, at most once per turn. New turns wait instead of reusing the box. The reaper saves `/workspace` with Modal's own snapshot, which needs no command in the box, and ends the box. The same turn then continues on a fresh box restored from that snapshot, shown as "Workspace machine restarted". If the fresh box still cannot start programs, or the replacement cannot be requested, the turn stops with the existing short message. If the box's save fails, the turns waiting on the replacement do not wait for it: they stop with "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then." A retry before the box is saved stops the same way. The box stays fenced, so no turn reuses it, and the existing capture policy keeps retrying the save. A command the model runs on such a box now returns a short explanation instead of Modal's command dump.

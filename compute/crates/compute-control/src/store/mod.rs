@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::e2b::lifecycle::Record;
 
-pub use memory::MemoryStore;
+pub use memory::{Called, MemoryStore};
 pub use pointers::{Found, Import, Imported, PointerRow};
 pub use postgres::{PostgresLead, PostgresStore};
 pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
