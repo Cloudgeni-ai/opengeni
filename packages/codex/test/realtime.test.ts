@@ -49,7 +49,7 @@ describe("native Codex subscription realtime call", () => {
     expect(captured).not.toBeNull();
     const request = captured!;
     expect(request.url).toBe(
-      "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+      "https://chatgpt.com/backend-api/wham/realtime/calls?intent=quicksilver&architecture=avas",
     );
     expect(request.method).toBe("POST");
     expect(request.headers.get("authorization")).toBe("Bearer server-only-token");
@@ -61,6 +61,10 @@ describe("native Codex subscription realtime call", () => {
     expect(request.headers.get("openai-alpha")).toBe("quicksilver=v2");
     expect(request.headers.get("session-id")).toBe("11111111-1111-4111-8111-111111111111");
     expect(request.headers.get("thread-id")).toBe("11111111-1111-4111-8111-111111111111");
+    const voiceSessionId = request.headers.get("voice-session-id");
+    expect(voiceSessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     expect(request.headers.get("content-type")).toBe("application/json");
     expect(await request.json()).toEqual({
       sdp: offer,
@@ -68,7 +72,7 @@ describe("native Codex subscription realtime call", () => {
         instructions: "Help with the current Opengeni session.",
         audio: { output: { voice: "juniper" } },
         delegation: { type: "client" },
-        model: "gpt-live-1-codex",
+        model: "gpt-live-1.1-codex",
         initial_items: [
           {
             type: "message",
@@ -86,6 +90,7 @@ describe("native Codex subscription realtime call", () => {
             content: [{ type: "output_text", text: "We decided to continue." }],
           },
         ],
+        voice_session_id: voiceSessionId,
       },
     });
     expect(result).toEqual({
@@ -434,7 +439,7 @@ describe("Codex realtime remote configuration", () => {
         ),
       ).toEqual({
         architecture: "avas",
-        model: "gpt-live-1-codex",
+        model: "gpt-live-1.1-codex",
         version: "v3",
         source: "fallback",
         advertisedVersion: advertised,
@@ -450,7 +455,7 @@ describe("Codex realtime remote configuration", () => {
       ),
     ).toEqual({
       architecture: "avas",
-      model: "gpt-live-1-codex",
+      model: "gpt-live-1.1-codex",
       version: "v3",
       source: "fallback",
     });
@@ -458,7 +463,7 @@ describe("Codex realtime remote configuration", () => {
       await fetchCodexRealtimeProviderConfig(auth, async () => Response.json({ nope: true })),
     ).toEqual({
       architecture: "avas",
-      model: "gpt-live-1-codex",
+      model: "gpt-live-1.1-codex",
       version: "v3",
       source: "fallback",
     });
