@@ -1044,8 +1044,9 @@ app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
 commands) stops the agent as before. Because of that rule, a `/bin/kill` or
 `pkill` from outside, sent while a command runs, may be ignored; the ways just
 listed always work. A foreground agent's keeper also starts the agent again
-after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in an Opengeni terminal counts as a
-command, including a `kill` typed there by a person.
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in
+an Opengeni terminal counts as a command, including a `kill` typed there by a
+person.
 
 Other signals still end the agent, and it is started again. A foreground
 agent's keeper ignores stop signals from the agent's commands, passes on one
