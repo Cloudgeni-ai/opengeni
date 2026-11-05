@@ -107,8 +107,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withheld the connected-command re-arm the same way and 1101 granted
- * it. 0988 withholds the queued-turn
- * hold summary; until it is granted, the control worker does not publish it.
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
@@ -135,7 +134,6 @@ export const RUNTIME_DEFINER_ROUTINES = [
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "read_external_identity_v1(uuid, text, text)",
