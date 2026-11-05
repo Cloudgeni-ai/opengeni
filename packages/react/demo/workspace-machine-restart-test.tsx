@@ -12,13 +12,14 @@ const englishText = createOpenGeniText();
  * box) restarted, replayed through the production MessageTimeline with the
  * web app's stylesheet. Synthetic events in the worker's exact shapes, no API
  * calls. `?copy=before` shows the old "[connected machine]" receipt,
- * `?theme=light|dark`, `?desktop=macos` (the desktop shell's platform
- * attribute, inside a macOS window frame).
+ * `?copy=earlier-name` a receipt stored under the box's earlier "[cloud
+ * computer]" name, `?theme=light|dark`, `?desktop=macos` (the desktop shell's
+ * platform attribute, inside a macOS window frame).
  */
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
-const before = params.get("copy") === "before";
+const copy = params.get("copy");
 const desktop = params.get("desktop") === "macos";
 document.documentElement.dataset.ogTheme = theme;
 document.documentElement.classList.toggle("dark", theme === "dark");
@@ -38,6 +39,14 @@ const AFTER = [
   "Which layer: the workspace machine itself, not your command",
   "What was preserved: unknown — the command was in flight when the workspace machine stopped answering, so it may not have run, or may have run fully or partly.",
   "What to try: once the workspace machine is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+].join("\n");
+
+const EARLIER_NAME = [
+  "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting",
+  "What happened: the cloud computer this chat runs on did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
+  "Which layer: the cloud computer itself, not your command",
+  "What was preserved: unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
+  "What to try: once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
 ].join("\n");
 
 const SESSION = "workspace-machine-restart";
@@ -66,7 +75,14 @@ const events: SessionEvent[] = [
     { id: "call-1", name: "exec_command", arguments: { cmd: "ogtool list" } },
     2,
   ),
-  event("agent.toolCall.output", { id: "call-1", output: before ? BEFORE : AFTER }, 9),
+  event(
+    "agent.toolCall.output",
+    {
+      id: "call-1",
+      output: copy === "before" ? BEFORE : copy === "earlier-name" ? EARLIER_NAME : AFTER,
+    },
+    9,
+  ),
 ];
 
 const items = buildTimeline(englishText, events);
