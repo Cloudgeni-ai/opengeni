@@ -666,11 +666,16 @@ export async function runTurnStreamAttempt(
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
       }).catch((error: unknown) => {
-        // Still pending: a later turn or restore delivers it.
-        observability.warn("pending restore notice delivery failed", {
-          ...safeErrorDiagnostic(error),
-          origin: "worker",
-        });
+        // Still pending: a later turn or restore delivers it. The warning
+        // itself must never fail the turn either.
+        try {
+          observability.warn?.("pending restore notice delivery failed", {
+            ...safeErrorDiagnostic(error),
+            origin: "worker",
+          });
+        } catch {
+          // Diagnostics only.
+        }
         return false;
       });
       const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
