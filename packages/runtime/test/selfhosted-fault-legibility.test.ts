@@ -9,7 +9,6 @@
 
 import { describe, expect, test } from "bun:test";
 import { type ControlRequest, ErrorCode } from "@opengeni/agent-proto";
-import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 import {
   ComputeWakeGate,
   type ControlRpc,
