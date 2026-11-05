@@ -62,9 +62,14 @@ export const CODEX_REALTIME_DEFAULT_VOICE = "cove";
 export const CODEX_REALTIME_CALL_TIMEOUT_MS = 15_000;
 export const CODEX_REALTIME_CONFIG_TIMEOUT_MS = 5_000;
 export const CODEX_REALTIME_CONFIG_ID = "3566525122";
-// Verified live on 2026-08-23. Used only when the authenticated remote config
-// is transiently unavailable or malformed; it is not the persisted model id.
-export const CODEX_REALTIME_PROVIDER_MODEL_FALLBACK = "gpt-live-1-codex";
+// Subscription voice calls are created on the WHAM base, beside the remote
+// config, as the official Codex desktop app does. The older /codex path
+// answers 404 for the current remotely configured model.
+export const CODEX_REALTIME_CALLS_URL = `${CODEX_WHAM_BASE}/wham/realtime/calls`;
+// The official Codex desktop app's default on 2026-11-04. Used only when the
+// authenticated remote config is transiently unavailable or malformed; it is
+// not the persisted model id.
+export const CODEX_REALTIME_PROVIDER_MODEL_FALLBACK = "gpt-live-1.1-codex";
 export const CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK = "avas";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)

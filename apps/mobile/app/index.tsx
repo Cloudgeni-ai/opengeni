@@ -33,7 +33,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import { useAccount } from "@/account";
+import { useAccount, usePickAccount } from "@/account";
 import { useAgentCall } from "@/call";
 import {
   cachedLists,
@@ -42,7 +42,7 @@ import {
   subscribeLists,
 } from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
-import { serverLabel } from "@/account-store";
+import { accountMenuTitle } from "@/account-switching";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import {
@@ -68,13 +68,14 @@ export default function HomeScreen() {
 
 /* Signed out: the web sign-in. Signed in: the home canvas. */
 function Gate() {
-  const { status } = useAccount();
+  const { status, account } = useAccount();
   const theme = useNativeTimelineTheme();
   if (status === "signedOut") {
     return (
       <>
         <Stack.Screen options={{ headerShown: false }} />
-        <SignInScreen />
+        {/* Keyed by account: picking another account from its list starts over for it. */}
+        <SignInScreen key={account?.id ?? "new"} target={account} />
       </>
     );
   }
@@ -108,7 +109,6 @@ function Home() {
   const {
     account,
     accounts,
-    switchAccount,
     adapters,
     client,
     config,
@@ -119,6 +119,7 @@ function Home() {
     error,
     reload,
   } = useAccount();
+  const pickAccount = usePickAccount();
   const [lists, setLists] = useState<SessionLists>(
     () => cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS,
   );
@@ -392,12 +393,9 @@ function Home() {
                           inline: true,
                           items: accounts.map((each) => ({
                             type: "action" as const,
-                            label:
-                              servers > 1
-                                ? `${each.email} · ${serverLabel(each.baseUrl)}`
-                                : each.email,
+                            label: accountMenuTitle(each, servers),
                             state: each.id === account?.id ? ("on" as const) : ("off" as const),
-                            onPress: () => switchAccount(each.id),
+                            onPress: () => pickAccount(each.id),
                           })),
                         },
                         {

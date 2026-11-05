@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { loadSiteSnapshot } from "../../sites-ui";
@@ -36,6 +44,8 @@ export type SiteViewProps = {
   archivedMessage?: string | undefined;
   /** Show the Site title in the frame bar; hide it under a host header that already does. */
   showTitle?: boolean | undefined;
+  /** Wraps the visible title (a host's menu on it); see ArtifactSandbox. */
+  renderTitle?: ((title: ReactElement) => ReactNode) | undefined;
   /** Loading copy; defaults to "Loading Site…". */
   loadingLabel?: string | undefined;
   /** Called with the loaded title, for a host header. */
@@ -91,6 +101,7 @@ export function SiteView({
   theme,
   archivedMessage,
   showTitle = true,
+  renderTitle,
   loadingLabel,
   onTitle,
   showToolbar,
@@ -231,6 +242,7 @@ export function SiteView({
       html={content.html}
       title={snapshot.detail.artifact.title}
       showTitle={showTitle}
+      {...(renderTitle ? { renderTitle } : {})}
       versionLabel={
         !versionControl && snapshot.detail.artifact.currentVersion
           ? t("artifacts.siteView.vRevision", {

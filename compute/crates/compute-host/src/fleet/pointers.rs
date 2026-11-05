@@ -12,13 +12,14 @@
 //! host's monotonic clock, so a step of the system clock does not move it.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use compute_fleet::Stamp;
 use compute_protocol::fleet::{
     POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite, PointerWritten,
+    READS_PACKS_HEADER,
 };
 use compute_storage::Error;
 use compute_storage::fresh::{Clock, Heard, offset_ms};
@@ -49,6 +50,8 @@ pub struct ControlPointers {
     /// The offset last warned about, so a host far off warns once, not
     /// at every answer.
     warned_ms: Arc<AtomicI64>,
+    /// Whether the last answer said every live host reads packs.
+    packs: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for ControlPointers {
@@ -70,6 +73,7 @@ impl ControlPointers {
             gate,
             fleet: Arc::new(Heard::default()),
             warned_ms: Arc::new(AtomicI64::new(0)),
+            packs: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -113,6 +117,7 @@ impl ControlPointers {
         let response = self
             .http
             .post(format!("{}{path}", self.control))
+            .header(READS_PACKS_HEADER, "1")
             .timeout(TIMEOUT)
             .json(body)
             .send()
@@ -146,6 +151,7 @@ impl PointerStore for ControlPointers {
             };
             let found: PointerFound = self.post(POINTER_READ_PATH, &read).await?;
             self.heard(found.now_ms);
+            self.packs.store(found.packs, Ordering::Relaxed);
             Ok(found.kept.map(|kept| Kept {
                 owner: Stamp {
                     epoch: compute_fleet::OwnerEpoch(kept.owner_epoch),
@@ -184,8 +190,15 @@ impl PointerStore for ControlPointers {
             };
             let written: PointerWritten = self.post(POINTER_WRITE_PATH, &write).await?;
             self.heard(written.now_ms);
+            self.packs.store(written.packs, Ordering::Relaxed);
             Ok(written.version.map(Version::Row))
         })
+    }
+
+    /// As the service last answered: an archive reads its earlier pointer
+    /// before it stores anything, so it goes by an answer of its own time.
+    fn writes_packs(&self) -> bool {
+        self.packs.load(Ordering::Relaxed)
     }
 
     fn names(&self) -> BoxFuture<'_, compute_storage::Result<Vec<String>>> {

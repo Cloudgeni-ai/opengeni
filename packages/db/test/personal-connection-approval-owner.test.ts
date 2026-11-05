@@ -4,6 +4,7 @@ import {
   acceptSessionApprovalDecision,
   accountOwnerLabelForTurn,
   applySessionTurnSettlement,
+  attachOpenSuffixToPendingToolCalls,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -11,6 +12,7 @@ import {
   getToolActionReview,
   personalConnectionOwnerForTurn,
   prepareConnectorActionApproval,
+  registerPendingSessionToolCall,
   saveRunState,
   SessionApprovalForbiddenError,
   submitHumanPromptInTransaction,
@@ -284,4 +286,139 @@ test("only the owner of a personal account approves a call on it; anyone may dec
   expect(await decide(bob, sharedAction, "approve")).toMatchObject({ action: "accepted" });
   expect(await decide(bob, declinedByOther, "reject")).toMatchObject({ action: "accepted" });
   expect(await decide(alice, approvedByOwner, "approve")).toMatchObject({ action: "accepted" });
+}, 180_000);
+
+test("a pause's other actions keep their decisions while a sibling decision resumes the turn", async () => {
+  if (!shared) return;
+  const { scope, alice, session, send, claim } = await workspaceWithTwoPeople();
+  await send(alice, "Draft a note to everyone", []);
+  const { attemptId, turn: claimedTurn } = await claim();
+  const turn = (await getSessionTurn(client.db, scope.workspaceId, claimedTurn.id))!;
+  const identity = {
+    ...scope,
+    sessionId: session.id,
+    turnId: claimedTurn.id,
+    attemptId,
+    executionGeneration: claimedTurn.executionGeneration,
+    initiator: turn.initiator,
+  };
+  const drafts = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  // A request whose call is not held for approval: the next resume can't apply
+  // its decision, so it is never offered one while the turn resumes.
+  const unheld = crypto.randomUUID();
+  for (const [index, approvalId] of [...drafts, unheld].entries()) {
+    await prepareConnectorActionApproval(client.db, identity, {
+      approvalId,
+      connectionId: "session-mcp:mail:synthetic",
+      serverId: "mail",
+      toolName: "create_draft",
+      arguments: { to: `person${index}@example.test`, subject: "Hello" },
+      approvalMode: "session_mcp",
+    });
+  }
+  const pendingInput = {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: session.id,
+    turnId: claimedTurn.id,
+    executionGeneration: claimedTurn.executionGeneration,
+    attemptId,
+  };
+  for (const callId of drafts) {
+    await registerPendingSessionToolCall(client.db, {
+      ...pendingInput,
+      callId,
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "mail__create_draft",
+        callId,
+        status: "in_progress",
+        arguments: "{}",
+      },
+    });
+  }
+  expect(
+    await attachOpenSuffixToPendingToolCalls(client.db, {
+      ...pendingInput,
+      members: drafts.map((callId) => ({
+        callId,
+        interruptionKind: "approval" as const,
+        reasoningItems: [],
+      })),
+    }),
+  ).toEqual({ accepted: true, attached: drafts.length });
+  await saveRunState(client.db, {
+    ...identity,
+    expectedExecutionGeneration: identity.executionGeneration,
+    expectedAttemptId: attemptId,
+    serializedRunState: "{}",
+    pendingApprovals: [...drafts, unheld].map((id) => ({ id, name: "mail__create_draft" })),
+  });
+  await applySessionTurnSettlement(client.db, scope.workspaceId, {
+    sessionId: session.id,
+    turnId: claimedTurn.id,
+    triggerEventId: turn.triggerEventId,
+    attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: claimedTurn.id,
+    events: [],
+  });
+  const review = (approvalId: string) =>
+    getToolActionReview(client.db, {
+      ...scope,
+      sessionId: session.id,
+      approvalId,
+      viewerSubjectId: alice,
+    });
+  const decide = (approvalId: string) =>
+    acceptSessionApprovalDecision(client.db, {
+      ...scope,
+      sessionId: session.id,
+      subjectId: alice,
+      payload: { approvalId, decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+    });
+  expect((await review(drafts[1]!))?.availableActions).toEqual(["approve", "reject"]);
+
+  // Deciding the first card resumes the turn; the next cards load meanwhile.
+  const first = await decide(drafts[0]!);
+  if (first.action !== "accepted") throw new Error("first decision was refused");
+  const resumedAttemptId = crypto.randomUUID();
+  const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: resumedAttemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "approval", triggerEventId: first.event.id },
+  });
+  if (resumed.action !== "claimed") throw new Error(`resume claim failed: ${resumed.action}`);
+  expect(resumed.turn.status).toBe("running");
+  for (const approvalId of drafts.slice(1)) {
+    expect(await review(approvalId)).toMatchObject({
+      status: "pending",
+      availableActions: ["approve", "reject"],
+    });
+  }
+  // The card's decision is accepted exactly as its review offered it.
+  expect(await decide(drafts[1]!)).toMatchObject({ action: "accepted" });
+  // Nothing is offered that the endpoint would refuse.
+  expect(await review(unheld)).toMatchObject({ status: "pending", availableActions: [] });
+  expect(await decide(unheld)).toMatchObject({ action: "conflict", reason: "not_pending" });
+  // Once the turn ends, its undecided actions are never offered a decision.
+  await applySessionTurnSettlement(client.db, scope.workspaceId, {
+    sessionId: session.id,
+    turnId: claimedTurn.id,
+    triggerEventId: resumed.turn.triggerEventId,
+    attemptId: resumedAttemptId,
+    turnStatus: "failed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [],
+  });
+  for (const approvalId of [drafts[2]!, unheld]) {
+    expect(await review(approvalId)).toMatchObject({ status: "cancelled", availableActions: [] });
+  }
 }, 180_000);

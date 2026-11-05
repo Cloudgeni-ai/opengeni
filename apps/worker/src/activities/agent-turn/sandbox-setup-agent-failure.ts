@@ -1,4 +1,12 @@
-import { SelfhostedControlError } from "@opengeni/runtime";
+import {
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  processStartFailureNullDeviceNote,
+  sanitizeProcessStartFailureMessage,
+  SelfhostedControlError,
+} from "@opengeni/runtime";
+import { CancelledFailure } from "@temporalio/activity";
+import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 
 /**
  * Platform sandbox setup (credential hooks, client readiness, repository
@@ -107,4 +115,348 @@ export function sandboxSetupFailure(guard: SandboxSetupReplayGuard, error: unkno
     return new SandboxSetupAgentUnavailableError(error);
   }
   return error;
+}
+
+/** The recovery code of a turn whose sandbox is being restarted because it
+ * could not start programs. */
+export const SANDBOX_MACHINE_RESTARTING_CODE = "sandbox_machine_restarting";
+/** The terminal code of a turn whose sandbox cannot start programs. */
+export const SANDBOX_PROCESS_START_FAILED_CODE = "sandbox_process_start_failed";
+
+/** Whether the machine's inability to start programs appears anywhere in the
+ * error's cause graph: a typed agent answer, or its stable marker in a
+ * wrapper's message (older wrappers keep only the text). One missing program
+ * is not that: it keeps its ordinary handling. */
+export function isSandboxProcessStartFailure(error: unknown): boolean {
+  return findProcessStartFailure(error) !== null;
+}
+
+function findProcessStartFailure(error: unknown): Error | null {
+  return findInCauseGraph(error, (node) =>
+    node instanceof SelfhostedControlError
+      ? node.processStartFailed
+      : isMachineProcessStartFailureMessage(node.message),
+  );
+}
+
+/** The probe ran the shell builtin `true` in the default working directory,
+ * so any process start that failed with ENOENT means the machine cannot start
+ * programs, whatever the agent named: an older agent reports `for true`,
+ * which elsewhere would read as one missing program. */
+function probeCannotStartPrograms(error: unknown): boolean {
+  return (
+    findInCauseGraph(
+      error,
+      (node) =>
+        isProcessStartFailureMessage(node.message) && /\(os error 2\)\s*$/.test(node.message),
+    ) !== null
+  );
+}
+
+function findInCauseGraph(error: unknown, matches: (node: Error) => boolean): Error | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<object>();
+  try {
+    for (let index = 0; index < queue.length && seen.size < 64; index += 1) {
+      const node = queue[index];
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+      if (node instanceof Error && matches(node)) return node;
+      const record = node as { cause?: unknown; error?: unknown; errors?: unknown };
+      queue.push(record.cause, record.error);
+      if (Array.isArray(record.errors)) queue.push(...record.errors.slice(0, 16));
+    }
+  } catch {
+    // An unreadable graph is not a process-start failure.
+  }
+  return null;
+}
+
+/**
+ * Platform setup failed because the sandbox could no longer start programs,
+ * and the worker restarted it (files kept, programs ended). Nothing the model
+ * asked for ran, so the same turn retries once the box is back.
+ */
+export class SandboxMachineRestartingError extends Error {
+  override readonly name = "SandboxMachineRestartingError";
+
+  constructor(cause: unknown) {
+    super(
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
+      { cause },
+    );
+  }
+}
+
+/**
+ * Platform setup failed because the sandbox could not start programs, but the
+ * worker's check did not show it still broken (it starts programs again, or
+ * its agent is offline or waking, as after another session's restart of a
+ * shared box), so it was not restarted. Nothing the model asked for ran, so
+ * the same turn retries within the ordinary sandbox recovery budget.
+ */
+export class SandboxMachineBackError extends Error {
+  override readonly name = "SandboxMachineBackError";
+
+  constructor(cause: unknown) {
+    super(
+      "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because a check didn't confirm it is still broken; the same turn will retry after a short delay.",
+      { cause },
+    );
+  }
+}
+
+/** Where the machine that cannot start programs runs, for the person's copy. */
+export type SandboxProcessStartMachine = "compute" | "connected_machine" | "other";
+
+/**
+ * The sandbox cannot start programs and the worker will not restart it
+ * (again): a restart already happened this turn, the machine is the person's
+ * own, or the restart itself failed. The turn stops with copy that says what
+ * to do, never the agent's raw text.
+ */
+export class SandboxProcessStartFailedError extends Error {
+  override readonly name = "SandboxProcessStartFailedError";
+  readonly machine: SandboxProcessStartMachine;
+  /** Diagnostic only: the sanitized agent message and any restart failure. */
+  readonly detail: string;
+
+  constructor(
+    cause: unknown,
+    input: {
+      machine: SandboxProcessStartMachine;
+      restartedThisTurn: boolean;
+      /** A restart was tried and failed (not merely skipped). */
+      restartAttemptFailed?: boolean;
+      restartFailure?: string;
+    },
+  ) {
+    const found = findProcessStartFailure(cause);
+    // A wrapper keeps the agent's raw text, which older agents filled with
+    // the whole command: only its sanitized form is kept.
+    const agentMessage = sanitizeProcessStartFailureMessage(
+      found?.message ?? (cause instanceof Error ? cause.message : String(cause)),
+    ).slice(0, 2_000);
+    super(
+      processStartFailedCopy(
+        input.machine,
+        input.restartedThisTurn,
+        input.restartAttemptFailed ?? false,
+        agentMessage,
+      ),
+      { cause },
+    );
+    this.machine = input.machine;
+    this.detail = input.restartFailure
+      ? `${agentMessage} (restart failed: ${input.restartFailure})`
+      : agentMessage;
+  }
+}
+
+function processStartFailedCopy(
+  machine: SandboxProcessStartMachine,
+  restartedThisTurn: boolean,
+  restartAttemptFailed: boolean,
+  agentMessage: string,
+): string {
+  if (machine === "connected_machine") {
+    const nullDevice = processStartFailureNullDeviceNote(agentMessage);
+    return nullDevice
+      ? `Your connected machine can't start programs because ${nullDevice}. Restart the machine to restore it, then retry.`
+      : "Your connected machine can't start programs. Restart the machine, then retry.";
+  }
+  if (restartedThisTurn) {
+    return "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";
+  }
+  if (restartAttemptFailed) {
+    return "The workspace machine can't start programs and couldn't be restarted, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.";
+  }
+  return "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.";
+}
+
+/** A sandbox session that can boot its box afresh (compute). `exec` runs a
+ * command on the box, which shows whether it can start programs again. */
+type RestartableMachine = {
+  backendId: "compute";
+  restartMachine(): Promise<void>;
+  exec?: (args: { cmd: string }) => Promise<unknown>;
+};
+
+/** How long the box gets to start one trivial program before a restart. */
+const START_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether the box can start a trivial program now. Several sessions can share
+ * one box, so another session's turn may have restarted it since this setup
+ * failed; restarting it again would stop that session's running programs.
+ * Only a probe that itself fails to start a program shows the box is still
+ * broken ("cannot"). One that starts ("starts"), or that cannot tell (the
+ * agent is offline or reconnecting, the box is still waking from another
+ * session's restart, no answer within the bound), never restarts it.
+ */
+async function probeProgramStart(
+  machine: RestartableMachine,
+): Promise<"starts" | "cannot" | "unknown"> {
+  // No way to ask: the restart is the only remedy, as before the probe.
+  if (typeof machine.exec !== "function") return "cannot";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      machine.exec({ cmd: "true" }).then(
+        () => "starts" as const,
+        (probeError: unknown) =>
+          isSandboxProcessStartFailure(probeError) || probeCannotStartPrograms(probeError)
+            ? ("cannot" as const)
+            : ("unknown" as const),
+      ),
+      new Promise<"unknown">((resolve) => {
+        timer = setTimeout(() => resolve("unknown"), START_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function restartableMachine(session: unknown): RestartableMachine | null {
+  if (!session || typeof session !== "object") return null;
+  const candidate = session as { backendId?: unknown; restartMachine?: unknown };
+  return candidate.backendId === "compute" && typeof candidate.restartMachine === "function"
+    ? (session as RestartableMachine)
+    : null;
+}
+
+export type SandboxProcessStartRecovery = {
+  /** The established sandbox session the setup ran against. */
+  session: unknown;
+  /** The turn's sandbox backend ("compute", "selfhosted", ...). */
+  backend: string | null | undefined;
+  /** Restarts this turn already began and completed for this reason
+   * (durable). */
+  restartsThisTurn: () => Promise<{ started: number; completed: number }>;
+  /** Publish the restart's `sandbox.operation.*` events (durable). */
+  publish: (
+    events: Array<{
+      type:
+        | "sandbox.operation.started"
+        | "sandbox.operation.completed"
+        | "sandbox.operation.failed";
+      payload: Record<string, unknown>;
+    }>,
+  ) => Promise<void>;
+  /** The operation name the guard counts. */
+  operationName: string;
+};
+
+/**
+ * The error a failed platform setup throws, with process-start recovery: when
+ * the sandbox cannot start programs, a compute box is restarted at most once
+ * per turn and the turn retries; any other case stops the turn with short,
+ * actionable copy. Liveness failures keep their own recovery.
+ */
+export async function recoverSandboxSetupFailure(
+  guard: SandboxSetupReplayGuard,
+  error: unknown,
+  recovery: SandboxProcessStartRecovery,
+): Promise<unknown> {
+  const mapped = sandboxSetupFailure(guard, error);
+  if (mapped !== error) return mapped;
+  if (
+    error instanceof SandboxMachineRestartingError ||
+    error instanceof SandboxMachineBackError ||
+    error instanceof SandboxProcessStartFailedError ||
+    !isSandboxProcessStartFailure(error)
+  ) {
+    return error;
+  }
+  const machine = restartableMachine(recovery.session);
+  if (!machine) {
+    return new SandboxProcessStartFailedError(error, {
+      machine: recovery.backend === "selfhosted" ? "connected_machine" : "other",
+      restartedThisTurn: false,
+    });
+  }
+  if (!guard.replaySafe()) {
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: false,
+      restartFailure: "a setup script had started, so the setup is not replayed",
+    });
+  }
+  let restarts: { started: number; completed: number };
+  try {
+    restarts = await recovery.restartsThisTurn();
+  } catch (countError) {
+    // Without proof that no restart happened, never risk a restart loop.
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: false,
+      restartFailure: `could not read earlier restarts: ${errorText(countError)}`,
+    });
+  }
+  if (restarts.started > 0) {
+    // One restart was begun this turn; the copy says it happened only when it
+    // completed (the worker may have stopped before or during it).
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: restarts.completed > 0,
+    });
+  }
+  // Checked before the restart: a box another session sharing it already
+  // restarted (or is restarting) is retried as it is, never restarted again.
+  // Nothing was restarted, so nothing is recorded; the ordinary sandbox
+  // recovery budget bounds these retries.
+  if ((await probeProgramStart(machine)) !== "cannot") return new SandboxMachineBackError(error);
+  const name = recovery.operationName;
+  try {
+    // Recorded before the restart, so a crash during it still counts.
+    await recovery.publish([
+      { type: "sandbox.operation.started", payload: { name, reason: "process_start_failed" } },
+    ]);
+  } catch (publishError) {
+    // A fenced or cancelled attempt stops as such; nothing was restarted.
+    if (isAttemptStop(publishError)) return publishError;
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: false,
+      restartFailure: `could not record the restart: ${errorText(publishError)}`,
+    });
+  }
+  try {
+    await machine.restartMachine();
+  } catch (restartError) {
+    await recovery
+      .publish([
+        {
+          type: "sandbox.operation.failed",
+          payload: { name, error: errorText(restartError) },
+        },
+      ])
+      .catch(() => undefined);
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: false,
+      restartAttemptFailed: true,
+      restartFailure: errorText(restartError),
+    });
+  }
+  await recovery
+    .publish([{ type: "sandbox.operation.completed", payload: { name } }])
+    .catch(() => undefined);
+  return new SandboxMachineRestartingError(error);
+}
+
+/** A lost attempt (fenced, superseded) or a cancelled operation: never
+ * reported as a machine failure. */
+function isAttemptStop(error: unknown): boolean {
+  return (
+    error instanceof TurnAttemptFencedError ||
+    error instanceof CancelledFailure ||
+    (error instanceof Error && error.name === "TurnOperationCancelledError")
+  );
+}
+
+function errorText(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.replace(/\s+/g, " ").slice(0, 300);
 }

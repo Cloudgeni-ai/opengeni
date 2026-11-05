@@ -673,6 +673,8 @@ const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
   "sandbox_capacity_unavailable",
   "sandbox_service_unavailable",
   "sandbox_service_refused",
+  // The detail is the machine agent's own text (the program, the OS error).
+  "sandbox_process_start_failed",
 ]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */

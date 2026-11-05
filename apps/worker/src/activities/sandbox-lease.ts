@@ -26,7 +26,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { isProviderCommandObservationUnavailableError } from "@opengeni/runtime";
-import { Context } from "@temporalio/activity";
+import { ApplicationFailure, Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
   accrueWarmSeconds,
@@ -118,6 +118,7 @@ import {
 import {
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
   sandboxArchiveCaptureTimeoutMs,
+  effectiveSandboxDrainProviderSnapshotTimeoutMs,
   sandboxDeadlineMandatoryCaptureLeadMs,
   sandboxProviderMaxRemainingLifetimeMs,
   sandboxWarmRateMicrosPerSecond,
@@ -204,6 +205,7 @@ import {
   SANDBOX_REAPER_CHILD_DISPATCH_LIMIT,
   type SandboxDrainActivityInput,
   type SandboxLeaseSweepMaintenanceInput,
+  sandboxDrainCaptureRetryDelayMs,
   sandboxDrainTimeoutClass,
   sandboxIdleCheckpointWorkflowId,
   type SandboxIdleCheckpointActivityInput,
@@ -610,7 +612,40 @@ type SandboxDrainCaptureAttempt = {
 };
 
 class SandboxDrainRecoveryDeferredError extends Error {
-  readonly name = "SandboxDrainRecoveryDeferredError";
+  readonly name: string = "SandboxDrainRecoveryDeferredError";
+}
+
+/** A full drain snapshot of this lease epoch failed recently: wait out its
+ * capped exponential backoff before starting another one. */
+class SandboxDrainCaptureBackoffError extends SandboxDrainRecoveryDeferredError {
+  override readonly name: string = "SandboxDrainCaptureBackoffError";
+  constructor(
+    message: string,
+    readonly retryAfterMs: number,
+  ) {
+    super(message);
+  }
+}
+
+/** Time left in this lease's drain snapshot backoff, or zero. No backoff once
+ * the provider deadline is inside the mandatory pre-deadline save window, and
+ * none that would run past that window's start: there, waiting would only let
+ * the provider end the box uncaptured. */
+function sandboxDrainCaptureBackoffRemainingMs(
+  lease: Pick<LeaseSnapshot, "drainCaptureFailures" | "providerDeadlineAt">,
+  settings: Parameters<typeof sandboxDeadlineMandatoryCaptureLeadMs>[0],
+  nowMs = Date.now(),
+): number {
+  const failures = lease.drainCaptureFailures;
+  if (!failures || failures.count <= 0 || !failures.lastFailedAt) return 0;
+  const backoffMs = Math.max(
+    0,
+    failures.lastFailedAt.getTime() + sandboxDrainCaptureRetryDelayMs(failures.count) - nowMs,
+  );
+  if (!lease.providerDeadlineAt) return backoffMs;
+  const windowStartsInMs =
+    lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) - nowMs;
+  return Math.min(backoffMs, Math.max(0, windowStartsInMs));
 }
 
 /**
@@ -628,6 +663,9 @@ class SandboxDrainRecoveryDeferredError extends Error {
  * provider call that never settles cannot pin the lease to this worker forever.
  */
 const settlingDrainCaptures = new Map<string, { startedAtMs: number }>();
+
+/** Below this, Temporal's own retry schedule is already about as soon. */
+const SANDBOX_DRAIN_CAPTURE_MIN_RETRY_HINT_MS = 1_000;
 
 type DrainCaptureIdentity = {
   sandboxGroupId: string;
@@ -1041,8 +1079,38 @@ export function createSandboxLeaseActivities(
         };
         if (error instanceof SandboxDrainRecoveryDeferredError) {
           observability.info("sandbox reaper: per-sandbox recovery deferred safely", details);
+        } else if (
+          error instanceof Error &&
+          error.name === "SandboxCheckpointArtifactRegistrationConflictError"
+        ) {
+          // A takeover's earlier attempt registered the same provider snapshot
+          // first and publishes it; this retry then finds the box drained. A
+          // conflict that persists still leaves the lease expired-draining,
+          // which alerts on its own.
+          observability.info(
+            "sandbox reaper: drain snapshot already registered by an earlier attempt",
+            details,
+          );
         } else {
           observability.warn("sandbox reaper: per-sandbox drain failed", details);
+        }
+        // After a settled snapshot failure, ask Temporal to come back when the
+        // backoff ends rather than on its short default schedule. A snapshot
+        // still in flight (its claim is held) keeps the short schedule, so a
+        // late success is torn down promptly.
+        const retryAfterMs =
+          error instanceof SandboxDrainCaptureBackoffError
+            ? error.retryAfterMs
+            : lease && !lease.archiveCapture && lease.leaseEpoch === row.leaseEpoch
+              ? sandboxDrainCaptureBackoffRemainingMs(lease, drainSettings)
+              : 0;
+        if (retryAfterMs > SANDBOX_DRAIN_CAPTURE_MIN_RETRY_HINT_MS) {
+          throw ApplicationFailure.create({
+            message: errorMessage(error),
+            type: error instanceof Error ? error.name : "SandboxDrainFailed",
+            ...(error instanceof Error ? { cause: error } : {}),
+            nextRetryDelay: retryAfterMs,
+          });
         }
         throw error;
       }
@@ -4488,6 +4556,16 @@ async function terminateDrainableBox(
         }
       }
     } else {
+      // Back off between full snapshots after settled failures of this epoch
+      // instead of starting a new one on every retry.
+      const backoffMs = sandboxDrainCaptureBackoffRemainingMs(lease, settings);
+      if (backoffMs > 0) {
+        throw new SandboxDrainCaptureBackoffError(
+          `sandbox ${row.sandboxGroupId} epoch ${row.leaseEpoch} drain snapshot failed ` +
+            `${lease.drainCaptureFailures?.count ?? 0} time(s); next attempt in ${backoffMs}ms`,
+          backoffMs,
+        );
+      }
       const claimed = await claimWorkspaceArchiveCapture(db, {
         accountId,
         workspaceId: row.workspaceId,
@@ -4763,6 +4841,7 @@ async function terminateDrainableBox(
             captureId: captureClaim.id,
             expectedEpoch: row.leaseEpoch,
             expectedInstanceId: lease.instanceId,
+            recordDrainCaptureFailure: true,
           });
         },
         row.workspaceId,
@@ -5330,12 +5409,23 @@ export async function terminateProviderBox(
       // The budget bounds only this attempt's wait, never the capture: a slow
       // but finite capture keeps reading and publishes late, and the retry
       // that finds it still settling here defers instead of starting another.
+      // The provider's own hard timeout is the separate, longer drain budget:
+      // when it equalled the wait, a snapshot slower than the wait was killed
+      // by the provider every time and the box could never drain.
+      // The capture claim's deadline (wait + settlement grace) therefore no
+      // longer bounds the provider operation. That is safe: a retry by another
+      // worker takes the claim over with the same provider request id, which
+      // Modal treats as the same snapshot, so a late result publishes once.
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),
         {
           requestId: providerCaptureRequestId ?? randomUUID(),
           strategy: liveCapturePolicy.strategy,
+          providerTimeoutMs: effectiveSandboxDrainProviderSnapshotTimeoutMs(
+            settings,
+            settings.sandboxSnapshotTimeoutMs,
+          ),
         },
         diskBackedArchives,
       );

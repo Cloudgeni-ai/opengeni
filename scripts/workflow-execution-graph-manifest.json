@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "218700455fa436150582fd149ab6a13422141fe9cef91aff274bd4c214a003d3"
+      "sha256": "ad34a9de238ee57b91291ce8792acb5e10e86300aebf63a2841f3f8ab6283fb5"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "178bac8ba10fea147fa4cc9fb731bcd4105fcd67e6cbeacc1f014af84389ef9a"
+      "sha256": "c39fbd686cef9d18961a0dabf677da27c4dec960fe8d80b76880074234343e0d"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -18,63 +18,63 @@
     },
     {
       "path": ".github/workflows/backup-image.yml",
-      "sha256": "4b113b52b5b9acef0d35771123644218cf7e11a688e35708954f7ab1f36e365a"
+      "sha256": "e22a85bc802c6e2e5facd973ea6e5884a857d5f3d5c4bd6c092501e8faa94f58"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
-      "sha256": "db9e34041155dcdd512dabf16dce76b1990f7479ea5d3cc5fcf251306caca928"
+      "sha256": "569443ff3f219650fb560dbbd46e7cdcc8045685a216eb573f04bdae902dedbd"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "10ecafc36def82ece0659b7b01cbc9b5b0143c3aa4f344c2d120bd77c1e9294d"
+      "sha256": "2bf9bd2fd7a954c3a7f66eba5e4aca5351c7aeada957b003b3eb758b81df0f61"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
-      "sha256": "7415baedd4c81423664e7d7e2947958d97a7cb1c8e3ea70798167b40cc805786"
+      "sha256": "4562843afc6048d299684baa306ffceeb8af60385e3686010a0f084b7a5d02d6"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "cbc0180146c34b13ba8ffbf99c4295dc05314e329626e7c9381a0e78dfa21858"
+      "sha256": "a32fdc7fcf7442eb5a8861bfdb4eba084d698685ee0fa0ed271cba07ccbe48dd"
     },
     {
       "path": ".github/workflows/compute-release.yml",
-      "sha256": "11eb439a5bf2e7b1bc9e5de5c5d0aeddfc7c391f4bc25668b79016d5a0175643"
+      "sha256": "30faad388598b08638e8081296a82d624d16f2e48e1da4172ce90ca92fd50919"
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "918f6da344eb20839fd15815eb322f1c4fefbdb901000ecb0183e8de1f4b3322"
+      "sha256": "1d45acbbe4982b313f0687c7d6006d70e5b104c92af63c7924cd9d7d53a22306"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
+      "sha256": "6ff28262c98fadb42eb24b5f96a72fcb2a1d421ed0f3be6737d623c60e9dae17"
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "fb1ee347cf037689810c03a4105bfc09de906fa19d1392484763f6b7d4a7b715"
+      "sha256": "0abc0e89782fa279bc500c1cb7fb0e251724e0732d8510b39b3cf4fa20c25b82"
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
-      "sha256": "cc27ffa0c93f4bc0daccfb66cd7a4709b00d7c7e4d3e2c54f73858f47dbcf03a"
+      "sha256": "915ab55dcc6aa7226149bd7600a3e218d5844785c36db997ccb6f8cb8261acf9"
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "7b965bf132f35ea5bbdc124899473bba1ee8711788cd92af85504b9e7bf87228"
+      "sha256": "b06d2043db94ef8978feb25b8cada13f5ccb20f65fc2218fbabffb700a2c7d95"
     },
     {
       "path": ".github/workflows/merge-content.yml",
-      "sha256": "e73d479146d440c32179858f7ab8ea5e6fb7339262c7ab093fb552badc1e4a0b"
+      "sha256": "2750e500167e7902d815e8f37d73fbfb3ef0b1352a2a8c340cf5b667e552afbe"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "fdebedaaa55772ea83f395776354e238617ffbf7ea031b936dfec256f56e1e32"
+      "sha256": "2774844f4b0e22cb89e68af137711c61ef6b337b6f27e045d0cd407e6f5480ea"
     },
     {
       "path": ".github/workflows/pr-ci-superseded.yml",
-      "sha256": "4491263ed500adde6c9f5ee0e2f0df79a747a5bb1ecbd2e5c66b2a811d968873"
+      "sha256": "46bc458f4e59641612fb9d21ed7dcd775c06963e450268e1a293b8827ac4472f"
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "c2507e52ef41c3ceb89a24503d6fe5a8134d3a83e43fee3208afb7437802fd75"
+      "sha256": "acd19756ad14de15828eda3066d0742d4db131e25eda265ff11b93078adec7a2"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -86,31 +86,31 @@
     },
     {
       "path": ".github/workflows/publish-browser-extension.yml",
-      "sha256": "db8d4155f396094f43283f98a521327000cda3d722aac44d627d2e8970f25480"
+      "sha256": "623e106b87f3c8917bae342d24ddf617fdf5b370b01fe7681a9afab998cdc190"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
-      "sha256": "4cb5d3bb038e0a1f8997b83b93d02c7dbb579ef3c4bcc84cd831f2e3210c1288"
+      "sha256": "d83050b580e5dbb89635e035ab06a42120d13454f09ba91104aa0fc6f00f2946"
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "d2a7a82918f7a95bdc5ba2bcd1af4c75fb4a831895cf4daa31f35cc0d40554d0"
+      "sha256": "99424d69bde4372a4d022e2df1c53006d649baf9f437f892f6a3e30826a1ffa5"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "cc073f9fdcbde42166d8659bc476cf83ff4613c70cda646743aa98d9f0e8bccc"
+      "sha256": "7937e21ad958a66fc1ef649ebbcb70acf1b5b5cb1a6c29197e8afc701ba3cbed"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "ac43d89317db69b4cdf8e07e8231f4e4ad9e526f35d4008c542b611d5caa5f1b"
+      "sha256": "d3ff6b3faeb2fc01ac1e53e5785bf67b16f43afef97f27f4e21d293bbcbe1919"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "c6586d5c4ab3803d830ab1a6bfb897e695f618ac7024b76a937a1195e9bbc913"
+      "sha256": "8e98bdf4d721c5be4e5246d7798a8b0f3b307149c016eea391f2a9b5a4381ad5"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
-      "sha256": "915b27ac2a5841b9d3735366b2db1b3445b973543af6d0560f28add9e611a747"
+      "sha256": "cdd155ca9c580162462762887dd88ef23060e1812563a46dbd1c645a06b753e5"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
@@ -118,7 +118,7 @@
     },
     {
       "path": ".github/workflows/regenerate-generated.yml",
-      "sha256": "d4afb5c9410784e18f3de0924eae8e0b46e1d41a141e56d55d19759cf7c23ef5"
+      "sha256": "3339ea42d0c997f279bb50a454c995d0eb5aab21f0d30163f97a9628b7e9f43a"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -126,7 +126,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "ddcb67184d0492ca3911a520ee912f22f35f1463e53f84614ed689d07e585edd"
+      "sha256": "c8aec435a575cc6b93b3af4fbd28c64a5b26b618696a28fa7077189bd389c34b"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -150,7 +150,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "802509a3d688869db12b13f489898bd758828fc00bfd1792db3143e204890693"
+      "sha256": "1eb5f05af3e50ac2b7524a4fb36755f866740223a68b1b0de1082ace0cf342ba"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -162,7 +162,7 @@
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
-      "sha256": "ac60feb9581061d3182d237497c1ea8b7f9f5ca6026b49cb636f33287dc9b86a"
+      "sha256": "0adf0313cd053d5d459d0a6f7ef440cdc91d51542c9b07d7c7294e165797cd52"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
@@ -172,7 +172,7 @@
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "546880d5a15d618687b04dbd34c2ce8e4fee1c3af4b332296507502f823404eb"
+      "sha256": "d69c34096c59fb5c9e52057cc024e541b62a9efeab2193aba6d75dafa8f58041"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -180,7 +180,7 @@
     },
     {
       "path": ".github/actions/setup-agent-test-nats/action.yml",
-      "sha256": "744f65eb944451c9b4c33d32f1ec14cd1d06623abc3e90c3771290bfd62a3b26"
+      "sha256": "98f53e5931ddeb517e694afb99b6c4139e61e69b126a275bffbe898b8ca48df8"
     }
   ],
   "generatedLocalTargets": [
@@ -306,6 +306,12 @@
     {
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
+      "step": "Allow unprivileged user namespaces for the agent's namespace tests",
+      "sha256": "0a1a20a7c4c58d02d5102702566514003267dffe4733afe6d11230900653a143"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
       "step": "cargo build --release --workspace",
       "sha256": "edf73b5fcb65b446c151c1bef82227f31164cbf8a4321051d2f1f535ffa4e2f6"
     },
@@ -313,7 +319,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "0472457afcd7d85cf00dddf60b569a51a0e4a670237f69eed4789634ca1c9e96"
+      "sha256": "c6713d108b004717903c7303c4e999f824dc4502a0ebba25ae6e562f19a1095e"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -792,6 +798,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "desktop-image",
+      "step": "Room on the runner",
+      "sha256": "44c950e02f3afcd144d998d669d3d1458590376898a0581f3de005449b61791e"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "desktop-image",
       "step": "Verify anonymous desktop image resolution",
       "sha256": "ab5bbe2c89fda9f60a36a58dc74323ecf7763c26f2f227afbff4c14b7c1d4854"
     },
@@ -1147,7 +1159,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "7720250bac9a13e634839d616a7274b06b8d8b0c1870fd8d3cc7bceccf4f34f0"
+      "sha256": "db623f05b43f1abd04e80c5b212d8f84eb3d4897eb9b6e5441ba635e76b6b98f"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1525,13 +1537,19 @@
       "workflow": ".github/workflows/publish-canary-chart.yml",
       "job": "publish",
       "step": "Package exact chart",
-      "sha256": "dc8b7635f45d5b2b79a8de039a293e494ce0f073104945832728b968a2b52b9d"
+      "sha256": "c991c239c9b586b5a11191689e1c4e8934796dd515b2643478a5bb2220fbfca3"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
       "job": "publish",
       "step": "Reconcile or publish and verify bytes",
       "sha256": "c1eae7a09c30ad919a582142d56e6c8483e903810a75a0765e830e9c025cb9a0"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary-chart.yml",
+      "job": "publish",
+      "step": "Resolve exact-source desktop image",
+      "sha256": "83c14e8586fb035aa83ba9c48b61ee2aee8d7114c5ca4515eabae537dacb20b3"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
@@ -1621,7 +1639,7 @@
       "workflow": ".github/workflows/publish-packages.yml",
       "job": "publish",
       "step": "Require successful protected source CI",
-      "sha256": "13237f597321e1a7030bc3f8b27e24c50675432f202f2faee9e9f627cb4ec3b5"
+      "sha256": "ff44ed1f88c20ad298c21582914aefa5e02631294fa129675510eb4c4f6d89a5"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",
@@ -1764,8 +1782,14 @@
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
+      "step": "Make room for the desktop candidate",
+      "sha256": "ce761828efbc188840bd0759dafb03da008ca496b537335723ab06961e420469"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
       "step": "Package the deterministic immutable Helm chart candidate",
-      "sha256": "1ee9fe40597a905e62b682be2032058b38bbce0f4028e2ad95fa46350315038d"
+      "sha256": "e27fd84847b289ab16b715927a1fe0150a102c6c4857c66464d7af9b440784e5"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1789,7 +1813,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Refuse occupied run-scoped candidate tags",
-      "sha256": "470b6fba1bda98f6d67392f9e7ec1df30c946506ec9c23f457f3449f8ead3b98"
+      "sha256": "4590a29a274d508048731dbda6c07a356b6a4000420f96cefddfbfcf26a5cb35"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1820,6 +1844,12 @@
       "job": "candidate",
       "step": "Resolve candidate identity",
       "sha256": "acc453965326f8aa632c3e648a347f5b46c4f209f5ae5e978a5978657b68bb7d"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
+      "step": "Resolve desktop candidate digest",
+      "sha256": "3f23534d8dde68b4e264e59ff162a0c518aab3c1d03d7a01845da82b2a47d2bb"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1855,7 +1885,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Verify candidate images support anonymous pull",
-      "sha256": "9a113e744aee2a393d378f25d93311502df7070015343cdc4d1039f58006de27"
+      "sha256": "bcccb4135a492a2522337a782a3d503b62ddead5f02912a4a3cabf4175dadc2d"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",

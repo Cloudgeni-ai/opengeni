@@ -297,7 +297,11 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
         reclaimable_memory_mib: reported.memory_reclaimable_mib,
         cpu_millis: reported.cpu_millis,
         free_cpu_millis: reported.cpu_free_millis,
-        free_disk_mib: reported.disk_free_mib,
+        // What the host frees by disk relief is room as much as what is
+        // free (ADR 30).
+        free_disk_mib: reported
+            .disk_free_mib
+            .saturating_add(reported.disk_reclaimable_mib),
         ready: reported
             .ready
             .iter()
@@ -770,6 +774,34 @@ mod tests {
                 .map(|placed| placed.host),
             Ok(HostId(1))
         );
+    }
+
+    /// Disk a host frees by disk relief counts as free: a host whose free
+    /// disk is short of a sandbox's fits it now once relief covers the
+    /// rest, ahead of a host that does not fit now.
+    #[test]
+    fn disk_a_host_frees_by_relief_counts_as_free() {
+        let mut short = host(1);
+        short.capacity.disk_free_mib = 512;
+        let free = |row: &HostRow| capacity(&row.info, &row.capacity).free_disk_mib;
+        assert_eq!(free(&short), 512);
+        short.capacity.disk_reclaimable_mib = 512;
+        assert_eq!(free(&short), 1024);
+        // The other host has no memory free now, so only the host that
+        // frees disk fits now.
+        let mut busy = host(1);
+        busy.id = HostId(2);
+        busy.info.name = "host-2".to_owned();
+        busy.capacity.memory_free_mib = 0;
+        let view = View::new(1, SILENT_AFTER);
+        view.apply_all(&[short, busy]);
+        for _ in 0..16 {
+            assert_eq!(
+                view.place(&demand(), &[], &HashSet::new())
+                    .map(|placed| placed.host),
+                Ok(HostId(1))
+            );
+        }
     }
 
     #[test]

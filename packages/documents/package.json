@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "6.7.0",
+  "version": "6.9.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

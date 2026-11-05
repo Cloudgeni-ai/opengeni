@@ -51,7 +51,7 @@ function RequestProfile() {
 writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, workspaceId), {
   // Sparse activity starts ungrouped so project auto-hydration cannot populate
   // additional running roots before the test uses the real Group by menu.
-  groupBy: ["sparse-active", "hover", "unread-reply"].includes(
+  groupBy: ["sparse-active", "hover", "unread-reply", "paused"].includes(
     new URLSearchParams(window.location.search).get("scenario") ?? "",
   )
     ? "none"

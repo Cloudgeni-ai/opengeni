@@ -135,7 +135,6 @@ describe("build-once rig provider image runtime", () => {
     ): Promise<T> => {
       expect(input.settings.modalImageId).toBe("im-built-rig-image");
       expect(input.settings.modalWorkspacePersistence).toBe("snapshot_directory");
-      expect(input.sandboxGroupId).toBe("33333333-3333-4333-8333-333333333333");
       return await run(
         {
           backendId: "modal",
@@ -166,7 +165,6 @@ describe("build-once rig provider image runtime", () => {
         observability: {} as never,
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
-        buildRequestId: "33333333-3333-4333-8333-333333333333",
         rigVersionId: VERSION_ID,
         sessionIdPrefix: "rig-provider-image-test",
         imageId: "im-built-rig-image",

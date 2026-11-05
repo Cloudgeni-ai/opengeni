@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "6.7.0",
+  "version": "6.9.0",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -230,7 +230,7 @@
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",

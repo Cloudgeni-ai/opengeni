@@ -196,6 +196,18 @@ export function createTranscriptionService(input: {
     }
     return null;
   };
+  const assertCandidateEligibility = async (
+    candidates: readonly DictationProvider[],
+    context: TranscriptionAvailabilityContext,
+  ) => {
+    if (!context.workspaceId) return;
+    for (const candidate of candidates) {
+      await deployment.assertEligible?.(candidate.id, {
+        workspaceId: context.workspaceId,
+        ...(context.accountId ? { accountId: context.accountId } : {}),
+      });
+    }
+  };
   const ordered = (context: TranscriptionAvailabilityContext) =>
     orderedProviders(
       providers,
@@ -242,7 +254,10 @@ export function createTranscriptionService(input: {
         );
     },
     async selectProvider(context) {
-      return (await firstAvailable(ordered(context), context))?.id ?? null;
+      const candidates = ordered(context);
+      const selected = await firstAvailable(candidates, context);
+      if (!selected) await assertCandidateEligibility(candidates, context);
+      return selected?.id ?? null;
     },
     async admit({ providerId, accountId, workspaceId, attribution }) {
       const provider = providers.find((candidate) => candidate.id === providerId);
@@ -282,6 +297,7 @@ export function createTranscriptionService(input: {
       const exactId = preferredProviderId(request.providerId);
       const pinnedAway = deployment.pinned && exactId && exactId !== deployment.pinned.providerId;
       const exact = exactId ? providers.find((candidate) => candidate.id === exactId) : undefined;
+      if (exact && !pinnedAway) await assertCandidateEligibility([exact], scopeContext);
       const selected = request.providerId
         ? !pinnedAway && exact && (await isAvailable(exact, scopeContext))
           ? exact
@@ -293,6 +309,7 @@ export function createTranscriptionService(input: {
           ? dictationModelOf(deployment, selected, request.model)
           : selected;
       if (!provider) {
+        await assertCandidateEligibility(exact ? [exact] : ordered(request), scopeContext);
         // EU-only: say so when the region is why nothing can serve the
         // workspace (fallback never leaves the EU; `available` excludes
         // every provider without an EU route).

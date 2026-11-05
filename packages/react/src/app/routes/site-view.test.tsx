@@ -1007,6 +1007,12 @@ test("Edit with Opengeni on a Site already open starts a new conversation once",
 
 const publicationSlot = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[data-live-status-slot]")!;
+/** The publication control's own text, without the Site's "…" menu beside it. */
+const publicationText = (container: HTMLElement) => {
+  const slot = publicationSlot(container).cloneNode(true) as HTMLElement;
+  for (const menu of slot.querySelectorAll("[data-site-actions-root]")) menu.remove();
+  return slot.textContent;
+};
 const siteHidden = (container: HTMLElement) =>
   container.querySelector("[data-site-view]")!.parentElement!.classList.contains("hidden");
 
@@ -1015,7 +1021,7 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
   const { container } = await render();
-  expect(publicationSlot(container).textContent).toBe("Publish");
+  expect(publicationText(container)).toBe("Publish");
   expect(container.querySelector("[data-publish-page]")).toBeNull();
 
   await act(async () => button(container, "Publish")!.click());
@@ -1048,8 +1054,8 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(1);
-  expect(publicationSlot(container).textContent).toContain("Published");
-  expect(publicationSlot(container).textContent).toContain("usage-4k9x.sites.example");
+  expect(publicationText(container)).toContain("Published");
+  expect(publicationText(container)).toContain("usage-4k9x.sites.example");
   // Focus goes back to the control that opened the form.
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
 });
@@ -1117,12 +1123,12 @@ test("people who can't publish see Published and its address, with no Publish or
   conversations = [];
   publicationLink = async () => published;
   const { container } = await render();
-  expect(publicationSlot(container).textContent).toContain("Published");
+  expect(publicationText(container)).toContain("Published");
   expect(button(container, "Publishing settings")).toBeUndefined();
   act(() => root?.unmount());
   publicationLink = notPublished;
   const next = await render();
-  expect(publicationSlot(next.container).textContent).toBe("");
+  expect(publicationText(next.container)).toBe("");
   expect(managementArgs).toHaveLength(0);
 });
 
@@ -1132,7 +1138,7 @@ test("the header never says Live, also where publishing isn't available", async 
   const { container } = await render();
   // A replacement is always given, so the frame's plain "Live" never shows.
   expect(siteViewProps.at(-1)!.liveStatus).toBeDefined();
-  expect(publicationSlot(container).textContent).toBe("");
+  expect(publicationText(container)).toBe("");
 });
 
 const menuItem = (container: HTMLElement, text: string) =>
@@ -1271,4 +1277,66 @@ test("with the chat hidden, or no chat to take files, the Site keeps its drops",
   const empty = await render();
   await act(async () => void fireFileDrag(document.body, "dragenter", [shot]));
   expect(cover(empty.container)).toBeNull();
+});
+
+const siteActions = (container: HTMLElement) =>
+  [
+    ...container.querySelectorAll<HTMLElement>(
+      "[data-site-actions-root] [role='menuitem'], [data-site-actions-root] a",
+    ),
+  ].map((item) => item.textContent);
+
+test("the Site's own menu copies its title, duplicates it and opens its details", async () => {
+  permissions = ["sessions:create", "artifacts:publish"];
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const { container } = await render();
+  expect(container.querySelector("[data-site-actions-menu]")?.getAttribute("aria-label")).toBe(
+    "More Site actions",
+  );
+  // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
+  expect(siteActions(container)).toEqual(["Copy title", "Duplicate", "Site details"]);
+  // The chat's menu keeps to the chat.
+  const chatMenu = [...container.querySelectorAll("[role='menu']")].filter(
+    (menu) => !menu.closest("[data-site-actions-root]"),
+  );
+  for (const menu of chatMenu) expect(menu.textContent).not.toContain("Site details");
+});
+
+test("people who can't publish get no Duplicate in the Site's menu", async () => {
+  permissions = ["sessions:create"];
+  const { container } = await render();
+  expect(siteActions(container)).toEqual(["Copy title", "Site details"]);
+});
+
+test("the Site's menu pins and archives through the sidebar's own actions", async () => {
+  const { publishSiteSidebarBridge } = await import("../lib/site-sidebar-bridge");
+  const pins: [string, boolean][] = [];
+  const archived: string[] = [];
+  const withdraw = publishSiteSidebarBridge({
+    workspaceId,
+    pinnedSiteIds: new Set([siteId]),
+    pin: (origin, pinned) => void pins.push([origin.siteId, pinned]),
+    archive: (origin) => void archived.push(origin.siteId),
+  });
+  try {
+    const { container } = await render();
+    expect(siteActions(container)).toEqual(["Copy title", "Unpin", "Site details", "Archive"]);
+    await act(async () => button(container, "Unpin")!.click());
+    await act(async () => button(container, "Archive")!.click());
+    expect(pins).toEqual([[siteId, false]]);
+    expect(archived).toEqual([siteId]);
+  } finally {
+    act(() => withdraw());
+  }
+});
+
+test("a Site with nothing published yet offers no Duplicate", async () => {
+  permissions = ["sessions:create", "artifacts:publish"];
+  siteDetails = async () => ({
+    artifact: { title: "Opengeni usage", status: "active", currentVersion: null },
+    versions: [],
+    events: [],
+  });
+  const { container } = await render();
+  expect(siteActions(container)).toEqual(["Copy title", "Site details"]);
 });

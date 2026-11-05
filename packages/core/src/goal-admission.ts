@@ -10,6 +10,7 @@ import {
 } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
   evaluateWorkspaceModelPolicy,
   type GoalAdmissionPausedReason,
   type Session,
@@ -126,6 +127,10 @@ export async function goalRunBudgetBlocked(
   const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
   if (denial === null) return null;
   const blocks: Record<NonNullable<typeof denial>, GoalAdmissionBlock> = {
+    subscription_api_unavailable: {
+      pausedReason: "model_unavailable",
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    },
     insufficient_credits: services.entitlements
       ? {
           pausedReason: "usage_policy",

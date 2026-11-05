@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -98,6 +98,8 @@ export type ModelAttemptToolCall = {
   subjectId: string;
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
+  /** The identity advertised under `modelName`; a call bound to another tool is not found. */
+  expectedIdentity?: AttemptToolIdentity;
 };
 
 export {
@@ -216,6 +218,21 @@ export class CodemodeToolContractError extends Error {
 export interface CodemodeTools {
   [key: string]: CodemodeTools | CodemodeToolFunction;
 }
+
+/** The API's refusal for a bearer whose agent attempt has ended. It never
+ * becomes valid again; only a different (renewed) bearer can succeed. */
+export const CODEMODE_CALLER_STALE_CODE = "agent_attempt_caller_stale";
+
+/** True when the attempt bearer used for this request was refused permanently. */
+export function isCodemodeCallerStaleError(error: unknown): error is CodemodeTransportError {
+  return error instanceof CodemodeTransportError && error.remoteCode === CODEMODE_CALLER_STALE_CODE;
+}
+
+/** Bearers the API refused as stale, per API base, shared by every client in
+ * this process: a program that builds a fresh client per retry must not reach
+ * the API with a dead bearer either. Only digests are kept, never bearer bytes. */
+const staleCallerRefusals = new Map<string, CodemodeTransportError>();
+const STALE_CALLER_REFUSALS_RETAINED = 64;
 
 /** Persistent, idempotent client for one exact sandbox attempt bearer. */
 export class CodemodeClient {
@@ -531,6 +548,19 @@ export class CodemodeClient {
   private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
+    // A bearer refused as stale never becomes valid again: fail locally with
+    // the same refusal. A renewed bearer (token file rewritten for a new
+    // attempt) has another digest and is sent normally.
+    const refusalKey = `${this.baseUrl}\u0000${createHash("sha256").update(token).digest("hex")}`;
+    const refused = staleCallerRefusals.get(refusalKey);
+    if (refused) {
+      throw new CodemodeTransportError(refused.message, refused.status, {
+        ...(refused.remoteCode ? { code: refused.remoteCode } : {}),
+        retryable: false,
+        outcomeUnknown: false,
+        ...(refused.details ? { details: refused.details } : {}),
+      });
+    }
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
@@ -561,7 +591,16 @@ export class CodemodeClient {
       } catch {
         // The status is sufficient; never echo an unbounded provider body.
       }
-      throw new CodemodeTransportError(message, response.status, errorOptions);
+      const error = new CodemodeTransportError(message, response.status, errorOptions);
+      if (isCodemodeCallerStaleError(error)) {
+        staleCallerRefusals.set(refusalKey, error);
+        if (staleCallerRefusals.size > STALE_CALLER_REFUSALS_RETAINED) {
+          staleCallerRefusals.delete(staleCallerRefusals.keys().next().value!);
+        }
+        // The bearer's attempt ended: nothing it could ask for is current.
+        this.catalogSnapshot = null;
+      }
+      throw error;
     }
     return response;
   }
@@ -610,11 +649,20 @@ export function compileCodemodeTools(
 ): CodemodeTools {
   const verified = parseVerifiedAttemptToolCatalog(catalog);
   const root: CodemodeTools = Object.create(null) as CodemodeTools;
-  for (const entry of verified.entries) {
+  entries: for (const entry of verified.entries) {
+    // Catalogs built by the gateway never overlap. Should one still do, keep
+    // the first tool at a path: never replace it or the namespace beneath it
+    // with another tool, and never fail every other tool over one.
+    let probe: CodemodeTools | CodemodeToolFunction | undefined = root;
+    for (const segment of entry.codemodePath) {
+      if (typeof probe === "function") continue entries;
+      probe = probe[segment];
+      if (probe === undefined) break;
+    }
+    if (probe !== undefined) continue;
     let cursor = root;
     for (const segment of entry.codemodePath.slice(0, -1)) {
-      let existing = cursor[segment];
-      if (typeof existing === "function") throw new Error("Codemode path collides with a tool");
+      let existing = cursor[segment] as CodemodeTools | undefined;
       if (!existing) {
         existing = Object.create(null) as CodemodeTools;
         cursor[segment] = existing;
@@ -681,6 +729,18 @@ export function createAttemptToolEnvironment(
           }),
       }),
     ),
+    {
+      onWarnings: (warnings) =>
+        console.warn("[codemode] attempt tool catalog built without some tools as listed", {
+          event: "tool_catalog_degraded",
+          workspaceId: input.scope.workspaceId,
+          sessionId: input.scope.sessionId,
+          turnId: input.scope.turnId,
+          attemptId: input.scope.attemptId,
+          count: warnings.length,
+          warnings: warnings.slice(0, 32),
+        }),
+    },
   );
   const unsigned = {
     version: ATTEMPT_TOOL_CATALOG_VERSION,

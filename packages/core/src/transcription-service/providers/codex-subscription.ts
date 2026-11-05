@@ -26,6 +26,7 @@ import {
   coreTranscriptionResult,
   coreTranscriptionUnavailable,
   withoutFallback,
+  assertSubscriptionTranscriptionAllowed,
 } from "./subscription-core";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
@@ -56,6 +57,7 @@ async function transcribeOnCore(
     ) => Promise<Response>;
   },
 ): Promise<{ text: string; languages: string[] }> {
+  await assertSubscriptionTranscriptionAllowed({ ...input, accountId: request.accountId });
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: request.accountId,

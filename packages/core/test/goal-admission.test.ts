@@ -151,7 +151,7 @@ test("Resume uses only promotional credits eligible for the chosen model", async
       model,
       undefined,
       undefined,
-      undefined,
+      "app",
     );
   }
 });

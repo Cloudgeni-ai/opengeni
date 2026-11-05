@@ -65,7 +65,7 @@ use crate::store::{
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 use confirmed::{Confirmed, ImageChunks};
-use files::{Earlier, Reusable};
+use files::{Earlier, reusable};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -93,8 +93,18 @@ type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 /// holding it (`None` for zeros).
 type Piece = (Range<u64>, Option<ChunkRef>);
 
+/// The format a copy is written in: [`copy::VERSION_PACKS`] when its new
+/// chunks are in packs, [`copy::VERSION`] otherwise (ADR 31).
+fn copy_version(packing: bool) -> u32 {
+    if packing {
+        copy::VERSION_PACKS
+    } else {
+        copy::VERSION
+    }
+}
+
 /// The head of a stored copy (see [`compute_storage::copy`]), in a format
-/// this build reads; it writes only [`copy::VERSION`].
+/// this build reads.
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
     Head::parse(bytes).map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))
 }
@@ -332,7 +342,7 @@ impl Chunked {
     pub async fn sweep(&self, delete: bool) -> Result<Report, StorageError> {
         compute_storage::sweep::sweep(
             &self.chunks,
-            |pointer| async move { self.names(&pointer).await },
+            &copy::Copies(&self.chunks),
             delete,
             std::time::SystemTime::UNIX_EPOCH,
         )
@@ -343,6 +353,7 @@ impl Chunked {
     /// `pointer` keeps. Anything unreadable fails, so a sweep stops before
     /// deleting what it could not account for; only a damaged or missing
     /// working-set pack does not, since a wake without it is just slower.
+    #[cfg(test)]
     async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
         copy::names(&self.chunks, pointer).await
     }
@@ -507,7 +518,13 @@ impl Chunked {
         op: &'static str,
         references: impl IntoIterator<Item = ChunkRef>,
     ) -> Result<bool, EngineError> {
-        let checks: Vec<Result<bool, EngineError>> = stream::iter(references)
+        // One look at an object proves every chunk in it: a pack's chunks
+        // are asked about once.
+        let mut objects = HashMap::new();
+        for reference in references {
+            objects.entry(reference.key()).or_insert(reference);
+        }
+        let checks: Vec<Result<bool, EngineError>> = stream::iter(objects.into_values())
             .map(|reference| async move {
                 let _permit = self
                     .transfers
@@ -788,11 +805,14 @@ impl Chunked {
             state: state_before,
             memory: memory_before,
         } = self.before(id, files, now).await;
+        // Decided once, so the head names the format its references are in.
+        let packing = self.chunks.writes_packs();
         let disk = self.put_file(
             files.disk.path(),
             files.disk.open(),
             disk_before,
             None,
+            packing,
             cancel,
         );
         let memory = async {
@@ -807,6 +827,7 @@ impl Chunked {
                     File::open(&image.state),
                     state_before,
                     None,
+                    packing,
                     cancel
                 ),
                 self.put_file(
@@ -814,6 +835,7 @@ impl Chunked {
                     File::open(&image.memory),
                     memory_before,
                     image.chunks.clone(),
+                    packing,
                     cancel,
                 ),
             );
@@ -844,7 +866,7 @@ impl Chunked {
             return Ok(Archive::Cancelled);
         }
         let head = Head {
-            version: copy::VERSION,
+            version: copy_version(packing),
             disk,
             memory,
             profile,
@@ -885,7 +907,7 @@ impl Store for Chunked {
         // again.
         let held = self.held(id);
         let holding = self.holding(&held);
-        let once = holding.archive_once(id, save, files, cancel);
+        let once = Box::pin(holding.archive_once(id, save, files, cancel));
         let (archived, kept) = self.chunks.keeping(&held, once).await;
         if kept.copied_bytes > 0 {
             crate::observe::notes::bytes("copied", kept.copied_bytes);
@@ -1161,38 +1183,6 @@ struct Before {
     memory: Earlier,
 }
 
-/// What an archive may reuse of a file, by offset: what its own earlier
-/// copy `own` holds there, confirmed to be stored if `own_confirmed`, and
-/// what the confirmed `image` holds there if it differs. A chunk of the
-/// earlier copy that the image holds at the same offset is confirmed with
-/// the image.
-fn reusable(
-    own: HashMap<u64, ChunkRef>,
-    own_confirmed: bool,
-    image: Option<&HashMap<u64, ChunkRef>>,
-) -> Earlier {
-    let mut earlier: Earlier = HashMap::with_capacity(own.len().max(image.map_or(0, HashMap::len)));
-    for (&offset, reference) in image.into_iter().flatten() {
-        earlier.entry(offset).or_default().push(Reusable {
-            reference: reference.clone(),
-            confirmed: true,
-        });
-    }
-    for (offset, reference) in own {
-        let held = earlier.entry(offset).or_default();
-        if held.iter().any(|reusable| reusable.reference == reference) {
-            continue;
-        }
-        // After the image's, so a range that matches both names the
-        // confirmed one.
-        held.push(Reusable {
-            reference,
-            confirmed: own_confirmed,
-        });
-    }
-    earlier
-}
-
 /// The chunk at each chunk-sized position of a memory manifest (`None` for
 /// zeros), or `None` if the manifest is not laid out in whole chunks at
 /// chunk boundaries, as [`Chunked`] stores memory.
@@ -1261,6 +1251,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
 
 mod confirmed;
 mod files;
+mod packed;
 mod rootfs;
 pub(crate) use rootfs::file_id;
 #[cfg(test)]

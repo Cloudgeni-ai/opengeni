@@ -1,5 +1,30 @@
 # @opengeni/react-native
 
+## 6.9.0
+
+### Patch Changes
+
+- 54bf495: A paused chat no longer says it is working. Its turn row reads "Paused" with the clock stopped where the pause began, and switches back to working on Resume; paused time is not counted as work. This covers a chat's own Pause, a parent's and the workspace's. Sidebar rows mark paused work with a pause icon instead of the spinner, including a parent whose workers are paused, through the new `treeStats.pausedWorkDescendants` count. A sub-chat's descendant counts now also respect its ancestors' pauses. `MessageTimeline` in both `@opengeni/react` and `@opengeni/react-native` takes the live pause through its new `pause` prop (`timelineLivePause(session.effectiveControl)`); custom timelines can use `useTimelinePauses`.
+- Updated dependencies [331bc5e]
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/react@6.9.0
+  - @opengeni/sdk@6.9.0
+  - @opengeni/contracts@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [fbb70bc]
+- Updated dependencies [feaecf8]
+- Updated dependencies [b393cac]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/react@6.8.0
+  - @opengeni/sdk@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

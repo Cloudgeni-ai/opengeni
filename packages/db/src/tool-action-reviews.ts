@@ -1,6 +1,7 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { parseVerifiedAttemptToolCatalog } from "@opengeni/codemode";
 import {
+  approvalIdentifier,
   McpConnectionAccountBindings,
   ToolActionReview,
   toolReviewContextFromSchema,
@@ -29,6 +30,109 @@ type ReviewScope = {
   sessionId: string;
   approvalId: string;
 };
+
+/** Live turn states in which a sibling decision is resuming the pause. */
+const RESUMING_TURN_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "recovering",
+  "waiting_capacity",
+]);
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether the decision endpoint takes a decision for this approval while its
+ * turn resumes from a sibling decision. Mirrors `acceptSessionApprovalDecision`:
+ * the turn is still the session's active one, the approval is in the turn's
+ * latest pause, its call has not settled, and the next resume can still apply
+ * it (a model tool call held for approval, or a programmatic call waiting on
+ * review).
+ */
+async function decidableWhileResuming(
+  db: Database,
+  input: ReviewScope,
+  turnId: string,
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scoped) => {
+    const [session] = await scoped
+      .select({ activeTurnId: schema.sessions.activeTurnId })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (session?.activeTurnId !== turnId) return false;
+    const [runState] = await scoped
+      .select({
+        pendingApprovals: schema.agentRunStates.pendingApprovals,
+        pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+      })
+      .from(schema.agentRunStates)
+      .where(
+        and(
+          eq(schema.agentRunStates.workspaceId, input.workspaceId),
+          eq(schema.agentRunStates.sessionId, input.sessionId),
+          eq(schema.agentRunStates.turnId, turnId),
+        ),
+      )
+      .orderBy(desc(schema.agentRunStates.stateVersion))
+      .limit(1);
+    if (!runState) return false;
+    let pending: unknown;
+    try {
+      pending = fromPostgresLosslessJson(
+        runState.pendingApprovals,
+        runState.pendingApprovalsCodecVersion,
+      );
+    } catch {
+      return false;
+    }
+    if (
+      !Array.isArray(pending) ||
+      !pending.some((item) => approvalIdentifier(item) === input.approvalId)
+    )
+      return false;
+    const [call] = await scoped
+      .select({
+        interruptionKind: schema.sessionPendingToolCalls.interruptionKind,
+        hasResult: sql<boolean>`${schema.sessionPendingToolCalls.resultItem} is not null`,
+      })
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+          eq(schema.sessionPendingToolCalls.turnId, turnId),
+          eq(schema.sessionPendingToolCalls.callId, input.approvalId),
+        ),
+      )
+      .limit(1);
+    if (call)
+      return (
+        !call.hasResult &&
+        (call.interruptionKind === "approval" ||
+          call.interruptionKind === "interaction_intervention")
+      );
+    if (!UUID_PATTERN.test(input.approvalId)) return false;
+    const [operation] = await scoped
+      .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+      .from(schema.sessionAttemptCodemodeCalls)
+      .where(
+        and(
+          eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+          eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+          eq(schema.sessionAttemptCodemodeCalls.turnId, turnId),
+          eq(schema.sessionAttemptCodemodeCalls.operationId, input.approvalId),
+          eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+        ),
+      )
+      .limit(1);
+    return operation !== undefined;
+  });
+}
 
 async function reviewSnapshot(db: Database, input: ReviewScope) {
   return await withRlsContext(db, input, async (scoped) => {
@@ -247,7 +351,15 @@ export async function getToolActionReview(
   // A person can always decline a waiting action. Approving needs the exact saved
   // arguments; when an older request's arguments cannot be recovered, decline is
   // the only safe decision and keeps the session from staying stuck.
-  const waiting = status === "pending" && turn.status === "requires_action";
+  // Deciding one of a pause's approvals resumes the turn (queued, running,
+  // ...); the others stay waiting meanwhile wherever the decision endpoint
+  // still takes their decision. A turn that ended already made its pending
+  // actions "cancelled" above.
+  const waiting =
+    status === "pending" &&
+    (turn.status === "requires_action" ||
+      (RESUMING_TURN_STATUSES.has(turn.status) &&
+        (await decidableWhileResuming(db, scope, turn.id))));
   const args = request.reviewArguments;
   const context = request.reviewContext ?? undefined;
   const parsed = decodeReviewArguments(args);

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/example-northstar-support",
-  "version": "0.0.208",
+  "version": "0.0.210",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@tailwindcss/vite": "^4.2.4",

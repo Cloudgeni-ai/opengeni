@@ -8,11 +8,16 @@ use serde::{Deserialize, Serialize};
 use crate::chunk::ChunkRef;
 use crate::manifest::ExtentSource;
 use crate::store::ChunkStore;
+use crate::sweep::{Named, Names};
 use crate::{Error, Result};
 
 /// The format copies are written in: manifests named with the period they
 /// were stored in (`<period>/<digest>`, ADR 25 and 28).
 pub const VERSION: u32 = 4;
+
+/// The format whose chunk references may name a chunk in a pack (ADR 31).
+/// Written only once every reader reads it ([`ChunkStore::writes_packs`]).
+pub const VERSION_PACKS: u32 = 5;
 
 /// The format before, whose manifests are named by their digest alone.
 /// Read, never written.
@@ -51,7 +56,7 @@ impl Head {
     /// The head `bytes` hold, in a format this build reads.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let head: Self = serde_json::from_slice(bytes)?;
-        if head.version != VERSION && head.version != VERSION_DIGESTS {
+        if ![VERSION_DIGESTS, VERSION, VERSION_PACKS].contains(&head.version) {
             return Err(Error::Invalid("a stored copy of an unknown version"));
         }
         Ok(head)
@@ -140,6 +145,79 @@ struct PackPart {
 pub async fn pack_parts(store: &ChunkStore, index: &ChunkRef) -> Result<Vec<ChunkRef>> {
     let parts: PackParts = serde_json::from_slice(&store.get_chunk(index).await?)?;
     Ok(parts.parts.into_iter().map(|part| part.chunk).collect())
+}
+
+/// Sandboxes' stored copies in `0`, as a sweep reads them: a head names its
+/// manifests, its profile and its working-set pack's index by itself; a
+/// manifest names its chunks, and a pack's index its parts.
+#[derive(Clone, Copy, Debug)]
+pub struct Copies<'a>(pub &'a ChunkStore);
+
+/// A stored object of a copy that names more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Within {
+    /// A manifest, by its name.
+    Manifest(String),
+    /// A working-set pack, by its index.
+    Pack(ChunkRef),
+}
+
+impl Names for Copies<'_> {
+    type Within = Within;
+
+    fn named(&self, pointer: &[u8]) -> Result<Named<Within>> {
+        let head = Head::parse(pointer)?;
+        let mut named = Named::default();
+        let mut manifests = vec![head.disk];
+        // A working-set pack holds memory pages, so it is kept only with the
+        // memory image it serves.
+        let pack = head.memory.as_ref().and(head.pack.as_ref());
+        if let Some(memory) = &head.memory {
+            manifests.extend([memory.state.clone(), memory.memory.clone()]);
+        }
+        for name in manifests {
+            let key = ChunkStore::manifest_key(&name)?;
+            named.keys.push(key.clone());
+            named.within.push((key, Within::Manifest(name)));
+        }
+        named.keys.extend(head.profile.map(|profile| profile.key()));
+        if let Some(index) = pack {
+            named.keys.push(index.key());
+            named
+                .within
+                .push((index.key(), Within::Pack(index.clone())));
+        }
+        Ok(named)
+    }
+
+    /// Anything unreadable fails, so a sweep stops before deleting what it
+    /// could not account for; only a damaged or missing working-set pack
+    /// does not, since a wake without it is just slower.
+    async fn within(&self, object: &Within) -> Result<Option<Vec<String>>> {
+        match object {
+            Within::Manifest(name) => {
+                let manifest = self.0.get_manifest(name).await?;
+                Ok(Some(
+                    manifest
+                        .extents
+                        .into_iter()
+                        .filter_map(|extent| match extent.source {
+                            ExtentSource::Chunk { reference, .. } => Some(reference.key()),
+                            ExtentSource::Zero | ExtentSource::Base { .. } => None,
+                        })
+                        .collect(),
+                ))
+            }
+            Within::Pack(index) => match pack_parts(self.0, index).await {
+                Ok(parts) => Ok(Some(parts.iter().map(ChunkRef::key).collect())),
+                Err(error) if error.is_permanent() => {
+                    tracing::warn!(%error, "working-set pack unreadable; its parts may be swept");
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
