@@ -7,6 +7,7 @@ import {
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import type { BrowserRecordingVideoInput } from "../activities/browser-recordings";
+import type { DictationListeningInput } from "../activities/dictation-listening";
 
 export type RecordingTranscriptWorkflowInput = {
   accountId: string;
@@ -34,6 +35,12 @@ export function recordingDeletionWorkflowId(recordingId: string): string {
 export function recordingSpeakerScanWorkflowId(recordingId: string): string {
   return `recording-speaker-scan:${recordingId}`;
 }
+
+export function dictationListeningWorkflowId(recordingId: string): string {
+  return `recording-dictation-listening:${recordingId}`;
+}
+
+export type DictationListeningWorkflowInput = DictationListeningInput;
 
 export type BrowserRecordingVideoWorkflowInput = BrowserRecordingVideoInput;
 
@@ -93,6 +100,17 @@ const speakerScanActivity = proxyActivities<Pick<typeof activities, "scanRecordi
     maximumInterval: "5 minutes",
     maximumAttempts: 3,
   },
+});
+
+/**
+ * One run listens to a dictation for up to ten minutes, heartbeating every
+ * fraction of a second. A failed run only leaves more for the final
+ * transcript, so it is tried again just once.
+ */
+const listeningActivity = proxyActivities<Pick<typeof activities, "listenToDictation">>({
+  startToCloseTimeout: "15 minutes",
+  heartbeatTimeout: "1 minute",
+  retry: { initialInterval: "1 second", maximumAttempts: 2 },
 });
 
 /** Encoding an hour of mostly still pages takes seconds; a long busy one, minutes. */
@@ -187,6 +205,25 @@ export async function recordingDeletionWorkflow(
   input: RecordingDeletionWorkflowInput,
 ): Promise<void> {
   await deletionActivity.deleteRecordingMedia(input);
+}
+
+/**
+ * Hear a dictation's pieces while it is still being spoken, so when it stops
+ * only its last few seconds are left. Ends with the dictation.
+ */
+export async function dictationListeningWorkflow(
+  input: DictationListeningWorkflowInput,
+): Promise<void> {
+  for (let runs = 0; runs < 20; runs += 1) {
+    let again = false;
+    try {
+      ({ again } = await listeningActivity.listenToDictation(input));
+    } catch {
+      // The final transcript hears what this didn't.
+    }
+    if (!again) return;
+  }
+  await continueAsNew<typeof dictationListeningWorkflow>(input);
 }
 
 /**

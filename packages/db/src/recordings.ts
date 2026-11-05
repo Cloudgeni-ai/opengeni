@@ -1144,11 +1144,15 @@ export async function listDeletingRecordingObjectKeys(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
-        // The speaker scan saved while a meeting was still recording.
+        // The speaker scan saved while a meeting was still recording, and
+        // the pieces of a dictation heard while it was spoken.
         ...tracks.flatMap((track) =>
           track.kind === "video"
             ? []
-            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+            : [
+                recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber }),
+                recordingHeardPiecesObjectKey({ ...input, trackNumber: track.trackNumber }),
+              ],
         ),
         // A browser recording's video and the action log beside it, even if
         // the worker saved them without recording it yet.
@@ -1222,6 +1226,19 @@ export function recordingSpeakerScanObjectKey(input: {
   trackNumber: number;
 }): string {
   return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.speakers`;
+}
+
+/**
+ * Where the worker keeps the pieces of a dictation it heard while the
+ * dictation was still being spoken, so the final transcript only hears the
+ * words after them.
+ */
+export function recordingHeardPiecesObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+  trackNumber: number;
+}): string {
+  return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.heard`;
 }
 
 /**
@@ -4205,11 +4222,15 @@ export async function beginRecordingAudioExpiry(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
-        // Voice features from a scan the final transcript never collected.
+        // Voice features from a scan the final transcript never collected,
+        // and the words of a dictation heard while it was spoken.
         ...tracks.flatMap((track) =>
           track.kind === "video"
             ? []
-            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+            : [
+                recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber }),
+                recordingHeardPiecesObjectKey({ ...input, trackNumber: track.trackNumber }),
+              ],
         ),
       ]),
     ];

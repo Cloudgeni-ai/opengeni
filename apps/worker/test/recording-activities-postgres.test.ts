@@ -1817,8 +1817,9 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       recordingId: recording.input.recordingId,
     });
     // Deleting a missing object succeeds, so the gone pieces count too, and
-    // so does each audio track's speaker scan, which may still exist.
-    expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 8, purged: true });
+    // so do each audio track's speaker scan and pieces heard while it was
+    // spoken, which may still exist.
+    expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 10, purged: true });
     expect(storage.objects.size).toBe(0);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
   });
@@ -1829,6 +1830,17 @@ async function capturedDictation(
   seconds = 3,
   options: { language?: string; keyterms?: string[] } = {},
   /** The provider and model the dictation named, such as a desktop shortcut's own. */
+  named?: { providerId: string; model: string },
+) {
+  const dictation = await speakingDictation(storage, opusWebm(seconds, 440), seconds, named);
+  return { actor: dictation.actor, input: await dictation.finalize(options) };
+}
+
+/** A dictation still being spoken, its audio so far uploaded as one chunk. */
+async function speakingDictation(
+  storage: ReturnType<typeof memoryStorage>,
+  audio: Uint8Array,
+  seconds: number,
   named?: { providerId: string; model: string },
 ) {
   const db = client!.db;
@@ -1855,7 +1867,6 @@ async function capturedDictation(
     tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
     ...(named ? { transcription: named } : {}),
   });
-  const audio = opusWebm(seconds, 440);
   const [row] = await reserveRecordingChunks(db, {
     ...actor,
     recordingId,
@@ -1877,28 +1888,30 @@ async function capturedDictation(
     trackNumber: 0,
     chunkNumbers: [0],
   });
-  const versionId = crypto.randomUUID();
-  await finalizeRecording(db, {
-    ...actor,
+  const work = {
+    accountId: grant.accountId,
+    workspaceId: actor.workspaceId,
     recordingId,
-    versionId,
-    tracks: [{ trackNumber: 0, chunkCount: 1 }],
-    transcription: {
-      providerId: named?.providerId ?? "voice-one",
-      model: named?.model ?? "voice-input",
-      options,
-      creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
-    },
-  });
+    ownerSubjectId: actor.subjectId,
+  };
   return {
     actor,
-    input: {
-      accountId: grant.accountId,
-      workspaceId: actor.workspaceId,
-      recordingId,
-      ownerSubjectId: actor.subjectId,
-      versionId,
-      processingOwner: versionId,
+    work,
+    finalize: async (options: { language?: string; keyterms?: string[] } = {}) => {
+      const versionId = crypto.randomUUID();
+      await finalizeRecording(db, {
+        ...actor,
+        recordingId,
+        versionId,
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        transcription: {
+          providerId: named?.providerId ?? "voice-one",
+          model: named?.model ?? "voice-input",
+          options,
+          creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
+        },
+      });
+      return { ...work, versionId, processingOwner: versionId };
     },
   };
 }
@@ -2079,6 +2092,77 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     expect(new Set(calls.map((call) => call.billing!.sourceId))).toEqual(
       new Set([`${dictation.input.recordingId}:${dictation.input.versionId}:0`]),
     );
+  });
+
+  test("pieces heard while a dictation is spoken are kept, so only its end is heard after it stops", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    // Speech with pauses at about 9 and 16 seconds.
+    const dictation = await speakingDictation(
+      storage,
+      gatedOpusWebm(20, [
+        [0, 8.8],
+        [9.5, 16],
+        [16.7, 20],
+      ]),
+      20,
+    );
+    const calls: TranscriptionRequest[] = [];
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      return {
+        text: `Piece ${calls.length}.`,
+        languages: ["en"],
+        providerId: "voice-one",
+        audioSeconds: request.durationSeconds ?? 0,
+        latencyMs: 5,
+        creditCostMicros: 100,
+      };
+    });
+    const attribution = {
+      kind: "human" as const,
+      initiatingHumanSubjectId: dictation.actor.subjectId,
+    };
+    const listening = run.listenToDictation({
+      ...dictation.work,
+      choice: {
+        providerId: "voice-one",
+        model: "voice-input",
+        options: {},
+        creditAttribution: attribution,
+      },
+    });
+    // The two pieces before its pauses are heard while it is still spoken.
+    for (let waited = 0; calls.length < 2 && waited < 100; waited += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(calls).toHaveLength(2);
+    const input = await dictation.finalize();
+    expect(await listening).toEqual({ again: false });
+    expect(await run.transcribeRecordingVersion(input)).toMatchObject({ outcome: "complete" });
+    // Only the last piece is heard after it stopped.
+    expect(calls).toHaveLength(3);
+    const seconds = calls.map((call) => call.durationSeconds!);
+    expect(seconds[0]).toBeGreaterThan(8.8);
+    expect(seconds[0]).toBeLessThan(9.5);
+    expect(seconds[2]).toBeGreaterThan(3.3);
+    expect(seconds[2]).toBeLessThan(4);
+    // Each piece is billed once, to who asked; a heard one as itself.
+    expect(calls.map((call) => call.billing!.sourceId)).toEqual([
+      expect.stringMatching(new RegExp(`^${input.recordingId}:heard:0-\\d+$`)),
+      expect.stringMatching(new RegExp(`^${input.recordingId}:heard:\\d+-\\d+$`)),
+      `${input.recordingId}:${input.versionId}:2`,
+    ]);
+    expect(calls.every((call) => call.billing!.attribution.kind === "human")).toBe(true);
+    const transcript = await getRecordingTranscriptPage(client.db, {
+      ...dictation.actor,
+      recordingId: input.recordingId,
+    });
+    expect(transcript.segments.map((segment) => segment.text)).toEqual([
+      "Piece 1.",
+      "Piece 2.",
+      "Piece 3.",
+    ]);
   });
 
   test("a credit refusal fails the dictation without retrying", async () => {

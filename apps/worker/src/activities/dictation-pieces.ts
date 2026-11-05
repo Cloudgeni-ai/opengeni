@@ -95,6 +95,35 @@ export const DICTATION_PIECES: DictationPiecePlan = {
 /** Loudness is measured in frames this long. */
 const FRAME_MILLISECONDS = 20;
 
+/** Each 20 ms frame's loudness (root mean square of its samples). */
+function frameLoudness(wav: PcmWav, endSample = wav.data.byteLength / 2): Float64Array {
+  const perMillisecond = wav.sampleRate / 1_000;
+  const frame = Math.max(1, Math.round(FRAME_MILLISECONDS * perMillisecond));
+  const frames = Math.floor(endSample / frame);
+  const view = new DataView(wav.data.buffer, wav.data.byteOffset, wav.data.byteLength);
+  const loudness = new Float64Array(frames);
+  for (let index = 0; index < frames; index += 1) {
+    let sum = 0;
+    for (let sample = index * frame; sample < (index + 1) * frame; sample += 1) {
+      const value = view.getInt16(sample * 2, true);
+      sum += value * value;
+    }
+    loudness[index] = Math.sqrt(sum / frame);
+  }
+  return loudness;
+}
+
+/**
+ * Quiet is relative to the recording: a tenth of the way from its floor to
+ * its speech. Audio with no clear floor has no pauses (0).
+ */
+function quietLevel(loudness: Float64Array): number {
+  const sorted = Float64Array.from(loudness).sort();
+  const floor = sorted[Math.floor(sorted.length * 0.02)] ?? 0;
+  const voice = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
+  return voice > Math.max(floor * 3, 32) ? floor + (voice - floor) * 0.1 : 0;
+}
+
 /**
  * Where to cut a dictation, as sample positions: the pieces run between
  * consecutive positions, from 0 to the last sample. Each cut is the middle
@@ -111,24 +140,11 @@ export function planDictationPieces(
   const total = samples / perMillisecond;
   if (total <= Math.max(plan.wholeMilliseconds, plan.minMilliseconds)) return [0, samples];
   const frame = Math.max(1, Math.round(FRAME_MILLISECONDS * perMillisecond));
-  const frames = Math.floor(samples / frame);
-  const view = new DataView(wav.data.buffer, wav.data.byteOffset, wav.data.byteLength);
-  const loudness = new Float64Array(frames);
-  for (let index = 0; index < frames; index += 1) {
-    let sum = 0;
-    for (let sample = index * frame; sample < (index + 1) * frame; sample += 1) {
-      const value = view.getInt16(sample * 2, true);
-      sum += value * value;
-    }
-    loudness[index] = Math.sqrt(sum / frame);
-  }
-  // Quiet is relative to this recording: a tenth of the way from its floor
-  // to its speech. Audio with no clear floor has no pauses to find, and is
-  // cut at its quietest moments instead.
-  const sorted = Float64Array.from(loudness).sort();
-  const floor = sorted[Math.floor(sorted.length * 0.02)] ?? 0;
-  const voice = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
-  const quiet = voice > Math.max(floor * 3, 32) ? floor + (voice - floor) * 0.1 : 0;
+  const loudness = frameLoudness(wav);
+  const frames = loudness.length;
+  // Audio with no clear floor has no pauses to find, and is cut at its
+  // quietest moments instead.
+  const quiet = quietLevel(loudness);
   const cuts = [0];
   let start = 0;
   const toFrame = (milliseconds: number) => Math.floor(milliseconds / FRAME_MILLISECONDS);
@@ -175,6 +191,82 @@ export function planDictationPieces(
 
 /** At most this many pieces of one dictation are heard at once. */
 export const DICTATION_PIECE_CONCURRENCY = 8;
+
+/**
+ * How a dictation is cut while it is still being spoken, so only the words
+ * after the last cut are left when it stops.
+ */
+export type DictationListeningPlan = {
+  /** A piece is at least this long before a pause may end it. */
+  minMilliseconds: number;
+  /** A pause at least this long ends a piece. */
+  pauseMilliseconds: number;
+  /** With no such pause, a piece is cut at its quietest moment once this long. */
+  maxMilliseconds: number;
+  /**
+   * The newest audio is this long, and is never cut into: decoding more of
+   * the recording later may still change its last moments.
+   */
+  settleMilliseconds: number;
+};
+
+export const DICTATION_LISTENING: DictationListeningPlan = {
+  minMilliseconds: 6_000,
+  pauseMilliseconds: 300,
+  maxMilliseconds: 30_000,
+  settleMilliseconds: 600,
+};
+
+/**
+ * The next place to cut a dictation that is still being spoken, after the
+ * cut at `fromSample`; null while there is none yet. It is the middle of the
+ * first pause after the shortest piece, or, when the speaker hasn't paused
+ * by the longest piece, its quietest moment. Only settled audio is
+ * considered, so the same cut is found again in the whole recording.
+ */
+export function nextDictationCut(
+  wav: PcmWav,
+  fromSample: number,
+  plan: DictationListeningPlan = DICTATION_LISTENING,
+): number | null {
+  const perMillisecond = wav.sampleRate / 1_000;
+  const frame = Math.max(1, Math.round(FRAME_MILLISECONDS * perMillisecond));
+  const samples = wav.data.byteLength / 2;
+  const settled = Math.floor((samples - plan.settleMilliseconds * perMillisecond) / frame);
+  const start = Math.ceil(fromSample / frame);
+  const toFrames = (milliseconds: number) => Math.round(milliseconds / FRAME_MILLISECONDS);
+  const first = start + toFrames(plan.minMilliseconds);
+  if (settled <= first) return null;
+  const loudness = frameLoudness(wav, settled * frame);
+  const quiet = quietLevel(loudness);
+  const last = Math.min(settled, start + toFrames(plan.maxMilliseconds));
+  const pause = toFrames(plan.pauseMilliseconds);
+  let run = 0;
+  // A pause may begin before the shortest piece is reached, as long as its
+  // middle comes after it; it must have ended within the settled audio.
+  for (let index = start + 1; index < settled; index += 1) {
+    if (loudness[index]! < quiet) {
+      run += 1;
+      continue;
+    }
+    if (run >= pause) {
+      const middle = index - Math.ceil(run / 2);
+      if (middle >= first && middle <= last) return middle * frame;
+      if (middle > last) break;
+    }
+    run = 0;
+    if (index > last) break;
+  }
+  if (settled < start + toFrames(plan.maxMilliseconds)) return null;
+  let cut = first;
+  for (let index = first; index <= last; index += 1) {
+    if (loudness[index]! < loudness[cut]!) cut = index;
+  }
+  return cut * frame;
+}
+
+/** At most this many pieces of a dictation still being spoken are heard at once. */
+export const DICTATION_LISTENING_CONCURRENCY = 4;
 
 /** The piece plan for a model that takes at most `maxMilliseconds` in one request. */
 export function dictationPiecePlan(maxMilliseconds: number): DictationPiecePlan {

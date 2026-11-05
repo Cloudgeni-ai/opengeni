@@ -1,10 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
   dictationPiecePlan,
+  nextDictationCut,
   pcmWavPiece,
   planDictationPieces,
   readPcmWav,
+  type PcmWav,
 } from "../src/activities/dictation-pieces";
+import {
+  dictationQuestion,
+  keptHeardPieces,
+  pcmSha256,
+  readHeardDictation,
+  writeHeardDictation,
+  type HeardDictation,
+} from "../src/activities/dictation-listening";
 import { mapConcurrently } from "../src/activities/concurrently";
 
 const RATE = 16_000;
@@ -81,5 +91,90 @@ describe("dictation pieces", () => {
         return value;
       }),
     ).rejects.toThrow("piece failed");
+  });
+
+  test("while it is spoken, a piece ends in the first pause after six seconds", () => {
+    const whole = readPcmWav(speech(20, [3, 9, 15]))!;
+    const upTo = (seconds: number): PcmWav => ({
+      sampleRate: RATE,
+      data: whole.data.subarray(0, seconds * RATE * 2),
+    });
+    // The pause at 3 s is too early; the one at 9 s hasn't settled yet.
+    expect(nextDictationCut(upTo(9.8), 0)).toBeNull();
+    const cut = nextDictationCut(upTo(10.4), 0)!;
+    expect(cut / RATE).toBeGreaterThanOrEqual(9);
+    expect(cut / RATE).toBeLessThanOrEqual(9.5);
+    // More audio finds the same cut, and the next one after it.
+    expect(nextDictationCut(upTo(20), 0)).toBe(cut);
+    const second = nextDictationCut(upTo(20), cut)!;
+    expect(second / RATE).toBeGreaterThanOrEqual(15);
+    expect(second / RATE).toBeLessThanOrEqual(15.5);
+    expect(nextDictationCut(upTo(20), second)).toBeNull();
+  });
+
+  test("a speaker who never pauses is cut at the longest piece", () => {
+    const wav = readPcmWav(speech(40, []))!;
+    const plan = {
+      minMilliseconds: 6_000,
+      pauseMilliseconds: 300,
+      maxMilliseconds: 20_000,
+      settleMilliseconds: 600,
+    };
+    const short: PcmWav = { sampleRate: RATE, data: wav.data.subarray(0, 19 * RATE * 2) };
+    expect(nextDictationCut(short, 0, plan)).toBeNull();
+    const cut = nextDictationCut(wav, 0, plan)!;
+    expect(cut / RATE).toBeGreaterThanOrEqual(6);
+    expect(cut / RATE).toBeLessThanOrEqual(20);
+  });
+
+  test("the final transcript keeps heard pieces only while the audio and question are the same", () => {
+    const wav = readPcmWav(speech(30, [9, 18]))!;
+    const question = dictationQuestion({
+      providerId: "voice-one",
+      model: "voice-input",
+      options: { language: "en" },
+    });
+    const cuts = [0, 9.25 * RATE, 18.25 * RATE];
+    const record: HeardDictation = {
+      version: 1,
+      sampleRate: RATE,
+      question,
+      pieces: [0, 1].map((index) => ({
+        startSample: cuts[index]!,
+        endSample: cuts[index + 1]!,
+        sha256: pcmSha256(wav, cuts[index]!, cuts[index + 1]!),
+        heard: {
+          text: `piece ${index}`,
+          languages: ["en"],
+          providerId: "voice-one",
+          creditCostMicros: 5,
+        },
+      })),
+    };
+    const read = readHeardDictation(writeHeardDictation(record));
+    expect(keptHeardPieces(read, wav, question)).toEqual(record.pieces);
+    // Another model or language: heard afresh.
+    expect(
+      keptHeardPieces(
+        read,
+        wav,
+        dictationQuestion({ providerId: "voice-one", model: "voice-input", options: {} }),
+      ),
+    ).toEqual([]);
+    // The second piece's audio changed: only the first stands.
+    const changed = new Uint8Array(wav.data);
+    changed[Math.round(12 * RATE) * 2] ^= 0xff;
+    expect(keptHeardPieces(read, { sampleRate: RATE, data: changed }, question)).toEqual([
+      record.pieces[0],
+    ]);
+    // A piece past the end of the recording isn't kept.
+    expect(
+      keptHeardPieces(
+        read,
+        { sampleRate: RATE, data: wav.data.subarray(0, 15 * RATE * 2) },
+        question,
+      ),
+    ).toEqual([record.pieces[0]]);
+    expect(readHeardDictation(new TextEncoder().encode("{"))).toBeNull();
   });
 });

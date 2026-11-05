@@ -9,7 +9,11 @@ import type {
   SessionAuthorizationPort,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
+import type {
+  CreditDebitAttribution,
+  Database,
+  SessionWorkflowWakeDeliveryResult,
+} from "@opengeni/db";
 import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
 import type { OnePasswordVaultProviderFactory } from "./domain/vaults/provider-registry";
 import type { ExternalVaultProviderFactories } from "./domain/vaults/external-provider-connections";
@@ -145,6 +149,24 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     recordingId: string;
     ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Hear a dictation's pieces while it is still being spoken, with the model
+   * and options chosen for it, so its text is ready moments after it stops.
+   * Starting it while it runs does nothing. Optional: without it the whole
+   * dictation is heard after it stops, which takes longer.
+   */
+  startDictationListening?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+    choice: {
+      providerId: string;
+      model: string;
+      options: { language?: string | undefined; keyterms?: string[] | undefined };
+      creditAttribution: CreditDebitAttribution;
+    };
   }) => Promise<void>;
   /**
    * Record an agent's browser recording whose frame bundle is uploaded and

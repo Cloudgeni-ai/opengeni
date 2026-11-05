@@ -99,6 +99,7 @@ async function fixture(
   };
   const started: Started[] = [];
   const speakerScans: string[] = [];
+  const listening: Array<Record<string, unknown>> = [];
   const settings = testSettings({
     productAccessMode: "configured",
     sandboxBackend: "none",
@@ -135,6 +136,9 @@ async function fixture(
       },
       startRecordingSpeakerScan: async (input: { recordingId: string }) => {
         speakerScans.push(input.recordingId);
+      },
+      startDictationListening: async (input: Record<string, unknown>) => {
+        listening.push(input);
       },
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
@@ -207,6 +211,7 @@ async function fixture(
     objects,
     started,
     speakerScans,
+    listening,
     admin,
     owner: await person(),
     other: await person(),
@@ -1100,6 +1105,48 @@ describe("recording routes", () => {
       language: "en",
       keyterms: ["Kubernetes"],
     });
+
+    // From its second chunk it is heard while it is spoken, asked just as
+    // finalizing will ask, and billed to who is dictating.
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      purpose: "dictation",
+      tracks: mic,
+      transcription: { language: "nb", keyterms: ["Kubernetes"] },
+    });
+    const chunks = [new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]), new Uint8Array([2, 3])];
+    const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+      trackNumber: 0,
+      chunks: chunks.map((bytes, chunkNumber) => ({
+        chunkNumber,
+        byteLength: bytes.byteLength,
+        sha256: sha(bytes),
+        startMilliseconds: chunkNumber * 1_000,
+        durationMilliseconds: 1_000,
+      })),
+    });
+    for (const [chunkNumber, bytes] of chunks.entries()) {
+      scope.objects.set(new URL(uploads.body.uploads[chunkNumber].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [chunkNumber],
+      });
+    }
+    expect(scope.listening.filter((input) => input.recordingId === recordingId)).toEqual([
+      {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId,
+        ownerSubjectId: expect.any(String),
+        choice: {
+          providerId: "openai",
+          model: expect.any(String),
+          options: { language: "nb", keyterms: ["Kubernetes"] },
+          creditAttribution: expect.objectContaining({ kind: "human" }),
+        },
+      },
+    ]);
   });
 
   test("a dictation that names its provider and model is heard by exactly that one", async () => {

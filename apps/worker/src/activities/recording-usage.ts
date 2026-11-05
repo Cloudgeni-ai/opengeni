@@ -277,6 +277,8 @@ export type RecordingProcessingReport = RecordingUsageLabels & {
   diarization: string | null;
   speakers: number | null;
   ourDiarizerFailed: boolean;
+  /** Of a dictation's pieces, those already heard while it was spoken. */
+  heardWhileSpokenPieces?: number;
   /** How our aligner placed a text-only model's words, when it ran. */
   alignment: {
     words: number;
@@ -480,6 +482,9 @@ export function reportRecordingProcessing(
         : {}),
       wallSeconds: round(report.wallSeconds),
       ...(report.queueSeconds !== null ? { queueSeconds: round(report.queueSeconds) } : {}),
+      ...(report.heardWhileSpokenPieces !== undefined
+        ? { heardWhileSpokenPieces: report.heardWhileSpokenPieces }
+        : {}),
       ...stages,
     });
   } catch {

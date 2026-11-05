@@ -43,6 +43,8 @@ export { sessionTitleWorkflow } from "./workflows/session-title";
 export {
   browserRecordingVideoWorkflow,
   browserRecordingVideoWorkflowId,
+  dictationListeningWorkflow,
+  dictationListeningWorkflowId,
   recordingDeletionWorkflow,
   recordingDeletionWorkflowId,
   recordingSpeakerScanWorkflow,
@@ -50,6 +52,7 @@ export {
   recordingTranscriptWorkflow,
   recordingTranscriptWorkflowId,
   type BrowserRecordingVideoWorkflowInput,
+  type DictationListeningWorkflowInput,
   type RecordingDeletionWorkflowInput,
   type RecordingTranscriptWorkflowInput,
 } from "./workflows/recordings";

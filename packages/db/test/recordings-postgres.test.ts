@@ -905,13 +905,16 @@ describe("recordings", () => {
       ...recording.actor,
       recordingId: recording.recordingId,
     });
-    // Two uploaded pieces per track, and each audio track's speaker scan.
-    expect(keys).toHaveLength(6);
+    // Two uploaded pieces per track, and each audio track's speaker scan and
+    // pieces heard while it was spoken.
+    expect(keys).toHaveLength(8);
     expect(keys).toEqual(
       expect.arrayContaining(
-        [0, 1].map(
-          (trackNumber) =>
-            `workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/prepared/track-${trackNumber}.speakers`,
+        [0, 1].flatMap((trackNumber) =>
+          ["speakers", "heard"].map(
+            (kind) =>
+              `workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/prepared/track-${trackNumber}.${kind}`,
+          ),
         ),
       ),
     );
@@ -1019,6 +1022,8 @@ describe("recordings", () => {
         `workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`,
         `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-0.speakers`,
         `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-1.speakers`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-0.heard`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-1.heard`,
       ].sort(),
     );
     // Stamped but interrupted before the objects were gone: offered again,

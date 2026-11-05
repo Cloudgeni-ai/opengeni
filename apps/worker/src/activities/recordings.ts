@@ -66,6 +66,7 @@ import {
   memberVoiceprints,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
+  recordingHeardPiecesObjectKey,
   recordingSpeakerScanObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
@@ -93,7 +94,7 @@ import {
 } from "@opengeni/config";
 import { findInferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ObjectStorage } from "@opengeni/storage";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   measureRecordingStage,
   RecordingUsage,
@@ -115,12 +116,28 @@ import {
 } from "./recording-audio";
 import { mapConcurrently } from "./concurrently";
 import {
+  DICTATION_LISTENING,
+  DICTATION_LISTENING_CONCURRENCY,
   DICTATION_PIECE_CONCURRENCY,
   dictationPiecePlan,
+  nextDictationCut,
   pcmWavPiece,
   planDictationPieces,
   readPcmWav,
+  type PcmWav,
 } from "./dictation-pieces";
+import {
+  DICTATION_PCM_FORMAT,
+  dictationQuestion,
+  heardPieceSourceId,
+  keptHeardPieces,
+  pcmSha256,
+  readHeardDictation,
+  writeHeardDictation,
+  type DictationListeningInput,
+  type HeardDictation,
+  type HeardDictationPiece,
+} from "./dictation-listening";
 import type { ControlActivityServices } from "./types";
 import { startMeetingSummary } from "./meeting-summary";
 import {
@@ -641,6 +658,20 @@ async function everyTrack(work: ReadonlyArray<Promise<void>>): Promise<void> {
 export const SPEAKER_SCAN_IDLE_MILLISECONDS = 15 * 60_000;
 
 /** How far into the track a speaker scan reaches (its header, at 16 kHz). */
+/**
+ * A piece cut while the dictation was spoken that no one has heard yet is
+ * waited for this long after it was cut: about as long as hearing it takes,
+ * with room to spare. After that it is heard by the final transcript itself.
+ */
+const HEARD_PIECE_PATIENCE_MILLISECONDS = 8_000;
+const HEARD_PIECE_POLL_MILLISECONDS = 100;
+/** How often the listener looks for newly uploaded audio. */
+const DICTATION_LISTEN_POLL_MILLISECONDS = 400;
+/** A listener stops when no audio has arrived this long; more audio starts it again. */
+const DICTATION_LISTEN_IDLE_MILLISECONDS = 30_000;
+/** One listening run, after which the workflow starts another while it is still spoken. */
+const DICTATION_LISTEN_RUN_MILLISECONDS = 10 * 60_000;
+
 export function speakerScanMilliseconds(scan: Uint8Array): number {
   if (scan.byteLength < 24) return 0;
   const view = new DataView(scan.buffer, scan.byteOffset, scan.byteLength);
@@ -1439,23 +1470,21 @@ export function createRecordingActivities(
       const offered = dictationProviders(deploymentFor(settings, db));
       if (track && chunks.length > 0) {
         const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+        // Decoded once, straight to the 16 kHz PCM the pieces are cut from
+        // and sent as: the same audio the worker listening while it was
+        // spoken decoded, so the pieces it heard are found again.
         const audio = await measureRecordingStage("prepare", () =>
-          preparedTrackAudio({
-            db,
-            objectStorage: storage,
-            settings,
-            actor: actor,
-            recordingId: input.recordingId,
-            trackNumber: track.trackNumber,
-            mimeType: track.mimeType,
+          prepareRecordingTrackAudio({
             chunks,
-            offsetMilliseconds,
-            knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
+            mimeType: track.mimeType,
+            format: DICTATION_PCM_FORMAT,
+            ffmpegPath: settings.voiceInputFfmpegPath,
             signal,
-            store: false,
+            onProgress: () => heartbeat({ phase: "preparing", trackNumber: track.trackNumber }),
+            readChunk: async (chunk) =>
+              (await storage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
           }),
         );
-        telemetry.preparedBytes += audio.storedBytes;
         const providerSegmentMilliseconds =
           Math.min(TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS, service.limits().maxDurationSeconds) *
           1_000;
@@ -1467,40 +1496,114 @@ export function createRecordingActivities(
           : null;
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
-        // Decoded once to 16 kHz PCM, then cut at the speaker's pauses.
+        const heardKey = recordingHeardPiecesObjectKey({
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          trackNumber: track.trackNumber,
+        });
+        const question = dictationQuestion(claimed.version);
+        // The pieces heard while it was spoken are kept; the rest is cut at
+        // the speaker's pauses.
         const { wav, pieces } = await measureRecordingStage("segment", async () => {
-          const rendered = await renderRecordingAudioPiece({
-            audio: { bytes: audio.bytes, extension: audio.extension },
-            startMilliseconds: 0,
-            endMilliseconds: audio.durationMilliseconds,
-            whole: true,
-            format: "wav",
-            ffmpegPath: settings.voiceInputFfmpegPath,
-            signal,
-          });
-          const decoded = readPcmWav(rendered.bytes);
+          const decoded = readPcmWav(audio.bytes);
           if (!decoded) throw new PermanentRecordingFailure("invalid_audio");
-          const cuts = planDictationPieces(
-            decoded,
-            dictationPiecePlan(providerSegmentMilliseconds),
-          );
+          // Only the first version: a re-run is asked to hear it afresh.
+          const heard =
+            claimed.version.versionNumber === 1
+              ? keptHeardPieces(
+                  readHeardDictation(
+                    await storage
+                      .getObjectBytes(heardKey)
+                      .then((found) => found?.bytes ?? null)
+                      .catch(() => null),
+                  ),
+                  decoded,
+                  question,
+                )
+              : [];
+          const from = heard.at(-1)?.endSample ?? 0;
+          const rest: PcmWav = {
+            sampleRate: decoded.sampleRate,
+            data: decoded.data.subarray(from * 2),
+          };
+          const cuts =
+            rest.data.byteLength >= 2
+              ? planDictationPieces(rest, dictationPiecePlan(providerSegmentMilliseconds)).map(
+                  (cut) => cut + from,
+                )
+              : [];
+          const planned: Array<{
+            startSample: number;
+            endSample: number;
+            heard: HeardDictationPiece | null;
+          }> = heard.map((piece) => ({
+            startSample: piece.startSample,
+            endSample: piece.endSample,
+            heard: piece,
+          }));
+          for (let index = 1; index < cuts.length; index += 1) {
+            if (cuts[index]! > cuts[index - 1]!) {
+              planned.push({ startSample: cuts[index - 1]!, endSample: cuts[index]!, heard: null });
+            }
+          }
           return {
             wav: decoded,
-            pieces: cuts.slice(1).flatMap((end, index) => {
-              const start = cuts[index]!;
-              return end > start
-                ? [{ segmentNumber: index, startSample: start, endSample: end }]
-                : [];
-            }),
+            pieces: planned.map((piece, segmentNumber) => ({ ...piece, segmentNumber })),
           };
         });
+        telemetry.heardWhileSpokenPieces = pieces.filter((piece) => piece.heard).length;
         const perMillisecond = wav.sampleRate / 1_000;
-        // Every piece is heard at once, so a long dictation is ready about as
-        // soon as its longest piece is.
+        /**
+         * What the worker listening while it was spoken heard in a piece:
+         * waited for briefly while it may still be hearing it.
+         */
+        const heardWhileSpoken = async (
+          piece: HeardDictationPiece,
+        ): Promise<HeardDictationPiece["heard"] | null> => {
+          if (piece.heard) return piece.heard;
+          const until = Math.min(
+            (piece.cutAt ?? 0) + HEARD_PIECE_PATIENCE_MILLISECONDS,
+            Date.now() + HEARD_PIECE_PATIENCE_MILLISECONDS,
+          );
+          while (Date.now() < until) {
+            await new Promise((resolve) => setTimeout(resolve, HEARD_PIECE_POLL_MILLISECONDS));
+            signal?.throwIfAborted();
+            const record = readHeardDictation(
+              await storage
+                .getObjectBytes(heardKey)
+                .then((found) => found?.bytes ?? null)
+                .catch(() => null),
+            );
+            const found = record?.pieces.find(
+              (candidate) =>
+                candidate.startSample === piece.startSample &&
+                candidate.endSample === piece.endSample &&
+                candidate.sha256 === piece.sha256,
+            );
+            if (found?.heard) return found.heard;
+          }
+          return null;
+        };
+        // Every piece left is heard at once, so a long dictation is ready
+        // about as soon as its longest piece is.
         const heardPieces = await withHeartbeat(() =>
           mapConcurrently(pieces, DICTATION_PIECE_CONCURRENCY, async (piece) => {
-            const bytes = pcmWavPiece(wav, piece.startSample, piece.endSample);
             const durationMilliseconds = (piece.endSample - piece.startSample) / perMillisecond;
+            const startMilliseconds = piece.startSample / perMillisecond;
+            const already = piece.heard ? await heardWhileSpoken(piece.heard) : null;
+            if (already) {
+              return {
+                result: {
+                  text: already.text,
+                  languages: already.languages,
+                  providerId: already.providerId,
+                  creditCostMicros: already.creditCostMicros ?? undefined,
+                },
+                durationMilliseconds,
+                startMilliseconds,
+              };
+            }
+            const bytes = pcmWavPiece(wav, piece.startSample, piece.endSample);
             const result = await measureRecordingStage("transcribe", () =>
               service.transcribe({
                 workspaceId: input.workspaceId,
@@ -1529,18 +1632,18 @@ export function createRecordingActivities(
                 billing: {
                   // One settlement per piece of this version, however many
                   // attempts the activity takes: a retry that hears it again
-                  // settles the same unit, so the payer is billed once.
-                  sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
+                  // settles the same unit, so the payer is billed once. A
+                  // piece cut while it was spoken settles as that piece,
+                  // whoever hears it.
+                  sourceId: piece.heard
+                    ? heardPieceSourceId(input.recordingId, piece.heard)
+                    : `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
                   attribution,
                   trustedDurationSeconds: durationMilliseconds / 1_000,
                 },
               }),
             );
-            return {
-              result,
-              durationMilliseconds,
-              startMilliseconds: piece.startSample / perMillisecond,
-            };
+            return { result, durationMilliseconds, startMilliseconds };
           }),
         );
         for (const { result, durationMilliseconds, startMilliseconds: pieceStart } of heardPieces) {
@@ -1948,6 +2051,232 @@ export function createRecordingActivities(
   }
 
   /**
+   * Listen to a dictation while it is still being spoken: as its audio
+   * arrives, cut it at the speaker's pauses and have each finished piece
+   * heard at once, keeping what was heard beside the audio. When it stops,
+   * the final transcript reuses those pieces and hears only the rest, so the
+   * text is ready about as soon as the last few seconds are heard. Each piece
+   * is billed once, as itself, whoever ends up hearing it. `again` is true
+   * when this run's time is up and the dictation is still being spoken.
+   */
+  async function listenToDictation(input: DictationListeningInput): Promise<{ again: boolean }> {
+    const { db, objectStorage, settings, observability } = await services();
+    if (!objectStorage) return { again: false };
+    const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
+    const current = () =>
+      getRecording(db, { ...actor, recordingId: input.recordingId }).catch((error: unknown) => {
+        if (error instanceof RecordingNotFoundError) return null;
+        throw error;
+      });
+    const recording = await current();
+    const track = recording?.tracks[0];
+    if (!recording || !track || recording.purpose !== "dictation") return { again: false };
+    if (recording.state !== "capturing") return { again: false };
+    const workspace = await getWorkspace(db, input.workspaceId);
+    if (resolveWorkspaceVoiceInputEnabled(workspace?.settings) === false) return { again: false };
+    const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+    const { service } = dictationFor(settings, db);
+    const signal = cancellation();
+    const key = recordingHeardPiecesObjectKey({
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+      trackNumber: track.trackNumber,
+    });
+    const question = dictationQuestion(input.choice);
+    const plan = {
+      ...DICTATION_LISTENING,
+      maxMilliseconds: Math.min(
+        DICTATION_LISTENING.maxMilliseconds,
+        Math.min(TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS, service.limits().maxDurationSeconds) *
+          1_000,
+      ),
+    };
+    const earlier = readHeardDictation(
+      await objectStorage
+        .getObjectBytes(key)
+        .then((found) => found?.bytes ?? null)
+        .catch(() => null),
+    );
+    const record: HeardDictation =
+      earlier?.question === question
+        ? earlier
+        : { version: 1, sampleRate: 16_000, question, pieces: [] };
+    let saving: Promise<void> = Promise.resolve();
+    const save = (): Promise<void> => {
+      const body = writeHeardDictation(record);
+      saving = saving
+        .then(() =>
+          objectStorage.putObject({
+            key,
+            contentType: "application/json",
+            body,
+            sha256: createHash("sha256").update(body).digest("hex"),
+          }),
+        )
+        .catch((error: unknown) => {
+          observability.warn("couldn't keep what a dictation's pieces said while it was spoken", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
+        });
+      return saving;
+    };
+    // Exactly the model it named, else the chosen one with the workspace's fallback.
+    const named = recording.transcription?.providerId
+      ? { providerId: input.choice.providerId, model: input.choice.model }
+      : null;
+    const pinned = input.choice.providerId !== "host" ? input.choice.providerId : null;
+    const hearing = new Set<Promise<void>>();
+    const waiting: Array<() => void> = [];
+    let busy = 0;
+    const hear = (piece: HeardDictationPiece, wav: PcmWav) => {
+      const work = (async () => {
+        if (busy >= DICTATION_LISTENING_CONCURRENCY) {
+          await new Promise<void>((resolve) => waiting.push(resolve));
+        }
+        busy += 1;
+        try {
+          const durationSeconds = (piece.endSample - piece.startSample) / wav.sampleRate;
+          const result = await service.transcribe({
+            workspaceId: input.workspaceId,
+            accountId: input.accountId,
+            subjectId: input.ownerSubjectId,
+            audio: pcmWavPiece(wav, piece.startSample, piece.endSample),
+            mimeType: "audio/wav",
+            durationSeconds,
+            ...(input.choice.options.language ? { language: input.choice.options.language } : {}),
+            ...(input.choice.options.keyterms?.length
+              ? { keyterms: input.choice.options.keyterms }
+              : {}),
+            requestId: `${input.recordingId}:heard:${piece.startSample}:${randomUUID()}`,
+            ...(signal ? { signal } : {}),
+            ...(named
+              ? named
+              : {
+                  preferredProvider: pinned ?? voiceInput?.preferredProvider,
+                  fallbackEnabled: voiceInput?.fallbackEnabled,
+                }),
+            billing: {
+              sourceId: heardPieceSourceId(input.recordingId, piece),
+              attribution: input.choice.creditAttribution,
+              trustedDurationSeconds: durationSeconds,
+            },
+          });
+          piece.heard = {
+            text: result.text,
+            languages: result.languages ?? [],
+            providerId: result.providerId,
+            creditCostMicros: result.creditCostMicros ?? null,
+          };
+          await save();
+        } catch (error) {
+          // The final transcript hears it instead.
+          observability.warn("couldn't hear a piece of a dictation while it was spoken", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            startSample: piece.startSample,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
+        } finally {
+          busy -= 1;
+          waiting.shift()?.();
+        }
+      })();
+      hearing.add(work);
+      void work.finally(() => hearing.delete(work));
+    };
+    // Chunks never change once uploaded, so each is read once.
+    const read = new Map<string, Uint8Array>();
+    const deadline = Date.now() + DICTATION_LISTEN_RUN_MILLISECONDS;
+    let next = record.pieces.at(-1)?.endSample ?? 0;
+    let decodedChunks = 0;
+    let lastArrival = Date.now();
+    let resumed = false;
+    let capturing = true;
+    try {
+      while (Date.now() < deadline) {
+        signal?.throwIfAborted();
+        heartbeat({ phase: "listening" });
+        const now = await current();
+        if (!now || now.state !== "capturing") {
+          capturing = false;
+          break;
+        }
+        const chunks = await listRecordingChunks(db, {
+          ...actor,
+          recordingId: input.recordingId,
+          trackNumber: track.trackNumber,
+        });
+        const contiguous: typeof chunks = [];
+        for (const chunk of chunks) {
+          if (chunk.state !== "uploaded" || chunk.chunkNumber !== contiguous.length) break;
+          contiguous.push(chunk);
+        }
+        if (contiguous.length > decodedChunks) {
+          decodedChunks = contiguous.length;
+          lastArrival = Date.now();
+          const audio = await prepareRecordingTrackAudio({
+            chunks: contiguous,
+            mimeType: track.mimeType,
+            format: DICTATION_PCM_FORMAT,
+            ffmpegPath: settings.voiceInputFfmpegPath,
+            signal,
+            readChunk: async (chunk) => {
+              const known = read.get(chunk.objectKey);
+              if (known) return known;
+              const bytes = (await objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null;
+              if (bytes) read.set(chunk.objectKey, bytes);
+              return bytes;
+            },
+          });
+          const wav = readPcmWav(audio.bytes);
+          if (!wav || wav.sampleRate !== record.sampleRate) break;
+          if (!resumed) {
+            resumed = true;
+            // An earlier run's pieces stand only while their audio is the same.
+            const kept = keptHeardPieces(record, wav, question);
+            if (kept.length !== record.pieces.length) {
+              record.pieces = kept;
+              next = kept.at(-1)?.endSample ?? 0;
+              await save();
+            }
+            for (const piece of kept) if (!piece.heard) hear(piece, wav);
+          }
+          for (
+            let cut = nextDictationCut(wav, next, plan);
+            cut !== null;
+            cut = nextDictationCut(wav, next, plan)
+          ) {
+            const piece: HeardDictationPiece = {
+              startSample: next,
+              endSample: cut,
+              sha256: pcmSha256(wav, next, cut),
+              cutAt: Date.now(),
+            };
+            record.pieces.push(piece);
+            next = cut;
+            void save();
+            hear(piece, wav);
+          }
+        } else if (Date.now() - lastArrival > DICTATION_LISTEN_IDLE_MILLISECONDS) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, DICTATION_LISTEN_POLL_MILLISECONDS));
+      }
+    } finally {
+      // What is being heard is still kept: the final transcript may be waiting for it.
+      while (hearing.size > 0) await Promise.all([...hearing]);
+      await saving;
+    }
+    // Deleted meanwhile: nothing of it may stay behind.
+    if (!capturing && !(await current())) {
+      await objectStorage.deleteObject(key).catch(() => undefined);
+    }
+    return { again: capturing && Date.now() >= deadline };
+  }
+
+  /**
    * The track's kept file (`objectKey`) is stored and recorded: delete its
    * uploaded pieces, then note that they are gone. Deleting a missing object
    * succeeds, so a stop between the two only repeats the deletes next time.
@@ -2256,6 +2585,7 @@ export function createRecordingActivities(
   return {
     transcribeRecordingVersion,
     scanRecordingSpeakers,
+    listenToDictation,
     failRecordingTranscript,
     deleteRecordingMedia,
     expireDictation,

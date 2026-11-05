@@ -777,6 +777,46 @@ export function registerRecordingRoutes(
     }
   }
 
+  /**
+   * Hear a dictation while it is still spoken, with the model and options
+   * finalizing would choose now. Never fails the upload: without it the
+   * whole dictation is heard after it stops. A refusal (no credits, voice
+   * input off) leaves it to finalizing, which tells the person.
+   */
+  async function startDictationListening(
+    actor: Awaited<ReturnType<typeof actorFor>>,
+    recordingId: string,
+  ): Promise<void> {
+    try {
+      const recording = await getRecording(db, { ...actor, recordingId });
+      if (recording.purpose !== "dictation" || recording.state !== "capturing") return;
+      const choice = await versionChoice(actor, recording, {});
+      if (choice.refused) return;
+      await deps.workflowClient.startDictationListening?.({
+        accountId: actor.accountId,
+        workspaceId: recording.workspaceId,
+        recordingId,
+        ownerSubjectId: recording.ownerSubjectId,
+        choice: {
+          providerId: choice.providerId,
+          model: choice.model,
+          options: {
+            ...(choice.options.language ? { language: choice.options.language } : {}),
+            ...(choice.options.keyterms?.length ? { keyterms: choice.options.keyterms } : {}),
+          },
+          creditAttribution: choice.creditAttribution,
+        },
+      });
+    } catch (error) {
+      if (error instanceof ApiHttpError) return;
+      observability?.warn("couldn't start hearing a dictation while it is spoken", {
+        workspaceId: actor.workspaceId,
+        recordingId,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+      });
+    }
+  }
+
   /** The live model a request names, else the provider's first, else the deployment's. */
   function liveModelChoice(requested: {
     providerId?: string | undefined;
@@ -1213,6 +1253,14 @@ export function registerRecordingRoutes(
     // are being told apart while it records (starting it again is a no-op).
     if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
       await startSpeakerScan(actor, recordingId);
+    }
+    // From a dictation's second chunk, and every ten after (a listener that
+    // stopped in a long pause starts again), hear it while it is spoken.
+    if (
+      deps.workflowClient.startDictationListening &&
+      present.some((n) => n === 1 || (n > 0 && n % 10 === 0))
+    ) {
+      await startDictationListening(actor, recordingId);
     }
     if (newlyStoredBytes > 0) {
       count(
