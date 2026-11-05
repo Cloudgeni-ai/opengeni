@@ -1,5 +1,5 @@
 /**
- * Self-repair of a chat's own cloud computer (a compute box) at turn setup.
+ * Self-repair of a chat's own workspace machine (a compute box) at turn setup.
  *
  * An agent can set the box's clock or overwrite /etc/resolv.conf with a few
  * shell commands. Both then persist across turns: the compute guest writes
@@ -279,8 +279,5 @@ export function ownedBoxRepairNote(report: OwnedBoxRepairReport): string | null 
     );
   }
   if (lines.length === 0) return null;
-  return [
-    "[Opengeni checked the cloud computer this chat runs on before this turn]",
-    ...lines,
-  ].join("\n");
+  return ["[Opengeni checked this chat's workspace machine before this turn]", ...lines].join("\n");
 }
