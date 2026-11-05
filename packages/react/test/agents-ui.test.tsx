@@ -729,9 +729,12 @@ test("the new-chat page starts chats through the agent hooks, never an ordinary 
     "text: composerAgent.draftText,",
     "agentError={composerAgent.blocker}",
     "workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}",
-    "(!composerAgent.loading && composerAgent.blocker === null)",
-    "(createdSessionAuthority === null && composerAgent.loading) ||",
-    "if (createdSessionAuthority === null && (composerAgent.loading || composerAgent.blocker)) {",
+    // Send's one guard (its enabled state, the early-Send hold, the guard
+    // Send runs and voice) reads the agent.
+    "agentLoading: composerAgent.loading,",
+    "agentBlocked: composerAgent.blocker !== null,",
+    "getNewSessionSendBlocker({ ...sendState, voice: realtimeModel !== null })",
+    'voiceSendBlocker === "agent"',
     "keepOnlyMe: selectedProjectOnlyMe,",
     "const firstMessageSaved = !realtimeModel && composerAgent.draftText !== message;",
   ]) {

@@ -30,6 +30,7 @@ import {
   makeAgent,
   summary,
 } from "../../../packages/react/test/agents-test-kit";
+import { getNewSessionSendBlocker } from "@opengeni/react/app/lib/composer-send-blocking";
 import { emptyAttachments, idleComposer } from "../src/dev/composer-chrome-fixtures";
 import { AgentRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
 import "../src/styles.css";
@@ -245,7 +246,31 @@ function Composer({ initialAgentId }: { initialAgentId?: string | undefined }) {
     setVisibility,
   });
   useAgentFirstMessage(composerAgent, { message, setMessage, draftLoading: false });
-  const canSend = message.trim().length > 0 && !composerAgent.loading && !composerAgent.blocker;
+  // The new-chat page's Send guard, with everything but the agent ready.
+  const sendBlocker = getNewSessionSendBlocker({
+    created: false,
+    draftLoading: false,
+    catalogLoading: false,
+    catalogFailed: false,
+    replacingModel: false,
+    policyValid: true,
+    anyModelSelectable: true,
+    selectedModelNotConnected: false,
+    selectedModelSelectable: true,
+    privateSessionUnavailable: false,
+    toolsLoading: false,
+    accountsLoading: false,
+    accountsFailed: false,
+    accountChoice: false,
+    resourcesLoading: false,
+    resourcesResolved: true,
+    uploadPending: false,
+    computeLoading: false,
+    computeReady: true,
+    agentLoading: composerAgent.loading,
+    agentBlocked: composerAgent.blocker !== null,
+  });
+  const canSend = message.trim().length > 0 && sendBlocker === null;
   const visibilitySetting: SessionSetupSetting | null = privateChats
     ? {
         label: "Visibility",
