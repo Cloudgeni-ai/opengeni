@@ -1054,7 +1054,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     };
 
     expect(await run.scanRecordingSpeakers(work)).toEqual({ again: true });
-    expect(scans).toEqual([{ fileName: "track-0.webm", cache: null }]);
+    expect(scans).toEqual([{ fileName: "track-0.wav", cache: null }]);
     expect(speakerScanMilliseconds(storage.objects.get(scanKey)!.bytes)).toBe(64_000);
     // Nothing new since: no scan.
     expect(await run.scanRecordingSpeakers(work)).toEqual({ again: true });

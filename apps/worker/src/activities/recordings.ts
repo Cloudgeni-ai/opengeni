@@ -2201,6 +2201,9 @@ export function createRecordingActivities(
       const audio = await prepareRecordingTrackAudio({
         chunks: contiguous,
         mimeType: track.mimeType,
+        // Decoded only: re-encoding an hour of audio for each scan took most
+        // of a minute, and the speaker models hear 16 kHz PCM anyway.
+        format: SPEECH_PCM_FORMAT,
         ffmpegPath: settings.voiceInputFfmpegPath,
         signal,
         onProgress: () => heartbeat({ phase: "scanning", trackNumber: track.trackNumber }),
