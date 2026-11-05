@@ -434,10 +434,10 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
     case "restarted":
       return {
         headline:
-          "this chat's cloud computer stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
-        happened: `the cloud computer did not answer for ${waited}, so Opengeni restarted it`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept; programs that were running stopped with the restart. ${command}${
+          "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+        happened: `the workspace machine did not answer for ${waited}, so Opengeni restarted it`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept; programs that were running stopped with the restart. ${command}${
           error.neverSent ? "" : " If it had started, the restart stopped it."
         }`,
         tryNext: error.neverSent
@@ -447,10 +447,10 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
     case "restarting":
       return {
         headline:
-          "this chat's cloud computer stopped responding and didn't come back. Opengeni asked for a restart; re-run the command in a moment.",
-        happened: `the cloud computer did not answer for ${waited}, so Opengeni asked for a restart, which had not finished yet`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept; programs that were running stop with the restart. ${command}${
+          "this chat's workspace machine stopped responding and didn't come back. Opengeni asked for a restart; re-run the command in a moment.",
+        happened: `the workspace machine did not answer for ${waited}, so Opengeni asked for a restart, which had not finished yet`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept; programs that were running stop with the restart. ${command}${
           error.neverSent ? "" : " If it had started, the restart stops it."
         }`,
         tryNext: error.neverSent
@@ -460,9 +460,9 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
     case "answering":
       return {
         headline:
-          "this chat's cloud computer stopped responding for a while, and is answering again",
-        happened: `the cloud computer did not answer for ${waited}, then answered again, so Opengeni did not restart it`,
-        layer: "the cloud computer itself — not your command",
+          "this chat's workspace machine stopped responding for a while, and is answering again",
+        happened: `the workspace machine did not answer for ${waited}, then answered again, so Opengeni did not restart it`,
+        layer: "the workspace machine itself — not your command",
         preserved: error.neverSent
           ? `files are kept. ${command}`
           : `files are kept. ${command} If it started, it is being stopped.`,
@@ -473,40 +473,40 @@ function unresponsiveAgentFields(error: SelfhostedControlError): FaultFields {
     case "already_restarted":
       return {
         headline:
-          "this chat's cloud computer stopped responding, and it was already restarted once this turn",
-        happened: `the cloud computer did not answer for ${waited}; Opengeni restarts it at most once per turn, and a restart was already made or begun this turn, so it was not restarted again`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept. ${command}`,
+          "this chat's workspace machine stopped responding, and it was already restarted once this turn",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni restarts it at most once per turn, and a restart was already made or begun this turn, so it was not restarted again`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
-          "stop running commands and tell the person the cloud computer is not responding; retrying later may work, and a new chat gets a fresh cloud computer.",
+          "stop running commands and tell the person the workspace machine is not responding; retrying later may work, and a new chat gets a fresh workspace machine.",
       };
     case "restart_unavailable":
       return {
         headline:
-          "this chat's cloud computer stopped responding, and Opengeni could not restart it",
-        happened: `the cloud computer did not answer for ${waited}; Opengeni could not arrange a restart, so none was made`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept. ${command}`,
+          "this chat's workspace machine stopped responding, and Opengeni could not restart it",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni could not arrange a restart, so none was made`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
-          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh cloud computer.",
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
       };
     case "restart_failed":
       return {
-        headline: "this chat's cloud computer stopped responding, and restarting it failed",
-        happened: `the cloud computer did not answer for ${waited}; Opengeni tried to restart it, but the restart did not go through`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept. ${command}`,
+        headline: "this chat's workspace machine stopped responding, and restarting it failed",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni tried to restart it, but the restart did not go through`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
-          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh cloud computer.",
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
       };
     default:
       return {
-        headline: "this chat's cloud computer stopped responding",
-        happened: `the cloud computer did not answer for ${waited}`,
-        layer: "the cloud computer itself — not your command",
-        preserved: `files on the cloud computer are kept. ${command}`,
+        headline: "this chat's workspace machine stopped responding",
+        happened: `the workspace machine did not answer for ${waited}`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
-          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh cloud computer.",
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
       };
   }
 }

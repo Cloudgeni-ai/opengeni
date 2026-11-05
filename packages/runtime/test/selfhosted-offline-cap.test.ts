@@ -212,7 +212,7 @@ describe("a command whose Connected Machine stops answering", () => {
   }, 30_000);
 });
 
-describe("the words a command whose cloud computer stopped answering gets", () => {
+describe("the words a command whose workspace machine stopped answering gets", () => {
   function unresponsive(recovery: string, neverSent: boolean): SelfhostedControlError {
     return new SelfhostedControlError({
       message: "the agent did not answer for 180s",
@@ -232,12 +232,13 @@ describe("the words a command whose cloud computer stopped answering gets", () =
   test("restarted", () => {
     const text = renderSelfhostedFault(unresponsive("restarted", false));
     expect(text).toContain(
-      "this chat's cloud computer stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+      "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
     );
     expect(text).toContain("did not answer for 3 minutes");
     expect(text).toContain("If it had started, the restart stopped it.");
-    // Named for the cloud computer, and the same when routed as one.
-    expect(text).toStartWith("[cloud computer] ");
+    // Not named for a Connected Machine, and the same when routed as an
+    // Opengeni-owned box.
+    expect(text).not.toStartWith("[connected machine]");
     expect(renderSelfhostedFault(unresponsive("restarted", false), { cloudComputer: true })).toBe(
       text,
     );
@@ -246,7 +247,7 @@ describe("the words a command whose cloud computer stopped answering gets", () =
   test("already restarted this turn", () => {
     const text = renderSelfhostedFault(unresponsive("already_restarted", true));
     expect(text).toContain("already restarted once this turn");
-    expect(text).toContain("a new chat gets a fresh cloud computer");
+    expect(text).toContain("a new chat gets a fresh workspace machine");
     expect(text).toContain("This command never reached it.");
   });
 

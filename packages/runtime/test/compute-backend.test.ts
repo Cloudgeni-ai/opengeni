@@ -1914,10 +1914,14 @@ describe("an exec whose agent stops answering and does not come back", () => {
     expect(machines).toEqual([false]);
     expect(control.restarts).toBe(1);
     expect(elapsedMs).toBeLessThan(8_000);
-    // Rendered as the routed session renders a cloud computer's faults.
-    expect(renderSelfhostedFault(error, selfhostedFaultContext("compute"))).toStartWith(
-      "[cloud computer] this chat's cloud computer stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+    // Rendered as the routed session renders a compute box's faults: the
+    // bound's words, not the generic offline ones, and not named for a
+    // Connected Machine.
+    const text = renderSelfhostedFault(error, selfhostedFaultContext("compute"));
+    expect(text).toContain(
+      "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
     );
+    expect(text).not.toStartWith("[connected machine]");
   }, 30_000);
 
   test("commands that stop together share one recovery: the box restarts once", async () => {
