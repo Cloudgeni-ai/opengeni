@@ -12,8 +12,10 @@ to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
   preview, confirm and Other rules keep their meaning in fewer words; the
   "Let the agent decide" sentence is cut because the tool result carries
   `HUMAN_INPUT_AGENT_DECIDES_NOTE` exactly when it applies.
-- Parent-agent sentences (child sessions only): "In a sub-session," is cut,
-  since only a sub-session receives them.
+- Parent-agent sentences (child sessions): "In a sub-session," is cut when
+  the caller says the session has a parent (`subSession: true`, which the
+  worker always sets from the frozen nested depth). A direct runtime caller
+  that leaves `subSession` out keeps the conditioned wording.
 - The secret sentences are unchanged.
 - Schema: `allowOther` is no longer sent (new choice questions are always
   normalized to offer Other, and a text question that set it was rejected),
@@ -31,12 +33,13 @@ to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
 A tool result too large to show names only the tools the session has. The
 spilled-result notice names `files__files_get_download_url` and the shell only
 when the turn has compute and the Files server's download tool. Without both
-(and no placed copy), it says the result was saved but no tool in the session
-can open it, and to call the tool again with narrower arguments if it can.
-Sessions with both readers get the same text as before.
+(and no placed copy), it says the result was saved, which reader is missing,
+and to call the tool again with narrower arguments if it can. Sessions with
+both readers get the same text as before.
 
 ```text
-+ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no shell and download tool together)
++ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no download tool)
++ … but this session has no shell to read it with. …   (download tool, no shell)
 - If the file is not there, call files__files_get_download_url with fileId <fileId> and download it with the shell.   (placed copy, no download tool)
 ```
 

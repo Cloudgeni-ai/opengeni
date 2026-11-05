@@ -39,22 +39,25 @@ export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
 /**
  * Which readers of a spilled copy this turn's model has: a shell whenever
  * compute is attached (the same fact that attaches the sandbox tools), and
- * the Files download tool when the turn's tools select the `files` server and
- * the deployment's server allows that tool.
+ * the Files download tool when one of the turn's tool refs selects the `files`
+ * server without narrowing that tool away and the deployment's server allows it.
  */
 export function spilledToolResultReadersForTurn(input: {
-  tools: ReadonlyArray<{ kind: string; id: string }>;
+  tools: ReadonlyArray<{ kind: string; id: string; allowedTools?: readonly string[] | undefined }>;
   mcpServers: ReadonlyArray<{ id: string; allowedTools?: readonly string[] | undefined }>;
   sandboxBackend: Settings["sandboxBackend"];
 }): SpilledToolResultReaders {
-  const files = input.tools.some((tool) => tool.kind === "mcp" && tool.id === "files")
-    ? input.mcpServers.find((server) => server.id === "files")
-    : undefined;
+  const allows = (allowedTools: readonly string[] | undefined) =>
+    allowedTools === undefined || allowedTools.includes("files_get_download_url");
+  const files = input.mcpServers.find((server) => server.id === "files");
   return {
     shell: input.sandboxBackend !== "none",
     fileDownload:
       files !== undefined &&
-      (files.allowedTools === undefined || files.allowedTools.includes("files_get_download_url")),
+      allows(files.allowedTools) &&
+      input.tools.some(
+        (tool) => tool.kind === "mcp" && tool.id === "files" && allows(tool.allowedTools),
+      ),
   };
 }
 

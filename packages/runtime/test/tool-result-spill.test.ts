@@ -173,7 +173,12 @@ describe("spilledModelToolResult", () => {
     expect(text(null, { shell: false, fileDownload: false })).toBe(unreadable);
     // A download URL alone is not readable without a shell, and a shell alone
     // cannot fetch a copy that was never placed.
-    expect(text(null, { shell: false, fileDownload: true })).toBe(unreadable);
+    expect(text(null, { shell: false, fileDownload: true })).toBe(
+      unreadable.replace(
+        "no tool in this session can open it",
+        "this session has no shell to read it with",
+      ),
+    );
     expect(text(null, { shell: true, fileDownload: false })).toBe(unreadable);
     // A placed copy with a shell but no download tool: no download fallback.
     const placed = text("/workspace/tool-results/x.json", { shell: true, fileDownload: false });

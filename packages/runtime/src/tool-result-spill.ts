@@ -85,8 +85,8 @@ export function spilledModelToolResult(
  * and otherwise (or when that copy is gone, for example in a later turn on a
  * new box) the workspace File through the Files download tool, as for
  * attachments. Only tools the model has are named: without a shell and the
- * download tool together nothing can open the file, so the model is told
- * that and how to get a result that fits instead. */
+ * download tool together the model cannot read the file, so it is told which
+ * one is missing and how to get a result that fits instead. */
 function spilledToolResultGuidance(
   receipt: ToolResultSpilledReceiptValue,
   readers: SpilledToolResultReaders = { shell: true, fileDownload: true },
@@ -102,7 +102,10 @@ function spilledToolResultGuidance(
   if (canDownload) {
     return `${size}, so its exact JSON is saved as a workspace file. To read it, ${download}, then ${read}.`;
   }
-  return `${size}, so none of it is shown here. Its exact JSON is saved as workspace file ${receipt.fileId}, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.`;
+  const unreadable = readers.fileDownload
+    ? "this session has no shell to read it with"
+    : "no tool in this session can open it";
+  return `${size}, so none of it is shown here. Its exact JSON is saved as workspace file ${receipt.fileId}, but ${unreadable}. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.`;
 }
 
 /** True when the model receives this result as is, without a spill or overflow error. */

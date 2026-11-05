@@ -17,9 +17,10 @@ The tool is sent only where someone can answer it, so a session nobody answers
 does not pay for it on every model call:
 
 - A session that started unattended has no `request_human_input` and its
-  prompt offers no question: a create with `unattended: true`, a scheduled or
-  event-triggered run without its own `unattended: false` (or an
-  `approvalTimeoutSeconds`), and Slack open-agent runs. This follows how the
+  prompt offers no question: a create with `unattended: true`, a chat a
+  scheduled task or event trigger creates without its own `unattended: false`
+  (or an `approvalTimeoutSeconds`), and Slack open-agent runs. A run delivered
+  to an existing chat keeps that chat's attendance. This follows how the
   chat started, so its tool list never changes under earlier requests; a chat
   switched to **Work without me** later keeps the tool and gets an immediate
   "no one will answer" result instead.

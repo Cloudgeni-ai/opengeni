@@ -2407,8 +2407,9 @@ export type BuildAgentOptions = {
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
   /**
-   * Whether this session has a parent agent (frozen at create). `false` leaves
-   * the parent-agent guidance out of `request_human_input`; omitted keeps it.
+   * Whether this session has a parent agent (frozen at create). `true` adds the
+   * parent-agent guidance to `request_human_input`, `false` leaves it out, and
+   * omitted keeps it conditioned on being a sub-session.
    */
   subSession?: boolean;
   /**
@@ -3345,7 +3346,11 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 const HUMAN_INPUT_TOOL_DESCRIPTION =
   "Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.";
 
-/** Rendered only for a session with a parent agent (nested depth above zero). */
+/**
+ * Rendered for a session with a parent agent (nested depth above zero). When
+ * the caller does not say whether there is a parent, the same text is
+ * conditioned on being a sub-session instead.
+ */
 const HUMAN_INPUT_PARENT_DESCRIPTION =
   "Your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
 
@@ -3700,7 +3705,10 @@ export function buildOpenGeniAgent(
           // against the full contract below.
           description: [
             HUMAN_INPUT_TOOL_DESCRIPTION,
-            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            options.subSession === true
+              ? HUMAN_INPUT_PARENT_DESCRIPTION
+              : options.subSession === undefined &&
+                `In a sub-session, y${HUMAN_INPUT_PARENT_DESCRIPTION.slice(1)}`,
             toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
           ]
             .filter((part): part is string => typeof part === "string")

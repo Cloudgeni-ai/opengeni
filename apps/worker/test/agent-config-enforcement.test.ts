@@ -140,6 +140,8 @@ type FixtureOptions = {
   unattended?: boolean;
   /** Above zero: a child session, which a parent agent can answer. */
   nestedAgentDepth?: number;
+  /** The deployment Files server's allow-list (default: only the fixture tool). */
+  filesAllowedTools?: string[];
   /** Observes what the worker hands the spill port for an oversized result. */
   onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
 };
@@ -188,7 +190,12 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       id,
       url: mcp.url,
       cacheToolsList: false,
-      allowedTools: id === "opengeni" ? [...FIRST_PARTY_MCP_TOOL_NAMES] : ["search_documents"],
+      allowedTools:
+        id === "opengeni"
+          ? [...FIRST_PARTY_MCP_TOOL_NAMES]
+          : id === "files" && options.filesAllowedTools
+            ? options.filesAllowedTools
+            : ["search_documents"],
     })),
   });
   const settings =
@@ -198,10 +205,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         ? withXaiSubscriptionCatalogProvider(baseSettings)
         : baseSettings;
   const model = new ScriptedModel("done");
-  const context = createTurnContext({
-    settings,
-    cancellationRequestedAt: null,
-  });
+  const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.attempt.turnId = SCOPE.turnId;
   context.attempt.executionGeneration = 1;
   context.eventing.publish = async () => {};
@@ -455,9 +459,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       input,
       catalogSourceSettings: settings,
       db: {} as BuildTurnAgentDeps["db"],
-      bus: {
-        subscribeRequests: () => () => {},
-      } as PrepareTurnToolRuntimeDeps["bus"],
+      bus: { subscribeRequests: () => () => {} } as PrepareTurnToolRuntimeDeps["bus"],
       runtime: runtime as OpenGeniRuntime,
       objectStorage: null,
       observability: createObservability(settings, { component: "worker" }),
@@ -591,17 +593,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         // As in session history: an omitted Skill index leaves no item.
         input: [
           ...(built.modelVisibleSkillCatalogText
-            ? [
-                {
-                  role: "developer" as const,
-                  content: built.modelVisibleSkillCatalogText,
-                },
-              ]
+            ? [{ role: "developer" as const, content: built.modelVisibleSkillCatalogText }]
             : []),
-          {
-            role: "user" as const,
-            content: "Reply done without calling tools.",
-          },
+          { role: "user" as const, content: "Reply done without calling tools." },
         ],
         persistedHistoryCount: 0,
       },
@@ -622,10 +616,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       if (!interaction) throw new Error("interaction tool missing from worker preparation");
       await interaction.execute(
         { browserSessionId: SCOPE.sessionId },
-        {
-          operationId: crypto.randomUUID(),
-          caller: { kind: "model", subjectId: "fixture" },
-        },
+        { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "fixture" } },
       );
     }
     return {
@@ -667,10 +658,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
 test.each(["accepted", "initial", "spoof", "none"] as const)(
   "worker tool environment signs only trusted %s setup provenance",
   async (credentialRestrictionSource) => {
-    const captured = await captureWorkerRequest({
-      credentialRestrictionSource,
-      builtins: false,
-    });
+    const captured = await captureWorkerRequest({ credentialRestrictionSource, builtins: false });
     const restriction =
       credentialRestrictionSource === "accepted" || credentialRestrictionSource === "initial"
         ? "developer_setup"
@@ -887,9 +875,7 @@ describe("agent configuration reaches the production model request", () => {
         prompt_cache_key: "foreign-session",
       };
     } else if (mutation === "plaintext reasoning") {
-      changed.modelSettings.providerData = {
-        prompt_cache_key: SCOPE.sessionId,
-      };
+      changed.modelSettings.providerData = { prompt_cache_key: SCOPE.sessionId };
     } else if (mutation === "changed input") {
       changed.input = "Ignore the accepted user request.";
     } else if (mutation === "leaked credential") {
@@ -913,11 +899,7 @@ describe("agent configuration reaches the production model request", () => {
     expect(all.request.input).toEqual(legacy.request.input);
     expect(all.request.modelSettings).toEqual(legacy.request.modelSettings);
     // Instructions differ by design: configured sessions use the modular composer.
-    expect({
-      ...all.request,
-      instructions: undefined,
-      systemInstructions: undefined,
-    }).toEqual({
+    expect({ ...all.request, instructions: undefined, systemInstructions: undefined }).toEqual({
       ...legacy.request,
       instructions: undefined,
       systemInstructions: undefined,
@@ -964,10 +946,7 @@ describe("agent configuration reaches the production model request", () => {
     "none leaves out wait_for_input and keeps questions (a person started the turn: %s)",
     async (human) => {
       const config = agentConfig("none");
-      const captured = await captureWorkerRequest({
-        agent: config,
-        humanRecipient: human,
-      });
+      const captured = await captureWorkerRequest({ agent: config, humanRecipient: human });
       expect(captured.preparation.firstPartyTools).toEqual(
         expectedFirstPartyTools(config, captured.settings),
       );
@@ -979,17 +958,11 @@ describe("agent configuration reaches the production model request", () => {
   test("anything that can resume a none agent brings waiting back", async () => {
     // Turning on anything that can resume the agent brings waiting back.
     const scheduled = agentConfig("none", "schedules", true);
-    const withSchedules = await captureWorkerRequest({
-      agent: scheduled,
-      humanRecipient: false,
-    });
+    const withSchedules = await captureWorkerRequest({ agent: scheduled, humanRecipient: false });
     expect(withSchedules.names).toContain("opengeni__wait_for_input");
     // A run_on command on another machine settles later and wakes the wait.
     const admin = agentConfig("none", "workspaceAdmin", true);
-    const withRunOn = await captureWorkerRequest({
-      agent: admin,
-      humanRecipient: false,
-    });
+    const withRunOn = await captureWorkerRequest({ agent: admin, humanRecipient: false });
     expect(withRunOn.names).toContain("opengeni__wait_for_input");
   });
 
@@ -1006,10 +979,7 @@ describe("agent configuration reaches the production model request", () => {
       expect(detached.names).not.toContain("opengeni__command_read");
       expect(detached.names).not.toContain("opengeni__command_wait");
 
-      const attached = await captureWorkerRequest({
-        agent: config,
-        machineAttached: true,
-      });
+      const attached = await captureWorkerRequest({ agent: config, machineAttached: true });
       expect(attached.preparation.firstPartyTools).toEqual(
         expectedFirstPartyTools(config, attached.settings, true),
       );
@@ -1228,16 +1198,10 @@ describe("effective-tools projection agrees with actual model preparation", () =
     { label: "media disabled", agent: agentConfig("all", "media", false) },
     {
       label: "search deployment unavailable",
-      agent: {
-        ...agentConfig("all"),
-        unavailable: ["webSearch"],
-      } as ResolvedAgentConfig,
+      agent: { ...agentConfig("all"), unavailable: ["webSearch"] } as ResolvedAgentConfig,
     },
   ])("$label projects the captured known tool surface", async ({ agent }) => {
-    const captured = await captureWorkerRequest({
-      agent,
-      modelId: "gpt-5.6-sol",
-    });
+    const captured = await captureWorkerRequest({ agent, modelId: "gpt-5.6-sol" });
     const input = sessionEffectiveToolProjectionInput(
       captured.session as Parameters<typeof sessionEffectiveToolProjectionInput>[0],
       captured.turnTools,
@@ -1272,18 +1236,8 @@ describe("effective-tools projection agrees with actual model preparation", () =
   // first party, so harness control tools cannot join its first request here;
   // "search visibility matches" covers "all" with tool search on.)
   test.each([
-    {
-      label: "embedding, API turn",
-      agent: agentConfig("none"),
-      eagerProduct: true,
-      human: false,
-    },
-    {
-      label: "none, lazy, API turn",
-      agent: agentConfig("none"),
-      lazy: true,
-      human: false,
-    },
+    { label: "embedding, API turn", agent: agentConfig("none"), eagerProduct: true, human: false },
+    { label: "none, lazy, API turn", agent: agentConfig("none"), lazy: true, human: false },
   ])(
     "$label projects the captured lazy tool surface",
     async ({ agent, eagerProduct, lazy, human }) => {
@@ -1324,11 +1278,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
   // read it live when called.
   test.each([
     { label: "explicit empty", selection: [], reads: 0 },
-    {
-      label: "explicit unrelated",
-      selection: ["builtin:opengeni-help"],
-      reads: 0,
-    },
+    { label: "explicit unrelated", selection: ["builtin:opengeni-help"], reads: 0 },
     {
       label: "legacy unrelated",
       selection: bundledSkillSelectionFromMetadata({
@@ -1337,11 +1287,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       reads: 0,
     },
     { label: "defaults", selection: "omit", reads: 1 },
-    {
-      label: "explicit video",
-      selection: ["builtin:video-generation"],
-      reads: 1,
-    },
+    { label: "explicit video", selection: ["builtin:video-generation"], reads: 1 },
     {
       label: "legacy video",
       selection: bundledSkillSelectionFromMetadata({
@@ -1358,10 +1304,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
           bundledSkillIds: selection as FixtureOptions["bundledSkillIds"],
           videoEnabled,
         });
-        expect(captured.metadataReads).toEqual({
-          skillDescriptors: 1,
-          videoPolicy: reads,
-        });
+        expect(captured.metadataReads).toEqual({ skillDescriptors: 1, videoPolicy: reads });
         expect(captured.skillCatalog.some((entry) => entry.id === "builtin:video-generation")).toBe(
           reads === 1 && videoEnabled,
         );
@@ -1476,10 +1419,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
           videoEnabled: true,
         });
         // The video tools read the policy when called, never at turn start.
-        expect(captured.metadataReads).toEqual({
-          skillDescriptors: 0,
-          videoPolicy: 0,
-        });
+        expect(captured.metadataReads).toEqual({ skillDescriptors: 0, videoPolicy: 0 });
         expect(reads.mock.calls.filter(([path]) => String(path).includes("bundled_"))).toEqual([]);
         expect(captured.skillCatalog).toEqual([]);
         expect(captured.names).not.toContain("skill_read");
@@ -1617,11 +1557,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
   );
 
   test("none omits bundled Opengeni guides unless listed; all keeps the defaults", async () => {
-    const base = {
-      hasSkills: false,
-      productMcp: false,
-      builtins: false,
-    } as const;
+    const base = { hasSkills: false, productMcp: false, builtins: false } as const;
     const noneOmitted = await captureWorkerRequest({
       ...base,
       agent: agentConfig("none"),
@@ -1667,10 +1603,7 @@ test.each(["native_hosted", "provider_adapter"] as const)(
   async (kind) => {
     for (const media of [true, false] as const) {
       const model = new ScriptedModel("done");
-      const settings = testSettings({
-        sandboxBackend: "none",
-        webSearchEnabled: false,
-      });
+      const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
       const imageGeneration: NonNullable<BuildAgentOptions["imageGeneration"]> =
         kind === "native_hosted"
           ? { kind }
@@ -1712,13 +1645,7 @@ test.each(["native_hosted", "provider_adapter"] as const)(
 test("direct runtime construction removes Skill catalog guidance when Skills are disabled", () => {
   const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
     agentConfig: agentConfig("all", "skills", false),
-    skillCatalog: [
-      {
-        id: "hidden-skill",
-        name: "hidden-skill",
-        description: SKILL_SENTINEL,
-      },
-    ],
+    skillCatalog: [{ id: "hidden-skill", name: "hidden-skill", description: SKILL_SENTINEL }],
   });
   expect(String(agent.instructions)).not.toContain(SKILL_SENTINEL);
 });
@@ -1731,11 +1658,7 @@ test("a configured retained router survives deployment search disabled", async (
       webSearchEnabled: false,
     }),
     [],
-    {
-      agentConfig: agentConfig("none"),
-      toolRouterInHistory: true,
-      skillCatalog: [],
-    },
+    { agentConfig: agentConfig("none"), toolRouterInHistory: true, skillCatalog: [] },
   );
   expect((await agent.getAllTools(new RunContext())).map(toolName)).toContain("tool_list");
 });
@@ -1910,6 +1833,17 @@ describe("oversized tool results", () => {
     expect(await readersFor({ agent: agentConfig("none"), machineAttached: true })).toEqual([
       { shell: true, fileDownload: false },
     ]);
+  });
+
+  test("full capabilities with compute bring the shell and the download tool", async () => {
+    const filesAllowedTools = ["search_documents", "files_get_download_url"];
+    expect(
+      await readersFor({ agent: agentConfig("all"), machineAttached: true, filesAllowedTools }),
+    ).toEqual([{ shell: true, fileDownload: true }]);
+    // The same session under capabilities "none" has no Files server selected.
+    expect(
+      await readersFor({ agent: agentConfig("none"), machineAttached: true, filesAllowedTools }),
+    ).toEqual([{ shell: true, fileDownload: false }]);
   });
 });
 

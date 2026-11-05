@@ -341,6 +341,23 @@ describe("spilled result readers for a turn", () => {
         sandboxBackend: "none",
       }),
     ).toEqual({ shell: false, fileDownload: true });
+    // A tool ref that narrows the Files server away from the download tool.
+    for (const allowedTools of [[], ["files_list"]]) {
+      expect(
+        spilledToolResultReadersForTurn({
+          tools: [{ ...filesTool, allowedTools }],
+          mcpServers: [files],
+          sandboxBackend: "modal",
+        }),
+      ).toEqual({ shell: true, fileDownload: false });
+    }
+    expect(
+      spilledToolResultReadersForTurn({
+        tools: [{ kind: "mcp", id: "files", allowedTools: ["files_get_download_url"] }],
+        mcpServers: [files],
+        sandboxBackend: "modal",
+      }),
+    ).toEqual({ shell: true, fileDownload: true });
   });
 });
 

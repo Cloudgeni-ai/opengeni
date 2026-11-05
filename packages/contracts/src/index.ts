@@ -20985,9 +20985,11 @@ export function canonicalSkillReviewQuestion(
   )
     return null;
   const canonical = skillReviewHumanInput(question.skillReview!).questions[0]!;
-  const { confirm: _confirm, ...withoutConfirm } = question;
+  // Strict tool schemas send an absent `confirm` as false and `secret` as null.
+  const { confirm: _confirm, secret: _secret, ...withoutConfirm } = question;
   const normalized = {
-    ...(question.confirm ? question : withoutConfirm),
+    ...(question.confirm ? { ...withoutConfirm, confirm: question.confirm } : withoutConfirm),
+    ...(question.secret != null ? { secret: question.secret } : {}),
     allowOther: false,
     options: question.options.map((option) => {
       // Strict tool schemas send absent optional fields as null (or false).
@@ -21031,10 +21033,11 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
 /**
- * The model-facing `request_human_input` parameters for the enabled features.
- * With every feature it is exactly `RequestHumanInputToolInput`; without one,
- * that field (and for secrets the `secret` kind) is left out of the schema the
- * model sees. Calls are still validated against the full contract.
+ * The `request_human_input` parameters for the enabled features. With every
+ * feature it is exactly `RequestHumanInputToolInput`; without one, that field
+ * (and for secrets the `secret` kind) is left out. Calls are still validated
+ * against the full contract. The wire schema the model sees is derived from
+ * these parameters and also always leaves out `allowOther` and `$schema`.
  */
 export function requestHumanInputToolParameters(features: HumanInputQuestionFeatures) {
   if (features.secrets && features.skillReview) return RequestHumanInputToolInput;
