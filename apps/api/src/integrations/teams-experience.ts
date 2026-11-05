@@ -25,13 +25,14 @@ export type TeamsExperienceReply = {
   action?: { kind: "link"; title: string } | { kind: "command"; title: string; command: string };
 };
 
-export type TeamsCommand = "help" | "unlink" | "unlink_confirm";
+export type TeamsCommand = "help" | "link" | "unlink" | "unlink_confirm";
 
 /**
  * The fixed commands. Only the whole message counts, so "help me write a
  * plan" still goes to the agent.
  */
 export function teamsCommand(text: string): TeamsCommand | null {
+  if (text.length > 64) return null;
   const value = text
     .trim()
     .replace(/^\//, "")
@@ -39,6 +40,7 @@ export function teamsCommand(text: string): TeamsCommand | null {
     .replace(/\s+/g, " ")
     .toLowerCase();
   if (value === "help" || value === "commands") return "help";
+  if (value === "link") return "link";
   if (value === "unlink" || value === "disconnect") return "unlink";
   if (value === "unlink confirm" || value === "disconnect confirm") return "unlink_confirm";
   return null;
@@ -52,16 +54,30 @@ const LIMITS = [
   "Approvals and requests for private information open in the Opengeni app.",
 ];
 
-function nextStep(state: TeamsExperienceState): TeamsExperienceReply["action"] | string | null {
+/**
+ * The person's next step. A help reply links straight to account linking; a
+ * welcome, which may be read long after it was sent, offers a button that
+ * asks for a fresh link instead.
+ */
+function nextStep(
+  state: TeamsExperienceState,
+  reply: "welcome" | "help",
+): TeamsExperienceReply["action"] | string | null {
   if (state.installation !== "active") return null;
   if (state.linked) return state.personal ? "Send a message to start a task." : null;
-  return state.personal
-    ? { kind: "link", title: "Link account" }
-    : "Send me a direct message to link your Opengeni account, then mention me here again.";
+  if (!state.personal)
+    return "Send me a direct message to link your Opengeni account, then mention me here again.";
+  return reply === "welcome"
+    ? { kind: "command", title: "Link account", command: "link" }
+    : { kind: "link", title: "Link account" };
 }
 
-function withNextStep(text: string, state: TeamsExperienceState): TeamsExperienceReply {
-  const step = nextStep(state);
+function withNextStep(
+  text: string,
+  state: TeamsExperienceState,
+  reply: "welcome" | "help",
+): TeamsExperienceReply {
+  const step = nextStep(state, reply);
   if (!step) return { text };
   if (typeof step === "string") return { text: `${text}\n\n${step}` };
   return { text: `${text}\n\nLink your Opengeni account to start.`, action: step };
@@ -74,9 +90,10 @@ export function teamsWelcome(state: TeamsExperienceState): TeamsExperienceReply 
       "**Welcome to Opengeni**",
       ABOUT,
       LIMITS.map((line) => `- ${line}`).join("\n"),
-      "Send **help** at any time to see what I can do.",
+      "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
     ].join("\n\n"),
     state,
+    "welcome",
   );
 }
 
@@ -85,8 +102,11 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
   const commands = [
     "- **help**: show this message",
     ...(state.personal
-      ? ["- **unlink**: disconnect your Teams account from Opengeni"]
-      : ["- **unlink**: send it to me in a direct message to disconnect your account"]),
+      ? [
+          "- **link**: link your Teams account to Opengeni",
+          "- **unlink**: disconnect your Teams account from Opengeni",
+        ]
+      : ["- **link** or **unlink**: send them to me in a direct message to manage your account"]),
   ];
   const tips = [
     ...LIMITS,
@@ -103,14 +123,19 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
       `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
     ].join("\n\n"),
     state,
+    "help",
   );
 }
 
-/** Replies for the unlink command and its confirmation. */
-export function teamsUnlinkReply(
-  step: "confirm" | "done" | "not_linked" | "not_personal",
+/** Replies for the link and unlink commands. */
+export function teamsAccountReply(
+  step: "already_linked" | "confirm" | "done" | "not_linked" | "not_personal",
 ): TeamsExperienceReply {
   switch (step) {
+    case "already_linked":
+      return {
+        text: "Your Teams account is already linked to Opengeni. Send a message to start a task, or **unlink** to disconnect it.",
+      };
     case "confirm":
       return {
         text: "Unlink your Teams account from Opengeni? I'll stop working on your messages here until you link it again. Your chats stay in Opengeni.\n\nSelect **Unlink account** or send **unlink confirm**.",
@@ -118,23 +143,27 @@ export function teamsUnlinkReply(
       };
     case "done":
       return {
-        text: "Your Teams account is unlinked from Opengeni. Send me a message any time to link it again.",
+        text: "Your Teams account is unlinked from Opengeni. Send **link** any time to link it again.",
       };
     case "not_linked":
       return { text: "Your Teams account isn't linked to Opengeni." };
     case "not_personal":
-      return { text: "Send **unlink** to me in a direct message to disconnect your account." };
+      return {
+        text: "Send **link** or **unlink** to me in a direct message to manage your account.",
+      };
   }
 }
 
 /** The schema.org message entity that shows Teams' "AI generated" label. */
-export const TEAMS_AI_GENERATED_ENTITY = {
-  type: "https://schema.org/Message",
-  "@type": "Message",
-  "@context": "https://schema.org",
-  "@id": "",
-  additionalType: ["AIGeneratedContent"],
-} as const;
+export function teamsAiGeneratedEntity() {
+  return {
+    type: "https://schema.org/Message" as const,
+    "@type": "Message" as const,
+    "@context": "https://schema.org" as const,
+    "@id": "" as const,
+    additionalType: ["AIGeneratedContent"],
+  };
+}
 
 /** A stable UUID for a provider event, so a redelivered event is the same request. */
 export function teamsEventUuid(namespace: string, value: string): string {
@@ -143,8 +172,36 @@ export function teamsEventUuid(namespace: string, value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const TABLE_SEPARATOR = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+/**
+ * Lines longer than this are passed through unchanged and never treated as
+ * Markdown structure. Real tables, headings and fences are far shorter, and
+ * it keeps every pattern below cheap on any input.
+ */
+const STRUCTURE_LINE_LIMIT = 4096;
+
+type Fence = { marker: string; info: string };
+
+/** A code fence line: three or more backticks or tildes, then an info string. */
+function fenceLine(line: string): Fence | null {
+  if (line.length > 1024) return null;
+  const match = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line.replace(/\n$/, ""));
+  if (!match) return null;
+  const marker = match[1]!;
+  const info = match[2]!;
+  // A backtick fence's info string can't contain backticks.
+  if (marker[0] === "`" && info.includes("`")) return null;
+  return { marker, info };
+}
+
+function closesFence(line: string, open: Fence): boolean {
+  const fence = fenceLine(line);
+  return Boolean(
+    fence &&
+    fence.marker[0] === open.marker[0] &&
+    fence.marker.length >= open.marker.length &&
+    !fence.info.trim(),
+  );
+}
 
 function tableCells(line: string): string[] {
   let value = line.trim();
@@ -154,78 +211,174 @@ function tableCells(line: string): string[] {
 }
 
 function tableRow(line: string): boolean {
-  return line.includes("|") && line.trim().length > 1;
+  return (
+    line.length <= STRUCTURE_LINE_LIMIT &&
+    line.includes("|") &&
+    line.trim().length > 1 &&
+    !/^(?: {4}|\t)/.test(line)
+  );
+}
+
+/** A table's delimiter row, with one cell per header cell. */
+function tableSeparator(line: string | undefined, columns: number): boolean {
+  if (line === undefined || line.length > STRUCTURE_LINE_LIMIT) return false;
+  if (!/^[\s|:-]+$/.test(line) || !line.includes("-") || /^(?: {4}|\t)/.test(line)) return false;
+  const cells = tableCells(line);
+  return cells.length === columns && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+function heading(line: string): { level: number; text: string } | null {
+  const match = /^ {0,3}(#{1,6})[ \t]+(.*)$/.exec(line);
+  if (!match) return null;
+  // An optional closing sequence of #s, after whitespace, isn't part of the text.
+  let text = match[2]!.trimEnd();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "#") end -= 1;
+  if (end < text.length && (end === 0 || text[end - 1] === " " || text[end - 1] === "\t"))
+    text = text.slice(0, end).trimEnd();
+  return { level: match[1]!.length, text };
+}
+
+/**
+ * Text that looks like an HTML tag, such as `List<string>` or `<name>`, would
+ * be read by Teams as markup and disappear. Escape it outside code spans,
+ * leaving autolinks such as <https://example.com> alone.
+ */
+function escapeTags(line: string): string {
+  if (!line.includes("<")) return line;
+  let out = "";
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index]!;
+    if (char === "`") {
+      let run = 1;
+      while (line[index + run] === "`") run += 1;
+      const marker = "`".repeat(run);
+      let close = line.indexOf(marker, index + run);
+      while (close !== -1 && line[close + run] === "`") {
+        let skip = close;
+        while (line[skip] === "`") skip += 1;
+        close = line.indexOf(marker, skip);
+      }
+      if (close === -1) {
+        out += marker;
+        index += run;
+      } else {
+        out += line.slice(index, close + run);
+        index = close + run;
+      }
+      continue;
+    }
+    if (char === "\\" && index + 1 < line.length) {
+      out += line.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+    if (
+      char === "<" &&
+      /[A-Za-z/!?]/.test(line[index + 1] ?? "") &&
+      !/^<br\s{0,2}\/?>/i.test(line.slice(index, index + 8)) &&
+      !/^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/.test(line.slice(index, index + 2100)) &&
+      !/^<[^\s<>@]+@[^\s<>@]+>/.test(line.slice(index, index + 320))
+    ) {
+      out += "\\<";
+      index += 1;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
 }
 
 /**
  * Agent Markdown in the subset Teams renders in text messages. Teams shows
  * bold, italics, strikethrough, links, lists, quotes, code and headings up to
- * level three; tables, images and horizontal rules show as raw characters.
- * Tables become one list item per row, deeper headings become bold lines,
- * images become links and rules are dropped. Code blocks are left as written.
+ * level three; tables, images and horizontal rules show as raw characters,
+ * and text that looks like an HTML tag disappears. Tables become one list
+ * item per row, deeper headings become bold lines, images become links, rules
+ * are dropped and tag-like text is escaped. Code blocks are left as written.
  */
 export function teamsMarkdown(input: string): string {
   const lines = input.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
-  let fence: string | null = null;
+  let fence: Fence | null = null;
+  /** The index of the last line that was ordinary paragraph text. */
+  let plainLine = -1;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    const fenced = FENCE.exec(line);
     if (fence) {
       out.push(line);
-      if (
-        fenced &&
-        fenced[1]![0] === fence[0] &&
-        fenced[1]!.length >= fence.length &&
-        !fenced[2]!.trim()
-      )
-        fence = null;
+      if (closesFence(line, fence)) fence = null;
       continue;
     }
-    if (fenced) {
-      fence = fenced[1]!;
+    const opened = fenceLine(line);
+    if (opened) {
+      fence = opened;
       out.push(line);
       continue;
     }
-    const next = lines[index + 1];
-    if (tableRow(line) && next !== undefined && TABLE_SEPARATOR.test(next) && next.includes("-")) {
-      const header = tableCells(line);
-      index += 1;
-      const rows: string[] = [];
-      while (index + 1 < lines.length && tableRow(lines[index + 1]!)) {
-        const cells = tableCells(lines[index + 1]!);
-        index += 1;
-        const pairs = cells.flatMap((cell, column) => {
-          if (!cell) return [];
-          const title = header[column];
-          return [title ? `**${title}:** ${cell}` : cell];
-        });
-        if (pairs.length) rows.push(`- ${pairs.join("; ")}`);
-      }
-      out.push(...(rows.length ? rows : [header.filter(Boolean).join(" · ")]));
+    if (line.length > STRUCTURE_LINE_LIMIT) {
+      out.push(line);
       continue;
     }
-    const heading = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
-    if (heading) {
+    if (tableRow(line)) {
+      const header = tableCells(line);
+      if (tableSeparator(lines[index + 1], header.length)) {
+        index += 1;
+        const rows: string[] = [];
+        while (index + 1 < lines.length && tableRow(lines[index + 1]!)) {
+          const cells = tableCells(lines[index + 1]!);
+          index += 1;
+          const pairs = cells.flatMap((cell, column) => {
+            if (!cell) return [];
+            const title = header[column];
+            return [title ? `**${title}:** ${cell}` : cell];
+          });
+          if (pairs.length) rows.push(escapeTags(`- ${pairs.join("; ")}`));
+        }
+        out.push(...(rows.length ? rows : [escapeTags(header.filter(Boolean).join(" · "))]));
+        continue;
+      }
+    }
+    const title = heading(line);
+    if (title) {
       out.push(
-        heading[1]!.length <= 3 ? `${heading[1]} ${heading[2]}` : `**${heading[2]!.trim()}**`,
+        escapeTags(
+          title.level <= 3 ? `${"#".repeat(title.level)} ${title.text}` : `**${title.text}**`,
+        ),
       );
+      continue;
+    }
+    // A line of = or - under a paragraph line underlines it as a heading.
+    const previous = lines[index - 1];
+    if (
+      /^ {0,3}(?:=+|-+)[ \t]*$/.test(line) &&
+      previous !== undefined &&
+      plainLine === index - 1 &&
+      previous.trim()
+    ) {
+      out[out.length - 1] = `${line.trim()[0] === "=" ? "#" : "##"} ${out.at(-1)!.trim()}`;
       continue;
     }
     if (/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
       out.push("");
       continue;
     }
+    if (line.trim() && !/^ {0,3}(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^(?: {4}|\t)/.test(line))
+      plainLine = index;
     out.push(
-      line
-        .replace(
-          /!\[([^\]]*)\]\(\s*(\S+?)(?:\s+"[^"]*")?\s*\)/g,
-          (_match, alt: string, url: string) => `[${alt.trim() || url}](${url})`,
-        )
-        .replace(
-          /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]\s+/,
-          (_match, marker: string, checked: string) => `${marker}${checked === " " ? "☐" : "☑"} `,
-        ),
+      escapeTags(
+        line
+          .replace(
+            /!\[([^\]\n]{0,512})\]\([ \t]{0,8}([^\s()]{1,2048})(?:[ \t]+"[^"\n]{0,512}")?[ \t]{0,8}\)/g,
+            (_match, alt: string, url: string) => `[${alt.trim() || url}](${url})`,
+          )
+          .replace(
+            /^([ \t]{0,12}(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})\[([ xX])\][ \t]/,
+            (_match, marker: string, checked: string) => `${marker}${checked === " " ? "☐" : "☑"} `,
+          ),
+      ),
     );
   }
   return out.join("\n");
@@ -238,29 +391,52 @@ export const TEAMS_PART_BYTES = 20_000;
  * Splits a message into parts within the Teams size limit, at line breaks
  * where possible. A code block cut between parts is closed at the end of one
  * part and reopened at the start of the next, so both still render as code.
+ * The reopening line carries only the fence and its language, and room for
+ * the closing fence is kept from the moment a block opens, so no part ever
+ * exceeds the limit.
  */
 export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): string[] {
+  /** An open code block. Its reopen line is null when it wouldn't comfortably
+   * fit a part; such a block is still tracked, just not closed and reopened. */
+  type OpenFence = { close: string; reopen: string | null };
+  const size = (value: string) => Buffer.byteLength(value);
   const parts: string[] = [];
   let part = "";
   let bytes = 0;
-  let fence: { marker: string; open: string } | null = null;
-  const size = (value: string) => Buffer.byteLength(value);
-  const reserve = () => (fence ? size(`\n${fence.marker}`) : 0);
-  const reopened = () => (fence ? `${fence.open}\n` : "");
+  let fence: OpenFence | null = null;
+  const closeBytes = (f: OpenFence | null) => (f?.reopen ? size(`\n${f.close}`) : 0);
+  const open = (f: Fence): OpenFence => {
+    const language = /^[\w#+.-]{1,32}/.exec(f.info.trim())?.[0] ?? "";
+    const reopen = `${f.marker}${language}\n`;
+    return {
+      close: f.marker,
+      reopen: size(reopen) + size(`\n${f.marker}`) <= maxBytes / 4 ? reopen : null,
+    };
+  };
+  const reopened = () => fence?.reopen ?? "";
   const flush = () => {
     if (!part || part === reopened()) return;
-    if (fence) part += part.endsWith("\n") ? fence.marker : `\n${fence.marker}`;
+    if (fence?.reopen) part += part.endsWith("\n") ? fence.close : `\n${fence.close}`;
     parts.push(part);
     part = reopened();
     bytes = size(part);
   };
-  const lines = text.split(/(?<=\n)/);
-  for (const line of lines) {
+  for (const line of text.split(/(?<=\n)/)) {
     const lineBytes = size(line);
-    if (bytes + lineBytes + reserve() > maxBytes) flush();
-    if (bytes + lineBytes + reserve() > maxBytes) {
-      // One line longer than a part: split it by characters.
-      const limit = maxBytes - reserve();
+    // The fence state once this line is in, so its closing fence has room.
+    let next: OpenFence | null = fence;
+    if (fence) {
+      if (closesFence(line, { marker: fence.close, info: "" })) next = null;
+    } else {
+      const opened = fenceLine(line);
+      if (opened) next = open(opened);
+    }
+    if (bytes + lineBytes + closeBytes(next) > maxBytes) flush();
+    if (bytes + lineBytes + closeBytes(next) > maxBytes) {
+      // One line longer than a part: split it by characters. A fence line this
+      // long can't open or close a block.
+      next = fence;
+      const limit = maxBytes - closeBytes(fence);
       for (const c of line) {
         const charBytes = c.length === 1 && c.charCodeAt(0) < 0x80 ? 1 : size(c);
         if (bytes + charBytes > limit) flush();
@@ -271,16 +447,7 @@ export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): s
       part += line;
       bytes += lineBytes;
     }
-    const fenced = FENCE.exec(line.replace(/\n$/, ""));
-    if (fence) {
-      if (
-        fenced &&
-        fenced[1]![0] === fence.marker[0] &&
-        fenced[1]!.length >= fence.marker.length &&
-        !fenced[2]!.trim()
-      )
-        fence = null;
-    } else if (fenced) fence = { marker: fenced[1]!, open: line.replace(/\n$/, "") };
+    fence = next;
   }
   if (part && part !== reopened()) parts.push(part);
   return parts;

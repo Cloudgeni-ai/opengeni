@@ -35,6 +35,8 @@ export type TeamsRoute = TeamsInstallation & {
   session_workspace_id: string | null;
   session_bound: boolean;
   delivered_sequence: number;
+  /** The latest reply, request for input or failure event in the route's session. */
+  relevant_event_sequence: number;
   lease_token: string | null;
 };
 export type TeamsInbox = {
@@ -354,9 +356,18 @@ export async function enqueueTeamsMessage(
       (route.session_workspace_id ?? null) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
-    await tx.execute(
-      sql`insert into teams_bot_inbox(account_id,workspace_id,event_id,route_id,actor_id,subject_id,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${input.eventId},${input.routeId},${input.actorId}::uuid,${input.subjectId},${JSON.stringify(input.payload)}::jsonb) on conflict(event_id) do nothing`,
+    const inserted = await rawRows(
+      tx,
+      sql`insert into teams_bot_inbox(account_id,workspace_id,event_id,route_id,actor_id,subject_id,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${input.eventId},${input.routeId},${input.actorId}::uuid,${input.subjectId},${JSON.stringify(input.payload)}::jsonb) on conflict(event_id) do nothing returning event_id`,
     );
+    return {
+      /** The route the message joined, which for a group chat may be a new one. */
+      routeId: input.routeId,
+      /** False when the event was already queued, as on a redelivery. */
+      queued: inserted.length > 0,
+      /** The route's reply progress when the message was queued; see `teamsReplyPending`. */
+      replySequence: Number(route.relevant_event_sequence),
+    };
   });
 }
 export async function claimTeamsRoute(
@@ -452,21 +463,25 @@ export async function enqueueTeamsOutput(
 }
 /**
  * Whether the reply to one inbound message is still being produced: the
- * message waits to be admitted, or it was admitted and nothing has been queued
- * for its chat since, apart from the "started" notice.
+ * message waits to be admitted, or it was admitted and its chat has had no
+ * reply, request for input or failure since it was queued (`replySequence`
+ * from `enqueueTeamsMessage`). Both lookups are by primary key.
  */
 export async function teamsReplyPending(
   db: Database,
   i: TeamsInstallation,
-  routeId: string,
-  eventId: string,
+  input: { eventId: string; replySequence: number },
 ): Promise<boolean> {
   return teamsScoped(db, i, async (tx) => {
-    const [row] = await rawRows<{ state: string; replied: boolean }>(
+    const [row] = await rawRows<{ state: string; progress: string | number }>(
       tx,
-      sql`select inbox.state,exists(select 1 from teams_bot_outbox outbox where outbox.route_id=inbox.route_id and outbox.source_sequence<>0 and outbox.created_at>=inbox.created_at) as replied from teams_bot_inbox inbox where inbox.route_id=${routeId} and inbox.event_id=${eventId}`,
+      sql`select inbox.state,r.relevant_event_sequence as progress from teams_bot_inbox inbox join teams_bot_routes r on r.route_id=inbox.route_id where inbox.event_id=${input.eventId}`,
     );
-    return Boolean(row && (row.state === "pending" || (row.state === "accepted" && !row.replied)));
+    return Boolean(
+      row &&
+      (row.state === "pending" ||
+        (row.state === "accepted" && Number(row.progress) <= input.replySequence)),
+    );
   });
 }
 /** An agent reply the bot delivered in one Teams conversation, found by its Teams message id. */

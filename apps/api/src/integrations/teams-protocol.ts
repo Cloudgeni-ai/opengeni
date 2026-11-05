@@ -282,13 +282,16 @@ const FeedbackInvoke = z.object({
     conversationType: z.enum(["personal", "channel", "groupChat"]),
     tenantId: uuid.optional(),
   }),
-  channelData: z.object({ tenant: z.object({ id: uuid }) }),
+  channelData: z.object({
+    tenant: z.object({ id: uuid }),
+    channel: z.object({ id: opaque }).optional(),
+  }),
   replyToId: opaque,
   value: z.object({
     actionName: z.literal("feedback"),
     actionValue: z.object({
       reaction: z.enum(["like", "dislike"]),
-      feedback: z.string().max(16384).optional(),
+      feedback: z.string().optional(),
     }),
   }),
 });
@@ -297,6 +300,9 @@ export type TeamsFeedback = {
   actorId: string;
   conversationId: string;
   personal: boolean;
+  groupChat: boolean;
+  /** The Teams channel, for feedback in a channel. */
+  channelId: string | null;
   /** The bot message the feedback is about. */
   replyToId: string;
   eventId: string;
@@ -320,20 +326,28 @@ export function normalizeTeamsFeedback(raw: unknown): TeamsFeedback | null {
     (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
   )
     return null;
-  // Teams sends the form as JSON text: {"feedbackText": "..."}.
+  const personal = a.conversation.conversationType === "personal";
+  const groupChat = a.conversation.conversationType === "groupChat";
+  if (!personal && !groupChat && !a.channelData.channel?.id) return null;
+  // Teams sends the form as JSON text: {"feedbackText": "..."}. Long text is
+  // kept, shortened.
   let comment: string | null = null;
-  try {
-    const form = a.value.actionValue.feedback ? JSON.parse(a.value.actionValue.feedback) : null;
-    if (form && typeof form.feedbackText === "string" && form.feedbackText.trim())
-      comment = form.feedbackText.trim().slice(0, 4000);
-  } catch {
-    comment = null;
-  }
+  const form = a.value.actionValue.feedback;
+  if (form && form.length <= 262_144)
+    try {
+      const value = JSON.parse(form) as { feedbackText?: unknown } | null;
+      if (value && typeof value.feedbackText === "string" && value.feedbackText.trim())
+        comment = Array.from(value.feedbackText.trim()).slice(0, 4000).join("");
+    } catch {
+      comment = null;
+    }
   return {
     tenantId,
     actorId: a.from.aadObjectId.toLowerCase(),
     conversationId: a.conversation.id,
-    personal: a.conversation.conversationType === "personal",
+    personal,
+    groupChat,
+    channelId: personal || groupChat ? null : a.channelData.channel!.id,
     replyToId: a.replyToId,
     eventId: a.id,
     sentiment: a.value.actionValue.reaction === "like" ? "positive" : "negative",

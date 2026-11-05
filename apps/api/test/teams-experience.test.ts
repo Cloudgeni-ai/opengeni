@@ -1,18 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import type { App } from "@microsoft/teams.apps";
 import {
-  TEAMS_AI_GENERATED_ENTITY,
+  teamsAiGeneratedEntity,
   teamsCommand,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
   teamsMarkdownParts,
-  teamsUnlinkReply,
+  teamsAccountReply,
   teamsWelcome,
   type TeamsExperienceState,
 } from "../src/integrations/teams-experience";
 import { normalizeTeamsFeedback, teamsPersonalInstall } from "../src/integrations/teams-protocol";
-import { keepTeamsTyping, sendTeamsReply } from "../src/integrations/teams-bot";
+import {
+  keepTeamsTyping,
+  sendTeamsReply,
+  type TeamsTypingLoop,
+} from "../src/integrations/teams-bot";
 
 const tenantId = "10000000-0000-4000-8000-000000000001";
 const actorId = "10000000-0000-4000-8000-000000000002";
@@ -31,7 +35,9 @@ describe("Teams commands", () => {
     expect(teamsCommand("unlink")).toBe("unlink");
     expect(teamsCommand("Disconnect")).toBe("unlink");
     expect(teamsCommand("unlink  confirm")).toBe("unlink_confirm");
+    expect(teamsCommand("Link")).toBe("link");
     expect(teamsCommand("help me write a plan")).toBeNull();
+    expect(teamsCommand(`help${" ".repeat(100)}`)).toBeNull();
     expect(teamsCommand("how do I unlink my account?")).toBeNull();
   });
 });
@@ -47,6 +53,7 @@ describe("Teams welcome and help", () => {
       expect(text).toContain("Microsoft Teams");
       expect(text).toContain("Files and images");
       expect(text).toContain("**help**");
+      expect(text).toContain("**unlink**");
       expect(text).not.toMatch(/https?:/);
     },
   );
@@ -61,17 +68,22 @@ describe("Teams welcome and help", () => {
   test("only an unlinked person in a connected organization's 1:1 chat gets a link button", () => {
     for (const state of states) {
       const action = teamsHelp(state).action;
-      if (state.personal && state.installation === "active" && !state.linked)
+      const welcome = teamsWelcome(state).action;
+      if (state.personal && state.installation === "active" && !state.linked) {
         expect(action).toEqual({ kind: "link", title: "Link account" });
-      else expect(action).toBeUndefined();
-      expect(teamsWelcome(state).action).toEqual(action);
+        // A welcome may be read much later, so it asks for a fresh link.
+        expect(welcome).toEqual({ kind: "command", title: "Link account", command: "link" });
+      } else {
+        expect(action).toBeUndefined();
+        expect(welcome).toBeUndefined();
+      }
     }
     expect(teamsHelp({ personal: false, installation: "active", linked: false }).text).toContain(
       "Send me a direct message to link your Opengeni account",
     );
   });
   test("unlink asks for confirmation with a button that sends the confirm command", () => {
-    expect(teamsUnlinkReply("confirm").action).toEqual({
+    expect(teamsAccountReply("confirm").action).toEqual({
       kind: "command",
       title: "Unlink account",
       command: "unlink confirm",
@@ -128,6 +140,41 @@ describe("Teams Markdown", () => {
     ].join("\n");
     expect(teamsMarkdown(input)).toBe(input);
   });
+  test("tag-like text is escaped outside code so Teams shows it", () => {
+    expect(teamsMarkdown("Use List<string> or <name>, see <https://example.test> and `a<b>`")).toBe(
+      "Use List\\<string> or \\<name>, see <https://example.test> and `a<b>`",
+    );
+    expect(teamsMarkdown("1 < 2 and a<br>b")).toBe("1 < 2 and a<br>b");
+    expect(teamsMarkdown("```\nList<string>\n```")).toBe("```\nList<string>\n```");
+  });
+  test("only real tables are converted", () => {
+    // Indented code and a setext heading containing pipes stay as written.
+    const code = "    ls | wc\n    ---";
+    expect(teamsMarkdown(code)).toBe(code);
+    expect(teamsMarkdown("a | b\n---")).toBe("## a | b");
+    expect(teamsMarkdown("Title\n===\n\n---\n- item\n---")).toBe("# Title\n\n\n- item\n");
+    // The delimiter row must have one cell per header cell.
+    expect(teamsMarkdown("| a | b |\n| --- |\n| 1 | 2 |")).toBe("| a | b |\n| --- |\n| 1 | 2 |");
+  });
+  test("headings drop their closing sequence", () => {
+    expect(teamsMarkdown("## Title ##")).toBe("## Title");
+    expect(teamsMarkdown("##### Deep #####")).toBe("**Deep**");
+    expect(teamsMarkdown("### C#")).toBe("### C#");
+  });
+  test("long lines are handled in linear time", () => {
+    const inputs = [
+      `# ${" ".repeat(40_000)}x`,
+      `|${" -".repeat(20_000)}`,
+      `a | b\n|${" -".repeat(20_000)}`,
+      `![${"[".repeat(40_000)}`,
+      `![a](${"x".repeat(40_000)}`,
+      `${"<a".repeat(2000)}`,
+      `${"`".repeat(1500)}x${"` ".repeat(1000)}<a`,
+    ];
+    const started = performance.now();
+    for (const input of inputs) teamsMarkdownParts(teamsMarkdown(input));
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
   test("a plain split is lossless and within the limit, including multibyte text", () => {
     const text = "🦉 hello\n".repeat(5000);
     const parts = teamsMarkdownParts(text, 2000);
@@ -147,6 +194,40 @@ describe("Teams Markdown", () => {
     }
     expect(parts[1]!.startsWith("```ts\n")).toBe(true);
     expect(parts.at(-1)!.endsWith("```\nAfter")).toBe(true);
+  });
+  test("a long fence opening line never makes parts oversized or numerous", () => {
+    const text = `\`\`\`${"x".repeat(25_000)}\n${"code line\n".repeat(5_000)}\`\`\`\nAfter`;
+    const parts = teamsMarkdownParts(text);
+    expect(parts.every((part) => Buffer.byteLength(part) <= 20_000)).toBe(true);
+    expect(parts.length).toBeLessThanOrEqual(Math.ceil(Buffer.byteLength(text) / 19_000) + 1);
+    // The reopening line carries only the fence and its language.
+    const info = `\`\`\`python ${"y".repeat(500)}\n${"print(1)\n".repeat(5_000)}\`\`\``;
+    const split = teamsMarkdownParts(info);
+    expect(split.length).toBeGreaterThan(1);
+    expect(split[1]!.startsWith("```python\nprint(1)")).toBe(true);
+  });
+  test("room for the closing fence is kept when the opening line fills a part", () => {
+    const open = `\`\`\`${"z".repeat(995)}\n`;
+    const text = `${open}body\n\`\`\``;
+    for (const part of teamsMarkdownParts(text, 1000))
+      expect(Buffer.byteLength(part)).toBeLessThanOrEqual(1000);
+  });
+  test("every split stays within the limit and close to the minimum part count", () => {
+    let seed = 7;
+    const random = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    const pieces = ["```ts\n", "```\n", "~~~~\n", "word ", "🦉", "\n", "| a |\n", "x".repeat(300)];
+    for (let round = 0; round < 200; round += 1) {
+      let text = "";
+      const length = Math.floor(random() * 400);
+      for (let index = 0; index < length; index += 1)
+        text += pieces[Math.floor(random() * pieces.length)];
+      const limit = 200 + Math.floor(random() * 2000);
+      const parts = teamsMarkdownParts(text, limit);
+      for (const part of parts) expect(Buffer.byteLength(part)).toBeLessThanOrEqual(limit);
+      expect(parts.length).toBeLessThanOrEqual(
+        Math.ceil((Buffer.byteLength(text) * 2) / limit) + 2,
+      );
+    }
   });
 });
 
@@ -214,6 +295,8 @@ describe("Teams activities", () => {
       actorId,
       conversationId: "a:personal",
       personal: true,
+      groupChat: false,
+      channelId: null,
       replyToId: "bot-message-1",
       eventId: "invoke-1",
       sentiment: "negative",
@@ -227,6 +310,35 @@ describe("Teams activities", () => {
         }),
       ),
     ).toMatchObject({ sentiment: "positive", comment: null });
+  });
+  test("long feedback text is kept, shortened", () => {
+    const long = normalizeTeamsFeedback(
+      feedback({
+        value: {
+          actionName: "feedback",
+          actionValue: {
+            reaction: "dislike",
+            feedback: JSON.stringify({ feedbackText: "w".repeat(20_000) }),
+          },
+        },
+      }),
+    );
+    expect(long?.comment).toHaveLength(4000);
+  });
+  test("channel feedback names its channel", () => {
+    expect(
+      normalizeTeamsFeedback(
+        feedback({
+          conversation: { id: "19:c;messageid=1", conversationType: "channel", tenantId },
+          channelData: { tenant: { id: tenantId }, channel: { id: "19:c" } },
+        }),
+      ),
+    ).toMatchObject({ personal: false, groupChat: false, channelId: "19:c" });
+    expect(
+      normalizeTeamsFeedback(
+        feedback({ conversation: { id: "19:c", conversationType: "channel", tenantId } }),
+      ),
+    ).toBeNull();
   });
   test("feedback refuses other invokes, bots and mismatched tenants", () => {
     expect(normalizeTeamsFeedback(feedback({ name: "adaptiveCard/action" }))).toBeNull();
@@ -304,7 +416,7 @@ describe("Teams deterministic replies", () => {
   });
   test("the unlink confirmation button sends the confirm command back as the person", async () => {
     const { app, calls } = transport();
-    await sendTeamsReply(app, { ...target, personal: true }, teamsUnlinkReply("confirm"));
+    await sendTeamsReply(app, { ...target, personal: true }, teamsAccountReply("confirm"));
     expect(calls[0]!.activity).toMatchObject({
       attachments: [
         {
@@ -322,7 +434,7 @@ describe("Teams deterministic replies", () => {
     });
   });
   test("the AI label entity is the documented schema.org message", () => {
-    expect(TEAMS_AI_GENERATED_ENTITY).toEqual({
+    expect(teamsAiGeneratedEntity()).toEqual({
       type: "https://schema.org/Message",
       "@type": "Message",
       "@context": "https://schema.org",
@@ -334,7 +446,7 @@ describe("Teams deterministic replies", () => {
 
 describe("Teams typing indicator", () => {
   test("repeats while the reply is pending and stops when it is ready", async () => {
-    const loops = new Map<string, { eventId: string }>();
+    const loops = new Map<string, TeamsTypingLoop>();
     let sent = 0;
     let checks = 0;
     await keepTeamsTyping({
@@ -351,7 +463,7 @@ describe("Teams typing indicator", () => {
     expect(loops.size).toBe(0);
   });
   test("a newer message in the same chat takes over the running loop", async () => {
-    const loops = new Map<string, { eventId: string }>();
+    const loops = new Map<string, TeamsTypingLoop>();
     const seen: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -360,9 +472,9 @@ describe("Teams typing indicator", () => {
       key: "route",
       eventId: "event-1",
       send: () => gate,
-      pending: async (eventId) => {
-        seen.push(eventId);
-        return false;
+      pending: async () => {
+        seen.push("event-1");
+        return true;
       },
       intervalMs: 1,
     });
@@ -373,11 +485,67 @@ describe("Teams typing indicator", () => {
       send: async () => {
         throw new Error("a second loop must not start");
       },
-      pending: async () => true,
+      pending: async () => {
+        seen.push("event-2");
+        return false;
+      },
     });
+    expect(loops.get("route")?.eventId).toBe("event-2");
     release();
     await first;
     expect(seen).toEqual(["event-2"]);
+  });
+  test("a takeover while the previous message is checked keeps the loop going", async () => {
+    const loops = new Map<string, TeamsTypingLoop>();
+    let sent = 0;
+    let secondChecks = 0;
+    await keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-1",
+      send: async () => {
+        sent += 1;
+      },
+      pending: async () => {
+        // The earlier message is answered, but a newer one arrives meanwhile.
+        await keepTeamsTyping({
+          loops,
+          key: "route",
+          eventId: "event-2",
+          send: async () => {},
+          pending: async () => ++secondChecks < 2,
+        });
+        return false;
+      },
+      intervalMs: 1,
+    });
+    expect(secondChecks).toBe(2);
+    expect(sent).toBe(3);
+    expect(loops.size).toBe(0);
+  });
+  test("a takeover restarts the time limit", async () => {
+    const loops = new Map<string, TeamsTypingLoop>();
+    const first = keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-1",
+      send: async () => {},
+      pending: async () => true,
+      intervalMs: 2,
+      maxMs: 30,
+    });
+    const before = loops.get("route")!.deadline;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await keepTeamsTyping({
+      loops,
+      key: "route",
+      eventId: "event-2",
+      send: async () => {},
+      pending: async () => true,
+      maxMs: 30,
+    });
+    expect(loops.get("route")!.deadline).toBeGreaterThan(before);
+    await first;
   });
   test("stops at the time limit even while the reply is pending", async () => {
     let sent = 0;

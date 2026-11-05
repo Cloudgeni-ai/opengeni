@@ -75,13 +75,13 @@ import {
   type TeamsPersonalInstall,
 } from "./teams-protocol";
 import {
-  TEAMS_AI_GENERATED_ENTITY,
+  teamsAiGeneratedEntity,
   teamsCommand,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
   teamsMarkdownParts,
-  teamsUnlinkReply,
+  teamsAccountReply,
   teamsWelcome,
   type TeamsCommand,
   type TeamsExperienceReply,
@@ -98,7 +98,10 @@ const ENDPOINT = "/v1/integrations/teams/messages";
 const ROOT = "/v1/workspaces/:workspaceId/integrations/teams";
 const inventoryCursors = new WeakMap<ApiRouteDeps, string>();
 const runtimes = new WeakMap<ApiRouteDeps, Promise<App>>();
-const typingLoops = new WeakMap<ApiRouteDeps, Map<string, { eventId: string }>>();
+const typingLoops = new WeakMap<ApiRouteDeps, Map<string, TeamsTypingLoop>>();
+/** Recently welcomed personal chats, so a redelivered install isn't welcomed twice. */
+const welcomed = new WeakMap<ApiRouteDeps, Map<string, number>>();
+const WELCOME_DEDUPE_MS = 10 * 60_000;
 
 function configuredBase(deps: ApiRouteDeps): string {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
@@ -156,7 +159,7 @@ async function send(
     ...(m.threadId ? { replyToId: m.threadId } : {}),
     ...(options.ai
       ? {
-          entities: [{ ...TEAMS_AI_GENERATED_ENTITY, additionalType: ["AIGeneratedContent"] }],
+          entities: [teamsAiGeneratedEntity()],
           channelData: { feedbackLoop: { type: "default" } },
         }
       : {}),
@@ -369,28 +372,43 @@ async function welcomeTeamsInstall(
   deps: ApiRouteDeps,
   app: App,
   install: TeamsPersonalInstall,
-): Promise<void> {
+): Promise<string> {
+  let recent = welcomed.get(deps);
+  if (!recent) welcomed.set(deps, (recent = new Map()));
+  const now = Date.now();
+  for (const [key, at] of recent) if (now - at > WELCOME_DEDUPE_MS) recent.delete(key);
+  const key = `${install.tenantId}:${install.conversationId}`;
+  if (recent.has(key)) return "welcome_duplicate";
+  recent.set(key, now);
   const i = await getTeamsInstallation(deps.db, install.tenantId);
-  const grant = i?.active && install.actorId ? await actorGrant(deps, i, install.actorId) : null;
-  // Without the person's identity there is nothing to link yet; their first
-  // message gets the link button.
-  const state = experienceState(true, install.actorId ? i : null, grant);
-  const actorId = install.actorId;
-  await sendTeamsReply(
-    app,
-    { ...install, threadId: null, personal: true },
-    teamsWelcome(state),
-    i && actorId ? () => proofLink(deps, { tenantId: install.tenantId, actorId }, i) : undefined,
-  );
+  const active = i?.active ? i : null;
+  // When Teams doesn't name who added the bot, offer linking; the link
+  // command answers from the sender's own authenticated message either way.
+  const grant = active && install.actorId ? await actorGrant(deps, active, install.actorId) : null;
+  try {
+    await sendTeamsReply(
+      app,
+      { ...install, threadId: null, personal: true },
+      teamsWelcome(experienceState(true, active, grant)),
+    );
+  } catch (error) {
+    recent.delete(key);
+    throw error;
+  }
+  return "welcome_sent";
 }
-/** Help and account commands: fixed replies that never reach the agent. */
+/**
+ * Help and account commands: fixed replies that never reach the agent.
+ * Returns null when the message should continue down the normal path, as
+ * "link" does for someone who isn't linked yet.
+ */
 async function answerTeamsCommand(
   deps: ApiRouteDeps,
   app: App,
   m: TeamsMessage,
   i: TeamsInstallation | null,
   command: TeamsCommand,
-): Promise<string> {
+): Promise<string | null> {
   const active = i?.active ? i : null;
   if (command === "help") {
     const grant = active ? await actorGrant(deps, active, m.actorId) : null;
@@ -402,48 +420,70 @@ async function answerTeamsCommand(
     );
     return "help_sent";
   }
+  if (command === "link") {
+    if (!active || !(await actorGrant(deps, active, m.actorId))) return null;
+    await sendTeamsReply(app, m, teamsAccountReply("already_linked"));
+    return "link_already_linked";
+  }
   if (!m.personal) {
-    await sendTeamsReply(app, m, teamsUnlinkReply("not_personal"));
+    await sendTeamsReply(app, m, teamsAccountReply("not_personal"));
     return "unlink_not_personal";
   }
   // The stored link, even when the person has since lost workspace access:
   // anyone may always remove their own link.
   const subjectId = active ? await getTeamsActor(deps.db, active, m.actorId) : null;
   if (!active || !subjectId) {
-    await sendTeamsReply(app, m, teamsUnlinkReply("not_linked"));
+    await sendTeamsReply(app, m, teamsAccountReply("not_linked"));
     return "unlink_not_linked";
   }
   if (command === "unlink") {
-    await sendTeamsReply(app, m, teamsUnlinkReply("confirm"));
+    await sendTeamsReply(app, m, teamsAccountReply("confirm"));
     return "unlink_confirmation_sent";
   }
   await removeTeamsLink(deps.db, active, subjectId);
-  await sendTeamsReply(app, m, teamsUnlinkReply("done"));
+  await sendTeamsReply(app, m, teamsAccountReply("done"));
   return "unlinked";
 }
+/** One chat's typing loop: the message it is for and how to tell it's answered. */
+export type TeamsTypingLoop = {
+  eventId: string;
+  pending: () => Promise<boolean>;
+  deadline: number;
+  /** Bumped when a newer message takes over the loop. */
+  version: number;
+};
 /**
  * Keeps Teams' typing indicator up while the reply to a message is being
- * produced: from the moment the message is accepted until a reply is queued
- * for its chat, the message is refused, or `maxMs` passes. One loop per chat;
- * a newer message in the same chat takes over the running loop.
+ * produced: from the moment the message is accepted until `pending` reports
+ * it answered or refused, or `maxMs` passes. One loop per chat; a newer
+ * message in the same chat takes over the running loop and restarts its
+ * deadline.
  */
 export async function keepTeamsTyping(input: {
-  loops: Map<string, { eventId: string }>;
+  loops: Map<string, TeamsTypingLoop>;
   key: string;
   eventId: string;
   send: () => Promise<void>;
-  pending: (eventId: string) => Promise<boolean>;
+  pending: () => Promise<boolean>;
   intervalMs?: number;
   maxMs?: number;
 }): Promise<void> {
+  const maxMs = input.maxMs ?? 5 * 60_000;
   const live = input.loops.get(input.key);
   if (live) {
     live.eventId = input.eventId;
+    live.pending = input.pending;
+    live.deadline = Date.now() + maxMs;
+    live.version += 1;
     return;
   }
-  const state = { eventId: input.eventId };
+  const state: TeamsTypingLoop = {
+    eventId: input.eventId,
+    pending: input.pending,
+    deadline: Date.now() + maxMs,
+    version: 0,
+  };
   input.loops.set(input.key, state);
-  const deadline = Date.now() + (input.maxMs ?? 5 * 60_000);
   try {
     for (;;) {
       await input.send();
@@ -451,7 +491,10 @@ export async function keepTeamsTyping(input: {
         const timer = setTimeout(resolve, input.intervalMs ?? 3000);
         (timer as { unref?: () => void }).unref?.();
       });
-      if (Date.now() >= deadline || !(await input.pending(state.eventId))) return;
+      const version = state.version;
+      const pending = Date.now() < state.deadline && (await state.pending());
+      // A newer message that took over while this was checked keeps the loop going.
+      if (!pending && version === state.version) return;
     }
   } finally {
     input.loops.delete(input.key);
@@ -462,6 +505,7 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
   if (f.botId.toLowerCase() !== `28:${deps.settings.teamsBotClientId!.toLowerCase()}`)
     return "bot_identity_mismatch";
   if (!teamsTenantEnabled(deps.settings, f.tenantId)) return "tenant_disabled";
+  if (!teamsConversationAllowed(deps, f)) return "channel_disabled";
   const i = await getTeamsInstallation(deps.db, f.tenantId);
   if (!i?.active) return "feedback_installation_inactive";
   const identity = await actorGrant(deps, i, f.actorId);
@@ -475,7 +519,14 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
   const grant = reply.session_workspace_id
     ? await ownPersonalWorkspaceGrant(deps, i, identity.subjectId, reply.session_workspace_id)
     : identity;
-  if (!grant || !hasPermission(grant.permissions, "sessions:read")) return "feedback_not_permitted";
+  // The same permissions the HTTP feedback route requires for feedback on a chat.
+  if (
+    !grant ||
+    !(["workspace:read", "sessions:create", "sessions:read"] as const).every((permission) =>
+      hasPermission(grant.permissions, permission),
+    )
+  )
+    return "feedback_not_permitted";
   const save = (turnId: string | null) => () =>
     createFeedback(deps.db, {
       accountId: grant.accountId,
@@ -518,6 +569,17 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
     throw error;
   }
 }
+/** Personal chats always; group chats and channels only when allowlisted. */
+function teamsConversationAllowed(
+  deps: ApiRouteDeps,
+  c: Pick<TeamsMessage, "tenantId" | "personal" | "groupChat" | "conversationId" | "channelId">,
+): boolean {
+  if (c.personal) return true;
+  return c.groupChat
+    ? deps.settings.teamsBotAllowedGroupChatIds.includes(`${c.tenantId}:${c.conversationId}`)
+    : Boolean(c.channelId) &&
+        deps.settings.teamsBotAllowedChannelIds.includes(`${c.tenantId}:${c.channelId}`);
+}
 /**
  * Handles one Teams activity. Call it only with an activity the Teams SDK has
  * authenticated (Connector JWT, audience, issuer, expiry and service URL);
@@ -542,10 +604,7 @@ export async function handleTeamsActivity(
   if (install) {
     if (install.botId.toLowerCase() !== botId) observed("bot_identity_mismatch");
     else if (!teamsTenantEnabled(deps.settings, install.tenantId)) observed("tenant_disabled");
-    else {
-      await welcomeTeamsInstall(deps, app, install);
-      observed("welcome_sent");
-    }
+    else observed(await welcomeTeamsInstall(deps, app, install));
     return { status: 200 };
   }
   const feedback = normalizeTeamsFeedback(body);
@@ -565,20 +624,18 @@ export async function handleTeamsActivity(
     observed("tenant_disabled");
     return { status: 200 };
   }
-  if (
-    !m.personal &&
-    !(m.groupChat
-      ? deps.settings.teamsBotAllowedGroupChatIds.includes(`${m.tenantId}:${m.conversationId}`)
-      : deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
-  ) {
+  if (!teamsConversationAllowed(deps, m)) {
     observed("channel_disabled");
     return { status: 200 };
   }
   const i = await getTeamsInstallation(deps.db, m.tenantId);
   const command = teamsCommand(m.text);
   if (command) {
-    observed(await answerTeamsCommand(deps, app, m, i, command));
-    return { status: 200 };
+    const answered = await answerTeamsCommand(deps, app, m, i, command);
+    if (answered) {
+      observed(answered);
+      return { status: 200 };
+    }
   }
   if (!i?.active) {
     if (m.personal && deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)) {
@@ -629,7 +686,7 @@ export async function handleTeamsActivity(
     : null;
   const routeId = teamsRouteId(m, i.generation, grant.subjectId, sessionWorkspaceId);
   const eventId = `${m.identity}:${i.generation}`;
-  await enqueueTeamsMessage(deps.db, i, {
+  const queued = await enqueueTeamsMessage(deps.db, i, {
     routeId,
     actorId: m.actorId,
     subjectId: grant.subjectId,
@@ -644,14 +701,16 @@ export async function handleTeamsActivity(
     eventId,
     payload: m,
   });
+  // A redelivered message is already being answered, or was answered.
+  if (!queued.queued) return { status: 200 };
   let loops = typingLoops.get(deps);
   if (!loops) typingLoops.set(deps, (loops = new Map()));
   void keepTeamsTyping({
     loops,
-    key: routeId,
+    key: queued.routeId,
     eventId,
     send: () => sendTyping(app, m),
-    pending: (current) => teamsReplyPending(deps.db, i, routeId, current),
+    pending: () => teamsReplyPending(deps.db, i, { eventId, replySequence: queued.replySequence }),
   }).catch(() => {
     // The indicator is a courtesy; the reply is delivered either way.
     observed("typing_stopped");

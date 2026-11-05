@@ -261,31 +261,54 @@ conversation, organization connected or not, account linked or not).
   `conversationUpdate` naming the bot in `membersAdded`) sends one welcome: what
   Opengeni does, that replies are AI-generated, the account requirement, the main
   limitations and how to get help. An unlinked person in a connected organization
-  also gets the link button. Messages never repeat it. A linked person's first
-  1:1 chat adds one line about AI and `help` to the "Started" notice.
-- **Commands.** A whole message of `help` (or `commands`) gets the help text in the
+  also gets a "Link account" button. The welcome holds no identity proof, since
+  proofs expire after ten minutes and a welcome may be read much later: the button
+  sends `link` as the person, whose authenticated message gets a fresh link card.
+  A redelivered install within ten minutes isn't welcomed again (per API process),
+  and messages never repeat it. A linked person's first 1:1 chat adds one line
+  about AI and `help` to the "Started" notice. The bot only answers in tenants
+  enabled for rollout, so a tenant used to review the app must be in
+  `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS` (or broad rollout must be on).
+- **Commands.** Commands run after the tenant and channel or group allowlist
+  checks. A whole message of `help` (or `commands`) gets the help text in the
   same conversation, for linked and unlinked people, without starting agent work.
-  In a 1:1 chat, `unlink` (or `disconnect`) asks for confirmation; its button
+  `link` gives an unlinked person the usual link card and tells a linked person
+  they already are. In a 1:1 chat, `unlink` (or `disconnect`) asks for
+  confirmation; its button
   sends `unlink confirm`, which removes the person's Teams link with the same
   logic as the web unlink. Anyone may always remove their own link. In shared
   conversations `unlink` points to the 1:1 chat.
-- **Typing.** After a message is accepted, the bot sends Teams typing activities
-  about every three seconds until a reply is queued for that chat, the message
-  is refused, or five minutes pass. The loop lives in the process that accepted
-  the message and is best-effort.
+- **Typing.** After a message is queued, the bot sends Teams typing activities
+  about every three seconds until the chat's session records a reply, a request
+  for input or a failure (the route's `relevant_event_sequence` moves past its
+  value when the message was queued), the message is refused, or five minutes
+  pass. One loop runs per chat; a newer message takes it over and restarts the
+  five minutes. A redelivered message starts none. The loop lives in the process
+  that accepted the message and is best-effort.
 - **Markdown.** Messages are sent with `textFormat: "markdown"`. Agent Markdown
   Teams can't show in text messages is rewritten: tables become one list item per
-  row, headings below level three become bold lines, images become links and
-  horizontal rules are dropped. A code block split across 20,000-byte parts is
-  closed and reopened.
+  row, headings below level three become bold lines, setext headings become ATX
+  headings, images become links and horizontal rules are dropped. Text that
+  looks like an HTML tag (`List<string>`) is backslash-escaped outside code so
+  Teams doesn't swallow it; autolinks and `<br>` are kept. Lines over 4 KB are
+  passed through unchanged. A code block split across 20,000-byte parts is
+  closed and reopened with only its fence and language, and room for the closing
+  fence is kept, so no part exceeds the limit. Verify tag-like text on desktop,
+  web and mobile during acceptance.
 - **AI label and feedback.** Agent replies (from `turn.completed`) carry the
   schema.org `AIGeneratedContent` message entity and `channelData.feedbackLoop`.
-  The authenticated `message/submitAction` feedback invoke is accepted only for a
+  The authenticated `message/submitAction` feedback invoke passes the same tenant
+  and channel or group allowlist checks as messages, and is accepted only for a
   delivered agent reply in the same conversation and installation generation,
-  from a linked person who can read that chat (only its owner for a 1:1 chat). It
-  is recorded through the ordinary Opengeni feedback store (`feedback_submissions`)
-  on the chat and turn, with an idempotency key derived from the Teams activity,
-  so a redelivered invoke records once.
+  from a linked person with the permissions the HTTP feedback route requires
+  (`workspace:read`, `sessions:create` and `sessions:read`) and session access to
+  that chat (only its owner for a 1:1 chat). It is recorded through the ordinary
+  Opengeni feedback store (`feedback_submissions`) on the chat and turn (on the
+  chat alone if the turn is gone), with an idempotency key derived from the
+  Teams activity, so a redelivered invoke records once. Each rating is its own
+  row, so a person who changes their rating leaves both; the latest is current.
+  Written feedback is kept up to 4,000 characters. The lookup uses the partial
+  index `teams_bot_outbox_delivered_message`.
 
 ## Publisher verification and Store submission
 
