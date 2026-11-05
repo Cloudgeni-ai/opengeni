@@ -1240,7 +1240,7 @@ offline. See [Transactional file edits](#transactional-file-edits).
 
 The agent starts every shell command, and each exec's containment anchor,
 through `/bin/sh`. When `/bin/sh` is missing or not executable (a command ran
-`mv /bin/sh …`), agent 0.1.152 and later start the first of `/bin/dash`,
+`mv /bin/sh …`), agent 0.1.153 and later start the first of `/bin/dash`,
 `/usr/bin/dash`, `/bin/bash` or `/usr/bin/bash` instead, and, running as root
 on Linux, point `/bin/sh` back at it with a symlink (only an empty path or a
 symlink is replaced, never a file or directory). With no shell at all, the start
