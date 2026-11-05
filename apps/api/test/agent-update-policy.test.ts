@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { EnrollmentRecord } from "@opengeni/db";
-import { automaticAgentUpdateDue } from "../src/sandbox/agent-update";
+import {
+  agentUpdateBrowserClosingNotice,
+  automaticAgentUpdateDue,
+  browserClosingUpdateAt,
+  browserUpdateDecision,
+  retryableAgentUpdateBackoffMs,
+  withBrowserClosingNotice,
+} from "../src/sandbox/agent-update";
 
 const NOW = Date.parse("2026-10-10T12:00:00.000Z");
 const minutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
@@ -156,5 +163,139 @@ describe("automatic agent updates", () => {
         NOW,
       ),
     ).toBe(true);
+  });
+});
+
+describe("retrying a failed download", () => {
+  const download = {
+    status: "failed" as const,
+    errorCode: "manifest_download_failed",
+    retryable: true,
+  };
+
+  test("the first retry comes soon, and each later one waits twice as long", () => {
+    // The first attempt failed a minute after it was requested.
+    const first = machine(
+      "0.1.150",
+      {
+        ...download,
+        targetVersion: "0.1.152",
+        requestedAt: minutesAgo(11),
+        updatedAt: minutesAgo(10),
+      },
+      { agentUpdatePendingSince: minutesAgo(11) },
+    );
+    expect(retryableAgentUpdateBackoffMs(first)).toBe(10 * 60_000);
+    expect(automaticAgentUpdateDue(first, "0.1.152", NOW)).toBe(true);
+    // Failing for 40 minutes so far: wait 40 more.
+    const later = machine(
+      "0.1.150",
+      {
+        ...download,
+        targetVersion: "0.1.152",
+        requestedAt: minutesAgo(31),
+        updatedAt: minutesAgo(30),
+      },
+      { agentUpdatePendingSince: minutesAgo(70) },
+    );
+    expect(retryableAgentUpdateBackoffMs(later)).toBe(40 * 60_000);
+    expect(automaticAgentUpdateDue(later, "0.1.152", NOW)).toBe(false);
+    expect(automaticAgentUpdateDue(later, "0.1.152", NOW + 10 * 60_000)).toBe(true);
+  });
+
+  test("the wait stops growing at six hours", () => {
+    const stuck = machine(
+      "0.1.150",
+      { ...download, targetVersion: "0.1.152", updatedAt: minutesAgo(5 * 60) },
+      { agentUpdatePendingSince: minutesAgo(3 * 24 * 60) },
+    );
+    expect(retryableAgentUpdateBackoffMs(stuck)).toBe(6 * 60 * 60_000);
+    expect(automaticAgentUpdateDue(stuck, "0.1.152", NOW)).toBe(false);
+    expect(automaticAgentUpdateDue(stuck, "0.1.152", NOW + 60 * 60_000)).toBe(true);
+  });
+});
+
+describe("an older agent's open browsers", () => {
+  const browsers = (update: Partial<NonNullable<EnrollmentRecord["agentUpdate"]>>, since: number) =>
+    machine(
+      "0.1.55",
+      {
+        status: "failed",
+        errorCode: "update_busy_browsers",
+        retryable: true,
+        ...update,
+      },
+      { agentUpdatePendingSince: minutesAgo(since) },
+    );
+
+  test("do not hold an update while no working session is using them", () => {
+    const waiting = browsers({ requestedAt: minutesAgo(30), updatedAt: minutesAgo(30) }, 30);
+    expect(browserUpdateDecision(waiting, { live: 3, inUse: 0 }, NOW)).toBe("update");
+    expect(browserUpdateDecision(waiting, { live: 0, inUse: 0 }, NOW)).toBe("update");
+    expect(browserUpdateDecision(waiting, { live: 3, inUse: 1 }, NOW)).toBe("postpone");
+    // A browser-preserving agent is updated whatever its browsers do.
+    expect(
+      browserUpdateDecision(
+        machine("0.1.58", { status: "failed", errorCode: "update_busy_browsers" }),
+        { live: 3, inUse: 3 },
+        NOW,
+      ),
+    ).toBe("update");
+  });
+
+  test("browsers always in use postpone an update for a bounded time, then it is announced", () => {
+    // Under a day of waiting: an ordinary postponement, looked at again soon.
+    const recent = browsers({ requestedAt: minutesAgo(11), updatedAt: minutesAgo(11) }, 23 * 60);
+    expect(browserClosingUpdateAt(recent)).toBeNull();
+    expect(agentUpdateBrowserClosingNotice(recent, NOW)).toBeNull();
+    expect(automaticAgentUpdateDue(recent, "0.1.60", NOW)).toBe(true);
+    expect(browserUpdateDecision(recent, { live: 1, inUse: 1 }, NOW)).toBe("postpone");
+
+    // The first postponement recorded after a day announces a closing time
+    // thirty minutes later, and agents using the browsers are told.
+    const announced = browsers(
+      { requestedAt: minutesAgo(5), updatedAt: minutesAgo(5) },
+      24 * 60 + 5,
+    );
+    expect(browserClosingUpdateAt(announced)).toBe(NOW + 25 * 60_000);
+    expect(agentUpdateBrowserClosingNotice(announced, NOW)).toBe(
+      "This Connected Machine's agent updates at 12:25 UTC (in 25 min), and the update closes this browser. Finish or save your browser work before then; open a new browser afterwards if you still need one.",
+    );
+    // Until then nothing is recorded or requested, even for a newer release.
+    expect(automaticAgentUpdateDue(announced, "0.1.60", NOW + 20 * 60_000)).toBe(false);
+    expect(automaticAgentUpdateDue(announced, "0.1.61", NOW + 20 * 60_000)).toBe(false);
+    expect(browserUpdateDecision(announced, { live: 1, inUse: 1 }, NOW)).toBe("wait");
+    // Then the update goes ahead though the browsers are still in use.
+    expect(automaticAgentUpdateDue(announced, "0.1.60", NOW + 25 * 60_000)).toBe(true);
+    expect(browserUpdateDecision(announced, { live: 1, inUse: 1 }, NOW + 25 * 60_000)).toBe(
+      "update",
+    );
+    expect(agentUpdateBrowserClosingNotice(announced, NOW + 25 * 60_000)).toBeNull();
+  });
+
+  test("only a postponement for browsers announces a closing time", () => {
+    const busyWork = browsers(
+      { errorCode: "update_busy_work", requestedAt: minutesAgo(5), updatedAt: minutesAgo(5) },
+      2 * 24 * 60,
+    );
+    expect(browserClosingUpdateAt(busyWork)).toBeNull();
+    const preserving = machine(
+      "0.1.58",
+      { status: "failed", errorCode: "update_busy_browsers", requestedAt: minutesAgo(5) },
+      { agentUpdatePendingSince: minutesAgo(2 * 24 * 60) },
+    );
+    expect(browserClosingUpdateAt(preserving)).toBeNull();
+  });
+
+  test("the notice is added to the observation's own notice", () => {
+    expect(withBrowserClosingNotice({ id: 1 }, null)).toEqual({ id: 1 });
+    expect(withBrowserClosingNotice({ id: 1 }, "Closing.")).toEqual({ id: 1, notice: "Closing." });
+    expect(withBrowserClosingNotice({ id: 1, notice: "Reloaded." }, "Closing.")).toEqual({
+      id: 1,
+      notice: "Reloaded.\nClosing.",
+    });
+    expect(withBrowserClosingNotice({ notice: "x".repeat(1_020) }, "Closing.")).toEqual({
+      notice: "Closing.",
+    });
   });
 });

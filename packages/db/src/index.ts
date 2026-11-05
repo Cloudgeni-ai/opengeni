@@ -66667,6 +66667,10 @@ export type EnrollmentRecord = {
   agentUpdateChannel: "stable" | "beta" | null;
   agentCapabilities: Record<string, boolean>;
   agentUpdate: EnrollmentAgentUpdateRecord | null;
+  /** When the current run of unsuccessful update attempts began: the first
+   * attempt since the last success. Null before any attempt, and after a
+   * success the next attempt starts a new run. */
+  agentUpdatePendingSince: string | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -66743,6 +66747,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
             completedAt: row.agentUpdateCompletedAt?.toISOString() ?? null,
           }
         : null,
+    agentUpdatePendingSince: row.agentUpdatePendingSince?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -68537,8 +68542,12 @@ export async function beginEnrollmentAgentUpdate(
     connectionGeneration: number;
     operationId: string;
     targetVersion: string;
+    /** True when this operation only records that the update is postponed
+     * (an `update_busy_*` code) without asking the agent. */
+    postponement?: boolean;
   },
 ): Promise<EnrollmentRecord | null> {
+  const postponement = input.postponement === true;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -68560,6 +68569,21 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateRequestedAt: now,
           agentUpdateUpdatedAt: now,
           agentUpdateCompletedAt: null,
+          // Postponements continue a run of postponements, and attempts a
+          // run of failed attempts; anything else (a first attempt, one after
+          // a success, or a switch between the two) starts a new run. Rows
+          // from before migration 1270 start theirs at the last request.
+          agentUpdatePendingSince: sql`case
+            when ${schema.enrollments.agentUpdateStatus} = 'failed'
+              and starts_with(coalesce(${schema.enrollments.agentUpdateErrorCode}, ''), 'update_busy')
+                = ${postponement}::boolean
+              then coalesce(
+                ${schema.enrollments.agentUpdatePendingSince},
+                ${schema.enrollments.agentUpdateRequestedAt},
+                ${now.toISOString()}::timestamptz
+              )
+            else ${now.toISOString()}::timestamptz
+          end`,
           updatedAt: now,
         })
         .where(

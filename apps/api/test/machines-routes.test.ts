@@ -50,7 +50,11 @@ import {
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
 import { agentVersionState, machineUpdateBlockedReason } from "../src/sandbox/machines";
-import { createAutomaticAgentUpdater } from "../src/sandbox/agent-update";
+import {
+  connectedMachineBrowserClosingNotice,
+  createAutomaticAgentUpdater,
+} from "../src/sandbox/agent-update";
+import { createPublishedAgentReleases } from "../src/sandbox/agent-release";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
   for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
@@ -2367,6 +2371,8 @@ describe("Connected Machine signed self-update orchestration", () => {
     await admin`update browser_sessions set lifecycle = 'suspended', controller_id = null,
       controller_generation = null, placement_instance_id = null, controller_heartbeat_at = null
       where id = ${saved}`;
+    // The session that opened them is working, so they may be in use.
+    await admin`update sessions set status = 'running' where id = ${session.id}`;
 
     const requests: ControlRequest[] = [];
     const bus = busWithAgent({
@@ -2495,6 +2501,211 @@ describe("Connected Machine signed self-update orchestration", () => {
       "the automatic update",
     );
     expect(requests.filter((request) => request.op?.$case === "agentUpdateApply")).toHaveLength(1);
+  }, 90_000);
+});
+
+describe("automatic updates of an older agent whose browsers stay open", () => {
+  async function olderAgentWithBrowser(sessionStatus: string) {
+    const seeded = await seed();
+    const { accountId, workspaceId, session, enrollment, sandbox } = seeded;
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.55",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    const browser = await openManagedBrowser(
+      { accountId, workspaceId, sessionId: session.id },
+      sandbox.id,
+    );
+    await admin`update sessions set status = ${sessionStatus} where id = ${session.id}`;
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    const clock = { now: Date.now() };
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.60",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => clock.now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    return {
+      ...seeded,
+      browser,
+      clock,
+      heartbeat,
+      updateRequests: () => requests.filter((request) => request.op?.$case === "agentUpdateApply"),
+      machine: async () => (await getEnrollment(db, workspaceId, enrollment.id))!,
+    };
+  }
+
+  test("open browsers no working session holds do not hold the update", async () => {
+    if (!available) return;
+    const { heartbeat, updateRequests, machine } = await olderAgentWithBrowser("idle");
+    await heartbeat();
+    await waitForValue(
+      async () => (await machine()).agentUpdate,
+      (update) => update?.status === "accepted",
+      "the automatic update",
+    );
+    expect(updateRequests()).toHaveLength(1);
+  }, 90_000);
+
+  test("browsers always in use: after a day the update is announced to their agents, then made", async () => {
+    if (!available) return;
+    const { workspaceId, sandbox, enrollment, clock, heartbeat, updateRequests, machine } =
+      await olderAgentWithBrowser("running");
+    await heartbeat();
+    const first = await waitForValue(
+      async () => (await machine()).agentUpdate,
+      (update) => update?.status === "failed",
+      "the first postponement",
+    );
+    expect(first?.errorCode).toBe("update_busy_browsers");
+    const waitingSince = (await machine()).agentUpdatePendingSince;
+    expect(waitingSince).not.toBeNull();
+
+    // Each postponement is a new operation, but the machine's wait goes on.
+    clock.now += 11 * 60_000;
+    await heartbeat();
+    const second = await waitForValue(
+      async () => (await machine()).agentUpdate,
+      (update) => update?.operationId !== first!.operationId && update?.status === "failed",
+      "the second postponement",
+    );
+    expect((await machine()).agentUpdatePendingSince).toBe(waitingSince);
+    expect(await connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id)).toBeNull();
+
+    // A day later, the next postponement announces a closing time.
+    await admin`update enrollments
+      set agent_update_pending_since = agent_update_pending_since - interval '1 day'
+      where id = ${enrollment.id}`;
+    clock.now += 11 * 60_000;
+    await heartbeat();
+    const announced = await waitForValue(
+      async () => (await machine()).agentUpdate,
+      (update) => update?.operationId !== second!.operationId && update?.status === "failed",
+      "the announcement",
+    );
+    const closingAt = Date.parse(announced!.requestedAt) + 30 * 60_000;
+    expect(
+      await connectedMachineBrowserClosingNotice(db, workspaceId, sandbox.id, closingAt - 60_000),
+    ).toContain("the update closes this browser");
+    expect(updateRequests()).toHaveLength(0);
+
+    // Before that time nothing more is recorded or requested.
+    clock.now = closingAt - 60_000;
+    await heartbeat();
+    await Bun.sleep(500);
+    expect((await machine()).agentUpdate?.operationId).toBe(announced!.operationId);
+    expect(updateRequests()).toHaveLength(0);
+
+    // At that time the update is requested although the browser is in use.
+    clock.now = closingAt;
+    await heartbeat();
+    await waitForValue(
+      async () => (await machine()).agentUpdate,
+      (update) => update?.status === "accepted",
+      "the announced update",
+    );
+    expect(updateRequests()).toHaveLength(1);
+  }, 90_000);
+
+  test("an update targets the newest published release, never an unpublished one", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    // The source tree names 0.1.18, which is not published yet.
+    const unpinned = {
+      ...settings,
+      agentAutoUpdate: true,
+      agentStableVersion: undefined,
+      publicBaseUrl: "https://dev.opengeni.example",
+    };
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: unpinned,
+      releases: createPublishedAgentReleases(unpinned, {
+        sourceTree: () => "0.1.18",
+        probe: async (version) => (version === "0.1.16" ? "published" : "missing"),
+      }),
+    })!;
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: { $case: "heartbeat", heartbeat: {} },
+        }),
+      ).finish(),
+      `${subject}.events`,
+      bus,
+      updates,
+    );
+    const accepted = await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (update) => update?.status === "accepted",
+      "the automatic update",
+    );
+    expect(accepted?.targetVersion).toBe("0.1.16");
+    const applied = requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!.op).toMatchObject({ agentUpdateApply: { targetVersion: "0.1.16" } });
   }, 90_000);
 });
 

@@ -12179,6 +12179,13 @@ export const enrollments = pgTable(
     agentUpdateCompletedAt: timestamp("agent_update_completed_at", {
       withTimezone: true,
     }),
+    /** When the machine began its current run of unsuccessful updates: the
+     * first attempt after its last success. Kept while attempts keep failing
+     * or being postponed, so automatic retries can back off and a postponement
+     * can be bounded (migration 1270). */
+    agentUpdatePendingSince: timestamp("agent_update_pending_since", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -176,6 +176,7 @@ import {
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
+  type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
@@ -283,6 +284,10 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  connectedMachineBrowserClosingNotice,
+  withBrowserClosingNotice,
+} from "../sandbox/agent-update";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
   BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
@@ -896,10 +901,13 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient }) =>
-          BrowserObservation.parse(
-            await sessionClient.selectTarget(targetId, agentObservationNotices(grant)),
-          ),
+        async ({ sessionClient, record }) => {
+          const [observation, notice] = await Promise.all([
+            sessionClient.selectTarget(targetId, agentObservationNotices(grant)),
+            agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+          ]);
+          return withBrowserClosingNotice(BrowserObservation.parse(observation), notice);
+        },
       );
       return context.json(result);
     },
@@ -1601,10 +1609,14 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => {
+        async ({ sessionClient, record }) => {
           stages.mark("placement");
           try {
-            return await sessionClient.observe(targetId, agentObservationNotices(grant));
+            const [observation, notice] = await Promise.all([
+              sessionClient.observe(targetId, agentObservationNotices(grant)),
+              agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+            ]);
+            return withBrowserClosingNotice(observation, notice);
           } finally {
             stages.mark("dispatch");
           }
@@ -1844,13 +1856,22 @@ export function registerBrowserSessionRoutes(
               });
               stages.mark("secrets");
               try {
-                return await sessionClient.action(
-                  BrowserActionCommand.parse({
-                    ...commandFields,
-                    ...(secretValues === undefined ? {} : { secretValues }),
-                  }),
-                  agentObservationNotices(grant),
-                );
+                const [receipt, notice] = await Promise.all([
+                  sessionClient.action(
+                    BrowserActionCommand.parse({
+                      ...commandFields,
+                      ...(secretValues === undefined ? {} : { secretValues }),
+                    }),
+                    agentObservationNotices(grant),
+                  ),
+                  agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+                ]);
+                return notice && receipt.observation
+                  ? {
+                      ...receipt,
+                      observation: withBrowserClosingNotice(receipt.observation, notice),
+                    }
+                  : receipt;
               } finally {
                 stages.mark("dispatch");
                 // Write back what the action did (new registrations, sign counts)
@@ -6607,6 +6628,26 @@ function isUuid(value: unknown): value is string {
 
 function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
   return validateInteractionRequestOrigin(context.req.header("origin"), settings);
+}
+
+/** For an agent's own browser tools on a Connected Machine whose older agent
+ * will close its browsers at an announced update, the notice saying when. A
+ * person's viewer and other API clients do not get it, and a failed read
+ * never fails the browser step. */
+async function agentBrowserClosingNotice(
+  db: Database,
+  grant: AccessGrant,
+  workspaceId: string,
+  record: BrowserSessionControlRecord,
+): Promise<string | null> {
+  const placement = record.session.placement;
+  if (grant.principalKind !== "agent_attempt" || placement?.kind !== "connected_machine") {
+    return null;
+  }
+  if (!placement.sandboxId) return null;
+  return await connectedMachineBrowserClosingNotice(db, workspaceId, placement.sandboxId).catch(
+    () => null,
+  );
 }
 
 /** An agent's own browser tools receive a tab's notice (for example that a

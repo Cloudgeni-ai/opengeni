@@ -626,13 +626,69 @@ export async function listBrowserSessions(
 /** Managed browsers that may still have a live browser process on one
  * Connected Machine: every non-terminal browser except a saved one whose
  * controller binding was already released (its process is gone). */
+function liveConnectedMachineBrowserFilter(input: { workspaceId: string; enrollmentId: string }) {
+  return and(
+    eq(schema.browserSessions.workspaceId, input.workspaceId),
+    eq(schema.browserSessions.placementKind, "connected_machine"),
+    eq(schema.sandboxes.enrollmentId, input.enrollmentId),
+    inArray(schema.browserSessions.lifecycle, [
+      "starting",
+      "active",
+      "suspending",
+      "suspended",
+      "restoring",
+      "repair_required",
+      "ending",
+    ]),
+    sql`(${schema.browserSessions.lifecycle} <> 'suspended' or ${schema.browserSessions.controllerGeneration} is not null)`,
+  );
+}
+
 export async function countLiveConnectedMachineBrowsers(
   db: Database,
   input: { accountId: string; workspaceId: string; enrollmentId: string },
 ): Promise<number> {
+  return (await connectedMachineBrowserUse(db, input)).live;
+}
+
+/** Statuses of a session whose turn is underway: working, about to start,
+ * recovering, or paused mid-turn for a person or for capacity. Its open
+ * browsers may be in use. */
+const BROWSER_USING_SESSION_STATUSES = [
+  "queued",
+  "running",
+  "recovering",
+  "requires_action",
+  "waiting_capacity",
+] as const;
+
+/** The live managed browsers on one Connected Machine (see
+ * countLiveConnectedMachineBrowsers), and how many of them a working session
+ * may be using now: a session associated with the browser (the one that
+ * opened it, or one that attached to it) has a turn underway. A live
+ * browser no such session holds is open but idle. */
+export async function connectedMachineBrowserUse(
+  db: Database,
+  input: { accountId: string; workspaceId: string; enrollmentId: string },
+): Promise<{ live: number; inUse: number }> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ count: sql<number>`count(*)::int` })
+      .select({
+        live: sql<number>`count(*)::int`,
+        inUse: sql<number>`(count(*) filter (where exists (
+          select 1
+          from ${schema.browserSessionAssociations} association
+          join ${schema.sessions} session
+            on session.workspace_id = association.workspace_id
+           and session.id = association.session_id
+          where association.workspace_id = ${schema.browserSessions.workspaceId}
+            and association.browser_session_id = ${schema.browserSessions.id}
+            and session.status in (${sql.join(
+              BROWSER_USING_SESSION_STATUSES.map((status) => sql`${status}`),
+              sql`, `,
+            )})
+        )))::int`,
+      })
       .from(schema.browserSessions)
       .innerJoin(
         schema.sandboxes,
@@ -641,24 +697,8 @@ export async function countLiveConnectedMachineBrowsers(
           eq(schema.sandboxes.id, schema.browserSessions.connectedSandboxId),
         ),
       )
-      .where(
-        and(
-          eq(schema.browserSessions.workspaceId, input.workspaceId),
-          eq(schema.browserSessions.placementKind, "connected_machine"),
-          eq(schema.sandboxes.enrollmentId, input.enrollmentId),
-          inArray(schema.browserSessions.lifecycle, [
-            "starting",
-            "active",
-            "suspending",
-            "suspended",
-            "restoring",
-            "repair_required",
-            "ending",
-          ]),
-          sql`(${schema.browserSessions.lifecycle} <> 'suspended' or ${schema.browserSessions.controllerGeneration} is not null)`,
-        ),
-      );
-    return row?.count ?? 0;
+      .where(liveConnectedMachineBrowserFilter(input));
+    return { live: row?.live ?? 0, inUse: row?.inUse ?? 0 };
   });
 }
 
