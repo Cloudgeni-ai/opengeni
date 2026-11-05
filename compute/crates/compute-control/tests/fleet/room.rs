@@ -95,10 +95,11 @@ async fn wakes_waiting_a_minute_for_room_ask_the_full_host_only_when_it_could_ha
     let periods = usize::try_from(within.as_secs() / 10).unwrap() + 1;
     assert!(asked <= SANDBOXES * periods, "{asked} adopts asked");
     assert!(woken <= SANDBOXES * periods, "{woken} wakes asked");
-    // Each ask follows one pointer read, and writes the row twice (the
-    // new owner epoch, then the refusal); a try that cannot place does
-    // neither.
-    let asked = u64::try_from(asked).unwrap();
+    // Each ask reads the pointer once at most (an adopt before it is sent,
+    // a wake the host does not hold once it is answered), and writes the
+    // row twice at most (the new owner epoch, then the refusal); a try
+    // that cannot place does neither.
+    let asked = u64::try_from(asked + woken).unwrap();
     assert!(reads <= asked, "{reads} pointer reads for {asked} asks");
     assert!(writes <= 2 * asked, "{writes} row writes for {asked} asks");
     // Waiting, each sandbox's row is read about once a second, by one

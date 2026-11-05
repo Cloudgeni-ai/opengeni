@@ -133,6 +133,12 @@ impl<S: Store> Service<S> {
                     .await?;
                 continue;
             }
+            // Another caller here is giving it to `host` now, which may not
+            // hold it yet: asked once that settles, not meanwhile.
+            if turn.is_none() && self.placing_now(id) {
+                turn = self.turn(id, deadline).await.map(|(held, _)| held);
+                continue;
+            }
             turn = None;
             let full = Refused::Wake(id);
             if self.view.refuses(host, &full) {
@@ -263,6 +269,17 @@ impl<S: Store> Service<S> {
             .await
             .ok()
             .map(|held| (held, true))
+    }
+
+    /// Whether another caller on this replica has the turn to place sandbox
+    /// `id` now ([`Self::turn`]).
+    fn placing_now(&self, id: Id) -> bool {
+        self.turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|lock| lock.try_lock().is_err())
     }
 
     /// Whether `host` refused to adopt sandbox `id` as full under owner
