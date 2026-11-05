@@ -2375,6 +2375,12 @@ export const BrowserPermissionSetting = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserPermissionSetting = z.infer<typeof BrowserPermissionSetting>;
 
+/**
+ * The longest one browser wait action may wait. The attached-browser bridge
+ * answers each request within two minutes, so a longer wait is several waits.
+ */
+export const BROWSER_WAIT_MAX_MS = 120_000;
+
 const browserActionVariants = [
   z.object({ type: z.literal("navigate"), url: boundedUrl }).strict(),
   z.object({ type: z.literal("history"), direction: z.enum(["back", "forward"]) }).strict(),
@@ -2601,7 +2607,15 @@ const browserActionVariants = [
       type: z.literal("wait"),
       condition: z.enum(["load", "network_idle", "visible", "hidden"]),
       locator: BrowserLocator.optional(),
-      timeoutMs: z.number().int().positive().max(120_000).optional(),
+      timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .max(BROWSER_WAIT_MAX_MS)
+        .optional()
+        .describe(
+          "Up to 120000 (2 minutes); default 30000. To wait longer, for example while a person approves a sign-in on their phone, wait again.",
+        ),
     })
     .strict(),
 ] as const;
