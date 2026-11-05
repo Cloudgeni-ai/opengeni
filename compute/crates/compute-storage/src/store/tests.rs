@@ -516,6 +516,8 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
     let store = ChunkStore {
         // Never read: GCS answers from the checksums it keeps.
         backend: backend.clone(),
+        uploads: backend.clone(),
+        pace: Arc::new(Pace::new()),
         prefix: Path::from("p"),
         uploader: Uploader::Gcs(gcs(&fake)),
         pointers: Arc::new(ObjectPointers::new(backend, Path::from("p"))),

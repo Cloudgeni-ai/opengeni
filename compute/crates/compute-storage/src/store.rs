@@ -33,6 +33,7 @@ use crate::{
     chunk::{ChunkRef, EncodedChunk, MAX_PACK, decode},
     fresh::{Clock, period_of},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
+    pace::{self, Pace},
     pack::Packer,
     pointer_store::{ObjectPointers, PointerStore},
     upload::{Created, Gcs, md5_hex, tag_is_md5},
@@ -95,6 +96,11 @@ pub trait QuarantineWatch: Send + Sync + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
+    /// The same store, for uploads: its requests may take longer
+    /// ([`UPLOAD_TIMEOUT`]).
+    uploads: Arc<dyn ObjectStore>,
+    /// The slots uploads take, shared by every clone ([`crate::pace`]).
+    pace: Arc<Pace>,
     prefix: Path,
     uploader: Uploader,
     pointers: Arc<dyn PointerStore>,
@@ -122,6 +128,12 @@ pub struct ChunkStore {
 /// was away while the write landed until that node has caught up, minutes
 /// after it is back.
 pub const SETTLE: Duration = Duration::from_secs(5 * 60);
+
+/// How long one upload request may take, sending its bytes included: a
+/// pack ([`crate::pack::PACK_BYTES`]) at a quarter of a megabyte a second,
+/// as a store busy with other writers can be, on top of the half minute
+/// any request may take. Other requests keep the client's usual deadline.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The longest wait between two reads while one settles.
 const SETTLE_DELAY_MAX: Duration = Duration::from_secs(10);
@@ -217,6 +229,8 @@ impl ChunkStore {
     pub fn new(backend: Arc<dyn ObjectStore>, prefix: Path) -> Self {
         Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
             backend,
             prefix,
             uploader: Uploader::ReadBack,
@@ -318,6 +332,8 @@ impl ChunkStore {
         let backend: Arc<dyn ObjectStore> = Arc::new(crate::fake::Bucket(fake.clone()));
         Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), Path::from(prefix))),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
             backend,
             prefix: Path::from(prefix),
             uploader: Uploader::Gcs(crate::fake::gcs(fake)),
@@ -365,8 +381,9 @@ impl ChunkStore {
     }
 
     fn open(url: &str, settings: Option<&[(String, String)]>) -> Result<Option<Self>> {
-        use object_store::aws::{AmazonS3Builder, Checksum};
-        use object_store::azure::MicrosoftAzureBuilder;
+        use object_store::ClientConfigKey;
+        use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, Checksum};
+        use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
         use object_store::client::{HttpConnector as _, ReqwestConnector};
         use object_store::gcp::GoogleCloudStorageBuilder;
 
@@ -375,30 +392,37 @@ impl ChunkStore {
         };
         let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
         let prefix = Path::from(prefix.trim_end_matches('/'));
-        let (backend, uploader): (Arc<dyn ObjectStore>, _) = match scheme {
-            "gs" => {
-                let builder = match settings {
-                    None => GoogleCloudStorageBuilder::from_env(),
-                    Some(settings) => configured(
-                        GoogleCloudStorageBuilder::new(),
-                        settings,
-                        "GOOGLE_",
-                        GoogleCloudStorageBuilder::with_config,
-                    )?,
-                };
-                let store = builder.with_bucket_name(bucket).build()?;
-                let client = ReqwestConnector::default().connect(&ClientOptions::new())?;
-                let gcs = Gcs::new(
-                    client,
-                    store.credentials().clone(),
-                    "https://storage.googleapis.com",
-                    bucket,
-                );
-                (Arc::new(store), Uploader::Gcs(gcs))
-            }
-            "s3" => (
-                Arc::new(
-                    match settings {
+        // Uploads go through a client of their own with a longer deadline:
+        // a request's deadline covers sending its body, which for a pack is
+        // megabytes.
+        let upload_timeout = format!("{}s", UPLOAD_TIMEOUT.as_secs());
+        let (backend, uploads, uploader): (Arc<dyn ObjectStore>, Arc<dyn ObjectStore>, _) =
+            match scheme {
+                "gs" => {
+                    let builder = match settings {
+                        None => GoogleCloudStorageBuilder::from_env(),
+                        Some(settings) => configured(
+                            GoogleCloudStorageBuilder::new(),
+                            settings,
+                            "GOOGLE_",
+                            GoogleCloudStorageBuilder::with_config,
+                        )?,
+                    };
+                    let store = builder.with_bucket_name(bucket).build()?;
+                    let client = ReqwestConnector::default()
+                        .connect(&ClientOptions::new().with_timeout(UPLOAD_TIMEOUT))?;
+                    let gcs = Gcs::new(
+                        client,
+                        store.credentials().clone(),
+                        "https://storage.googleapis.com",
+                        bucket,
+                    );
+                    // Cloud Storage uploads go through `gcs`, not the store.
+                    let store: Arc<dyn ObjectStore> = Arc::new(store);
+                    (store.clone(), store, Uploader::Gcs(gcs))
+                }
+                "s3" => {
+                    let builder = match settings {
                         None => AmazonS3Builder::from_env(),
                         Some(settings) => configured(
                             AmazonS3Builder::new(),
@@ -408,14 +432,22 @@ impl ChunkStore {
                         )?,
                     }
                     .with_bucket_name(bucket)
-                    .with_checksum_algorithm(Checksum::SHA256)
-                    .build()?,
-                ),
-                Uploader::StoreVerified,
-            ),
-            "az" => (
-                Arc::new(
-                    match settings {
+                    .with_checksum_algorithm(Checksum::SHA256);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::StoreVerified,
+                    )
+                }
+                "az" => {
+                    let builder = match settings {
                         None => MicrosoftAzureBuilder::from_env(),
                         Some(settings) => configured(
                             MicrosoftAzureBuilder::new(),
@@ -424,16 +456,27 @@ impl ChunkStore {
                             MicrosoftAzureBuilder::with_config,
                         )?,
                     }
-                    .with_container_name(bucket)
-                    .build()?,
-                ),
-                Uploader::ReadBack,
-            ),
-            _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
-        };
+                    .with_container_name(bucket);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AzureConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::ReadBack,
+                    )
+                }
+                _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
+            };
         Ok(Some(Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
             backend,
+            uploads,
+            pace: Arc::new(Pace::new()),
             prefix,
             uploader,
             clock: Clock::system(),
@@ -626,7 +669,36 @@ impl ChunkStore {
 
     /// Writes `bytes` under `key`, a name that allows no other bytes,
     /// unless they are stored there already; whether this call wrote them.
+    ///
+    /// It waits for a slot among the store's uploads, and an upload that
+    /// fails as a busy store's do is sent again after a pause, up to
+    /// [`pace::TRIES`] times ([`crate::pace`]).
     async fn put_immutable(&self, key: &str, bytes: Bytes) -> Result<bool> {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let slot = self.pace.slot().await;
+            match self.put_immutable_once(key, &bytes).await {
+                Ok(new) => {
+                    slot.stored();
+                    return Ok(new);
+                }
+                Err(error) if pace::crowded(&error) => {
+                    slot.crowded();
+                    if tries >= pace::TRIES {
+                        return Err(error);
+                    }
+                    tracing::debug!(key, tries, %error, "upload failed: sending it again");
+                    tokio::time::sleep(pace::pause(tries)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One try of [`Self::put_immutable`].
+    async fn put_immutable_once(&self, key: &str, bytes: &Bytes) -> Result<bool> {
+        let bytes = bytes.clone();
         let path = self.path(key);
         if self.create(&path, &bytes).await? == Created::New {
             return Ok(true);
@@ -661,7 +733,7 @@ impl ChunkStore {
             mode: PutMode::Overwrite,
             ..Default::default()
         };
-        self.backend
+        self.uploads
             .put_opts(path, bytes.clone().into(), options)
             .await?;
         Ok(())
@@ -678,7 +750,7 @@ impl ChunkStore {
             ..Default::default()
         };
         match self
-            .backend
+            .uploads
             .put_opts(path, bytes.clone().into(), options)
             .await
         {
