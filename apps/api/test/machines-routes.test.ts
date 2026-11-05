@@ -2858,6 +2858,22 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
         },
       });
       const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read", "sessions:read"])}`;
+      const desiredVersion = async () => {
+        const list = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        });
+        const machines = (
+          (await list.json()) as {
+            machines: Array<{ enrollmentId: string; runtime: { desiredVersion: string | null } }>;
+          }
+        ).machines;
+        return machines.find((machine) => machine.enrollmentId === enrollment.id)?.runtime
+          .desiredVersion;
+      };
+      // Nothing checked yet: the page shows the promoted build at once and
+      // checks the release host in the background.
+      expect(await desiredVersion()).toBe(source);
+      await waitForValue(desiredVersion, (version) => version === published, "the check");
       const response = await app.request(
         `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
         { method: "POST", headers: { authorization: auth } },
@@ -2867,17 +2883,7 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
       expect(
         requests.find((request) => request.op?.$case === "agentUpdateApply")?.op,
       ).toMatchObject({ agentUpdateApply: { targetVersion: published } });
-      const list = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
-        headers: { authorization: auth },
-      });
-      const machines = (
-        (await list.json()) as {
-          machines: Array<{ enrollmentId: string; runtime: { desiredVersion: string | null } }>;
-        }
-      ).machines;
-      expect(
-        machines.find((machine) => machine.enrollmentId === enrollment.id)?.runtime.desiredVersion,
-      ).toBe(published);
+      expect(await desiredVersion()).toBe(published);
     } finally {
       fetchSpy.mockRestore();
     }

@@ -239,4 +239,21 @@ describe("the agent release an update targets", () => {
     await releases.resolve("stable");
     expect(warnings).toHaveLength(2);
   });
+
+  test("a release host that has nothing published near this build is reported", async () => {
+    const warnings: Array<[string, Record<string, string>]> = [];
+    const releases = createPublishedAgentReleases(unpinned, {
+      // A host that denies every request answers like this too.
+      probe: async () => "missing",
+      sourceTree: () => "0.1.152",
+      warn: (message, fields) => warnings.push([message, fields]),
+    });
+    expect(await releases.resolve("stable")).toBeNull();
+    expect(warnings).toEqual([
+      [
+        "No published agent release found near this deployment's agent version; Connected Machine agent updates wait until one is published",
+        { version: "0.1.152", releasesBaseUrl: RELEASES },
+      ],
+    ]);
+  });
 });
