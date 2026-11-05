@@ -48,6 +48,16 @@ words (a message sent while the workstream is paused waits and shows as a
 waiting message). Pass `offerQueue: true` as well to offer Queue next to Send.
 Under the default `busySend: "queue"` the screen offers Steer next to Send.
 
+Above the composer, `NativeSessionScreen` shows how the agent works: chips for
+the session goal, helper agents and running commands. For people to whom a
+paused goal or a count of helper agents means nothing, pass
+`agentSignals={false}`. Queued messages, approvals and the agent's questions
+still show.
+
+```tsx
+<NativeSessionScreen controller={controller} agentSignals={false} />
+```
+
 ### Labels and languages
 
 The native components read their text from the same catalog as

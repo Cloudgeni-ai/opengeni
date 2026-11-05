@@ -219,6 +219,12 @@ someone else's product with zero styling:
   `modelPicker`, or report `modelSelection: true` from the proxy
   (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
   also fixes the policy server-side.
+- **Agent signals can be hidden**: the goal pill (and any agents or commands
+  segments you pass in `chromeProps`) show how the agent works. For end users
+  to whom a paused goal or a helper-agent count means nothing, pass
+  `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
+  `OpenGeniChat`). Queued messages, approvals and the agent's questions still
+  show, and the goal is not read at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available

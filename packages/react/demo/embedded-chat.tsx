@@ -10,7 +10,9 @@
    steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
-   messages waiting. */
+   messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
+   `&signals=off` mounts it with `agentSignals: false`, as a product for end
+   users would. */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -21,7 +23,7 @@ import {
   SessionConversationView,
   useSessionConversation,
 } from "@opengeni/react";
-import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
+import { fakeClient, fakeGoal, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -34,6 +36,8 @@ const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
+const pausedGoal = params.get("goal") === "paused";
+const agentSignals = params.get("signals") !== "off";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -392,6 +396,21 @@ const client = fakeClient({
   },
 });
 
+// A goal the agent paused to wait for a person's decision.
+if (pausedGoal) {
+  const goal = fakeGoal({
+    sessionId: SELECTED,
+    status: "paused",
+    pausedReason: "agent",
+    text: "Resolve the double charge on T-4821",
+  });
+  Object.assign(client, {
+    getGoal: async () => goal,
+    updateGoal: async () => goal,
+    deleteGoal: async () => undefined,
+  });
+}
+
 // The demo can hold the real default new-chat flow at a response boundary.
 // Browser checks edit the next draft, retry an uncertain outcome, then settle
 // the same synthetic create without contacting a provider.
@@ -557,9 +576,10 @@ function HostApp() {
           ) : (
             <OpenGeniChat
               defaultSessionId={scenario === "empty" ? null : SELECTED}
-              {...(oneSend
-                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
-                : {})}
+              conversationProps={{
+                agentSignals,
+                ...(oneSend ? { composerOptions: { busySend: "steer" as const } } : {}),
+              }}
             />
           )}
         </OpenGeniProvider>

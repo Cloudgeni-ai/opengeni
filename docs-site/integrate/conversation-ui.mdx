@@ -78,6 +78,7 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | `headers`, `fetch`                                     | With `baseUrl`: headers for every request (static or a function), or a custom fetch      |
 | `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
 | `modelPicker`                                          | Show the model picker. Hidden unless the proxy sets `modelSelection: true`               |
+| `agentSignals`                                         | Show the goal pill and agent activity. Defaults to `true`; see below                     |
 | `toolRegistry`                                         | Your own renderers for your tools                                                        |
 | `renderMessageText`                                    | Custom rendering for message text, such as links into your product                       |
 | `renderAllowanceExhausted`, `allowanceExhaustedLabels` | Replace the row or its words when a [usage allowance](/guides/usage-allowances) runs out |
@@ -86,6 +87,24 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | `composerProps`                                        | Composer options, such as placeholder text                                               |
 
 Remount the component when the signed-in user or tenant changes.
+
+## Hide agent signals from end users
+
+Above the composer, the conversation shows how the agent works: the goal pill
+(for example "Goal · Paused · agent") and, when you pass them in `chromeProps`,
+counts of helper agents and running commands. People who just want an answer
+often don't need these. Turn them off with `agentSignals={false}`:
+
+```tsx
+<SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} agentSignals={false} />
+
+// The full chat takes it through conversationProps:
+<OpenGeniChat baseUrl="/api/opengeni" conversationProps={{ agentSignals: false }} />
+```
+
+Queued messages, approvals and the agent's questions still show. React Native's
+`NativeSessionScreen` takes the same `agentSignals={false}` to hide its goal,
+agents and commands chips.
 
 ## Keep a conversation across layouts
 
