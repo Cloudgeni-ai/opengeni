@@ -1,5 +1,89 @@
 # @opengeni/api-router
 
+## 6.10.0
+
+### Minor Changes
+
+- c9e5547: Add opt-in owner-authorized automatic credit top-up settings, card setup and SDK methods, with durable Stripe PaymentIntent recovery and tax-inclusive UTC monthly caps. Deployment activation is off by default.
+
+### Patch Changes
+
+- 232e713: Subscription voice no longer refuses to start when the Codex realtime remote configuration advertises a protocol version other than V3. That version is the desktop client's preference, not a requirement of the call endpoint, so the call now uses the pinned V3 model and architecture (as the Codex CLI does). A refused realtime negotiation now writes one server log line with the provider status, the failing stage, identifier-shaped provider error fields, and the call parameters with their source; the client still gets only the safe message.
+- 7b472d7: Subscription voice no longer fails when one connected Codex account has lost voice. A connection's recorded plan can still say it has voice after the plan was cancelled, and the provider then refuses the call (404, or 403 without the entitlement). The call now moves on to the next connected subscription, and the server logs each refused connection with the provider's status and reason. Every other failure still ends the call.
+- 46499c0: Opening a computer with an attached-device placement whose ID is not an attached device now returns a 404 that points to the connected-machine placement, instead of an unclassified 500. The computer route now handles the "attached browser not found" error the way the browser route already did.
+- b5a7db4: Insights usage no longer fails for every request after a chat's usage rows are deleted out of order. Deleting model call facts whose hourly rollup row was already gone used to store their amounts as a negative rollup row, which made every Insights usage read covering that hour return 500. A delete now subtracts only amounts the group holds; otherwise the group is rebuilt from its facts at commit. Migration 1252 rebuilds every hour that already holds a negative rollup row.
+
+  An unexpected API 500 now logs its cause's message (scrubbed of credentials and bounded to 1 KiB) as `causeMessage` in the server log, so the log says why it failed. Responses are unchanged.
+
+- e0e16fe: Slack agent instructions and the `slack_agent_*` tool descriptions are shorter, with the same rules. Text the server already enforces or reports is gone, and a long agent list describes the first 20 agents and names the rest.
+- 36bb7d6: Continue with Google or GitHub signs in or creates the account from either the Sign in or Sign up tab, and from the add-account window without a Create a new account switch. Each click runs the Turnstile signup challenge in the background and shows it inline only when Cloudflare asks for interaction. A social start whose challenge token can't be verified no longer fails: an existing user signs in, and creating a new user still requires a verified challenge.
+- f45ab2f: Subscription accounts (Claude, ChatGPT and SuperGrok) now read the same everywhere they are listed. The "Use for next turn" account menu is wider and shows each account's full name and email, the plan once when every account shares it (or on each row when they differ), which account runs the next turn, and every usage window the provider reports with its short label ("5h", "Week", "Fable week", "Credits", "Extra usage"), the share left and when it resets. Nothing is assumed: a Claude Ultra or ChatGPT Pro account without a 5-hour limit shows none. Plans use the provider's current names ("Claude Max", "Claude Ultra", "ChatGPT Plus", "SuperGrok Heavy"), and a Claude Max account whose tier isn't known yet reads "Max or Ultra".
+
+  Claude usage also follows the October 2026 plan changes: the usage endpoint's explicit `null` for a limit the plan doesn't have (a verified Ultra plan has no five-hour limit) no longer stops an early weekly reset from ending a refusal, while an omitted or `null` window still never clears a limit that refused; the separate weekly Fable limit (`seven_day_fable`) is read and cools only Fable models; and a renewed sign-in reads the plan and Max tier from the Claude profile.
+
+- 9cf9b58: Refuse connected subscriptions for API-origin work, including scheduled and
+  goal continuations, transcription and realtime voice, and skip them when choosing API defaults. Keep app
+  subscription use fee-free and own-key billing configuration-driven. Clarify
+  paid-plan and API pricing in the billing page, docs and bundled help.
+- d717b72: `PUT /sessions/:id/tool-policy` accepts an optional `firstPartyMcpPermissions`, so an existing session can gain a newly granted tool and the first-party permissions it needs in one versioned update. The caller must hold every permission it grants, a child stays within its parent, an agent attempt may only narrow, and a session with an open goal keeps `goals:manage`.
+- Updated dependencies [2caf31f]
+- Updated dependencies [c9e5547]
+- Updated dependencies [9f0b440]
+- Updated dependencies [1fd358c]
+- Updated dependencies [232e713]
+- Updated dependencies [2a27f11]
+- Updated dependencies [f96cab4]
+- Updated dependencies [25a0452]
+- Updated dependencies [681bbac]
+- Updated dependencies [b032ab0]
+- Updated dependencies [2e02796]
+- Updated dependencies [b5a7db4]
+- Updated dependencies [168d812]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [f619179]
+- Updated dependencies [7fb4b0d]
+- Updated dependencies [b5201d5]
+- Updated dependencies [b089060]
+- Updated dependencies [8acae3d]
+- Updated dependencies [783d955]
+- Updated dependencies [c672cf7]
+- Updated dependencies [6674146]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [3b162f4]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [f0d27b2]
+- Updated dependencies [d717b72]
+- Updated dependencies [3cb57d8]
+- Updated dependencies [2c39231]
+  - @opengeni/db@6.10.0
+  - @opengeni/contracts@6.10.0
+  - @opengeni/config@6.10.0
+  - @opengeni/runtime@6.10.0
+  - @opengeni/codex@6.10.0
+  - @opengeni/observability@6.10.0
+  - @opengeni/capabilities@6.10.0
+  - @opengeni/core@6.10.0
+  - @opengeni/codemode@6.10.0
+  - @opengeni/network@6.10.0
+  - @opengeni/documents@6.10.0
+  - @opengeni/artifact-tool@6.10.0
+  - @opengeni/tool-gateway@6.10.0
+  - @opengeni/events@6.10.0
+  - @opengeni/github@6.10.0
+  - @opengeni/interaction@6.10.0
+  - @opengeni/storage@6.10.0
+  - @opengeni/vaults@6.10.0
+  - @opengeni/vaults-bitwarden@6.10.0
+  - @opengeni/vaults-keeper@6.10.0
+  - @opengeni/vaults-onepassword@6.10.0
+  - @opengeni/vaults-protonpass@6.10.0
+  - @opengeni/xai-subscription@6.10.0
+  - @opengeni/agent-proto@6.10.0
+
 ## 6.9.0
 
 ### Minor Changes
