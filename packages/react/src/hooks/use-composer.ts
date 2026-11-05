@@ -1520,19 +1520,19 @@ export function useComposer(
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
     const base = draftRef.current;
-    // The pick is part of the draft like its text: a model, effort or speed
-    // chosen without typing is saved too, so it survives opening another
-    // chat or reloading before the next Send.
-    if (!base || !policy) return null;
+    const currentPolicy = policyRef.current;
+    if (!base || !currentPolicy) return null;
+    // The pick comes from the refs, so a Send in the same tick as a pick
+    // saves and submits that pick.
     return composerDraftPayload(
       base,
       value,
       restoredResources,
       annotations,
-      policyPicked ? policy : undefined,
+      pickedPolicy(policyPickedRef, policyRef),
       resolveSendExtras(sendExtrasRef.current).resources ?? [],
     );
-  }, [annotations, durableDrafts, policy, policyPicked, restoredResources, targetKey, value]);
+  }, [annotations, durableDrafts, restoredResources, targetKey, value]);
 
   const adoptDraftBase = useCallback(
     (next: ComposerDraft): void => {
@@ -2139,7 +2139,10 @@ export function useComposer(
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
   useEffect(() => {
-    // Only an edit this run schedules below is left to save on leaving.
+    // Only an edit this run schedules below is left to save on leaving, and
+    // only a pick it schedules skips the typing pause.
+    const savePromptly = savePickPromptlyRef.current;
+    savePickPromptlyRef.current = false;
     unsavedDraftRef.current = null;
     const pending = pendingOperationRef.current;
     if (pending) {
@@ -2205,6 +2208,7 @@ export function useComposer(
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
     unsavedDraftRef.current = { client, workspaceId, sessionId, payload };
+    savePickPromptlyRef.current = savePromptly;
     const timer = window.setTimeout(
       () => {
         savePickPromptlyRef.current = false;
@@ -2212,7 +2216,7 @@ export function useComposer(
         unsavedDraftRef.current = null;
         void persistPayload(payload);
       },
-      savePickPromptlyRef.current ? 0 : 500,
+      savePromptly ? 0 : 500,
     );
     return () => window.clearTimeout(timer);
   }, [
@@ -2223,8 +2227,15 @@ export function useComposer(
     draftConflict,
     draftLoading,
     liveExtrasVersion,
+    // A send settling lets an edit made while it ran be saved.
+    optimisticSends,
     pendingOperationKey,
     persistPayload,
+    // The pick is part of the draft like its text: a model, effort or speed
+    // chosen without typing is saved too, so it survives opening another
+    // chat or reloading before the next Send.
+    policy,
+    policyPicked,
     setOptimisticDraftShadow,
     sending,
     sessionId,

@@ -246,16 +246,87 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
       }),
     };
     const of = (sessionId: string) => servers[sessionId as keyof typeof servers];
+    // While held, Sends wait before reaching the server.
+    let submitGate: Promise<void> | null = null;
     const client = fakeClient({
       getComposerDraft: (workspaceId, sessionId, options) =>
         of(sessionId).client.getComposerDraft(workspaceId, sessionId, options),
       saveComposerDraft: (workspaceId, sessionId, request) =>
         of(sessionId).client.saveComposerDraft(workspaceId, sessionId, request),
-      submitComposerDraft: (workspaceId, sessionId, request) =>
-        of(sessionId).client.submitComposerDraft(workspaceId, sessionId, request),
+      submitComposerDraft: async (workspaceId, sessionId, request) => {
+        await submitGate;
+        return of(sessionId).client.submitComposerDraft(workspaceId, sessionId, request);
+      },
     });
-    return { client, first: servers[SESSION_ID], other: servers[OTHER_SESSION_ID] };
+    return {
+      client,
+      first: servers[SESSION_ID],
+      other: servers[OTHER_SESSION_ID],
+      holdSends: () => {
+        let release!: () => void;
+        submitGate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return () => {
+          submitGate = null;
+          release();
+        };
+      },
+    };
   }
+
+  test("a pick and a Send in the same tick send the pick", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setValue("right now"));
+    await flush(600);
+    await act(async () => {
+      const composer = hook.result.current;
+      composer.setReasoningEffort("high");
+      expect(await composer.send()).toBe(true);
+    });
+    await flush(600);
+    expect(chats.first.submits).toHaveLength(1);
+    expect(chats.first.submits[0]).toMatchObject({ text: "right now", reasoningEffort: "high" });
+    await hook.unmount();
+  });
+
+  test("a pick made while a Send is on its way is saved once it lands", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setValue("first message"));
+    await flush(600);
+    const release = chats.holdSends();
+    await act(async () => {
+      void hook.result.current.send();
+    });
+    await flush(50);
+    await act(() => hook.result.current.setReasoningEffort("high"));
+    await flush(50);
+    release();
+    await flush(600);
+    expect(chats.first.submits).toHaveLength(1);
+    await hook.unmount();
+
+    const reloaded = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    expect(reloaded.result.current.policy?.reasoningEffort).toBe("high");
+    await reloaded.unmount();
+  });
 
   test("an effort pick alone is saved and survives a reload", async () => {
     const chats = twoChats();
