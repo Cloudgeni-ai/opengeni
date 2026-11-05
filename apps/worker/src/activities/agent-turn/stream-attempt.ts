@@ -110,6 +110,7 @@ import {
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
+  type ModelRequestPreDispatchStage,
 } from "../../observability-metrics";
 import {
   compactRetainedScreenshotHistory,
@@ -973,12 +974,15 @@ export async function runTurnStreamAttempt(
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: () => revalidateModelCallAdmission({ yieldToSteer: true }),
-      observe: (phase, durationSeconds) =>
+      observe: (phase, durationSeconds) => {
         recordModelStepPhase(observability, {
           provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
           phase,
           durationSeconds,
-        }),
+        });
+        // The settlement wait ended; this model entry's admission begins.
+        if (phase === "settlement_wait") enterModelRequestStage("admission");
+      },
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
@@ -1018,6 +1022,13 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // A title or other auxiliary request shares the transport but is never the
+    // main request's preparation.
+    const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) => {
+      if (isAuxiliaryProviderDispatch()) return;
+      streamTiming.enterPreDispatchStage(stage);
+    };
+    eventing.enterModelRequestStage = enterModelRequestStage;
     // Wire fingerprint of the latest main request. The next model entry waits
     // for the previous response's settlement, so the response being settled
     // always belongs to the latest dispatched request (as for streamTiming).
@@ -1025,14 +1036,17 @@ export async function runTurnStreamAttempt(
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+      enterModelRequestStage("dispatch_checkpoint");
       await checkpointBeforeProviderDispatch();
       if (
         providerPublishesNativeRequestEvents ||
         eventing.firstModelRequestPreparationRecorded ||
         eventing.firstModelRequestPreparationStartedAt === null
       ) {
+        enterModelRequestStage("transport");
         return;
       }
+      enterModelRequestStage("request_audit");
       sandboxState.firstProviderRequestStarted = true;
       eventing.firstModelRequestPreparationRecorded = true;
       const preparationDurationMs = Math.max(
@@ -1092,6 +1106,7 @@ export async function runTurnStreamAttempt(
         providerRecoveryCount: attempt.providerRecoveryCount,
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
+      enterModelRequestStage("transport");
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
@@ -1149,7 +1164,12 @@ export async function runTurnStreamAttempt(
           },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
-            return modelCallAdmission.beforeModelRequest(point);
+            const admitted = modelCallAdmission.beforeModelRequest(point);
+            // A transport recheck joins the call's admission; only the model
+            // entry's own admission ends before the request is built.
+            return point === "transport"
+              ? admitted
+              : admitted.then(() => enterModelRequestStage("request_build"));
           },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
