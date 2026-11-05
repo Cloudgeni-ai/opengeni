@@ -146,7 +146,9 @@ export {
   SESSION_STATUS_PRESENTATION,
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
+  sessionStatusItemDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus, SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";

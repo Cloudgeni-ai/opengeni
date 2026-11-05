@@ -390,6 +390,8 @@ export function failedSessionCopy(
  * revives it.
  */
 export function chatComposerPlaceholder(input: {
+  /** Archived chats are read-only; their work continues in a new chat. */
+  archived?: boolean | undefined;
   cancelled: boolean;
   /** Out of credits, and the chat has stopped (failed or idle). */
   creditStopped: boolean;
@@ -397,6 +399,7 @@ export function chatComposerPlaceholder(input: {
   creditGap: FreeCreditGap | null;
   canBuyCredits: boolean;
 }): string {
+  if (input.archived) return "This chat is archived.";
   if (input.cancelled) return "This session was cancelled.";
   if (!input.creditStopped) return "Send a follow-up…";
   if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);

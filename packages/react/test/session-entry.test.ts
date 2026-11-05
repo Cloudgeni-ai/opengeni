@@ -61,6 +61,9 @@ describe("session-only entry", () => {
       "@opengeni/contracts/claude-subscription-model-ids",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
+      // The archive's stop reason, so an archive never reads as cancelled: a
+      // dependency-free contracts leaf shared with the server.
+      "@opengeni/contracts/session-history",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
       "@opengeni/contracts/values",
       "@opengeni/sdk",

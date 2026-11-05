@@ -28,7 +28,10 @@ export {
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
 export { sessionStorageMaintenanceWorkflow } from "./workflows/session-storage";
-export { sessionArchiveRequestWorkflow } from "./workflows/session-archive-request";
+export {
+  sessionArchiveRequestWorkflow,
+  sessionArchiveRestoreWorkflow,
+} from "./workflows/session-archive-request";
 export {
   browserDeadlineCheckpointWorkflow,
   browserDeadlineCheckpointSweepWorkflow,

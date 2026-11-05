@@ -826,7 +826,7 @@ describe("workbench live acceptance preflight", () => {
     );
   });
 
-  test("enforces HTTPS, a full SHA, Modal, and at least 100 repetitions", () => {
+  test("enforces HTTPS, a full SHA, Modal, 100 observations and a bounded Steer count", () => {
     const base = [
       "--api-url",
       "https://api.example.com",
@@ -849,8 +849,18 @@ describe("workbench live acceptance preflight", () => {
     ];
     expect(parseLiveAcceptanceArgs(base).repetitions).toBe(100);
     expect(() => parseLiveAcceptanceArgs([...base, "--repetitions", "99"])).toThrow(">= 100");
+    // Steers are the model-billed part of the run: 20 by default, never fewer.
+    expect(parseLiveAcceptanceArgs(base).steerRepetitions).toBe(20);
+    expect(parseLiveAcceptanceArgs([...base, "--repetitions", "150"]).steerRepetitions).toBe(20);
+    expect(parseLiveAcceptanceArgs([...base, "--steer-repetitions", "40"]).steerRepetitions).toBe(
+      40,
+    );
+    expect(() => parseLiveAcceptanceArgs([...base, "--steer-repetitions", "19"])).toThrow(
+      "--steer-repetitions must be an integer >= 20",
+    );
     expect(() => parseLiveAcceptanceArgs(base.with(1, "http://api.example.com"))).toThrow("HTTPS");
     expect(parseLiveAcceptanceArgs(base).controlBudgetMs).toBe(DEFAULT_CONTROL_BUDGET_MS);
+    expect(DEFAULT_CONTROL_BUDGET_MS).toBe(25 * 60_000);
     expect(
       parseLiveAcceptanceArgs([...base, "--control-budget-ms", "3600000"]).controlBudgetMs,
     ).toBe(3_600_000);

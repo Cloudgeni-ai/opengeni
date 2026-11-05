@@ -796,16 +796,15 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 
 /**
  * Split the durable queued-turn count by what holds each prompt. Only `ready`
- * prompts are waiting for dispatch; an old `ready` prompt is a stranded queue.
- * Every class is always published so an emptied class drops to 0.
+ * prompts are waiting for dispatch. A `ready` prompt older than a few seconds
+ * is waiting somewhere before it runs: in the session's control activities
+ * before any turn-queue task exists, or in the turn-queue backlog. Every class
+ * is always published so an emptied class drops to 0.
  */
 export function recordQueuedTurnHoldGauges(
   observability: Observability,
-  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary>,
 ): void {
-  // Null until a later migration grants 0988's withheld runtime EXECUTE:
-  // publish nothing rather than a misleading all-zero split.
-  if (!summary) return;
   for (const hold of QUEUED_TURN_HOLDS) {
     const entry = summary[hold];
     observability.setGauge({

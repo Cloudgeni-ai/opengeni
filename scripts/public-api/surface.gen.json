@@ -28380,6 +28380,7 @@
         "$": "object",
         "$.archive": "object! null",
         "$.archive.archivedAt": "string! null",
+        "$.archive.restoring": "const?=[\"true\"]",
         "$.archive.state": "enum!=[\"\\\"archived\\\"\",\"\\\"archiving\\\"\"]",
         "$.keepLive": "boolean!"
       }
@@ -31848,6 +31849,8 @@
         "$": "object",
         "$.archived": "boolean!",
         "$.clientEventId": "string?",
+        "$.confirmActiveSubChats": "array?",
+        "$.confirmActiveSubChats[]": "string",
         "$.confirmPause": "boolean?",
         "$.expectedVersion": "integer?",
         "$.mode": "enum?=[\"\\\"hide_for_me\\\"\",\"\\\"pause_and_archive\\\"\"]"
@@ -38581,6 +38584,7 @@
       "SESSION_EVENT_BROWSER_PENDING_MAX_COUNT": "value",
       "SESSION_STATUS_META": "value",
       "sessionAdmissionBlocked": "value",
+      "sessionArchived": "value",
       "SessionAttentionClientLike": "type",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
@@ -40644,8 +40648,10 @@
       "SESSION_STATUS_BADGE": "value",
       "SESSION_STATUS_PRESENTATION": "value",
       "sessionAdmissionBlocked": "value",
+      "sessionArchived": "value",
       "sessionDisplayStatus": "value",
       "SessionDisplayStatus": "type",
+      "sessionStatusItemDisplayStatus": "value",
       "SessionStatusTone": "type",
       "STARTUP_WAIT_TITLES": "value",
       "startupDuration": "value",

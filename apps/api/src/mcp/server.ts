@@ -7263,6 +7263,10 @@ function registerWorkspaceOrchestrationTools(
               reasoningEffort: result.reasoningEffort,
               latencyMode: result.latencyMode,
               effectiveFrom: result.effectiveFrom,
+              // The turn that was waiting for subscription capacity continues on this model now.
+              ...(result.releasedCapacityWaitTurnId
+                ? { capacityWaitingTurnContinuesNow: result.releasedCapacityWaitTurnId }
+                : {}),
             },
             nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
           }),

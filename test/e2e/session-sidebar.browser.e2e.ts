@@ -332,7 +332,7 @@ test("All isolates archives in the last collapsed folder and uses archive filing
   expect(archiveCall?.options.sortBy).toBeUndefined();
 }, 30_000);
 
-test("Archived filter opens only the archive folder; an archived chat can't be restored", async () => {
+test("Archived filter opens only the archive folder; an archived chat's menu offers no Restore (that is in the chat)", async () => {
   await openActive();
   await selectView("Status", "Archived");
   await waitForRows("Archived", 4);

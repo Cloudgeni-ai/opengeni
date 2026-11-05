@@ -2434,6 +2434,8 @@ export type SessionRetention = {
   archive: {
     state: "archiving" | "archived";
     archivedAt: string | null;
+    /** Someone restored the chat; its stored content is being put back. */
+    restoring?: true | undefined;
   } | null;
 };
 
@@ -2446,8 +2448,17 @@ export type UpdateSessionUnattendedRequest = {
   unattended: boolean;
 };
 
+/**
+ * `archived: true` archives a root chat and its sub-chats; it is refused
+ * (409 `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless each is listed in `confirmActiveSubChats`.
+ * `archived: false` brings the chat back at any time: exactly as it was within
+ * the undo window, and later with stored content restored in the background.
+ */
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ids of sub-chats still in use to archive (and stop) too. */
+  confirmActiveSubChats?: string[];
   /** Ignored; kept for older clients. */
   clientEventId?: string;
   /** Ignored; there is one kind of archive. Kept for older clients. */

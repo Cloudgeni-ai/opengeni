@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  MINIMUM_STEER_REPETITIONS,
   NUMERIC_PERFORMANCE_BUDGETS,
   WORKBENCH_ACCEPTANCE_REQUIREMENTS,
 } from "./workbench-acceptance-contract";
@@ -85,7 +86,7 @@ function validResult(
       ? {
           measurement: {
             unit: budget.unit,
-            sampleCount: 100,
+            sampleCount: budget.minimumSamples,
             p50: budget.direction === "maximum" ? budget.limit * 0.5 : budget.limit * 1.2,
             p75: budget.direction === "maximum" ? budget.limit * 0.6 : budget.limit * 1.15,
             p95: budget.direction === "maximum" ? budget.limit * 0.8 : budget.limit,
@@ -279,6 +280,40 @@ describe("workbench acceptance bundle", () => {
     )!;
     capture.measurement!.sampleCount = 99;
     expect(() => validate(insufficient)).toThrow("at least 100 samples");
+  });
+
+  test("accepts the bounded Steer sample count and rejects fewer", () => {
+    // Every Steer costs two real model turns; the release gate asks for a
+    // bounded count plus the Pause, while cheap observations keep 100.
+    expect(NUMERIC_PERFORMANCE_BUDGETS["performance.control-cancellation"]!.minimumSamples).toBe(
+      MINIMUM_STEER_REPETITIONS + 1,
+    );
+    expect(MINIMUM_STEER_REPETITIONS).toBeLessThan(100);
+    for (const id of ["performance.capture-api-response", "performance.capture-usable-workbench"]) {
+      expect(NUMERIC_PERFORMANCE_BUDGETS[id]!.minimumSamples).toBe(100);
+    }
+
+    const bounded = validBundle();
+    for (const item of bounded.results) {
+      if (item.requirementId === "performance.control-cancellation") {
+        item.measurement!.sampleCount = MINIMUM_STEER_REPETITIONS + 1;
+      }
+    }
+    const problems = (bundle: WorkbenchAcceptanceBundle) => {
+      try {
+        validate(bundle);
+        return "";
+      } catch (error) {
+        return String(error);
+      }
+    };
+    expect(problems(bounded)).not.toContain("samples");
+
+    const tooFew = validBundle();
+    tooFew.results.find(
+      (item) => item.requirementId === "performance.control-cancellation",
+    )!.measurement!.sampleCount = MINIMUM_STEER_REPETITIONS;
+    expect(() => validate(tooFew)).toThrow(`at least ${MINIMUM_STEER_REPETITIONS + 1} samples`);
   });
 
   test("rejects extra environment rows and impossible measurement distributions", () => {

@@ -57,6 +57,11 @@ export function sessionTimelineEmptyStateCopy(
         title: "Run cancelled",
         description: "No step was produced. Send a follow-up whenever you want to continue.",
       };
+    case "archived":
+      return {
+        title: "This chat is archived",
+        description: "It has no messages. Continue its work in a new chat.",
+      };
     case "idle":
       return {
         title: "Waiting for the first step",
