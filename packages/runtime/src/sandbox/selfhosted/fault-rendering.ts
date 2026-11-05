@@ -474,7 +474,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
         layer: "the workspace machine itself — not your command",
         preserved: error.neverSent
           ? `files are kept. ${command}`
-          : `files are kept. ${command} If it started, it is being stopped.`,
+          : `files are kept. ${command} If it started, it may still be running, or Opengeni may be stopping it.`,
         tryNext: error.neverSent
           ? "re-run the command."
           : "check whether the command already took effect, then re-run it if needed.",
@@ -487,7 +487,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
-          "stop running commands and tell the person the workspace machine is not responding; retrying later may work, and a new chat gets a fresh workspace machine.",
+          "if the restart was only just made, wait a moment and re-run the command once; if it still does not respond, stop running commands and tell the person the workspace machine is not responding; a new chat gets a fresh workspace machine.",
       };
     case "restart_unavailable":
       return {

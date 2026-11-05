@@ -918,8 +918,11 @@ class OpConsumer {
     // timeout, never after it.
     const runStartedAt = Date.now();
     const deadlineAt = deadlineMs > 0 ? runStartedAt + deadlineMs : 0;
-    // A new command's start also ends once its agent has answered nothing for
-    // the unanswered bound, however long its own wall (none by default).
+    // A new command's start, and its first attach, also end once its agent has
+    // answered nothing for the unanswered bound since the start's last answer,
+    // however long its own wall (none by default). Attach answers do not reset
+    // it: an agent that accepts a start and then answers nothing for the bound
+    // is unresponsive.
     this.lastStartAnswerAt = runStartedAt;
     const startWall = this.startWall(wallMs, exec === null ? 0 : this.startUnansweredMs);
     let startRetries: number;

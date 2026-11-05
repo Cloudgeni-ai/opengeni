@@ -248,6 +248,10 @@ describe("the words a command whose workspace machine stopped answering gets", (
     const text = renderSelfhostedFault(unresponsive("already_restarted", true));
     expect(text).toContain("already restarted once this turn");
     expect(text).toContain("a new chat gets a fresh workspace machine");
+    // A box restarted moments ago may still be booting: one re-run first.
+    expect(text).toContain(
+      "if the restart was only just made, wait a moment and re-run the command once",
+    );
     expect(text).toContain("This command never reached it.");
   });
 
@@ -259,9 +263,10 @@ describe("the words a command whose workspace machine stopped answering gets", (
 
   test("answering again", () => {
     expect(renderSelfhostedFault(unresponsive("answering", true))).toContain("is answering again");
-    // A start that may have reached it has a stop request: it is not kept.
+    // A start that may have reached it may still be running, or be stopping:
+    // the words never promise either.
     expect(renderSelfhostedFault(unresponsive("answering", false))).toContain(
-      "If it started, it is being stopped.",
+      "If it started, it may still be running, or Opengeni may be stopping it.",
     );
   });
 
