@@ -3158,6 +3158,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "getBillingAlertSettings",
+    "method": "GET",
+    "path": "/v1/billing/alerts",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAlertSettings"
+    ]
+  },
+  {
     "id": "getBillingAutoTopUp",
     "method": "GET",
     "path": "/v1/billing/auto-top-up",
@@ -5063,6 +5075,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:read"
   },
   {
+    "id": "listBillingCreditNotifications",
+    "method": "GET",
+    "path": "/v1/billing/notifications",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "ListBillingCreditNotificationsResponse"
+    ]
+  },
+  {
     "id": "listBotTemplates",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/bot-templates",
@@ -6406,6 +6430,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MetricSample"
     ],
     "permission": "enrollments:read"
+  },
+  {
+    "id": "markBillingCreditNotificationRead",
+    "method": "POST",
+    "path": "/v1/billing/notifications/:notificationId/read",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": []
   },
   {
     "id": "migrateSiteSql",
@@ -9587,6 +9621,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "updateBillingAlertSettings",
+    "method": "PUT",
+    "path": "/v1/billing/alerts",
+    "request": [
+      "UpdateBillingAlertSettingsRequest"
+    ],
+    "response": [
+      "BillingAlertSettings"
     ]
   },
   {

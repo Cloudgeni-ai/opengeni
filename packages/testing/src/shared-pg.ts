@@ -1394,6 +1394,8 @@ export type RestrictedRuntimeTestDatabase = {
   schema: string;
   /** opengeni_app URL; pass `{ searchPath: schema }` to createDb. */
   appUrl: string;
+  /** Non-superuser migration owner URL; set `search_path` to `schema`. */
+  ownerUrl: string;
   /** Superuser pool on the same database with `search_path` set to the schema. */
   admin: postgres.Sql;
   /** Name of the NOSUPERUSER NOBYPASSRLS migration owner. */
@@ -1439,6 +1441,7 @@ export async function acquireRestrictedRuntimeTestDatabase(
     return {
       schema,
       appUrl: appUrl.toString(),
+      ownerUrl: owner.ownerUrl,
       admin: pool,
       ownerRole: owner.ownerRole,
       release: async () => {

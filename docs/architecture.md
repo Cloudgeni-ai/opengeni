@@ -1900,6 +1900,19 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Organization credit alerts use `packages/db/src/billing-credit-notifications.ts`
+for account-fenced crossing state and durable recipient receipts, and
+`packages/core/src/billing-credit-notifications.ts` for the existing managed-email
+transport. The control worker evaluates canonical general availability and
+settled spend; the API delivers email and projects organization notices through
+the existing inbox and billing-authorized routes. The standalone server owns the
+delivery pump's startup and draining shutdown; composing request routes alone
+does not start organization scans. Membership's invoker projection
+keeps recipients current. Billing events never enter workspace feeds merely
+because a recipient is a workspace administrator. See
+[credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
+API/SDK and the transaction-compatible top-up enqueue seam.
+
 Connected subscriptions serve app-origin work on qualifying paid plans, with
 no usage fee. API-origin work refuses them at admission and before model calls;
 omitted API models skip subscription defaults. Origin is inherited by children,
