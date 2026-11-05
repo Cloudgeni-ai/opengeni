@@ -270,6 +270,8 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
     await act(() => hook.result.current.setReasoningEffort("high"));
     await flush(600);
     expect(chats.first.saves.at(-1)).toMatchObject({ text: "", reasoningEffort: "high" });
+    // A pick alone is not an unsent message.
+    expect(hook.result.current.hasDraftContent()).toBe(false);
     await hook.unmount();
 
     // A reload: a fresh composer reads the saved pick back.
@@ -326,6 +328,101 @@ describe("useComposer keeps a model, effort or speed pick made without typing", 
       model: "picked-model",
       reasoningEffort: "xhigh",
     });
+    // As before, the sent pick becomes the chat's setting and the draft is empty.
+    expect(chats.first.chat()).toMatchObject({ model: "picked-model", reasoningEffort: "xhigh" });
+    expect(hook.result.current.sendPolicy).toBeNull();
+    expect(hook.result.current.hasDraftContent()).toBe(false);
+    await hook.unmount();
+  });
+
+  test("text typed just before opening another chat is saved, not dropped", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setValue("half a thought"));
+    // Inside the typing pause: autosave has not run yet.
+    expect(chats.first.saves).toHaveLength(0);
+
+    await hook.rerender(OTHER_SESSION_ID);
+    await flush();
+    expect(chats.first.saves.at(-1)).toMatchObject({ text: "half a thought" });
+    expect(hook.result.current.value).toBe("");
+    expect(chats.other.saves).toHaveLength(0);
+
+    await hook.rerender(SESSION_ID);
+    await flush();
+    expect(hook.result.current.value).toBe("half a thought");
+    await hook.unmount();
+  });
+
+  test("an edit still waiting for autosave is saved when the composer closes", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setValue("before I go"));
+    await hook.unmount();
+    await flush();
+    expect(chats.first.saves.at(-1)).toMatchObject({ text: "before I go" });
+
+    const reopened = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    expect(reopened.result.current.value).toBe("before I go");
+    await reopened.unmount();
+  });
+
+  test("leaving right after a Send does not bring the sent text back", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setReasoningEffort("high"));
+    await act(() => hook.result.current.setValue("send this"));
+    await act(async () => expect(await hook.result.current.send()).toBe(true));
+    await hook.rerender(OTHER_SESSION_ID);
+    await flush(600);
+    expect(chats.first.submits).toHaveLength(1);
+    const after = await chats.first.client.getComposerDraft(WORKSPACE_ID, SESSION_ID);
+    expect(after).toMatchObject({ text: "", policyFollowsSession: true });
+    await hook.unmount();
+  });
+
+  test("a save on leaving never overwrites a draft that moved on meanwhile", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setValue("from this tab"));
+    // Another tab saves the same chat's draft first.
+    const current = await chats.first.client.getComposerDraft(WORKSPACE_ID, SESSION_ID);
+    await chats.first.client.saveComposerDraft(WORKSPACE_ID, SESSION_ID, {
+      expectedRevision: current.revision,
+      text: "from another tab",
+      resources: [],
+      annotations: [],
+    });
+
+    await hook.rerender(OTHER_SESSION_ID);
+    await flush();
+    const kept = await chats.first.client.getComposerDraft(WORKSPACE_ID, SESSION_ID);
+    expect(kept.text).toBe("from another tab");
     await hook.unmount();
   });
 });
