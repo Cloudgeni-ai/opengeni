@@ -935,6 +935,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               }),
             }
           : {}),
+        // A setup notice (a repository folder moved aside) follows the tool
+        // result the model reads; the timeline shows the tool's own output.
+        onSandboxSetupNoticeDelivered: (appended: string) => {
+          (eventing.commandCompletionNotices ??= new Set()).add(appended);
+        },
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
