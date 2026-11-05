@@ -640,15 +640,15 @@ mod tests {
             signal: Signal::SIGTERM as i32,
             sender,
         };
-        let agent = Some(agent_pid);
-        assert_eq!(placed(from(Some(command)), agent), Sender::Command);
+        let kept = Some(agent_pid);
+        assert_eq!(placed(from(Some(command)), kept), Sender::Command);
         for outside in [agent_pid.as_raw(), getppid().as_raw(), getpid().as_raw()] {
             assert_eq!(
-                placed(from(Some(outside)), agent),
+                placed(from(Some(outside)), kept),
                 Sender::Outside(Some(outside))
             );
         }
-        assert_eq!(placed(from(None), agent), Sender::Outside(None));
+        assert_eq!(placed(from(None), kept), Sender::Outside(None));
         let _ = kill(Pid::from_raw(command), Signal::SIGKILL);
         let _ = agent.kill();
         let _ = agent.wait();

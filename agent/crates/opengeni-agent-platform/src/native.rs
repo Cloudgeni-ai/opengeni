@@ -2384,11 +2384,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
     async fn agent_on_a_console() {
-        const LIST_CONSOLE: &str = "$sig = '[DllImport(\"kernel32.dll\")] public static extern uint GetConsoleProcessList(uint[] list, uint count);'\r\n\
+        const LIST_CONSOLE: &str = "$sig = '[DllImport(\"kernel32.dll\", SetLastError = true)] public static extern uint GetConsoleProcessList([In, Out] uint[] list, uint count); [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();'\r\n\
             $k = Add-Type -MemberDefinition $sig -Name ConsoleList -Namespace OpengeniTest -PassThru\r\n\
             $list = New-Object 'uint[]' 256\r\n\
             $n = $k::GetConsoleProcessList($list, 256)\r\n\
-            if ($n -eq 0) { 'none' } else { ($list[0..($n - 1)]) -join ' ' }\r\n";
+            $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()\r\n\
+            if ($n -eq 0) { \"none (error $err, window $($k::GetConsoleWindow()))\" } else { ($list[0..($n - 1)]) -join ' ' }\r\n";
         if std::env::var_os(CONSOLE_HELPER).is_none() {
             return;
         }

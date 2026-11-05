@@ -50,8 +50,7 @@ pub fn commands_ran_within(window: Duration) -> bool {
         return true;
     }
     let ended = LAST_ENDED.load(Ordering::SeqCst);
-    ended != 0
-        && u128::from(now_millis().saturating_sub(ended - 1)) <= window.as_millis()
+    ended != 0 && u128::from(now_millis().saturating_sub(ended - 1)) <= window.as_millis()
 }
 
 #[cfg(test)]
