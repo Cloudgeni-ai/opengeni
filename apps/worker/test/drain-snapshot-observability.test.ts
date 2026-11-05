@@ -13,6 +13,10 @@ import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities } from "../src/activities/sandbox-lease";
+import {
+  recordSandboxDrainCaptureFailure,
+  recordSandboxWorkspaceSnapshotSize,
+} from "../src/observability-metrics";
 import type { ActivityServices } from "../src/activities/types";
 
 const TEST_WORKSPACE_FINGERPRINT =
@@ -335,4 +339,34 @@ describe("drain snapshot observability", () => {
     ]);
     expect(counted()).toEqual([1]);
   }, 60_000);
+});
+
+test("a metrics sink without histograms, or one that throws, never breaks a drain", () => {
+  const counted: string[] = [];
+  const partial = {
+    incrementCounter: (input: { name: string }) => counted.push(input.name),
+  } as unknown as Parameters<typeof recordSandboxDrainCaptureFailure>[0];
+  expect(() =>
+    recordSandboxDrainCaptureFailure(partial, { backend: "modal", consecutiveFailures: 2 }),
+  ).not.toThrow();
+  expect(counted).toEqual(["opengeni_sandbox_drain_capture_failures_total"]);
+  expect(() =>
+    recordSandboxWorkspaceSnapshotSize(partial, {
+      backend: "modal",
+      outcome: "captured",
+      fileCount: 10,
+      totalFileBytes: 100,
+    }),
+  ).not.toThrow();
+  const throwing = {
+    incrementCounter() {
+      throw new Error("sink down");
+    },
+    observeHistogram() {
+      throw new Error("sink down");
+    },
+  } as unknown as Parameters<typeof recordSandboxDrainCaptureFailure>[0];
+  expect(() =>
+    recordSandboxDrainCaptureFailure(throwing, { backend: "modal", consecutiveFailures: 1 }),
+  ).not.toThrow();
 });

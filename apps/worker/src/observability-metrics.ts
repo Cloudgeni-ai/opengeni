@@ -1880,6 +1880,16 @@ function safeSandboxBackend(backend: string): string {
   return SandboxBackend.safeParse(backend).success ? backend : "unknown";
 }
 
+/** Drain metrics are diagnostics: a sink that lacks a method or throws must
+ * never change a drain's outcome. */
+function bestEffortDrainMetric(record: () => void): void {
+  try {
+    record();
+  } catch {
+    // Ignored: the drain's own result never depends on a metric.
+  }
+}
+
 /** One settled drain snapshot failure, observed with the lease epoch's new
  * consecutive failure count so alerts can tell one flaky attempt from a box
  * that keeps failing without a per-lease label. */
@@ -1888,18 +1898,22 @@ export function recordSandboxDrainCaptureFailure(
   input: { backend: string; consecutiveFailures: number },
 ): void {
   const backend = safeSandboxBackend(input.backend);
-  observability.incrementCounter({
-    name: "opengeni_sandbox_drain_capture_failures_total",
-    help: "Settled workspace snapshot failures while draining an idle sandbox.",
-    labels: { backend },
-  });
-  observability.observeHistogram({
-    name: "opengeni_sandbox_drain_capture_consecutive_failures",
-    help: "Consecutive settled drain snapshot failures of one sandbox lease epoch, observed at each failure.",
-    buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
-    labels: { backend },
-    value: Math.max(1, Math.floor(input.consecutiveFailures)),
-  });
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_failures_total",
+      help: "Settled workspace snapshot failures while draining an idle sandbox.",
+      labels: { backend },
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_drain_capture_consecutive_failures",
+      help: "Consecutive settled drain snapshot failures of one sandbox lease epoch, observed at each failure.",
+      buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
+      labels: { backend },
+      value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
 }
 
 const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
@@ -1921,20 +1935,24 @@ export function recordSandboxWorkspaceSnapshotSize(
 ): void {
   if (!Number.isFinite(input.fileCount) || !Number.isFinite(input.totalFileBytes)) return;
   const labels = { backend: safeSandboxBackend(input.backend), outcome: input.outcome };
-  observability.observeHistogram({
-    name: "opengeni_sandbox_workspace_snapshot_bytes",
-    help: "Total regular-file bytes under /workspace when a drain snapshot settled.",
-    buckets: SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS,
-    labels,
-    value: Math.max(0, input.totalFileBytes),
-  });
-  observability.observeHistogram({
-    name: "opengeni_sandbox_workspace_snapshot_files",
-    help: "Regular files under /workspace when a drain snapshot settled.",
-    buckets: SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS,
-    labels,
-    value: Math.max(0, input.fileCount),
-  });
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_bytes",
+      help: "Total regular-file bytes under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS,
+      labels,
+      value: Math.max(0, input.totalFileBytes),
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_files",
+      help: "Regular files under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS,
+      labels,
+      value: Math.max(0, input.fileCount),
+    }),
+  );
 }
 
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
