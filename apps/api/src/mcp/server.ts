@@ -465,7 +465,10 @@ import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
-import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import {
+  deploymentCannotConnect,
+  inChatCapabilitySetup,
+} from "@opengeni/contracts/personal-integration-setup";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
@@ -7909,6 +7912,17 @@ async function capabilitySetupProjection(
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  // The rule the Capabilities page uses to hide such entries: no card could
+  // finish a connection this deployment cannot start.
+  if (deploymentCannotConnect(item)) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        item.runtime.notes ??
+        "New connections to this integration are not available on this deployment.",
+    };
+  }
   if (item.surfaceType === "first_party_onepassword") {
     // 1Password is connected and its vaults linked in Settings > Secrets; the
     // agent reaches linked vaults through secret references, not tools.

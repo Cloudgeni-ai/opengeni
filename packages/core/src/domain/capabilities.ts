@@ -464,9 +464,23 @@ export function applyOperatorOAuthClientRequirement(
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
   if (typeof issuer !== "string" || !issuer) return item;
+  const isConfigured = configured(issuer);
+  // An installed row keeps its own status note; the setup note is for rows
+  // that are not on yet.
+  if (isConfigured || item.enabled) {
+    return {
+      ...item,
+      runtime: { ...item.runtime, operatorOAuthClient: { configured: isConfigured } },
+    };
+  }
   return {
     ...item,
-    runtime: { ...item.runtime, operatorOAuthClient: { configured: configured(issuer) } },
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until this deployment registers an OAuth client with the provider.",
+    },
   };
 }
 
