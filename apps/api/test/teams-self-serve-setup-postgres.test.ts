@@ -329,7 +329,6 @@ describe("Teams self-serve setup", () => {
     const refused = await refusal(
       completeTeamsSetup(d, elsewhere.grant, {
         setupToken: moveToken,
-        audit: { subjectId: elsewhere.subject, source: "app", principalKind: "human_session" },
         microsoft: await adminSignIn(provider, d, elsewhere, moveToken, {
           oid: moverActor,
           wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
@@ -347,7 +346,6 @@ describe("Teams self-serve setup", () => {
     // the old workspace keeps an audit record.
     const moved = await completeTeamsSetup(d, elsewhere.grant, {
       setupToken: moveToken,
-      audit: { subjectId: elsewhere.subject, source: "app", principalKind: "human_session" },
       microsoft: await adminSignIn(provider, d, elsewhere, moveToken, {
         oid: moverActor,
         wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
@@ -365,9 +363,20 @@ describe("Teams self-serve setup", () => {
       Array<{ workspace_id: string; subject_id: string; metadata: Record<string, unknown> }>
     >`select workspace_id, subject_id, metadata from audit_events
       where target_id = ${tenantId} and action = 'connection.disconnected'
-        and workspace_id = ${left.workspace_id}::uuid and subject_id = ${elsewhere.subject}`;
-    expect(audit).toHaveLength(1);
-    expect(audit[0]!.metadata).toMatchObject({ reason: "released_by_tenant_administrator" });
+        and workspace_id = ${left.workspace_id}::uuid`;
+    // The audit names the Microsoft administrator, not an Opengeni identity from elsewhere.
+    expect(audit).toEqual([
+      {
+        workspace_id: left.workspace_id,
+        subject_id: `microsoft:${tenantId}:${moverActor}`,
+        metadata: expect.objectContaining({
+          reason: "released_by_tenant_administrator",
+          principalKind: "microsoft_global_administrator",
+          removedLinks: 1,
+          removedRoutes: 0,
+        }),
+      },
+    ]);
 
     // An active binding is never moved, even by a Global Administrator.
     const third = await person();
@@ -387,6 +396,92 @@ describe("Teams self-serve setup", () => {
     expect((await getTeamsInstallation(client.db, tenantId))?.workspace_id).toBe(
       elsewhere.grant.workspaceId,
     );
+
+    // A failed move changes nothing: reusing the setup link that already
+    // connected leaves the disconnected binding where it was.
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, tenantId))!);
+    const reused = await refusal(
+      completeTeamsSetup(d, third.grant, {
+        setupToken: moveToken,
+        microsoft: await adminSignIn(provider, d, third, moveToken, {
+          oid: moverActor,
+          wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
+        }),
+      }),
+    );
+    expect(reused.status).toBe(409);
+    expect(await getTeamsInstallation(client.db, tenantId)).toMatchObject({
+      workspace_id: elsewhere.grant.workspaceId,
+      active: false,
+    });
+    expect(
+      await getTeamsActor(
+        client.db,
+        (await getTeamsInstallation(client.db, tenantId))!,
+        moverActor,
+      ),
+    ).toBe(elsewhere.subject);
+  }, 60_000);
+
+  test("moving a disconnected binding is one transaction", async () => {
+    const owner = await person();
+    const target = await person();
+    const tenantId = crypto.randomUUID();
+    const base = { actorId: crypto.randomUUID(), requireInactive: true };
+    await installTeamsBot(client.db, {
+      ...base,
+      accountId: owner.grant.accountId,
+      workspaceId: owner.grant.workspaceId,
+      tenantId,
+      subjectId: owner.subject,
+      nonce: crypto.randomUUID(),
+    });
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, tenantId))!);
+    const left = (await getTeamsInstallation(client.db, tenantId))!;
+    // The target workspace is bound to another organization meanwhile.
+    await installTeamsBot(client.db, {
+      ...base,
+      accountId: target.grant.accountId,
+      workspaceId: target.grant.workspaceId,
+      tenantId: crypto.randomUUID(),
+      subjectId: target.subject,
+      nonce: crypto.randomUUID(),
+    });
+    const audit = {
+      subjectId: `microsoft:${tenantId}:x`,
+      source: "app" as const,
+      principalKind: "t",
+    };
+    await expect(
+      installTeamsBot(client.db, {
+        ...base,
+        accountId: target.grant.accountId,
+        workspaceId: target.grant.workspaceId,
+        tenantId,
+        subjectId: target.subject,
+        nonce: crypto.randomUUID(),
+        replaceInactive: { installation: left, audit },
+      }),
+    ).rejects.toThrow();
+    expect(await getTeamsInstallation(client.db, tenantId)).toEqual(left);
+    expect(await getTeamsActor(client.db, left, base.actorId)).toBe(owner.subject);
+    // A stale read (the binding changed since) changes nothing either.
+    const third = await person();
+    await expect(
+      installTeamsBot(client.db, {
+        ...base,
+        accountId: third.grant.accountId,
+        workspaceId: third.grant.workspaceId,
+        tenantId,
+        subjectId: third.subject,
+        nonce: crypto.randomUUID(),
+        replaceInactive: {
+          installation: { ...left, generation: crypto.randomUUID() },
+          audit,
+        },
+      }),
+    ).rejects.toThrow("teams_installation_changed");
+    expect(await getTeamsInstallation(client.db, tenantId)).toEqual(left);
   }, 60_000);
 
   test("self-serve installation never rotates an active binding, even in a race", async () => {

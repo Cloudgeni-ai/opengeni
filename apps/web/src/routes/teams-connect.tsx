@@ -20,6 +20,7 @@ import {
   savePendingTeamsSetup,
   teamsMicrosoftFailureText,
   teamsMicrosoftReturn,
+  teamsRouteMissing,
   type TeamsMicrosoftReturn,
   type TeamsPendingSetup,
 } from "@/lib/teams-connect";
@@ -175,8 +176,7 @@ export function TeamsConnectRoute() {
             const api = teamsApi(client, workspaceId);
             const { authorizationUrl } = await api.startMicrosoftSignIn(token).catch((caught) => {
               // An API without self-serve setup keeps the operator-approved flow.
-              if ((caught as { status?: unknown } | null)?.status === 404)
-                return { authorizationUrl: null };
+              if (teamsRouteMissing(caught)) return { authorizationUrl: null };
               throw caught;
             });
             if (authorizationUrl) {

@@ -6,6 +6,7 @@ import {
   teamsFragmentToken,
   teamsMicrosoftFailureText,
   teamsMicrosoftReturn,
+  teamsRouteMissing,
 } from "./teams-connect";
 import { signupReturnPath } from "./signup-attribution";
 
@@ -124,5 +125,20 @@ describe("Teams self-serve Microsoft sign-in return", () => {
     expect(
       teamsAuthReturnPath({ pathname: "/teams/connect", search: "?code=c&state=s", hash: "" }),
     ).toBe("/teams/connect?code=c&state=s");
+  });
+});
+
+describe("Teams setup against an older API", () => {
+  test("only a missing route falls back to the operator flow", () => {
+    const refusal = (status: number, code: string, message: string) => ({
+      status,
+      code,
+      body: JSON.stringify({ error: { status, code, message, retryable: false } }),
+    });
+    expect(teamsRouteMissing(refusal(404, "not_found", "Resource not found."))).toBe(true);
+    expect(teamsRouteMissing(refusal(404, "not_found", "Teams is not enabled"))).toBe(false);
+    expect(teamsRouteMissing(refusal(403, "forbidden", "Resource not found."))).toBe(false);
+    expect(teamsRouteMissing({ status: 404, code: "not_found", body: "Not Found" })).toBe(false);
+    expect(teamsRouteMissing(null)).toBe(false);
   });
 });

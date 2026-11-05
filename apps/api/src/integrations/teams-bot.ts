@@ -34,7 +34,6 @@ import {
   getWorkspaceTeamsInstallation,
   listTeamsInstallations,
   installTeamsBot,
-  releaseInactiveTeamsInstallation,
   linkTeamsActor,
   getTeamsActor,
   getOwnTeamsLink,
@@ -52,7 +51,6 @@ import {
   renewTeamsRoute,
   teamsDeliveryStatus,
   refuseTeamsRouteOutputs,
-  type DisconnectAuditActor,
   type TeamsInstallation,
   type TeamsRoute,
 } from "@opengeni/db";
@@ -718,8 +716,6 @@ export async function completeTeamsSetup(
   input: {
     setupToken: string;
     microsoft?: { code: string; state: string } | undefined;
-    /** Who connected, for the audit record when a disconnected binding is moved. */
-    audit?: DisconnectAuditActor | null;
   },
 ) {
   const { setupToken, microsoft } = input;
@@ -768,16 +764,19 @@ export async function completeTeamsSetup(
     throw new HTTPException(409, {
       message: "This workspace is linked to another Teams organization.",
     });
-  if (release) {
-    if (!(await releaseInactiveTeamsInstallation(deps.db, release, { audit: input.audit ?? null })))
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization's connection changed while you were connecting it. Start again from the setup link in Teams.",
-      });
-    deps.observability?.info("Teams disconnected binding released", {
-      method: "global_administrator",
-    });
-  }
+  // The old workspace's audit names the Microsoft administrator whose
+  // authority moved the binding, not an Opengeni identity from elsewhere.
+  const replaceInactive =
+    release && admin
+      ? {
+          installation: release,
+          audit: {
+            subjectId: `microsoft:${admin.tenantId}:${admin.actorId}`,
+            source: "app" as const,
+            principalKind: "microsoft_global_administrator",
+          },
+        }
+      : null;
   try {
     await installTeamsBot(deps.db, {
       accountId: grant.accountId,
@@ -787,6 +786,7 @@ export async function completeTeamsSetup(
       subjectId: grant.subjectId,
       nonce: p.nonce,
       requireInactive: !approved,
+      replaceInactive,
     });
   } catch (error) {
     const cause = error as {
@@ -799,6 +799,11 @@ export async function completeTeamsSetup(
       throw new HTTPException(409, {
         message:
           "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
+      });
+    if (cause.message === "teams_installation_changed")
+      throw new HTTPException(409, {
+        message:
+          "This Teams organization's connection changed while you were connecting it. Start again from the setup link in Teams.",
       });
     if (cause.message === "teams_installation_already_active")
       throw new HTTPException(409, {
@@ -824,6 +829,7 @@ export async function completeTeamsSetup(
   }
   deps.observability?.info("Teams organization connected", {
     method: approved ? "operator_approved" : "tenant_administrator",
+    movedDisconnectedBinding: Boolean(replaceInactive),
   });
   if (p.conversation) {
     const conversation = p.conversation;
@@ -899,12 +905,7 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
         })
         .strict(),
     );
-    return c.json(
-      await completeTeamsSetup(deps, grant, {
-        ...input,
-        audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
-      }),
-    );
+    return c.json(await completeTeamsSetup(deps, grant, input));
   });
   app.delete(`${ROOT}/bot`, async (c) => {
     await browserHuman(c, deps);

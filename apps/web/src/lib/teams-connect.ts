@@ -121,3 +121,17 @@ export function teamsMicrosoftFailureText(failure: { error: string; description:
     return "Your organization needs a Global Administrator to approve Opengeni before you can sign in. Ask a Global Administrator to connect Opengeni, then try again.";
   return "Microsoft sign-in didn't finish. Try again.";
 }
+/**
+ * True only when the API has no such route (an API older than self-serve
+ * setup), not when the route exists and refused the request.
+ */
+export function teamsRouteMissing(error: unknown): boolean {
+  const e = error as { status?: unknown; code?: unknown; body?: unknown } | null;
+  if (e?.status !== 404 || e.code !== "not_found" || typeof e.body !== "string") return false;
+  try {
+    const body = JSON.parse(e.body) as { error?: { message?: unknown } } | null;
+    return body?.error?.message === "Resource not found.";
+  } catch {
+    return false;
+  }
+}

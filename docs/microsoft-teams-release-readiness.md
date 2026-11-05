@@ -171,16 +171,23 @@ rotate an active installation.
 
 What a tenant administrator can do with a connection that already exists:
 
-- **Active**: nothing through self-serve. An Opengeni administrator of the bound
-  workspace can disconnect it there first.
+- **Active**: nothing through self-serve, and there is no operator transfer
+  either. An Opengeni administrator of the bound workspace disconnects it there
+  first; until then a Teams administrator can block the app in the Teams admin
+  center.
 - **Disconnected, same workspace**: a Global Administrator or Teams
   Administrator who is an Opengeni administrator of that workspace reconnects
   it.
 - **Disconnected, another workspace**: only a Global Administrator can move it.
-  The old binding is deleted together with its account links and routes, and
-  the old workspace gets a `connection.disconnected` audit record with reason
-  `released_by_tenant_administrator`. This keeps a binding left behind by a
-  departed admin, consultant or trial from locking the organization out.
+  The removal of the old binding and the new connection are one transaction, so
+  a failed move changes nothing. The old binding is deleted together with its
+  account links, routes and their delivery records (inbox and outbox, including
+  unknown or failed sends); the Opengeni sessions and their history remain. The
+  old workspace gets a `connection.disconnected` audit record with reason
+  `released_by_tenant_administrator`, the counts of removed links and routes,
+  and the Microsoft administrator as `microsoft:<tenant ID>:<object ID>` (not
+  the Opengeni identity in the new workspace). This keeps a binding left behind
+  by a departed admin, consultant or trial from locking the organization out.
 
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.
