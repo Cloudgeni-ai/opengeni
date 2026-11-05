@@ -68,7 +68,7 @@ import {
 import { recordWorkspaceUsage, requireLimit, sanitizeWorkspaceFilename } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "../mcp/transport";
 import { buildFilesMcpServer } from "../mcp/files";
 import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
@@ -141,7 +141,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const server = buildWorkspaceToolGatewayMcpServer(
@@ -173,7 +173,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
     });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
-      const transport = new WebStandardStreamableHTTPServerTransport({
+      const transport = createApiMcpTransport({
         enableJsonResponse: true,
       });
       const server = buildFilesMcpServer(deps, access);

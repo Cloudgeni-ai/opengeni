@@ -8,6 +8,15 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+API and SDK/embedded requests use credits, not monthly app-plan credit.
+Connected AI subscriptions are for paid-plan app work and cannot serve API
+requests; an explicit selection returns `subscription_api_unavailable` (403),
+and an omitted model skips subscription defaults. Own provider API keys remain
+supported. Their platform fee is configuration-driven; at
+`OPENGENI_BYOK_PLATFORM_FEE_BPS=0` there is no fee or paid-credit admission
+requirement for it. See [billing-origin.md](billing-origin.md) for funding and
+the existing internal-account legacy terms.
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
@@ -258,6 +267,8 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | Capability | Lets the agent |
 | --- | --- |
 | `humanInput` | pause and ask the person for a decision or missing detail |
+| `notifications` | notify the person, withdraw notifications, tidy their inbox and call them (off in `"none"`) |
+| `privacyFacts` | answer privacy, retention and provider questions from the deployment's facts (off in `"none"`) |
 | `webSearch` | search the public web |
 | `media` | generate images and videos |
 | `goals` | work toward a goal across many turns |
@@ -277,6 +288,21 @@ tools and runtime mechanics are not capabilities and are never toggled. A
 capability the deployment does not offer is reported off in `agent.unavailable`;
 requesting it returns 422 `agent_capability_unavailable`. Child sessions may
 only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
+
+Every built-in tool and prompt section follows what the session can use, so
+`"none"` pays only for what is relevant on each call: a neutral identity
+without a shared workspace; `request_human_input` with the secret kind only
+under `secrets` and Skill reviews only under `skills: "manage"`;
+`wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
+`browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
+on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
+search only when a tool is
+deferred (an `optional` or connection-backed eager server still counts as
+deferred); no Skill index without Skills. Sessions with a feature get the same
+prompt as before. Saved workspace defaults and schedules keep notifications
+and privacy facts under `"none"`. `GET .../model-context` returns the latest
+request's provider body; on the native Anthropic route it also lists the
+instructions, their layers and each tool.
 
 `identity` replaces only how Opengeni introduces the agent. `instructions` is
 the session `instructions` field. The prompt order is identity, Opengeni's

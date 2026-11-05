@@ -111,10 +111,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
  * only they reach as pending. 1103 withheld the subscription
- * account-administrator grant and 1149 granted it. 1107 withholds the agent
+ * account-administrator grant and 1149 granted it. 1107 withheld the agent
  * call routines and the native push v2 functions that carry the iOS VoIP
- * token; until they are granted, native push keeps its v1 functions, no phone
- * takes calls and agents cannot place one.
+ * token; 1239 grants them.
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
@@ -133,12 +132,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "native_push_device_v2(text)",
-  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-  "claim_native_push_deliveries_v2(uuid, integer, integer)",
-  "agent_call_device_count_v1(text, boolean)",
-  "agent_call_ringing_v1(text)",
-  "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
@@ -1849,6 +1842,17 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
 );
 
+/**
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
+ * triggers mirror bot_templates and slack_agents writes into the agents
+ * tables; the guard keeps sessions.agent_id immutable once set.
+ */
+const AGENTS_TRIGGER_ROUTINES = [
+  "sync_agent_from_bot_template()",
+  "sync_agent_from_slack_agent()",
+  "guard_session_agent_id_immutable()",
+] as const;
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "guard_session_agent_creation_provenance()",
@@ -1872,6 +1876,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1896,6 +1901,7 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
@@ -1918,7 +1924,10 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_revisions",
   "agent_run_states",
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "attached_browser_devices",
   "attached_browser_inventories",
@@ -1931,6 +1940,9 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
+  "billing_auto_top_up_mutations",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
@@ -2488,6 +2500,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
   "agent_call_host_phones",
   "agent_run_states",
+  // 1243_agents: the agent directory and its Slack installations.
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "audit_events",
   "auth_identities",
@@ -2839,6 +2854,9 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  // 1243_agents: immutable agent revisions.
+  "agent_revisions",
+  "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2907,6 +2925,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "browser_identities",
   "browser_session_retained_downloads",
   "browser_sessions",

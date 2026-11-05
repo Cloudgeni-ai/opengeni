@@ -8,14 +8,17 @@ import {
   beginSandboxRematerialization,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  commitWarmingToWarm,
   consentPublicSandboxRecovery,
   createDb,
   createSession,
   failWarmingToCold,
   getSandboxRecoveryDiscontinuity,
   markWarmLeaseInstanceLost,
+  markSandboxRestoreVerifying,
   readLease,
   readPublicSandboxRecovery,
+  recordWarmingSandboxCreated,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
@@ -229,6 +232,17 @@ describe("system continuity after a lost sandbox on every backend", () => {
     expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.sessionId)).toContain(
       archive.workspaceArchiveMeta.capturedAt,
     );
+    // The decision alone tells the person nothing: the restore may still fail.
+    const recoveryNotices = async () =>
+      (
+        await shared.admin`select payload from session_events
+          where session_id = ${f.sessionId} and type = 'sandbox.recovery.selected'`
+      ).map((row) => row.payload);
+    expect(await recoveryNotices()).toEqual([]);
+    expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, attempt)).toMatchObject({
+      status: "already_authorized",
+      lane: "checkpoint",
+    });
     // The elected owner restores exactly that older archive.
     const elected = await acquireLease(client.db, {
       ...f.group,
@@ -239,13 +253,43 @@ describe("system continuity after a lost sandbox on every backend", () => {
     });
     expect(elected.role).toBe("spawner");
     expect(elected.lease.historicalRecoveryAuthorized).toBe(true);
+    const rematerializationId = crypto.randomUUID();
     expect(
       await beginSandboxRematerialization(client.db, {
         ...f.group,
         expectedEpoch: elected.lease.leaseEpoch,
-        rematerializationId: crypto.randomUUID(),
+        rematerializationId,
       }),
     ).toMatchObject({ status: "started" });
+    const leaseScope = { ...f.group, expectedEpoch: elected.lease.leaseEpoch };
+    await recordWarmingSandboxCreated(client.db, {
+      ...leaseScope,
+      rematerializationId,
+      instanceId: "restored-docker-box",
+      resumeBackendId: "docker",
+      resumeState: { backendId: "docker", sessionState: archive },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, { ...leaseScope, rematerializationId });
+    expect(await recoveryNotices()).toEqual([]);
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...leaseScope,
+        instanceId: "restored-docker-box",
+        leaseTtlMs: 60_000,
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: archive.workspaceArchiveMeta.revision,
+        },
+      }),
+    ).toMatchObject({ committed: true });
+    // Once the restore is verified, the person is told once, with the save's time.
+    expect(await recoveryNotices()).toEqual([
+      expect.objectContaining({
+        mode: "checkpoint",
+        capturedAt: archive.workspaceArchiveMeta.capturedAt,
+      }),
+    ]);
   });
 
   test("a Docker NotFound with nothing to restore never continues on an empty workspace", async () => {

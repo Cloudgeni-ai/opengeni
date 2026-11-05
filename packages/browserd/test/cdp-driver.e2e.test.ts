@@ -1545,8 +1545,10 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentContainer).toMatchObject({ text: "Public intro", redacted: "payment" });
-      expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
+      // Only standard markup marks a field private: an element merely named
+      // like a card field (`id="card-number"`) is page text and is read.
+      expect(paymentContainer).toMatchObject({ redacted: null });
+      expect(paymentContainer.text).toContain("fixture-card-text-secret");
       const paymentChild = await driver.readDom(authPage.target.id, {
         kind: "element",
         locator: { kind: "css", selector: "#card-child" },
@@ -1554,8 +1556,7 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentChild).toMatchObject({ text: null, redacted: "payment" });
-      expect(JSON.stringify(paymentChild)).not.toContain("fixture-card-text-secret");
+      expect(paymentChild).toMatchObject({ text: "fixture-card-text-secret", redacted: null });
       const spoofedPage = await driver.openTarget(
         dataUrl(`<!doctype html><title>Spoofed DOM</title>
           <input id="spoofed-password" type="password" value="fixture-spoofed-password">

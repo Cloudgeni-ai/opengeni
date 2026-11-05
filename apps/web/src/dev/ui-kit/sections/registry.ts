@@ -103,6 +103,7 @@ export const SECTION_KEYS = [
   // Status
   "status-badge",
   "usage-meter",
+  "subscription-accounts",
   "feedback",
   // Forms
   "form-dialog",
@@ -643,6 +644,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./usage-meter"),
+  },
+  {
+    key: "subscription-accounts",
+    group: "Status",
+    title: "Subscription accounts",
+    purpose:
+      "Claude, ChatGPT and SuperGrok accounts with their plan and every usage window the provider reports.",
+    usedOn: "Session header account menu, Models settings rows",
+    load: () => import("./subscription-accounts"),
   },
   {
     key: "feedback",

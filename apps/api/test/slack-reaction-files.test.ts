@@ -169,7 +169,7 @@ describe("Slack reaction image magic sniffing", () => {
 
 test("on-demand Slack MCP images must fully decode before reaching the model", async () => {
   const valid = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=",
     "base64",
   );
   await expect(validateSlackMcpImage(valid)).resolves.toBeUndefined();

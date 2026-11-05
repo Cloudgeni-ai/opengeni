@@ -391,6 +391,67 @@ fn a_checkpoint_books_its_disks_whole_growth_while_it_runs() {
     assert_eq!(rig.host.disk().unwrap().booked.bytes, before);
 }
 
+#[test]
+fn a_checkpoint_during_hydration_books_the_whole_disk_once() {
+    let mut rig = Rig::new(&HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    let reading = Input::Disk {
+        available: DiskSpace {
+            bytes: 128 * GIB,
+            inodes: 10_000,
+        },
+    };
+    rig.send(reading);
+    let size = Size {
+        disk: 32 * GIB + 32 * GIB / 256,
+        save: 16 * GIB + (64 << 20),
+        fetch: 16 * GIB + (64 << 20),
+        ..Size::whole(16 * GIB)
+    };
+    rig.add(1, State::RUNNING, checkpointed(), size);
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: true,
+    });
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: 4 * GIB,
+    });
+    rig.send(reading);
+    assert_eq!(
+        rig.host.disk().unwrap().booked.bytes,
+        4 * GIB + size.save + size.fetch
+    );
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    let whole = size.disk + size.save + size.fetch;
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, whole);
+    // Even a small headroom measurement cannot weaken the clone/trim
+    // bound while the step owns the VM. Memory may still all arrive.
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.send(reading);
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, whole);
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: false,
+    });
+    rig.send(reading);
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, size.disk + size.save);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(
+        rig.host.disk().unwrap().booked.bytes,
+        size.disk + 2 * size.save
+    );
+}
+
 /// A checkpoint leaves its sandbox running and booking its next save, so
 /// the memory image it wrote is booked on its own until a reading shows
 /// it, whether the checkpoint was done or cancelled while it uploaded:

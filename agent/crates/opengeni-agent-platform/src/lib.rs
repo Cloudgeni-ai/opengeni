@@ -38,6 +38,8 @@ mod error;
 mod exec_handover;
 mod native;
 #[cfg(unix)]
+mod null_device;
+#[cfg(unix)]
 mod process_cleanup;
 mod pty;
 pub mod run_as;
@@ -777,6 +779,19 @@ fn default_git_email_with(
     (git_guesses_email() == Some(false)).then_some(DEFAULT_GIT_EMAIL)
 }
 
+/// A discarded stdio stream: the agent's retained null device on Unix, so a
+/// machine whose `/dev/null` was removed can still run the probe.
+fn discarded_stdio() -> std::process::Stdio {
+    #[cfg(unix)]
+    {
+        null_device::null_stdio()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Stdio::null()
+    }
+}
+
 /// Whether Git, with no identity configured anywhere, derives a usable commit
 /// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
 /// and every email source removed fails exactly when the hostname guess is
@@ -823,9 +838,9 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(discarded_stdio())
+        .stdout(discarded_stdio())
+        .stderr(discarded_stdio());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;

@@ -80,6 +80,15 @@ function nameTaken(): ApiHttpError {
   });
 }
 
+function slackAgentVersionConflict(): ApiHttpError {
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: "This Slack agent changed. Refresh and try again.",
+    retryable: false,
+    details: { code: "slack_agent_version_conflict" },
+  });
+}
+
 function agentView(
   agent: SlackAgentRecord,
   extra: {
@@ -263,8 +272,8 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   /**
-   * Opening an agent to anyone in Slack lets people outside its workspace use
-   * what the workspace shares, so it takes the request's verified
+   * Opening an agent to the organization in Slack lets people outside its
+   * workspace use what the workspace shares, so it takes the request's verified
    * organization admin proof (`account:admin` for the agent's organization).
    * Turning it off only needs the workspace admin every edit already needs.
    */
@@ -284,6 +293,10 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     if (payload.open === true && !agent.open) {
       await requireOrganizationAdmin(c, agent.targetWorkspaceId);
+    } else if (payload.open === true && payload.expectedVersion !== agent.version) {
+      // Seen open, but the write applies to the version the caller names,
+      // which may be one an admin closed since; never reopen it unchecked.
+      throw slackAgentVersionConflict();
     }
     // Every name rule applies to a new name; an unchanged one (even one that
     // predates the stricter rules) can still be saved.
@@ -316,14 +329,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       },
     );
     if (updated === "name_taken") throw nameTaken();
-    if (updated === "version_conflict") {
-      throw new ApiHttpError(409, {
-        code: "conflict",
-        message: "This Slack agent changed. Refresh and try again.",
-        retryable: false,
-        details: { code: "slack_agent_version_conflict" },
-      });
-    }
+    if (updated === "version_conflict") throw slackAgentVersionConflict();
     if (!updated) throw new HTTPException(404, { message: "Slack agent not found" });
     const binding = (
       await listSlackInstallationBindings(deps.db, {

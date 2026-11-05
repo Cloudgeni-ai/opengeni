@@ -27,6 +27,8 @@ const MAX_HEIGHT = 320;
  * stays up; hovering holds it. A question to stop stays.
  */
 export const MEETING_CARD_TIMEOUT_MS = 45_000;
+/** How often the card looks whether the pointer is on it, which holds it. */
+const POINTER_MS = 200;
 
 const ACTIONS = { act: "chosen", dismiss: "dismissed", expire: "expired" } as const;
 
@@ -66,6 +68,8 @@ export interface MeetingPromptCardOptions {
   log?: FloatingWindowLog;
   /** How long the card's page has to load or answer before its window is built again. */
   answerMs?: number;
+  /** How often the card looks whether the pointer is on it. */
+  pointerMs?: number;
 }
 
 export class MeetingPromptCard implements MeetingPromptView {
@@ -78,6 +82,8 @@ export class MeetingPromptCard implements MeetingPromptView {
   } | null = null;
   /** Whether the window is on screen. */
   private showing = false;
+  /** Looks, while a card shows, whether the pointer is on it. */
+  private pointer: ReturnType<typeof setInterval> | null = null;
   private tokens = 0;
 
   constructor(private readonly options: MeetingPromptCardOptions = {}) {}
@@ -98,6 +104,7 @@ export class MeetingPromptCard implements MeetingPromptView {
   destroy(): void {
     this.current = null;
     this.showing = false;
+    this.stopPointer();
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
     this.loaded = null;
@@ -113,6 +120,7 @@ export class MeetingPromptCard implements MeetingPromptView {
 
   private hide(): void {
     this.showing = false;
+    this.stopPointer();
     if (this.window && !this.window.isDestroyed()) this.window.hide();
   }
 
@@ -126,6 +134,7 @@ export class MeetingPromptCard implements MeetingPromptView {
       this.window = null;
       this.loaded = null;
       this.showing = false;
+      this.stopPointer();
     }
     if (!window.isDestroyed()) window.destroy();
   }
@@ -182,9 +191,13 @@ export class MeetingPromptCard implements MeetingPromptView {
     watchFloatingPage(window, (why) => this.lost(window, why));
     window.on("closed", () => {
       if (this.window !== window) return;
+      const showing = this.showing;
       this.window = null;
       this.loaded = null;
       this.showing = false;
+      // Closed from outside while asking: the person closed the question.
+      const current = this.current;
+      if (showing && current) this.finish(current.token, "dismissed");
     });
     this.window = window;
     this.loaded = window.loadURL(
@@ -263,6 +276,47 @@ export class MeetingPromptCard implements MeetingPromptView {
     window.setBounds(cardBounds(display.workArea, height));
     window.showInactive();
     this.showing = true;
+    this.watchPointer(window, token);
     return true;
+  }
+
+  /**
+   * Tell the page whether the pointer is on the card. The page's own mouse
+   * events can't say: a window shown again gets the pointer replayed where it
+   * last was, on the Not now pressed before. Where the system's cursor is
+   * only known from the app's own windows (Linux), it is stale the same way,
+   * so the card is held only while the pointer moves on it; the page lets go
+   * itself when the pointer leaves it (a replay only ever fakes arriving).
+   */
+  private watchPointer(window: BrowserWindow, token: number): void {
+    this.stopPointer();
+    let inside = false;
+    let last = screen.getCursorScreenPoint();
+    const look = () => {
+      if (this.current?.token !== token || this.window !== window || window.isDestroyed()) {
+        this.stopPointer();
+        return;
+      }
+      const point = screen.getCursorScreenPoint();
+      const moved = point.x !== last.x || point.y !== last.y;
+      last = point;
+      const bounds = window.getBounds();
+      const on =
+        point.x >= bounds.x &&
+        point.x < bounds.x + bounds.width &&
+        point.y >= bounds.y &&
+        point.y < bounds.y + bounds.height;
+      // Moving on the card holds it (again, if the page let go); leaving lets go.
+      if (on ? !moved : !inside) return;
+      inside = on;
+      window.webContents.executeJavaScript(`hold(${on})`).catch(() => undefined);
+    };
+    this.pointer = setInterval(look, this.options.pointerMs ?? POINTER_MS);
+    this.pointer.unref?.();
+  }
+
+  private stopPointer(): void {
+    if (this.pointer) clearInterval(this.pointer);
+    this.pointer = null;
   }
 }

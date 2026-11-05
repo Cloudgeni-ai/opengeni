@@ -64,18 +64,20 @@ const usage = (version = 1): ClaudeSubscriptionUsage => ({
 test("meters use remaining percentages, retain exact resets and invalidate elapsed windows", () => {
   const readings = claudeUsageReadings(usage(), Date.parse("2026-09-30T14:00:00Z"));
   expect(readings.map((reading) => [reading.label, reading.percent])).toEqual([
-    ["Weekly", 50],
-    ["5-hour", 0],
+    ["5h", 0],
+    ["Week", 50],
   ]);
   const expired = usage();
   expired.windows[0]!.resetsAt = "2026-09-30T13:59:00Z";
-  expect(claudeUsageReadings(expired, Date.parse("2026-09-30T14:00:00Z"))[1]).toEqual({
-    label: "5-hour",
+  expect(claudeUsageReadings(expired, Date.parse("2026-09-30T14:00:00Z"))[0]).toEqual({
+    label: "5h",
     percent: null,
+    valueLabel: "Reset passed",
   });
-  expect(claudeUsageReadings(null, 0).every((reading) => reading.percent === null)).toBe(true);
+  // Nothing reported shows no windows rather than invented ones.
+  expect(claudeUsageReadings(null, 0)).toEqual([]);
 });
-test("an account row says when both plan limits reset, the shown one first", async () => {
+test("an account row shows every reported window with its reset", async () => {
   const state: ClaudeUsageState = {
     value: usage(),
     loading: false,
@@ -85,13 +87,12 @@ test("an account row says when both plan limits reset, the shown one first", asy
     refresh: async () => {},
   };
   await act(async () => root.render(<ClaudeUsageReadout state={state} />));
-  // The 5-hour limit is reached, so the row shows it and its reset leads.
-  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toStartWith(
-    "Limit reached",
+  const windows = [...container.querySelectorAll('[data-slot="subscription-usage-window"]')].map(
+    (window) => window.getAttribute("aria-label"),
   );
-  expect(container.querySelector('[data-slot="usage-readout-resets"]')?.textContent).toMatch(
-    /^Resets \d+ (Sep|Oct) 2099 · Weekly \d+ Oct 2099$/,
-  );
+  expect(windows).toHaveLength(2);
+  expect(windows[0]).toMatch(/^5h: Limit reached, until .*2099/);
+  expect(windows[1]).toMatch(/^Week: 50% left, resets .*Oct 2099/);
 });
 test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
   const value = usage();
@@ -123,16 +124,10 @@ test("near-full allowed quotas stay available and explicit rejection needs no in
       </>,
     ),
   );
-  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toStartWith(
-    "Limit reached",
-  );
-  // A reached limit still says when it resets.
-  expect(container.querySelector('[data-slot="usage-readout-resets"]')?.textContent).toMatch(
-    /^Resets \d+ Sep 2099$/,
-  );
-  expect(
-    container.querySelector('[data-slot="usage-readout"]')?.hasAttribute("aria-valuenow"),
-  ).toBe(false);
+  const row = container.querySelector('[data-slot="subscription-usage-window"]');
+  // A reached limit still says when it resets, without an invented share.
+  expect(row?.getAttribute("aria-label")).toMatch(/^5h: Limit reached, until .*Sep 2099/);
+  expect(row?.hasAttribute("aria-valuenow")).toBe(false);
   expect(container.querySelector('[data-level="exhausted"]')).not.toBeNull();
 });
 test("fresh partial headers cannot make an older retained weekly reading look current", () => {
@@ -194,7 +189,7 @@ test("shared usage components explain scope errors and never claim unknown quota
     container.querySelector('button[aria-label="Check usage now"]')?.getAttribute("aria-disabled"),
   ).toBe("true");
   await act(async () => root.render(<ClaudeUsage state={{ ...state, value: null }} />));
-  expect(container.textContent).toContain("Not reported yet");
+  expect(container.textContent).toContain("Claude hasn't reported usage yet.");
   expect(container.textContent).not.toContain("100% left");
 });
 test("usage requests stay disabled with the provider flag and stale scope/version results are discarded", async () => {

@@ -29,6 +29,7 @@ import {
   useState,
 } from "react";
 import { AppState } from "react-native";
+import { router, usePathname } from "expo-router";
 import {
   forgetAccountToken,
   loadAccounts,
@@ -39,6 +40,7 @@ import {
   type StoredAccount,
   writeAccountToken,
 } from "@/account-store";
+import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
@@ -73,6 +75,23 @@ interface AccountState {
   /** Sign in through the deployment's web sign-in and make it the active account. */
   addAccount(baseUrl: string): Promise<WebSignInResult>;
   switchAccount(id: string): void;
+  /**
+   * The person picked an account: a signed-in one becomes active at once; one
+   * that must sign in again stays inactive and answers "signIn".
+   */
+  chooseAccount(id: string): Promise<"stay" | "switched" | "signIn">;
+  /** The account in use before the current one, this run of the app. */
+  previousAccountId: string | null;
+  /**
+   * Accounts whose saved sign-in couldn't be read the last time it was tried.
+   * They are not signed out: the read may work next time.
+   */
+  unreadable: ReadonlySet<string>;
+  /**
+   * Read an account's saved sign-in again. A readable one becomes the account
+   * in use ("ready"); a missing one marks it signed out ("signIn").
+   */
+  retrySignIn(id: string): Promise<"ready" | "signIn" | "unreadable">;
   signOut(id: string): Promise<void>;
 }
 
@@ -99,6 +118,11 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<{ id: string; value: string | null } | null>(null);
   const snapshotRef = useRef<AccountsSnapshot | null>(null);
   snapshotRef.current = snapshot;
+  const [previousAccountId, setPreviousAccountId] = useState<string | null>(null);
+  // The way back is a signed-in account: leaving a signed-out one keeps it.
+  const rememberWayBack = useCallback((current: AccountsSnapshot, nextId: string) => {
+    setPreviousAccountId((way) => wayBackWhenLeaving(current, nextId, way));
+  }, []);
 
   useEffect(() => {
     void loadAccounts().then(setSnapshot);
@@ -106,17 +130,6 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const account = snapshot?.accounts.find((each) => each.id === snapshot.activeId) ?? null;
   const accountId = account?.id ?? null;
-  useEffect(() => {
-    if (!accountId) return;
-    let live = true;
-    void readAccountToken(accountId).then((value) => {
-      if (live) setToken({ id: accountId, value });
-    });
-    return () => {
-      live = false;
-    };
-  }, [accountId]);
-
   const activeToken = token && token.id === accountId ? token.value : null;
   const baseUrl = account?.baseUrl ?? DEFAULT_SERVER_URL;
   const client = useMemo(() => newClient(baseUrl, activeToken), [baseUrl, activeToken]);
@@ -151,6 +164,112 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     },
     [persist],
   );
+
+  const [unreadable, setUnreadable] = useState<ReadonlySet<string>>(() => new Set());
+  const noteRead = useCallback((id: string, failed: boolean) => {
+    setUnreadable((current) => {
+      if (current.has(id) === failed) return current;
+      const next = new Set(current);
+      if (failed) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  /** Mark accounts signed out, all in one save so no write undoes another. */
+  const markSignedOut = useCallback(
+    (ids: readonly string[]) => {
+      const current = snapshotRef.current;
+      if (!current || ids.length === 0) return;
+      const marks = new Set(
+        ids.filter((id) => current.accounts.some((each) => each.id === id && !each.signedOut)),
+      );
+      if (marks.size === 0) return;
+      void persist({
+        ...current,
+        accounts: current.accounts.map((each) =>
+          marks.has(each.id) ? { ...each, signedOut: true } : each,
+        ),
+      });
+    },
+    [persist],
+  );
+  // Reads of one account can overlap; only the newest one may mark it.
+  const readGenerations = useRef(new Map<string, number>());
+  // Bumped only when an account signs in or out: a credential read from
+  // before that must not set the token either.
+  const signIns = useRef(new Map<string, number>());
+  /** Reads of an account still in flight no longer count (it signed in or out). */
+  const supersedeReads = useCallback((id: string) => {
+    readGenerations.current.set(id, (readGenerations.current.get(id) ?? 0) + 1);
+    signIns.current.set(id, (signIns.current.get(id) ?? 0) + 1);
+  }, []);
+  /**
+   * Read accounts' saved sign-ins. A missing one marks the account signed
+   * out, so every menu and list shows it as it is; one that couldn't be read
+   * is only noted, since the read may work next time.
+   */
+  const checkCredentials = useCallback(
+    async (ids: readonly string[]) => {
+      const generations = ids.map((id) => {
+        const next = (readGenerations.current.get(id) ?? 0) + 1;
+        readGenerations.current.set(id, next);
+        return next;
+      });
+      const reads = await Promise.all(
+        ids.map((id) =>
+          readAccountToken(id).then(
+            (credential) => ({ credential, failed: false }),
+            () => ({ credential: null, failed: true }),
+          ),
+        ),
+      );
+      const missing: string[] = [];
+      ids.forEach((id, index) => {
+        const read = reads[index];
+        if (!read || readGenerations.current.get(id) !== generations[index]) return;
+        noteRead(id, read.failed);
+        if (!read.failed && !read.credential) missing.push(id);
+      });
+      markSignedOut(missing);
+      return reads;
+    },
+    [markSignedOut, noteRead],
+  );
+  const checkCredential = useCallback(
+    async (id: string) => {
+      const [read] = await checkCredentials([id]);
+      return read ?? { credential: null, failed: true };
+    },
+    [checkCredentials],
+  );
+
+  useEffect(() => {
+    if (!accountId) return;
+    let live = true;
+    const signIn = signIns.current.get(accountId);
+    // A failed read settles too: the account's sign-in screen offers a retry
+    // instead of loading forever. A sign-in meanwhile already set the token.
+    void checkCredential(accountId).then(({ credential }) => {
+      if (live && signIns.current.get(accountId) === signIn) {
+        setToken({ id: accountId, value: credential });
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [accountId, checkCredential]);
+
+  // The other accounts' saved sign-ins, once per launch, so the menus and the
+  // sign-in screen's list show which ones still have one.
+  const loaded = snapshot !== null;
+  useEffect(() => {
+    const current = snapshotRef.current;
+    if (!loaded || !current) return;
+    const others = current.accounts.filter(
+      (each) => each.id !== current.activeId && !each.signedOut,
+    );
+    if (others.length > 0) void checkCredentials(others.map((each) => each.id));
+  }, [loaded, checkCredentials]);
 
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -269,32 +388,83 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       const existing = current.accounts.find((each) => sameIdentity(each, identity));
       const id = existing?.id ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
       await writeAccountToken(id, result.accessToken);
+      supersedeReads(id);
+      noteRead(id, false);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const known = latest.accounts.some((each) => each.id === id);
       const stored: StoredAccount = {
         id,
         baseUrl: serverUrl,
         subjectId: context.subjectId,
         email: context.subjectLabel ?? context.subjectId,
-        workspaceId: existing?.workspaceId ?? null,
+        workspaceId:
+          latest.accounts.find((each) => each.id === id)?.workspaceId ??
+          existing?.workspaceId ??
+          null,
       };
       setToken({ id, value: result.accessToken });
+      rememberWayBack(latest, id);
       await persist({
-        accounts: existing
-          ? current.accounts.map((each) => (each.id === id ? stored : each))
-          : [...current.accounts, stored],
+        accounts: known
+          ? latest.accounts.map((each) => (each.id === id ? stored : each))
+          : [...latest.accounts, stored],
         activeId: id,
       });
       return result;
     },
-    [persist],
+    [noteRead, persist, rememberWayBack, supersedeReads],
   );
 
   const switchAccount = useCallback(
     (id: string) => {
       const current = snapshotRef.current;
       if (!current || current.activeId === id) return;
+      if (!current.accounts.some((each) => each.id === id)) return;
+      rememberWayBack(current, id);
       void persist({ ...current, activeId: id });
     },
-    [persist],
+    [persist, rememberWayBack],
+  );
+
+  const chooseAccount = useCallback(
+    async (id: string): Promise<"stay" | "switched" | "signIn"> => {
+      // The account in use stays as it is: its state comes from its own loading.
+      if (snapshotRef.current?.activeId === id) return "stay";
+      // An unreadable credential opens the sign-in too (with a retry), but
+      // only a missing one marks the account signed out.
+      const read = await checkCredential(id);
+      const current = snapshotRef.current;
+      if (!current) return "stay";
+      const pick = planAccountPick(current, id, Boolean(read.credential));
+      if (pick.kind === "signIn") return "signIn";
+      if (pick.kind === "stay") return "stay";
+      rememberWayBack(current, id);
+      await persist(pick.next);
+      return "switched";
+    },
+    [checkCredential, persist, rememberWayBack],
+  );
+
+  const retrySignIn = useCallback(
+    async (id: string): Promise<"ready" | "signIn" | "unreadable"> => {
+      const signIn = signIns.current.get(id);
+      const read = await checkCredential(id);
+      // Signed in or out while the read ran: that settled it.
+      if (signIns.current.get(id) !== signIn) return "signIn";
+      if (read.failed) return "unreadable";
+      if (!read.credential) return "signIn";
+      const current = snapshotRef.current;
+      // Removed while the read ran: nothing to go to.
+      if (!current?.accounts.some((each) => each.id === id)) return "signIn";
+      setToken({ id, value: read.credential });
+      if (current.activeId !== id) {
+        rememberWayBack(current, id);
+        await persist({ ...current, activeId: id });
+      }
+      return "ready";
+    },
+    [checkCredential, persist, rememberWayBack],
   );
 
   const signOut = useCallback(
@@ -314,13 +484,17 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         console.warn("Native sign-out: no stored credential for the account");
       }
       await forgetAccountToken(id);
-      const accounts = current.accounts.filter((each) => each.id !== id);
+      supersedeReads(id);
+      noteRead(id, false);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const accounts = latest.accounts.filter((each) => each.id !== id);
       await persist({
         accounts,
-        activeId: current.activeId === id ? (accounts[0]?.id ?? null) : current.activeId,
+        activeId: latest.activeId === id ? (accounts[0]?.id ?? null) : latest.activeId,
       });
     },
-    [persist],
+    [noteRead, persist, supersedeReads],
   );
 
   const organizations = useMemo(
@@ -359,6 +533,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reload,
       addAccount,
       switchAccount,
+      chooseAccount,
+      previousAccountId,
+      unreadable,
+      retrySignIn,
       signOut,
     }),
     [
@@ -380,6 +558,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reload,
       addAccount,
       switchAccount,
+      chooseAccount,
+      previousAccountId,
+      unreadable,
+      retrySignIn,
       signOut,
     ],
   );
@@ -390,4 +572,37 @@ export function useAccount(): AccountState {
   const value = useContext(AccountContext);
   if (!value) throw new Error("useAccount must be used inside AccountProvider");
   return value;
+}
+
+/**
+ * What the account menus and Settings do with a picked account: switch to a
+ * signed-in one, or open the sign-in for one that is signed out over the
+ * account in use, so Cancel returns to it.
+ */
+export function usePickAccount(): (id: string, onInUse?: () => void) => void {
+  const { chooseAccount } = useAccount();
+  // A second tap while the first pick settles, or once its sheet is up,
+  // would open a second sheet. (The sheet's route also has one id, so a
+  // push that slips through goes to the open sheet.)
+  const picking = useRef(false);
+  const sheetOpen = usePathname() === "/add-account";
+  return useCallback(
+    (id: string, onInUse?: () => void) => {
+      if (picking.current || sheetOpen) return;
+      picking.current = true;
+      void chooseAccount(id)
+        .then((outcome) => {
+          if (outcome === "signIn")
+            router.push({ pathname: "/add-account", params: { account: id } });
+          else onInUse?.();
+        })
+        .catch((caught: unknown) => {
+          if (__DEV__) console.warn("Couldn't switch accounts", caught);
+        })
+        .finally(() => {
+          picking.current = false;
+        });
+    },
+    [chooseAccount, sheetOpen],
+  );
 }

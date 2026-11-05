@@ -20,9 +20,11 @@ import {
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+  AGENT_FUNCTION_TOOL_CAPABILITIES,
   allAgentCapabilities,
   noneAgentCapabilities,
   projectAgentEffectiveTools,
+  resolveAgentToolFamilies,
   type AgentCapabilityId,
   type AgentConfigCreator,
   type AgentSkillsCapability,
@@ -104,6 +106,9 @@ function toolName(tool: Tool | ModelRequest["tools"][number]): string {
 
 type FixtureOptions = {
   agent?: ResolvedAgentConfig | null;
+  humanRecipient?: boolean;
+  /** The product server is listed eagerly with lazy tool search on: the embedding profile. */
+  eagerProduct?: boolean;
   hasSkills?: boolean;
   inlineSkills?: BuildTurnAgentDeps["session"]["skills"];
   loadSkillDescriptors?: () => Promise<Awaited<ReturnType<typeof db.listSkillDescriptors>>>;
@@ -124,6 +129,8 @@ type FixtureOptions = {
   credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
   /** Route this turn to an attached Connected Machine (home stays `none`). */
   machineAttached?: boolean;
+  /** The turn minted a Codemode bearer. */
+  codemodeToken?: boolean;
   /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
   bundledSkillIds?: BundledSkillId[] | "omit";
   /** Rendered workspace governance for this turn. */
@@ -166,7 +173,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       : {}),
     ...(options.modelId ? { openaiModel: options.modelId } : {}),
     webSearchEnabled: disabled !== "webSearch",
-    lazyToolSearchEnabled: options.lazy === true,
+    lazyToolSearchEnabled: options.lazy === true || options.eagerProduct === true,
     allowedFirstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter(
       (name) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[name] !== disabled,
     ),
@@ -225,7 +232,8 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => {
       skillCatalogWrites.push(input.catalog);
-      return input.catalog;
+      // A session that never saw an index keeps none when told to omit it.
+      return input.omitWhenEmpty ? "" : input.catalog;
     }),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
       governanceWrites.push(input.governance);
@@ -346,7 +354,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     tools: configuredServerIds.map((id) => ({
       kind: "mcp" as const,
       id,
-      ...(options.lazy ? { eager: true } : {}),
+      ...(options.lazy || (options.eagerProduct && id === "customer-product")
+        ? { eager: true }
+        : {}),
     })),
     toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     ...(options.bundledSkillIds === "omit"
@@ -366,7 +376,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     executionGeneration: 1,
     reasoningEffort: "low",
     sandboxBackend: "none",
-    initiator: { kind: "user", subjectId: "fixture-human" },
+    initiator:
+      options.humanRecipient === false
+        ? { kind: "api_key", subjectId: "api_key:fixture" }
+        : { kind: "subject", subjectId: "user:fixture-human" },
     resources: [],
     tools: session.tools,
     personalConnectionDelegations: [],
@@ -542,15 +555,20 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       fileResourceDownloads: [],
       modelInputPolicy: { inputFileMediaTypes: [], supportsImageInput: true },
       groupBoxBackend: "none",
-      lazyToolTransport: options.lazy ? "generic_dispatch" : undefined,
+      lazyToolTransport: options.lazy || options.eagerProduct ? "generic_dispatch" : undefined,
+      ...(options.machineAttached ? { activeSandboxBackend: "selfhosted" as const } : {}),
+      ...(options.codemodeToken ? { sandboxCodemodeToken: "fixture-codemode-token" } : {}),
     } as BuildTurnAgentDeps);
     const visibleTools = await built.agent.getAllTools(new RunContext());
     const result = await runAgentStream(
       built.agent,
       {
+        // As in session history: an omitted Skill index leaves no item.
         input: [
-          { role: "developer", content: built.modelVisibleSkillCatalogText },
-          { role: "user", content: "Reply done without calling tools." },
+          ...(built.modelVisibleSkillCatalogText
+            ? [{ role: "developer" as const, content: built.modelVisibleSkillCatalogText }]
+            : []),
+          { role: "user" as const, content: "Reply done without calling tools." },
         ],
         persistedHistoryCount: 0,
       },
@@ -635,16 +653,9 @@ function expectedFirstPartyTools(
   settings: Settings,
   sandboxAttached = false,
 ) {
+  const families = resolveAgentToolFamilies(config, { sandboxAttached });
   return allowedFirstPartyMcpToolsForSession(settings, [...FIRST_PARTY_MCP_TOOL_NAMES]).filter(
-    (name) => {
-      const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
-      if (owner === "sandbox") return sandboxAttached;
-      return (
-        !config ||
-        owner === "runtime" ||
-        (config.capabilities[owner] !== false && !config.unavailable.includes(owner))
-      );
-    },
+    (name) => families.allowsFirstPartyTool(name),
   );
 }
 
@@ -682,8 +693,8 @@ function assertCapabilitySurface(
     enabled("humanInput") && captured.buildOptions.humanInputEnabled !== false,
   );
   expect(captured.names.includes("list_models")).toBe(enabled("subagents"));
-  // Privacy answers come from server facts under every configuration.
-  expect(captured.names).toContain("privacy_facts");
+  // Privacy answers come from server facts whenever privacyFacts is on.
+  expect(captured.names.includes("privacy_facts")).toBe(enabled("privacyFacts"));
   expect(captured.names.includes("image_generation")).toBe(enabled("media"));
   expect(captured.names.includes("skill_read")).toBe(enabled("skills"));
   for (const name of SKILL_MANAGEMENT_TOOLS) {
@@ -694,7 +705,10 @@ function assertCapabilitySurface(
   expect(captured.selectedServerIds.includes("files")).toBe(enabled("workspaceFiles"));
   expect(captured.selectedServerIds.includes("docs")).toBe(enabled("knowledge"));
   expect(captured.names).toContain(prefixedMcpToolName("customer-product", "search_documents"));
-  expect(captured.names).toContain("opengeni__wait_for_input");
+  // Waiting follows the families: something must be able to resume the agent.
+  expect(captured.names.includes("opengeni__wait_for_input")).toBe(
+    resolveAgentToolFamilies(config, { sandboxAttached: false }).waitForInput,
+  );
   // No sandbox or Connected Machine is attached, so no command can exist.
   expect(captured.names).not.toContain("opengeni__command_read");
   expect(captured.names).not.toContain("opengeni__command_wait");
@@ -872,10 +886,57 @@ describe("agent configuration reaches the production model request", () => {
     assertCapabilitySurface(captured, config);
     expect(captured.names).toContain("request_human_input");
     expect(captured.names).toContain("skill_read");
-    expect(captured.names).toContain("privacy_facts");
+    // Nothing can resume a none agent without compute: it has no wait.
+    expect(captured.names).not.toContain("opengeni__wait_for_input");
+    expect(captured.names).not.toContain("privacy_facts");
     expect(captured.names).not.toContain("web_search");
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
+  });
+
+  test("Codemode guidance needs a sandbox or Connected Machine to run it from", async () => {
+    const codemode = "Every tool in the Codemode catalog";
+    const detached = await captureWorkerRequest({
+      agent: agentConfig("none"),
+      codemodeToken: true,
+    });
+    expect(detached.request.systemInstructions).not.toContain(codemode);
+    const attached = await captureWorkerRequest({
+      agent: agentConfig("none"),
+      codemodeToken: true,
+      machineAttached: true,
+    });
+    expect(attached.request.systemInstructions).toContain(codemode);
+    // run_on opens a Codemode-enabled shell on another machine.
+    const remote = await captureWorkerRequest({
+      agent: agentConfig("none", "workspaceAdmin", true),
+      codemodeToken: true,
+    });
+    expect(remote.request.systemInstructions).toContain(codemode);
+  });
+
+  test.each([true, false])(
+    "none leaves out wait_for_input and keeps questions (a person started the turn: %s)",
+    async (human) => {
+      const config = agentConfig("none");
+      const captured = await captureWorkerRequest({ agent: config, humanRecipient: human });
+      expect(captured.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, captured.settings),
+      );
+      expect(captured.names).not.toContain("opengeni__wait_for_input");
+      expect(captured.names).toContain("request_human_input");
+    },
+  );
+
+  test("anything that can resume a none agent brings waiting back", async () => {
+    // Turning on anything that can resume the agent brings waiting back.
+    const scheduled = agentConfig("none", "schedules", true);
+    const withSchedules = await captureWorkerRequest({ agent: scheduled, humanRecipient: false });
+    expect(withSchedules.names).toContain("opengeni__wait_for_input");
+    // A run_on command on another machine settles later and wakes the wait.
+    const admin = agentConfig("none", "workspaceAdmin", true);
+    const withRunOn = await captureWorkerRequest({ agent: admin, humanRecipient: false });
+    expect(withRunOn.names).toContain("opengeni__wait_for_input");
   });
 
   test.each(["all", "none", "legacy"] as const)(
@@ -886,7 +947,8 @@ describe("agent configuration reaches the production model request", () => {
       expect(detached.preparation.firstPartyTools).toEqual(
         expectedFirstPartyTools(config, detached.settings),
       );
-      expect(detached.names).toContain("opengeni__wait_for_input");
+      // Waiting needs something that can resume the agent: compute does.
+      expect(detached.names.includes("opengeni__wait_for_input")).toBe(from !== "none");
       expect(detached.names).not.toContain("opengeni__command_read");
       expect(detached.names).not.toContain("opengeni__command_wait");
 
@@ -1140,6 +1202,48 @@ describe("effective-tools projection agrees with actual model preparation", () =
       toolsKnown: false,
     });
   });
+
+  // With tool search on, the projection follows the worker's router decision:
+  // no router or title tool when nothing is deferred, and no wait_for_input
+  // when nothing can resume the agent. (The fixture's `opengeni` server is not
+  // first party, so harness control tools cannot join its first request here;
+  // "search visibility matches" covers "all" with tool search on.)
+  test.each([
+    { label: "embedding, API turn", agent: agentConfig("none"), eagerProduct: true, human: false },
+    { label: "none, lazy, API turn", agent: agentConfig("none"), lazy: true, human: false },
+  ])(
+    "$label projects the captured lazy tool surface",
+    async ({ agent, eagerProduct, lazy, human }) => {
+      const captured = await captureWorkerRequest({
+        agent,
+        builtins: false,
+        hasSkills: false,
+        humanRecipient: human,
+        ...(eagerProduct ? { eagerProduct } : {}),
+        ...(lazy ? { lazy } : {}),
+      });
+      const projected = projectAgentEffectiveTools(
+        sessionEffectiveToolProjectionInput(
+          captured.session as Parameters<typeof sessionEffectiveToolProjectionInput>[0],
+          captured.turnTools,
+          {
+            settings: captured.settings,
+            humanInputEnabled: true,
+            hasWorkspaceSkills: false,
+            objectStorageAvailable: true,
+            mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
+          },
+        ),
+      );
+      const product = `${prefixedMcpToolName("customer-product", "search_documents").split("__")[0]}__`;
+      const upfront = projected.tools.filter((tool) => tool.visibility === "upfront");
+      expect(upfront.map((tool) => tool.name).sort()).toEqual(
+        captured.names.filter((name) => !name.startsWith(product)).sort(),
+      );
+      for (const entry of projected.tools.filter((tool) => tool.visibility === "search"))
+        expect(captured.deferredNames).toContain(entry.name);
+    },
+  );
 });
 
 describe("Skill attachment is distinct from Skill catalog availability", () => {
@@ -1530,4 +1634,157 @@ test("a configured retained router survives deployment search disabled", async (
     { agentConfig: agentConfig("none"), toolRouterInHistory: true, skillCatalog: [] },
   );
   expect((await agent.getAllTools(new RunContext())).map(toolName)).toContain("tool_list");
+});
+
+/**
+ * The embedding profile: capabilities "none", no sandbox, one eager product
+ * MCP server, no goal, identity or instructions, started through the API or by
+ * a person. Everything in its first request except the product's own tools is
+ * a fixed per-call cost.
+ */
+async function embeddingFixedPrefix(human = false) {
+  const captured = await captureWorkerRequest({
+    agent: agentConfig("none"),
+    builtins: false,
+    eagerProduct: true,
+    hasSkills: false,
+    humanRecipient: human,
+  });
+  const productTool = prefixedMcpToolName("customer-product", "search_documents");
+  const system = captured.request.systemInstructions ?? "";
+  const sections: Record<string, number> = {};
+  let heading = "identity";
+  for (const block of system.split(/\n(?=#{1,3} )/)) {
+    const first = block.split("\n", 1)[0]!;
+    if (/^#{1,3} /.test(first)) heading = first;
+    sections[heading] = (sections[heading] ?? 0) + Buffer.byteLength(block);
+  }
+  const tools: Record<string, number> = {};
+  for (const tool of captured.request.tools) {
+    const name = toolName(tool);
+    if (name === productTool) continue;
+    tools[name] = Buffer.byteLength(JSON.stringify(tool));
+  }
+  const developer = captured.request.input.filter(
+    (item) => (item as { role?: string }).role === "developer",
+  );
+  return { captured, system, sections, tools, developer };
+}
+
+describe("embedding profile fixed prefix", () => {
+  // Raise only with a reviewed reason: every byte here is paid on every call.
+  const BUDGET_BYTES = 12_000;
+
+  test("stays within its budget", async () => {
+    const prefix = await embeddingFixedPrefix();
+    const toolBytes = Object.values(prefix.tools).reduce((sum, size) => sum + size, 0);
+    expect(prefix.developer).toEqual([]);
+    expect(Buffer.byteLength(prefix.system) + toolBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+  });
+
+  // Who started the turn never changes the prefix, so mixed API and person
+  // turns share one prompt cache.
+  test("is the same whether the API or a person started the turn", async () => {
+    const api = await embeddingFixedPrefix(false);
+    const person = await embeddingFixedPrefix(true);
+    expect(person.system).toBe(api.system);
+    expect(person.tools).toEqual(api.tools);
+  });
+
+  // A reviewed inventory: a change to any section or built-in tool shows up
+  // here by name, so growth in the minimal profile is always a decision.
+  test("inventory of sections and built-in tools", async () => {
+    const prefix = await embeddingFixedPrefix();
+    expect({ sections: prefix.sections, tools: prefix.tools }).toEqual(INVENTORY);
+  });
+});
+
+const INVENTORY = {
+  sections: {
+    identity: 476,
+    "# Personality": 349,
+    "## Writing style": 552,
+    "# Working with the user": 128,
+    "## Match effort to the request": 733,
+    "## Progress updates": 747,
+    "## Final answer": 434,
+    "### Formatting rules": 127,
+    "# Rules for getting work done": 682,
+    "## Autonomy and persistence": 3089,
+    "# Destructive Actions": 547,
+    "# Runtime mechanics": 20,
+    "## New messages while you work": 805,
+    "## Compaction": 698,
+  },
+  tools: { request_human_input: 2562 },
+};
+
+// Every tool the prompt names must be one the model can reach in that request:
+// in the tool list, or behind the search router when the router is there.
+describe("the prompt names only attached tools", () => {
+  // "remember" is also an English word in prose. The media module names the
+  // provider-dependent media tools on purpose: the capability permits
+  // discovering them, and it says an adapter may not be attached.
+  const NAMED_BY_DESIGN: ReadonlySet<string> = new Set([
+    "remember",
+    "generate_image",
+    "generate_video",
+    "get_video_generation_capabilities",
+    "image_generation",
+  ]);
+  const KNOWN_TOOLS = [
+    ...new Set([
+      ...FIRST_PARTY_MCP_TOOL_NAMES,
+      ...FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+      ...Object.keys(AGENT_FUNCTION_TOOL_CAPABILITIES),
+      "tool_search",
+      "tool_invoke",
+      "tool_list",
+      "web_search",
+    ]),
+  ].filter((tool) => !NAMED_BY_DESIGN.has(tool));
+  const named = (text: string, tool: string) =>
+    new RegExp(`(?:^|[^a-z0-9_]|__)${tool}(?![a-z0-9_])`, "u").test(text);
+  const bare = (name: string) => name.replace(/^(?:opengeni|interaction)__/u, "");
+  const cases: Array<[string, FixtureOptions]> = [
+    ["none, API turn", { agent: agentConfig("none"), humanRecipient: false, builtins: false }],
+    ["none, user turn", { agent: agentConfig("none"), builtins: false }],
+    [
+      "embedding profile",
+      {
+        agent: agentConfig("none"),
+        builtins: false,
+        eagerProduct: true,
+        hasSkills: false,
+        humanRecipient: false,
+      },
+    ],
+    ["all", { agent: agentConfig("all") }],
+    ["all, tool search on", { agent: agentConfig("all"), lazy: true }],
+    ...AGENT_CAPABILITY_IDS.map(
+      (id) =>
+        [
+          `none + ${id}`,
+          {
+            agent: agentConfig("none", id, id === "skills" ? "manage" : true),
+            humanRecipient: false,
+          },
+        ] as [string, FixtureOptions],
+    ),
+  ];
+  for (const [name, options] of cases) {
+    test(name, async () => {
+      const captured = await captureWorkerRequest(options);
+      const system = captured.request.systemInstructions ?? "";
+      const reachable = new Set([...captured.names, ...captured.deferredNames].map(bare));
+      const router = reachable.has("tool_search");
+      const missing = KNOWN_TOOLS.filter(
+        (tool) =>
+          named(system, tool) &&
+          !reachable.has(tool) &&
+          !(router && captured.catalog.entries.some((entry) => entry.identity.toolName === tool)),
+      );
+      expect(missing).toEqual([]);
+    });
+  }
 });

@@ -1,5 +1,31 @@
 # @opengeni/agent-host
 
+## 6.10.0
+
+### Patch Changes
+
+- b72f388: A Connected Machine agent on Linux now comes back however often it is stopped. Its systemd unit allowed five starts a minute, so a few quick kills (a command such as `pkill -f opengeni` run in a loop, or a model retrying one) left the agent stopped until the person started it by hand. The unit now has no start limit and restarts the agent after 2 s, backing off to 30 s (systemd 254 and newer; older systemd keeps a fixed 5 s). An installed unit the agent generated is updated when the agent starts after upgrading, without restarting the agent; a unit someone edited is left alone. The macOS LaunchAgent and the Windows logon task already kept restarting the agent and are unchanged.
+- 6900fce: The native Codemode client on Connected Machines (`opengeni-agent codemode`, the `$OPENGENI_CODEMODE_NATIVE_CLIENT` path) now says why it can't reach Opengeni instead of "Codemode request failed: error sending request for url (…)". A failed DNS lookup names the host, the resolver's reason and where to look; a TLS certificate that is not yet valid or has expired names this machine's clock reading, so a wrong clock is easy to spot; a certificate for another name points at the URL and intercepting proxies; a refused, timed-out, closed or unroutable connection says so. When a proxy from `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` is in use, connection failures name the proxy (host and port only) and its variable instead of blaming Opengeni's host or the resolver, and a failure while an answer was arriving reads "Lost contact with Opengeni". A connection that is not up within 10 seconds now fails as a connection timeout instead of waiting out the 30-second request limit. The machine's own settings are never changed: on a person's own computer the message says what to check. Unknown causes keep the previous text. Takes effect with the next machine agent release (0.1.151).
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [fb37d99]
+- Updated dependencies [f619179]
+- Updated dependencies [15763a2]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/sdk@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+
 ## 6.8.0
 
 ### Patch Changes

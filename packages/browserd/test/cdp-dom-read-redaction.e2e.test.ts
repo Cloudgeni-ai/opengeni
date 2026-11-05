@@ -28,13 +28,13 @@ const MIXED_PAGE = `<title>Mixed</title><body>
     <label>Email <input name="email" value="fixture-email-value"></label>
     <label>Password <input type="password" value="fixture-password-secret"></label>
     <textarea data-private>fixture-textarea-secret</textarea>
-    <select id="expiry-field" name="card-expiry"><option>fixture-select-secret</option></select>
+    <select id="expiry-field" name="card-expiry" autocomplete="cc-exp"><option>fixture-select-secret</option></select>
   </form>
   <p>Balance: <span data-private>fixture-balance-secret</span> NOK</p>
   <h2 id="credit-card-offers">Credit card offers</h2><p id="expiration-notice">Your trial ends Friday</p>
   <label>Link expiration <select id="link-expiration"><option>1 day</option><option>7 days</option></select></label>
   <div id="card-number">Card ending 4242</div>
-  <div contenteditable id="card-number-editor">fixture-editor-secret</div>
+  <div contenteditable id="card-number-editor" data-private>fixture-editor-secret</div>
   <div data-sensitive><p>fixture-nested-secret</p><span>fixture-nested-secret-two</span></div>
   <div style="display: contents">Contents <span style="display: none">fixture-hidden-text</span><span data-private>fixture-contents-secret</span></div>
   <ul><li>First</li><li>Second</li></ul>
@@ -105,15 +105,15 @@ e2e(
         "More",
         "Less",
         "Footer text",
-        // A payment-like id marks a form field, or an element named exactly
-        // as one (#card-number): other page text keeps showing.
+        // Only standard markup protects: payment-like ids, names and
+        // labels never hide page text.
         "Credit card offers",
         "Your trial ends Friday",
         "Link expiration",
+        "Card ending 4242",
       ]) {
         expect(mixedBody.text).toContain(shown);
       }
-      expect(mixedBody.text).not.toContain("Card ending 4242");
       expect(JSON.stringify(mixedBody)).not.toMatch(/fixture-/u);
 
       // Paging through the text never reaches protected text either.
@@ -129,13 +129,7 @@ e2e(
       expect(paged).toBe(mixedBody.text!);
 
       // A protected element, and anything inside one, is still refused whole.
-      for (const selector of [
-        "#inside",
-        "#inside-child",
-        "#card-number",
-        "#card-number-editor",
-        "#expiry-field",
-      ]) {
+      for (const selector of ["#inside", "#inside-child", "#card-number-editor", "#expiry-field"]) {
         const refused = await read(mixed.target.id, selector);
         expect(refused).toMatchObject({ text: null, value: null });
         expect(refused.redacted).not.toBeNull();
@@ -145,6 +139,7 @@ e2e(
       for (const [selector, text] of [
         ["#credit-card-offers", "Credit card offers"],
         ["#expiration-notice", "Your trial ends Friday"],
+        ["#card-number", "Card ending 4242"],
       ]) {
         const shown = await read(mixed.target.id, selector!);
         expect(shown).toMatchObject({ redacted: null, text });
@@ -170,7 +165,7 @@ const OBSERVED_PAGE = `<title>Observed</title><body>
       oninput="document.getElementById('password-length').textContent = 'Password length ' + this.value.length"></label>
     <label>Notes <textarea data-private
       oninput="document.getElementById('notes-length').textContent = 'Notes length ' + this.value.length">fixture-textarea-secret</textarea></label>
-    <label>Expiry <select name="card-expiry"><option>fixture-select-secret</option><option>fixture-select-other</option></select></label>
+    <label>Expiry <select name="card-expiry" autocomplete="cc-exp"><option>fixture-select-secret</option><option>fixture-select-other</option></select></label>
     <label>Agree <input type="checkbox" data-private checked></label>
   </form>
   <p id="password-length">Password length 0</p>
@@ -179,7 +174,7 @@ const OBSERVED_PAGE = `<title>Observed</title><body>
   <h2 id="credit-card-offers">Credit card offers</h2><p id="expiration-notice">Your trial ends Friday</p>
   <label>Link expiration <select id="link-expiration"><option>1 day</option><option>7 days</option></select></label>
   <div id="card-number">Card ending 4242</div>
-  <div contenteditable id="card-number-editor">fixture-editor-secret</div>
+  <div contenteditable id="card-number-editor" data-private>fixture-editor-secret</div>
   <div data-sensitive><p>fixture-nested-secret</p><a href="/fixture-link-address">fixture-link-secret</a></div>
   <button>Pay <span data-private>fixture-button-secret</span> now</button>
   <span id="private-label" data-private>fixture-labelledby-secret</span>
@@ -249,12 +244,11 @@ e2e(
       expect(expiry).toMatchObject({ value: { redacted: true, reason: "payment" } });
       expect(expiry.children ?? []).toEqual([]);
 
-      // A payment-like id or name marks a form field, or an element named
-      // exactly as one (#card-number). A heading, a paragraph and a select
-      // whose name merely mentions expiration keep showing what they hold.
+      // Only standard markup protects. Payment-like ids and names never
+      // hide a heading, a paragraph, a select or an element's text.
       expect(node(page, "heading", "Credit card offers")).toBeDefined();
       expect(node(page, "text", "Your trial ends Friday")).toBeDefined();
-      expect(JSON.stringify(page)).not.toContain("Card ending 4242");
+      expect(node(page, "text", "Card ending 4242")).toBeDefined();
       const linkExpiration = node(page, "combobox", "Link expiration");
       expect(JSON.stringify(linkExpiration.value ?? null)).not.toContain("redacted");
       expect(JSON.stringify(linkExpiration)).toContain("7 days");

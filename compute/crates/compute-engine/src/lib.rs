@@ -416,6 +416,18 @@ pub trait Engine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether a VM left for `spec` is held frozen, as the host's guard
+    /// leaves every VM once the lease has run out (ADR 18): its VMM
+    /// cannot answer until something thaws it, and a VM held frozen runs
+    /// nothing meanwhile. A host whose agent finds one it cannot take back
+    /// lists it when it registers, so the service rules on it before the
+    /// lease lets it run again. No VM left for `spec` is not held frozen,
+    /// and neither is any VM of an engine whose VMs no guard stops.
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        let _ = spec;
+        Ok(false)
+    }
+
     /// Whether the kernel may compress running VMs' memory (ADR 24): on
     /// an engine that does not, a running VM's compressed pages are a
     /// defect worth a warning.

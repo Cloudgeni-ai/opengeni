@@ -78,6 +78,9 @@ struct Agent {
     wanted: Option<(AgentInit, CommandEnv)>,
     /// The running agent's pid and what it started with.
     running: Option<(i32, AgentInit)>,
+    /// The pid of an agent the guest asked to stop, to start again with
+    /// other settings: its end is no fault of its program.
+    stopping: Option<i32>,
     /// The epoch its connections to its link port open in; see
     /// [`Guest::agent_link_gone`].
     link_epoch: crate::agent::LinkEpoch,
@@ -194,7 +197,7 @@ impl Guest {
         let Some(wanted) = &given.agent else {
             return;
         };
-        if !Path::new(crate::agent::AGENT_PATH).exists() {
+        if !super::program::Program::agent().available() {
             log("the init names an agent, but the image has none");
             return;
         }
@@ -206,6 +209,9 @@ impl Guest {
             .filter(|(_, running)| running != wanted)
             .map(|(pid, _)| *pid);
         agent.wanted = Some((wanted.clone(), env));
+        if stale.is_some() {
+            agent.stopping = stale;
+        }
         drop(agent);
         self.agent_changed.notify_all();
         if let Some(pid) = stale
@@ -238,8 +244,8 @@ impl Guest {
         self.agent().running = Some((pid, init));
     }
 
-    /// The agent `pid` ended.
-    pub fn agent_stopped(&self, pid: i32) {
+    /// The agent `pid` ended. Whether the guest had asked it to stop.
+    pub fn agent_stopped(&self, pid: i32) -> bool {
         let mut agent = self.agent();
         if agent
             .running
@@ -248,6 +254,11 @@ impl Guest {
         {
             agent.running = None;
         }
+        let asked = agent.stopping == Some(pid);
+        if asked {
+            agent.stopping = None;
+        }
+        asked
     }
 
     /// The agent's link epoch, which a connection to its link port opens

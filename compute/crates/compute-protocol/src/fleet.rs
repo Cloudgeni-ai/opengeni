@@ -20,7 +20,7 @@ mod pointers;
 
 pub use pointers::{
     KeptPointer, POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite,
-    PointerWritten,
+    PointerWritten, READS_PACKS_HEADER,
 };
 
 /// Where the service's host API lives: registrations, renewals and reports
@@ -195,6 +195,13 @@ pub struct Capacity {
     pub cpu_free_millis: u64,
     /// Disk free for sandboxes, in MiB.
     pub disk_free_mib: u64,
+    /// Disk in MiB beyond [`Capacity::disk_free_mib`] that a new sandbox
+    /// could take now by the host freeing what it keeps without losing
+    /// anything, as its admission counts it (ADR 30). Placement counts it
+    /// as free. Missing from what a host or the service of an earlier
+    /// release wrote, which then counts none.
+    #[serde(default)]
+    pub disk_reclaimable_mib: u64,
     /// Its ready clones, per shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ready: Vec<ReadyClones>,
@@ -219,6 +226,12 @@ pub struct Capacity {
     /// release.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pointers_in_service: bool,
+    /// Whether it reads copies whose chunks are in packs (ADR 31). Hosts
+    /// write them only once every live host does. Told here for the same
+    /// reason as [`Capacity::guest`]; `false` from a host of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_packs: bool,
     /// What the host is now, as it would register: told here for the same
     /// reason as [`Capacity::guest`], so that a host whose configuration
     /// changed under a kept registration is placed on what it is. The

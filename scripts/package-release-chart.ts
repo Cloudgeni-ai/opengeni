@@ -1,16 +1,28 @@
 #!/usr/bin/env bun
 import { gzipSync } from "node:zlib";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+// The Modal Computer/Browser box: a docker/desktop.Dockerfile image by digest,
+// never a tag and never the headless opengeni-sandbox image.
+const desktopImageRefPattern =
+  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\.[a-z0-9-]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\/opengeni-desktop@sha256:[0-9a-f]{64}$/;
+const desktopImageRefLine = /^desktop:\n {2}imageRef: "[^"\n]*"$/gm;
 
+/**
+ * Packages the chart with its default Modal desktop pin set to the desktop
+ * image built from the same source, so a packaged chart can never carry an
+ * older box than its own release. The source values.yaml pin is only the
+ * fallback for unpackaged checkouts.
+ */
 export async function packageReleaseChart(input: {
   chartDirectory: string;
   output: string;
   version: string;
   appVersion: string;
+  desktopImageRef: string;
   run?: Spawn;
 }): Promise<void> {
   if (!versionPattern.test(input.version)) {
@@ -18,6 +30,11 @@ export async function packageReleaseChart(input: {
   }
   if (!input.appVersion.trim() || /[\r\n]/.test(input.appVersion)) {
     throw new Error("chart app version must be a nonempty single line");
+  }
+  if (!desktopImageRefPattern.test(input.desktopImageRef)) {
+    throw new Error(
+      "desktop image ref must be the release's opengeni-desktop image pinned by @sha256 digest",
+    );
   }
 
   const chartDirectory = resolve(input.chartDirectory);
@@ -55,6 +72,7 @@ export async function packageReleaseChart(input: {
     if (roots.length !== 1) {
       throw new Error(`packaged chart must contain exactly one root (found ${roots.length})`);
     }
+    await pinDesktopImage(resolve(extracted, roots[0]!, "values.yaml"), input.desktopImageRef);
     const tar = await run(
       [
         "tar",
@@ -79,6 +97,29 @@ export async function packageReleaseChart(input: {
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+export function pinDesktopImageInValues(values: string, desktopImageRef: string): string {
+  const matches = values.match(desktopImageRefLine) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(
+      `chart values must declare exactly one top-level desktop.imageRef (found ${matches.length})`,
+    );
+  }
+  const pinned = values.replace(
+    desktopImageRefLine,
+    `desktop:\n  imageRef: ${JSON.stringify(desktopImageRef)}`,
+  );
+  const parsed = Bun.YAML.parse(pinned) as { desktop?: { imageRef?: unknown } } | null;
+  if (parsed?.desktop?.imageRef !== desktopImageRef) {
+    throw new Error("packaged chart desktop.imageRef does not equal the release desktop image");
+  }
+  return pinned;
+}
+
+async function pinDesktopImage(valuesPath: string, desktopImageRef: string): Promise<void> {
+  const values = await readFile(valuesPath, "utf8");
+  await writeFile(valuesPath, pinDesktopImageInValues(values, desktopImageRef));
 }
 
 type Spawn = (argv: string[], cwd: string) => Promise<Buffer>;
@@ -106,6 +147,7 @@ function parseArgs(values: string[]): {
   output: string;
   version: string;
   appVersion: string;
+  desktopImageRef: string;
 } {
   const parsed = new Map<string, string>();
   for (let index = 0; index < values.length; index += 1) {
@@ -116,7 +158,13 @@ function parseArgs(values: string[]): {
     if (parsed.has(flag)) throw new Error(`${flag} may be supplied only once`);
     parsed.set(flag, value);
   }
-  const allowed = new Set(["--chart", "--output", "--version", "--app-version"]);
+  const allowed = new Set([
+    "--chart",
+    "--output",
+    "--version",
+    "--app-version",
+    "--desktop-image-ref",
+  ]);
   for (const flag of parsed.keys()) {
     if (!allowed.has(flag)) throw new Error(`unknown argument: ${flag}`);
   }
@@ -130,6 +178,7 @@ function parseArgs(values: string[]): {
     output: required("--output"),
     version: required("--version"),
     appVersion: required("--app-version"),
+    desktopImageRef: required("--desktop-image-ref"),
   };
 }
 
