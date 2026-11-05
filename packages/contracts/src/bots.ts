@@ -219,6 +219,42 @@ export const BotTemplateResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type BotTemplateResponse = z.output<typeof BotTemplateResponse>;
 
+// --- Bot suggestions ------------------------------------------------------
+
+/** The longest setup-instructions draft a suggestion carries (a template may hold more). */
+export const BOT_SUGGESTION_SETUP_INSTRUCTIONS_MAX_LENGTH = 8_000;
+export const BOT_SUGGESTION_REASON_MAX_LENGTH = 400;
+/**
+ * A suggestion is refused until this many similar requests came in a row from
+ * people in the chat: a bot is for work that keeps coming back, not a one-off.
+ */
+export const BOT_SUGGESTION_MIN_SIMILAR_REQUESTS = 3;
+
+/**
+ * The newest bot suggestion the agent made in a chat with `bot_suggest`,
+ * shown to people as a card. `create`: make this chat a bot (and, if they
+ * like, save it as a template). `reuse`: a bot chat (`sessionId`) or bot
+ * template (`templateId`) that already does this work. Display state only:
+ * it never changes a chat or saves a template by itself.
+ */
+export const SessionBotSuggestion = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: Uuid,
+      kind: z.enum(["create", "reuse"]),
+      sessionId: Uuid.nullable(),
+      templateId: Uuid.nullable(),
+      name: z.string().min(1).max(BOT_TEMPLATE_NAME_MAX_LENGTH),
+      description: z.string().max(SESSION_DESCRIPTION_MAX_LENGTH).nullable(),
+      avatar: SessionAvatar.nullable(),
+      setupInstructions: z.string().max(BOT_SUGGESTION_SETUP_INSTRUCTIONS_MAX_LENGTH).nullable(),
+      reason: z.string().max(BOT_SUGGESTION_REASON_MAX_LENGTH).nullable(),
+      createdAt: z.string(),
+    })
+    .strict(),
+);
+export type SessionBotSuggestion = z.output<typeof SessionBotSuggestion>;
+
 export const BOT_TEMPLATE_FILE_FORMAT = "opengeni.bot-template";
 
 /**

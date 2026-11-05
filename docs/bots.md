@@ -131,6 +131,37 @@ The agent saves a template of itself with `bot_template_save` (capability
 the setup instructions from what the chat has established and leaves out
 one-off tasks, history, personal details and secrets.
 
+### The agent suggesting a bot
+
+When most of a person's requests in a chat are the same kind of work, including
+the last three or more in a row, the agent may call `bot_suggest` (capability
+`subagents`, needs `sessions:read`). The agent judges similarity and says how
+many requests in a row match; the server declines fewer than
+`BOT_SUGGESTION_MIN_SIMILAR_REQUESTS` (3), or more than people have actually sent
+that chat, and declines a second suggestion in the same chat, so a dismissed card
+never comes back. It offers one of two things:
+
+- `create`: make this chat a bot. The agent chooses the name, a one-line
+  description and an avatar, and drafts setup instructions for a template.
+- `reuse`: a bot chat (`sessionId`) or bot template (`templateId`) that already
+  does this work. A `create` whose name a bot or template already has is
+  declined with the existing ones listed, so the agent can suggest reusing one.
+
+Everyone who can open a chat can read its card and the tool's result, so a shared
+chat may only name shared bots and templates, never its person's own Only me ones or a private Slack task;
+an Only me chat may also name that person's. The stored suggestion is written once
+(`bot_suggestion IS NULL` in the update), so concurrent calls leave one card.
+
+The tool changes nothing. It records the suggestion on the chat
+(`sessions.bot_suggestion`, migration `1219_session_bot_suggestion.sql`, display
+state that never reaches the model, returned as `Session.botSuggestion`) and the
+chat shows it as a card. **Make it a bot** sets the chat's name, description
+and avatar as the person and keeps it live; **Save as template…** opens the
+template dialog filled in from the draft; a `reuse` card opens the bot chat or
+starts a bot from the template; **Not now** hides it in that browser. A chat
+that is already a bot is not offered one. One sentence of prompt guidance,
+shown only while the tool can be available, tells the agent when to call it.
+
 ### Sharing a template as a file
 
 A template exports as a small JSON file and imports into any workspace as a new

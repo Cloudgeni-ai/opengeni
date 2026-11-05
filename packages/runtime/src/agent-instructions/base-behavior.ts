@@ -50,6 +50,10 @@ function workingWithTheUser(context: AgentPromptContext): string {
       "Larger or riskier work, and research or comparison questions, still get the full effort they need.",
     ),
     'When the user repeats an ask, such as "check again", "run it again", or the same question for a new time window, reuse the approach, query, script, or session from the earlier turn with the new inputs instead of rediscovering the environment.',
+    // Offering a bot is described only while `bot_suggest` may exist.
+    toolAvailable(context, "bot_suggest")
+      ? "When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `bot_suggest` once in that chat, preferring a bot that already does the work: it offers them a bot as a card and changes nothing until they accept."
+      : null,
     `## Progress updates
 
 ${sentences(
