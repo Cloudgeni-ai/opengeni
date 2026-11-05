@@ -4872,6 +4872,24 @@ export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewa
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
 /**
+ * The reasoning levels a model on an OpenAI-compatible endpoint accepts as
+ * `reasoning_effort`, lowest first, and the one it uses by default.
+ */
+export type CompatibleModelReasoning = {
+  efforts: ReasoningEffort[];
+  defaultEffort: ReasoningEffort;
+};
+
+/**
+ * One model of an organization's OpenAI-compatible endpoint. `reasoning` is
+ * null when it declares no reasoning levels: chats then offer no reasoning
+ * choice and send no `reasoning_effort`.
+ */
+export type OrganizationCompatibleEndpointModel = OrganizationProviderCustomModel & {
+  reasoning: CompatibleModelReasoning | null;
+};
+
+/**
  * An organization's own OpenAI-compatible endpoint: an organization model
  * account like its OpenAI key, of which it can connect several. Its key is
  * write-only; its base URL, API format and name are non-secret.
@@ -4886,14 +4904,18 @@ export type OrganizationCompatibleEndpoint = {
   api: "chat" | "responses";
   label: string | null;
   /** The endpoint's active models. */
-  models: OrganizationProviderCustomModel[];
+  models: OrganizationCompatibleEndpointModel[];
   createdAt: string;
   updatedAt: string;
 };
 export type OrganizationCompatibleEndpointsResponse = {
   endpoints: OrganizationCompatibleEndpoint[];
 };
-/** Connect an endpoint with its first model; the API checks it with a short test request first. */
+/**
+ * Connect an endpoint with its first model; the API checks it with a short
+ * test request first. Without `reasoning`, the model's levels are read from
+ * the endpoint's model listing when it publishes them; `null` declares none.
+ */
 export type CreateOrganizationCompatibleEndpointRequest = {
   operationId: string;
   baseUrl: string;
@@ -4901,15 +4923,26 @@ export type CreateOrganizationCompatibleEndpointRequest = {
   model: string;
   api?: "chat" | "responses" | undefined;
   label?: string | undefined;
+  reasoning?: CompatibleModelReasoning | null | undefined;
 };
 export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
   operationId: string;
   expectedVersion: number;
   apiKey: string;
 };
+/** Add a model to an endpoint; `reasoning` works as when connecting the endpoint. */
 export type CreateOrganizationCompatibleEndpointModelRequest = {
   operationId: string;
   upstreamModelId: string;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+/**
+ * Set one endpoint model's reasoning levels: given levels, `null` for none,
+ * or omitted to read them again from the endpoint's model listing.
+ */
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = {
+  expectedVersion: number;
+  reasoning?: CompatibleModelReasoning | null | undefined;
 };
 
 /**

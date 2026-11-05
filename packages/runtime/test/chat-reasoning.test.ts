@@ -131,7 +131,13 @@ async function response(
 }
 
 describe("shared Chat reasoning round trip", () => {
-  for (const kind of ["api-key", "openrouter-workspace", "openrouter-organization"] as const) {
+  for (const kind of [
+    "api-key",
+    "openrouter-workspace",
+    "openrouter-organization",
+    "direct-compatible-workspace",
+    "direct-compatible-organization",
+  ] as const) {
     for (const field of ["reasoning", "reasoning_content"] as const) {
       for (const stream of [true, false]) {
         test(`${kind}: ${field}, stream=${stream}, tool continuation and later user turn`, async () => {
@@ -241,6 +247,77 @@ describe("shared Chat reasoning round trip", () => {
         });
       }
     }
+  }
+});
+
+describe("a compatible endpoint's declared reasoning levels", () => {
+  const declared = {
+    runnable: true,
+    efforts: ["none", "low", "high", "max"] as const,
+    defaultEffort: "high" as const,
+  };
+  for (const stream of [false, true]) {
+    test(`sends only a declared reasoning_effort and reads reasoning and cached tokens back, stream=${stream}`, async () => {
+      const requests: Record<string, any>[] = [];
+      const provider: ResolvedModelProvider = {
+        id: "fixture",
+        label: "Fixture",
+        kind: "direct-compatible-organization",
+        api: "chat",
+        builtin: false,
+      };
+      const client = new ReplayableJsonOpenAI(
+        {
+          apiKey: "fixture-key",
+          baseURL: "https://example.test/v1",
+          maxRetries: 0,
+          fetch: async (_url, init) => {
+            const body = JSON.parse(await requestBodyText(init?.body));
+            requests.push(body);
+            return wireReply(body, "reasoning_content", false);
+          },
+        },
+        { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+      );
+      const run = async (
+        model: OpenGeniChatCompletionsModel,
+        effort: "none" | "low" | "medium" | "high" | "xhigh" | "max",
+      ) => {
+        const request = { ...base, modelSettings: { reasoning: { effort } }, input: "Start" };
+        if (!stream) return await getOrCreateTrace(() => model.getResponse(request));
+        let done: ModelResponse | undefined;
+        for await (const event of model.getStreamedResponse(request))
+          if (event.type === "response_done") done = event.response as unknown as ModelResponse;
+        return done!;
+      };
+      const model = new OpenGeniChatCompletionsModel(client, "fixture-model", {
+        ...declared,
+        efforts: [...declared.efforts],
+      });
+      const result = await run(model, "max");
+      expect(requests.at(-1)!.reasoning_effort).toBe("max");
+      // Reasoning text and cached input tokens come back from the endpoint's reply.
+      expect(result.output[0]).toMatchObject({
+        type: "reasoning",
+        rawContent: [{ text: "Compare the fixtures." }],
+      });
+      expect(JSON.stringify(result.usage)).toContain('"cached_tokens":8');
+      // An undeclared level is clamped to the nearest declared one below it.
+      await run(model, "medium");
+      expect(requests.at(-1)!.reasoning_effort).toBe("low");
+      await run(model, "xhigh");
+      expect(requests.at(-1)!.reasoning_effort).toBe("high");
+      await run(model, "none");
+      expect(requests.at(-1)!.reasoning_effort).toBe("none");
+      // A model that declares no levels never receives reasoning_effort.
+      const plain = new OpenGeniChatCompletionsModel(client, "fixture-model", {
+        runnable: false,
+        efforts: [],
+        defaultEffort: null,
+      });
+      await run(plain, "high");
+      expect(requests.at(-1)!).not.toHaveProperty("reasoning_effort");
+    });
   }
 });
 

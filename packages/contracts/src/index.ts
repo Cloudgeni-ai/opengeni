@@ -30,6 +30,7 @@ import {
   CompatibleModelApi,
   CompatibleModelBaseUrl,
   CompatibleModelName,
+  CompatibleModelReasoning,
 } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import {
@@ -51,6 +52,8 @@ export {
   ClaudeSubscriptionAccountsResponse,
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
+export * from "./reasoning-effort";
+import { ReasoningEffort } from "./reasoning-effort";
 export * from "./artifact-catalog";
 export * from "./file-access";
 import { FileAccess } from "./file-access";
@@ -895,10 +898,6 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
-);
-
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
   z.enum(["standard", "priority", "fast", "ultrafast"]),
@@ -913,7 +912,6 @@ export type LatencyMode = z.infer<typeof LatencyMode>;
 export function modelServiceTierCatalogEntry(slug: string, tierId: string): string {
   return `${slug}@${tierId}`;
 }
-export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -3986,6 +3984,18 @@ export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
 >;
 
 /**
+ * One model of an organization's OpenAI-compatible endpoint, with the
+ * reasoning levels it accepts (null when it declares none, so chats get no
+ * reasoning choice for it).
+ */
+export const OrganizationCompatibleEndpointModel = /* @__PURE__ */ defineSchema(() =>
+  OrganizationProviderCustomModel.extend({ reasoning: CompatibleModelReasoning.nullable() }),
+);
+export type OrganizationCompatibleEndpointModel = z.infer<
+  typeof OrganizationCompatibleEndpointModel
+>;
+
+/**
  * An organization's own OpenAI-compatible endpoint: an organization model
  * account like its OpenAI key, of which it can connect several. Its key is
  * write-only; its base URL, API format and name are non-secret.
@@ -4000,7 +4010,7 @@ export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
     api: CompatibleModelApi,
     label: primitives.nullableString,
     /** The endpoint's active models. */
-    models: z.array(OrganizationProviderCustomModel),
+    models: z.array(OrganizationCompatibleEndpointModel),
     createdAt: primitives.dateTime,
     updatedAt: primitives.dateTime,
   }),
@@ -4014,7 +4024,9 @@ export type OrganizationCompatibleEndpointsResponse = z.infer<
 >;
 /**
  * Connect an OpenAI-compatible endpoint with its first model. The API checks
- * the model with a short test request to the endpoint before saving.
+ * the model with a short test request to the endpoint before saving. Without
+ * `reasoning`, the model's reasoning levels are read from the endpoint's
+ * model listing when it publishes them; `null` declares none.
  */
 export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -4030,6 +4042,7 @@ export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defin
         .max(60)
         .regex(/^[^\r\n|]+$/)
         .optional(),
+      reasoning: CompatibleModelReasoning.nullable().optional(),
     })
     .strict(),
 );
@@ -4049,12 +4062,37 @@ export const ReplaceOrganizationCompatibleEndpointKeyRequest = /* @__PURE__ */ d
 export type ReplaceOrganizationCompatibleEndpointKeyRequest = z.infer<
   typeof ReplaceOrganizationCompatibleEndpointKeyRequest
 >;
-/** Add a model to an endpoint; the API checks it with the endpoint's key first. */
+/**
+ * Add a model to an endpoint; the API checks it with the endpoint's key
+ * first. `reasoning` works as when connecting the endpoint.
+ */
 export const CreateOrganizationCompatibleEndpointModelRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ operationId: primitives.uuid, upstreamModelId: CompatibleModelName }).strict(),
+  z
+    .object({
+      operationId: primitives.uuid,
+      upstreamModelId: CompatibleModelName,
+      reasoning: CompatibleModelReasoning.nullable().optional(),
+    })
+    .strict(),
 );
-export type CreateOrganizationCompatibleEndpointModelRequest = z.infer<
+export type CreateOrganizationCompatibleEndpointModelRequest = z.input<
   typeof CreateOrganizationCompatibleEndpointModelRequest
+>;
+/**
+ * Set the reasoning levels of one endpoint model: given levels, `null` for
+ * none, or omitted to read them again from the endpoint's model listing.
+ */
+export const SetOrganizationCompatibleEndpointModelReasoningRequest =
+  /* @__PURE__ */ defineSchema(() =>
+    z
+      .object({
+        expectedVersion: primitives.positiveInteger,
+        reasoning: CompatibleModelReasoning.nullable().optional(),
+      })
+      .strict(),
+  );
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = z.input<
+  typeof SetOrganizationCompatibleEndpointModelReasoningRequest
 >;
 
 const turnInitiatorIdentityFields = {

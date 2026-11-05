@@ -15370,6 +15370,14 @@ export const organizationModelProviderCustomModels = pgTable(
     connectionId: uuid("connection_id"),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
+    /** OpenAI-compatible endpoint models only: accepted reasoning levels, lowest first. */
+    reasoningEfforts: text("reasoning_efforts")
+      .array()
+      .$type<("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[]>(),
+    /** OpenAI-compatible endpoint models only: the declared default level. */
+    defaultReasoningEffort: text("default_reasoning_effort").$type<
+      "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    >(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15403,6 +15411,10 @@ export const organizationModelProviderCustomModels = pgTable(
     connectionCheck: check(
       "organization_model_provider_custom_models_connection_chk",
       sql`(${table.providerKind} = 'openai_compatible') = (${table.connectionId} is not null)`,
+    ),
+    reasoningCheck: check(
+      "organization_model_provider_custom_models_reasoning_chk",
+      sql`(${table.reasoningEfforts} is null) = (${table.defaultReasoningEffort} is null) and (${table.reasoningEfforts} is null or (${table.providerKind} = 'openai_compatible' and cardinality(${table.reasoningEfforts}) between 1 and 7 and ${table.reasoningEfforts} <@ array['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']::text[] and ${table.defaultReasoningEffort} = any (${table.reasoningEfforts})))`,
     ),
     createOperation: uniqueIndex(
       "organization_model_provider_custom_models_create_operation_uq",
