@@ -113,7 +113,7 @@ template setup text 0 to 20,000.
 1. Expand (this step): tables, session columns, backfill, sync triggers,
    wider legacy checks.
 2. Worker: the agent Instructions prompt layer and a claim gate so older
-   workers never run a chat that needs it (migration 1246; see
+   workers never run a chat that needs it (migration 1261; see
    [run lifecycle, "Agent instructions"](run-lifecycle.md#agent-instructions)).
 3. API switch: read `agents`, write both shapes (with
    `opengeni.agents_dual_write`), bind `sessions.agent_id` and the revision when

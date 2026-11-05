@@ -7,7 +7,7 @@ import { getSandboxRecoveryDiscontinuity, type Database } from "@opengeni/db";
 export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 4 as const;
 
 /** This build adds the agent instructions layer and channel; a worker without
- * it cannot claim a chat bound to an agent revision (migration 1246). */
+ * it cannot claim a chat bound to an agent revision (migration 1261). */
 export const AGENT_INSTRUCTIONS_PROTOCOL = 1 as const;
 
 export async function recoveryAwareSessionInstructions(

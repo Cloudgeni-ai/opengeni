@@ -77044,7 +77044,7 @@ export type ClaimSessionWorkForAttemptInput = {
   filesystemDiscontinuityProtocol?: 1 | 2 | 3 | 4;
   /** Internal worker-build declaration: this build adds the agent
    * instructions layer and channel. Without it, a claim of a chat bound to an
-   * agent revision is refused (SQLSTATE 55000, migration 1246). */
+   * agent revision is refused (SQLSTATE 55000, migration 1261). */
   agentInstructionsProtocol?: 1;
   sessionId: string;
   workflowId: string;
