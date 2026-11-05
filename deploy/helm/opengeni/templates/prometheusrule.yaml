@@ -238,6 +238,9 @@ spec:
           # its recovery request recorded is scheduled, not overdue, so
           # sustained 429s that keep some session in backoff stay silent.
           # Overdue > 5m held for 5m means a single session is >= 10m past due.
+          # The workflow-wake reaper re-wakes a stranded recovery about four
+          # minutes after its close; apps/worker's session-recovery-repair-alert
+          # test keeps this window clearly longer, so a self-repair never pages.
           expr: |
             max by (state) (
               opengeni_session_recovery_oldest_overdue_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
