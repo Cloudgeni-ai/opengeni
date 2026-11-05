@@ -2,12 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { SandboxProviderError } from "@openai/agents/sandbox";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
-import {
-  buildManifest,
-  buildOpenGeniAgent,
-  runOwnedSandboxSetup,
-  takeSandboxSetupNotices,
-} from "../src/index";
+import * as runtimeIndex from "../src/index";
+import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { SelfhostedControlError } from "../src/sandbox/selfhosted/control-rpc";
 
 // Imported lazily so the setup regressions above run (and fail) on code
@@ -89,7 +85,8 @@ describe("platform setup on a damaged box", () => {
     });
     // No turn input is left to add to: the notice is held for the next shell
     // result (sandbox-setup-notices.ts).
-    const held = takeSandboxSetupNotices(agent);
+    // Read through the namespace so this file still loads on code without it.
+    const held = runtimeIndex.takeSandboxSetupNotices(agent);
     expect(held).toStartWith("Platform setup notice:");
     expect(held).toContain("No space left on the workspace machine's disk");
   });
