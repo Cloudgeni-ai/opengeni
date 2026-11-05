@@ -31314,6 +31314,37 @@ export async function previewConnectorActionApproval(
   );
 }
 
+/**
+ * The decision this attempt's frozen tool permissions give one connector tool
+ * on one connection, as a call of it would resolve: an explicit choice, else
+ * `defaultDecision`. Reads only the snapshot; creates no request or audit row.
+ * Lets one tool follow the choice a person made for another, such as a bot
+ * send following the person's own Slack send permission.
+ */
+export async function resolveAttemptConnectorToolDecision(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  input: {
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    defaultDecision: "allow" | "ask";
+  },
+): Promise<"allow" | "ask" | "block"> {
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        ...input,
+        actionName: input.toolName,
+      });
+      return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
+    },
+  );
+}
+
 export async function beginConnectorActionExecution(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -34575,6 +34606,84 @@ export async function getSessionParentXaiProviderAccountAuthority(
   childSessionId: string,
 ): Promise<FrozenXaiExecutionAuthority> {
   return getAcceptedSubscriptionParentAuthority(db, "xai", workspaceId, childSessionId);
+}
+
+/** The top of a worker chain, as it runs now. */
+export type SessionChainRoot = {
+  rootSessionId: string;
+  /** Whether no person answers in the root chat right now. */
+  rootUnattended: boolean;
+  /**
+   * Metadata of the exact root turn that started this chain, through each
+   * child's immutable parent turn. Null when that lineage is not recorded
+   * (legacy children) or the turn is gone.
+   */
+  rootTurnMetadata: Record<string, unknown> | null;
+};
+
+const SESSION_CHAIN_MAX_HOPS = 64;
+
+/**
+ * The root chat of a worker session and the root turn that started its chain,
+ * following `parentSessionId`/`parentTurnId`. Null for a top-level session.
+ * Lets a worker act as attended or not the way the chat it works for does: a
+ * worker spawned by a scheduled or unattended run has nobody to answer it.
+ */
+export async function getSessionChainRoot(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionChainRoot | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    let currentId = sessionId;
+    let rootTurnId: string | null = null;
+    for (let hop = 0; hop <= SESSION_CHAIN_MAX_HOPS; hop += 1) {
+      const [row] = await scopedDb
+        .select({
+          parentSessionId: schema.sessions.parentSessionId,
+          parentTurnId: schema.sessions.parentTurnId,
+          unattendedSetting: schema.sessions.unattendedSetting,
+          metadata: schema.sessions.metadata,
+          forkedFromSessionId: schema.sessions.forkedFromSessionId,
+        })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, currentId)))
+        .limit(1);
+      if (!row) {
+        if (currentId === sessionId) return null;
+        throw new Error("session chain root is unavailable");
+      }
+      if (row.parentSessionId) {
+        rootTurnId = row.parentTurnId;
+        currentId = row.parentSessionId;
+        continue;
+      }
+      if (currentId === sessionId) return null;
+      const [turn] = rootTurnId
+        ? await scopedDb
+            .select({ metadata: schema.sessionTurns.metadata })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, currentId),
+                eq(schema.sessionTurns.id, rootTurnId),
+              ),
+            )
+            .limit(1)
+        : [];
+      return {
+        rootSessionId: currentId,
+        rootUnattended: resolveSessionUnattended({
+          setting: (row.unattendedSetting as SessionUnattendedSetting | null) ?? null,
+          createdUnattended: sessionMetadataUnattended(row.metadata),
+          forked: row.forkedFromSessionId !== null,
+        }),
+        rootTurnMetadata: turn?.metadata ?? null,
+      };
+    }
+    throw new Error("session chain is deeper than any admitted worker chain");
+  });
 }
 
 export async function getSessionSpawnDenial(

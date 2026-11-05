@@ -271,6 +271,8 @@ import {
   buildOpenGeniMcpProtocolServer,
   buildOpenGeniMcpServer,
   isOpenGeniMcpProtocolOnlyMessage,
+  mcpMessageNeedsSlackBotAvailability,
+  resolveSlackBotToolAvailability,
 } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -2143,9 +2145,8 @@ export function createAppComposition(deps: AppDependencies): {
           typeof boundSessionId === "string"
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
-        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
-          authorizeBoundSession(),
-          () =>
+        const [, [mcpDeps, startedByPerson, fullAccess, slackBotAvailable]] =
+          await alongsideAuthorization(authorizeBoundSession(), () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
               // Fixed for the session's life: a person started it themselves.
@@ -2156,11 +2157,17 @@ export function createAppComposition(deps: AppDependencies): {
                     (authority) => authority !== null,
                   )
                 : false,
+              // Live: the bot tools are listed only while a bot is available.
+              // Read only for a tool listing or a bot tool call.
+              mcpRequestNeedsSlackBotAvailability(boundedRequest).then((needed) =>
+                needed ? resolveSlackBotToolAvailability(routeDeps.db, grant) : undefined,
+              ),
             ]),
-        );
+          );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          slackBotAvailable,
           appActions: sessionScope
             ? {
                 access: {
@@ -2843,6 +2850,17 @@ async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
   }
   const messages = Array.isArray(body) ? body : [body];
   return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
+}
+
+async function mcpRequestNeedsSlackBotAvailability(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself; nothing is listed.
+    return false;
+  }
+  return (Array.isArray(body) ? body : [body]).some(mcpMessageNeedsSlackBotAvailability);
 }
 
 async function requireMcpAccessGrantAuthorization(
