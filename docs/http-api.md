@@ -68,8 +68,10 @@ deployment archives idle sessions. `PUT
 `{ "archived": true }` archives a chat for everyone (`sessions:control`), and
 `{ "archived": false }` brings it back: exactly within ten seconds, and later
 by restoring its stored content in the background (`retention.archive.restoring`
-until done; 409 `session_archive_busy` while it is being stored, 409
-`session_archive_restore_root` for a sub-chat). 409 `session_archive_blocked`
+until done; 409 `session_archive_busy` while it is being stored or its stopped
+work is settling, 409 `session_archive_restore_root` for a sub-chat). A restored
+chat whose work the Archive stopped is idle and resumed again, so it takes new
+messages. 409 `session_archive_blocked`
 lists what keeps a chat live, including sub-chats still in use
 (`active_sub_chat`), which `confirmActiveSubChats` archives too. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).

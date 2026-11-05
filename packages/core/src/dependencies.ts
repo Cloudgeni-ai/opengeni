@@ -132,6 +132,8 @@ export type SessionWorkflowClient = {
     accountId: string;
     workspaceId: string;
     sessionId: string;
+    /** Who restored it: the chats it brings back are resumed as them. */
+    subjectId: string;
     requestedAt: string;
   }) => Promise<void>;
   /**

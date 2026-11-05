@@ -1,4 +1,8 @@
-import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
+import {
+  SESSION_ARCHIVE_STOP_REASON,
+  type SessionEvent,
+  type SessionEventType,
+} from "@opengeni/contracts";
 import { and, asc, eq, gt, inArray, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   rawRows,
@@ -7,7 +11,8 @@ import {
   withWorkspaceSessionActivityRls,
   type Database,
 } from "./database";
-import { fromPostgresLosslessJson } from "./lossless-json";
+import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
 
@@ -848,13 +853,16 @@ export class SessionArchiveFinalError extends Error {
   }
 }
 
-/** The chat is being moved to long-term storage right now; restoring waits for that. */
+/**
+ * The chat is being moved to long-term storage right now, or the work its
+ * Archive stopped is still settling; restoring waits for that.
+ */
 export class SessionArchiveBusyError extends Error {
   readonly code = "session_archive_busy";
-  constructor() {
-    super(
-      "This chat is being moved to long-term storage right now. Try restoring it again in a minute.",
-    );
+  constructor(
+    message = "This chat is being moved to long-term storage right now. Try restoring it again in a minute.",
+  ) {
+    super(message);
     this.name = "SessionArchiveBusyError";
   }
 }
@@ -1200,6 +1208,7 @@ export async function unarchiveSession(
           archived: boolean;
           archived_with_root: boolean;
           content_archive_state: "archiving" | "archived" | null;
+          stop_settling: boolean;
         }>(
           tx,
           sql`select s.id, s.parent_session_id, s.root_session_id,
@@ -1208,7 +1217,9 @@ export async function unarchiveSession(
                 select r.archived_at from sessions r
                 where r.workspace_id = s.workspace_id and r.id = ${scope.sessionId}::uuid
               ) as archived_with_root,
-              s.content_archive_state
+              s.content_archive_state,
+              s.status = 'cancelled' and s.active_turn_id is not null
+                and s.direct_control_reason = ${SESSION_ARCHIVE_STOP_REASON} as stop_settling
             from sessions s
             where s.workspace_id = ${scope.workspaceId}::uuid
               and s.id in (${sql.join(
@@ -1235,6 +1246,13 @@ export async function unarchiveSession(
         const targets = rows.filter((row) => row.id === root.id || row.archived_with_root);
         if (targets.some((row) => row.content_archive_state === "archiving")) {
           throw new SessionArchiveBusyError();
+        }
+        // The work the Archive stopped is still settling: restoring now would
+        // leave that chat cancelled. It settles within moments.
+        if (targets.some((row) => row.stop_settling)) {
+          throw new SessionArchiveBusyError(
+            "This chat's work is still stopping. Try restoring it again in a moment.",
+          );
         }
         const live = targets.filter((row) => row.content_archive_state === null).map((r) => r.id);
         const stored = targets
@@ -1270,6 +1288,169 @@ export async function unarchiveSession(
         };
       }),
   );
+}
+
+/**
+ * The chats in this chat's tree (itself included) that its Archive stopped
+ * and that are live again. Archiving stops running work the way Cancel does,
+ * with the archive as the reason: the chat and its sub-chats become
+ * `cancelled`. Such a chat is cancelled only because it was archived, which
+ * its last status change records. A chat still archived, or cancelled for
+ * any other reason, is not one of them.
+ */
+function archiveStoppedSessionsSql(scope: SessionArchiveScope, onlyIds?: readonly string[]): SQL {
+  return sql`with recursive tree(id) as (
+      select id from sessions
+      where workspace_id = ${scope.workspaceId}::uuid and id = ${scope.sessionId}::uuid
+      union
+      select child.id from sessions child join tree on child.parent_session_id = tree.id
+      where child.workspace_id = ${scope.workspaceId}::uuid
+    )
+    select s.id, s.active_turn_id is not null as settling
+    from sessions s join tree on tree.id = s.id
+    where s.workspace_id = ${scope.workspaceId}::uuid
+      and s.status = 'cancelled'
+      and s.archived_at is null and s.content_archive_state is null
+      and s.direct_control_reason = ${SESSION_ARCHIVE_STOP_REASON}
+      ${
+        onlyIds
+          ? sql`and s.id in (${sql.join(
+              onlyIds.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`
+          : sql``
+      }
+      and (
+        select e.payload ->> 'reason' from session_events e
+        where e.workspace_id = s.workspace_id and e.session_id = s.id
+          and e.type = 'session.status.changed'
+        order by e.sequence desc
+        limit 1
+      ) = ${SESSION_ARCHIVE_STOP_REASON}
+    order by s.id`;
+}
+
+/**
+ * Put the chats an Archive stopped back to idle once they are live again
+ * (restored, or the Archive undone after it stopped them), so they take new
+ * messages: each records an `idle` status change. The turn the Archive cut
+ * off stays as it ended, which reads as interrupted. A chat whose stopped
+ * turn is still settling is left for a later call and counted in `settling`.
+ * The pause the Archive left is lifted separately, by a Resume (see
+ * {@link listArchivePausedSessions}). Repeating a call changes nothing.
+ */
+export async function reopenArchiveStoppedSessions(
+  db: Database,
+  scope: SessionArchiveScope,
+): Promise<{ reopened: Array<{ sessionId: string; eventIds: string[] }>; settling: number }> {
+  return await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
+    (scoped as unknown as Database).transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const found = await rawRows<{ id: string; settling: boolean }>(
+        tx,
+        archiveStoppedSessionsSql(scope),
+      );
+      const ready = found.filter((row) => !row.settling).map((row) => row.id);
+      const settling = found.length - ready.length;
+      if (ready.length === 0) return { reopened: [], settling };
+      const locks = await lockSessionEventWriteRows(tx, {
+        rowProjection: "event",
+        workspaceId: scope.workspaceId,
+        controlLock: "none",
+        sessionIds: ready,
+      });
+      // Checked again under the lock: only what is still true is changed.
+      const confirmed = new Set(
+        (
+          await rawRows<{ id: string; settling: boolean }>(
+            tx,
+            archiveStoppedSessionsSql(scope, ready),
+          )
+        )
+          .filter((row) => !row.settling)
+          .map((row) => row.id),
+      );
+      const now = new Date();
+      const reopened: Array<{ sessionId: string; eventIds: string[] }> = [];
+      for (const session of locks.sessions) {
+        if (!confirmed.has(session.id)) continue;
+        const sequence = session.lastSequence + 1;
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads([
+                {
+                  accountId: session.accountId,
+                  workspaceId: scope.workspaceId,
+                  sessionId: session.id,
+                  sequence,
+                  type: "session.status.changed",
+                  payload: { status: "idle", reason: "restored" },
+                  occurredAt: now,
+                },
+              ]),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning({ id: schema.sessionEvents.id });
+        await tx
+          .update(schema.sessions)
+          .set({ status: "idle", lastSequence: sequence, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, scope.workspaceId),
+              eq(schema.sessions.id, session.id),
+            ),
+          );
+        reopened.push({ sessionId: session.id, eventIds: inserted.map((row) => row.id) });
+      }
+      return { reopened, settling };
+    }),
+  );
+}
+
+/**
+ * The chats in this chat's tree still paused by an Archive although they are
+ * live and no longer cancelled, topmost first: a Resume of each one (which
+ * also lifts the pause below it) lets them run again. `pauseRevision` names
+ * the pause, so a repeated Resume of the same one is recognised.
+ */
+export async function listArchivePausedSessions(
+  db: Database,
+  scope: SessionArchiveScope,
+): Promise<Array<{ sessionId: string; pauseRevision: number }>> {
+  const rows = await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
+    rawRows<{ id: string; direct_pause_revision: string | number }>(
+      scoped as unknown as Database,
+      sql`with recursive tree(id) as (
+          select id from sessions
+          where workspace_id = ${scope.workspaceId}::uuid and id = ${scope.sessionId}::uuid
+          union
+          select child.id from sessions child join tree on child.parent_session_id = tree.id
+          where child.workspace_id = ${scope.workspaceId}::uuid
+        ),
+        paused as (
+          select s.id, s.parent_session_id, s.direct_pause_revision
+          from sessions s join tree on tree.id = s.id
+          where s.workspace_id = ${scope.workspaceId}::uuid
+            and s.direct_control_state = 'paused'
+            and s.direct_pause_revision is not null
+            and s.direct_control_reason = ${SESSION_ARCHIVE_STOP_REASON}
+            and s.status <> 'cancelled'
+            and s.archived_at is null and s.content_archive_state is null
+        )
+        select p.id, p.direct_pause_revision from paused p
+        where p.parent_session_id is null
+          or p.parent_session_id not in (select id from paused)
+        order by p.id`,
+    ),
+  );
+  return rows.map((row) => ({
+    sessionId: row.id,
+    pauseRevision: Number(row.direct_pause_revision),
+  }));
 }
 
 /**

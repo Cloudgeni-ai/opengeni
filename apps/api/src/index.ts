@@ -415,6 +415,7 @@ export async function createTemporalWorkflowClient(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
+              subjectId: input.subjectId,
             },
           ],
         });

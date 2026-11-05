@@ -247,17 +247,33 @@ chat counts as active for the idle period, so the idle archiver does not take
 it back on its next pass. If the workflow is lost, the maintenance pass
 finishes any restore requested more than five minutes earlier.
 
+A restored chat takes new messages again. Stopping an archived chat's work is
+a Cancel with the reason `Archived`, which leaves the chat and its sub-chats
+`cancelled` and paused. Once a chat is live again (at once, or when its
+content is back), each chat that Cancel stopped (its last
+`session.status.changed` is `cancelled` with reason `Archived`) records
+`session.status.changed` `{ "status": "idle", "reason": "restored" }` and
+becomes `idle`, and the topmost chat the Archive paused is resumed (a
+`session.control.resumed` by the person who restored it, or by the
+`service:session-archive-restore` service when the maintenance pass finishes
+the restore), which lifts the pause on its sub-chats too. The turn the Archive
+cut off stays cancelled and reads as interrupted. A chat that was cancelled
+for another reason before the Archive stays cancelled. Repeating
+`{ "archived": false }` on a live chat finishes this step if an earlier
+attempt could not.
+
 Restoring a sub-chat on its own answers 409 `session_archive_restore_root`
 with the `rootSessionId` to restore instead; a chat that is being stored right
-now answers 409 `session_archive_busy` (try again a minute later). A sub-chat
-that was stored on its own before the root was archived stays stored.
+now, or whose stopped turn is still settling, answers 409
+`session_archive_busy` (try again a moment later). A sub-chat that was stored
+on its own before the root was archived stays stored.
 
 What a restore does not bring back: purged event types (streamed text and
 output fragments, model-request telemetry, update bookkeeping, startup
 phases, credential selection and late-rejected events), which only a running
-turn or a debugger reads; work the stop step cancelled; goals it paused
-(they stay paused, so the agent does not start again on its own); and
-one-time automations it retired.
+turn or a debugger reads; the turn and queued messages the stop step
+cancelled; goals it paused (they stay paused, so the agent does not start
+again on its own); and one-time automations it retired.
 
 ### Keep-live
 

@@ -598,6 +598,84 @@ describe("restoring an archived chat from long-term storage", () => {
     );
   }, 180_000);
 
+  test("a chat that was busy when archived is stored, then restored ready for new messages", async () => {
+    const objects = new Map<string, Uint8Array>();
+    const activities = inMemoryArchive(objects);
+    const parent = await idleSession();
+    const child = await idleSession(parent);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set parent_session_id = ${parent.sessionId},
+          root_session_id = ${parent.sessionId}
+        where workspace_id = ${child.workspaceId} and id = ${child.sessionId}`;
+    });
+    const prompt = async (text: string) =>
+      await withWorkspaceSessionActivityRls(client.db, parent.workspaceId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            ...parent,
+            actor: { type: "human", subjectId: parent.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            source: "user",
+            reasoningEffortFallback: "medium",
+          }),
+        ),
+      );
+    // Busy with new work when someone archives it with its sub-chat.
+    await prompt("Keep going");
+    const [archived] = await shared.admin<{ archived_at: Date }[]>`
+      update sessions set archived_at = now() - interval '1 hour',
+        archive_requested_by = ${parent.subjectId}
+      where workspace_id = ${parent.workspaceId}
+        and id in (${parent.sessionId}, ${child.sessionId})
+      returning archived_at`;
+    // The undo window ends: the Archive stops that work like Cancel does.
+    expect(
+      await activities.stopArchivedSessionWork({
+        ...parent,
+        archivedAt: archived!.archived_at.toISOString(),
+      }),
+    ).toEqual({ pending: true });
+    for (const scope of [parent, child]) {
+      expect((await getSession(client.db, scope.workspaceId, scope.sessionId))?.status).toBe(
+        "cancelled",
+      );
+    }
+    for (let pass = 0; pass < 4; pass += 1) {
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+      for (const scope of [parent, child]) {
+        if ((await contentState(scope.sessionId)).content_archive_state === null) {
+          await deliverWakes(scope);
+        }
+      }
+    }
+    for (const scope of [parent, child]) {
+      expect((await contentState(scope.sessionId)).content_archive_state).toBe("archived");
+    }
+
+    expect((await unarchiveSession(client.db, parent))?.outcome).toBe("restoring");
+    expect(
+      await activities.restoreArchivedSessions({ ...parent, subjectId: parent.subjectId }),
+    ).toEqual({ restored: 2 });
+    for (const scope of [parent, child]) {
+      const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+      expect(session?.status).toBe("idle");
+      expect(session?.retention?.archive).toBeNull();
+    }
+    const [resumed] = await shared.admin<{ direct_control_state: string }[]>`
+      select direct_control_state from sessions where id = ${parent.sessionId}`;
+    expect(resumed!.direct_control_state).toBe("active");
+    // It takes a new message (a cancelled chat refuses it).
+    await prompt("Carry on");
+    const [queued] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from session_turns
+      where session_id = ${parent.sessionId} and status = 'queued'`;
+    expect(queued!.count).toBe(1);
+  }, 180_000);
+
   test("the maintenance pass finishes a restore whose workflow never ran", async () => {
     const objects = new Map<string, Uint8Array>();
     const activities = inMemoryArchive(objects);

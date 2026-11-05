@@ -540,6 +540,157 @@ describe("archiving a chat whose sub-chats are in use", () => {
   });
 });
 
+describe("restoring a chat whose work its Archive stopped", () => {
+  async function sendMessage(
+    chat: { workspaceId: string },
+    sessionId: string,
+    authorization: string,
+    text: string,
+  ) {
+    const response = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions/${sessionId}/events`,
+      {
+        method: "POST",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: { text },
+        }),
+      },
+    );
+    await flushPostCommitTasks();
+    return response;
+  }
+
+  async function sessionState(sessionId: string) {
+    const [row] = await admin<{ status: string; direct_control_state: string }[]>`
+      select status, direct_control_state from sessions where id = ${sessionId}`;
+    return row!;
+  }
+
+  test("a chat that was busy when archived takes new messages again once restored", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const child = await createSession(db, {
+      accountId: chat.accountId,
+      workspaceId: chat.workspaceId,
+      initialMessage: "sub-chat",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      parentSessionId: chat.sessionId,
+      createdBy: { kind: "subject", subjectId: OWNER },
+    });
+    await admin`update sessions set status = 'idle' where id = ${child.id}`;
+    // A model this deployment serves, so new messages are admitted.
+    await admin`update sessions set model = ${settings.openaiModel}
+      where root_session_id = ${chat.sessionId}`;
+    const authorization = await bearer(chat, OWNER);
+    await archive(chat, authorization);
+    // The undo window ends: the chat's running work is stopped, which leaves
+    // it and its sub-chat cancelled and paused.
+    expect(await runScheduledStep(chat.sessionId)).toEqual({ pending: true });
+    await flushPostCommitTasks();
+    expect(await sessionState(chat.sessionId)).toEqual({
+      status: "cancelled",
+      direct_control_state: "paused",
+    });
+    expect((await sessionState(child.id)).status).toBe("cancelled");
+    const [stopped] = await admin<{ id: string; status: string }[]>`
+      select id, status from session_turns where session_id = ${chat.sessionId}`;
+    expect(stopped!.status).toBe("cancelled");
+
+    await admin`update sessions set archived_at = archived_at - interval '1 minute'
+      where root_session_id = ${chat.sessionId}`;
+    const restored = await archive(chat, authorization, false);
+    expect(restored.archived).toBe(false);
+    await flushPostCommitTasks();
+    // Both are idle again; the chat is resumed, which lifts the pause on its
+    // sub-chat too (sending to it below proves that).
+    expect(await sessionState(chat.sessionId)).toEqual({
+      status: "idle",
+      direct_control_state: "active",
+    });
+    expect((await sessionState(child.id)).status).toBe("idle");
+    // The cut-off turn stays as it ended (it reads as interrupted), and the
+    // chat records that it is idle again.
+    const [cutOff] = await admin<{ status: string }[]>`
+      select status from session_turns where id = ${stopped!.id}`;
+    expect(cutOff!.status).toBe("cancelled");
+    const [latest] = await admin<{ payload: { status: string; reason: string } }[]>`
+      select payload from session_events
+      where session_id = ${chat.sessionId} and type = 'session.status.changed'
+      order by sequence desc limit 1`;
+    expect(latest!.payload).toMatchObject({ status: "idle", reason: "restored" });
+
+    // Both take a new message, and it is admitted to run.
+    for (const id of [chat.sessionId, child.id]) {
+      const sent = await sendMessage(chat, id, authorization, "carry on");
+      expect(sent.status).toBe(202);
+      const [admitted] = await admin<{ count: number }[]>`
+        select count(*)::int as count from session_turns
+        where session_id = ${id} and status in ('queued', 'running')`;
+      expect(admitted!.count).toBe(1);
+      expect((await sessionState(id)).status).not.toBe("cancelled");
+    }
+
+    // Restoring again changes nothing.
+    const again = await archiveRequest(chat, authorization, { archived: false });
+    expect(again.status).toBe(200);
+    const [resumes] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_events
+      where session_id = ${chat.sessionId} and type = 'session.control.resumed'`;
+    expect(resumes!.count).toBe(1);
+  });
+
+  test("a chat cancelled before it was archived stays cancelled when restored", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const authorization = await bearer(chat, OWNER);
+    const cancelled = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions/${chat.sessionId}/control`,
+      {
+        method: "POST",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({ action: "cancel", clientEventId: crypto.randomUUID() }),
+      },
+    );
+    expect(cancelled.status).toBe(200);
+    await flushPostCommitTasks();
+    await archive(chat, authorization);
+    await runScheduledStep(chat.sessionId);
+    await flushPostCommitTasks();
+    await admin`update sessions set archived_at = archived_at - interval '1 minute'
+      where id = ${chat.sessionId}`;
+    expect((await archive(chat, authorization, false)).archived).toBe(false);
+    await flushPostCommitTasks();
+    expect((await sessionState(chat.sessionId)).status).toBe("cancelled");
+  });
+
+  test("restoring while the stopped work is still settling asks to try again", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const authorization = await bearer(chat, OWNER);
+    await archive(chat, authorization);
+    await runScheduledStep(chat.sessionId);
+    await flushPostCommitTasks();
+    // As while a running turn is still being stopped.
+    const [turn] = await admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${chat.sessionId}`;
+    await admin`update sessions set active_turn_id = ${turn!.id} where id = ${chat.sessionId}`;
+    await admin`update sessions set archived_at = archived_at - interval '1 minute'
+      where id = ${chat.sessionId}`;
+    const busy = await archiveRequest(chat, authorization, { archived: false });
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toMatchObject({ code: "session_archive_busy" });
+    expect(await archivedAt(chat.sessionId)).not.toBeNull();
+  });
+});
+
 describe("restoring an archived chat after its content was stored", () => {
   /** What the archiver leaves once a chat's content is in long-term storage. */
   async function markStored(sessionId: string, state: "archiving" | "archived" = "archived") {

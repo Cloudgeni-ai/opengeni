@@ -31,6 +31,10 @@ import {
   retireArchivedChatWaits,
   requestSessionArchive,
   unarchiveSession,
+  listArchivePausedSessions,
+  reopenArchiveStoppedSessions,
+  SessionControlConflictError,
+  type SessionCommandActor,
   getSessionGoal,
   setSessionGoalStatusWithEvent,
   sessionWorkstreamHasActiveWork,
@@ -1079,10 +1083,19 @@ export async function archiveHumanSessionWorkstream(
     const requestedAt = new Date();
     const result = await unarchiveSession(deps.db, scope, requestedAt);
     if (result === null) return null;
+    // Chats that are live again take new messages at once; stored ones do
+    // when their content is back (the restore workflow does the same). Also
+    // run when nothing was archived, so restoring again repairs a chat an
+    // interrupted earlier restore left stopped.
+    await reviveRestoredArchivedSessions(deps, {
+      ...scope,
+      actor: { type: "human", subjectId: context.subjectId },
+    });
     if (result.restoringSessionIds.length > 0) {
       // Durable: putting the content back must not depend on this process.
       await deps.workflowClient.scheduleSessionArchiveRestore?.({
         ...scope,
+        subjectId: context.subjectId,
         requestedAt: requestedAt.toISOString(),
       });
     }
@@ -1194,6 +1207,70 @@ export async function stopArchivedSessionWork(
     scheduleHumanControlPostCommit(deps, input.workspaceId, result, "cancel");
   }
   return { pending: true };
+}
+
+/**
+ * Make a restored chat (and its restored sub-chats) take new messages again.
+ * Its Archive stopped any running work the way Cancel does, which leaves the
+ * tree cancelled and paused: put the chats it cancelled back to idle, then
+ * Resume the topmost chat it paused (as `actor`), which lifts the pause below
+ * it too. A turn the Archive cut off stays as it ended and reads as
+ * interrupted; goals it paused stay paused. Chats still archived or in
+ * storage, or cancelled for another reason, are left alone. Safe to repeat:
+ * a later call finishes what an earlier one could not.
+ */
+export async function reviveRestoredArchivedSessions(
+  deps: Parameters<typeof stopArchivedSessionWork>[0],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    actor: Exclude<SessionCommandActor, { type: "agent_attempt" }>;
+  },
+): Promise<{ reopened: number; resumed: number; settling: number }> {
+  const scope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  };
+  const { reopened, settling } = await reopenArchiveStoppedSessions(deps.db, scope);
+  for (const session of reopened) {
+    await publishSessionEventIds(
+      deps,
+      input.workspaceId,
+      session.sessionId,
+      session.eventIds,
+    ).catch(() => undefined);
+  }
+  let resumed = 0;
+  for (const paused of await listArchivePausedSessions(deps.db, scope)) {
+    try {
+      const result = await runSessionCommandPersistenceTransaction(
+        deps,
+        { workspaceId: input.workspaceId },
+        {
+          stage: "session_commands.archive_restore_resume",
+          eventTypes: ["session.control.resumed"],
+          transaction: async (tx) =>
+            await mutateSessionControlInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: paused.sessionId,
+              actor: input.actor,
+              operationKey: `archive-restore:${paused.sessionId}:${paused.pauseRevision}`,
+              action: "resume",
+              reason: null,
+            }),
+        },
+      );
+      scheduleHumanControlPostCommit(deps, input.workspaceId, result, "resume");
+      resumed += 1;
+    } catch (error) {
+      // A chat above it was cancelled for another reason: it stays as it is.
+      if (!(error instanceof SessionControlConflictError)) throw error;
+    }
+  }
+  return { reopened: reopened.length, resumed, settling };
 }
 
 /** Backward-compatible response path used by the REST control route. */

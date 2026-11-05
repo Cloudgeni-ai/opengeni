@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/activity";
-import { stopArchivedSessionWork } from "@opengeni/core";
+import { reviveRestoredArchivedSessions, stopArchivedSessionWork } from "@opengeni/core";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
   SESSION_ARCHIVE_FORMAT,
@@ -148,6 +148,8 @@ export type SessionArchiveRestoreRequest = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  /** Who restored it; absent on requests started before it was recorded. */
+  subjectId?: string;
 };
 
 export type SessionArchiveActivityOptions = {
@@ -378,6 +380,7 @@ export function createSessionArchiveActivities(
           // A restore whose own workflow was lost.
           if (objectStorage && (await restoreOne(db, objectStorage, unfinished)) === "restored") {
             result.restored += 1;
+            await reviveRestored(unfinished);
           }
         } else {
           result.purgedRows += await purgeUntilDone(db, unfinished, deadline);
@@ -472,24 +475,45 @@ export function createSessionArchiveActivities(
   async function stopArchivedSessionWorkActivity(
     input: ArchivedSessionRequest,
   ): Promise<{ pending: boolean }> {
+    return await stopArchivedSessionWork(await sessionCommandDeps(), input);
+  }
+
+  async function sessionCommandDeps(): Promise<Parameters<typeof stopArchivedSessionWork>[0]> {
     const { db, bus, wakeSessionWorkflow } = await services();
-    return await stopArchivedSessionWork(
-      {
-        db,
-        bus,
-        workflowClient: {
-          // Committed wakes are drained from their durable outbox.
-          requestSessionWorkflowWakeDispatch: async () => undefined,
-          wakeSessionWorkflow: async (wake) => {
-            if (wakeSessionWorkflow) return await wakeSessionWorkflow(wake);
-          },
-        },
-        schedulePromptPostCommit: (task) => {
-          void task().catch(() => undefined);
+    return {
+      db,
+      bus,
+      workflowClient: {
+        // Committed wakes are drained from their durable outbox.
+        requestSessionWorkflowWakeDispatch: async () => undefined,
+        wakeSessionWorkflow: async (wake) => {
+          if (wakeSessionWorkflow) return await wakeSessionWorkflow(wake);
         },
       },
-      input,
-    );
+      schedulePromptPostCommit: (task) => {
+        void task().catch(() => undefined);
+      },
+    };
+  }
+
+  /**
+   * A restored chat takes new messages again: the chats its Archive stopped
+   * go back to idle and are resumed, as the person who restored it when
+   * known. Fails (to be retried) while a stopped turn is still settling.
+   */
+  async function reviveRestored(scope: SessionArchiveScope, subjectId?: string): Promise<void> {
+    const { settling } = await reviveRestoredArchivedSessions(await sessionCommandDeps(), {
+      ...scope,
+      actor: subjectId
+        ? { type: "human", subjectId }
+        : { type: "service", subjectId: "service:session-archive-restore" },
+    });
+    if (settling > 0) {
+      throw ApplicationFailure.retryable(
+        `${settling} restored chat(s) are still stopping their archived work`,
+        "session_archive_restore_retry",
+      );
+    }
   }
 
   /**
@@ -581,6 +605,10 @@ export function createSessionArchiveActivities(
         "session_archive_restore_retry",
       );
     }
+    await reviveRestored(
+      { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId },
+      input.subjectId,
+    );
     return { restored };
   }
 
