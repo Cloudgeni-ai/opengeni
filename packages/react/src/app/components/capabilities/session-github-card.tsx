@@ -145,8 +145,8 @@ export function SessionGitHubCapabilityCard({
   }, [awaitingChange, canSyncGitHub, canUseGitHub, refreshGitHub, repoBusy, workspaceId]);
 
   useEffect(() => {
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted || !inFlight.current) return;
+    const onPageShow = (event?: Partial<PageTransitionEvent>) => {
+      if (event?.persisted !== true || !inFlight.current) return;
       // A cancelled authorization can restore this exact React tree from the
       // back/forward cache. Its prior request must not navigate or settle a
       // newer attempt after the card becomes usable again.
