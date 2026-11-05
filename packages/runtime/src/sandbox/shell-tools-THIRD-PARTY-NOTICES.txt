@@ -369,7 +369,7 @@ Oniguruma: COPYING (jq 1.8.2 vendor/oniguruma, included in jq's release executab
 Oniguruma LICENSE
 -----------------
 
-Copyright (c) 2002-2021  K.Kosako  <kkosako0@gmail.com>
+Copyright (c) 2002-2021  K.Kosako  <kkosako0 at gmail.com>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
