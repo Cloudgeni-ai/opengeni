@@ -44,6 +44,8 @@ mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+#[cfg(target_os = "linux")]
+pub mod signal_sender;
 pub mod transactional_write;
 mod work_scope;
 

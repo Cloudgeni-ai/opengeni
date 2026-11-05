@@ -805,10 +805,16 @@ struct ExecProcessGroup {
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+        /// A console of its own, without a window: a command that sends a
+        /// console control event to "every process on my console"
+        /// (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`, the Windows `kill 0`)
+        /// reaches only itself and its children, never the agent and other
+        /// commands sharing the agent's console. Nothing flashes on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
         // As before, no user code runs until the suspended child joins its job.
         let mut child = command
-            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED)
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED | CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()?;
         if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
@@ -2291,6 +2297,137 @@ mod tests {
             }
         };
         assert_eq!(status.code(), Some(7));
+    }
+
+    /// A command that signals its own process group, by number (`kill -TERM
+    /// -<pgid>`) or as `kill 0`, reaches only itself: never the agent that runs
+    /// it (this test process) and never a sibling command. A shared staging
+    /// machine went offline after a test run was stopped that way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_signalling_its_own_process_group_reaches_only_itself() {
+        use nix::sys::signal::Signal;
+        use nix::unistd::{getpgrp, Pid};
+
+        let (platform, _dir) = rooted();
+        let mut sibling_command = tokio::process::Command::new("/bin/sh");
+        sibling_command.arg("-c").arg("exec sleep 60");
+        let mut sibling = spawn_contained(sibling_command, None).expect("spawn the sibling");
+        drop(sibling.stdin.take());
+        let agent_group = getpgrp();
+        for (name, script) in [
+            (
+                "kill -TERM -<own pgid>",
+                "pgid=$(ps -o pgid= -p $$ | tr -d ' '); \
+                 [ -n \"$pgid\" ] || exit 90; \
+                 [ \"$pgid\" != \"$OPENGENI_TEST_AGENT_PGID\" ] || exit 91; \
+                 kill -TERM \"-$pgid\"; sleep 5; exit 92",
+            ),
+            ("kill 0", "kill -TERM 0; sleep 5; exit 92"),
+        ] {
+            let req = ExecRequest {
+                command: vec![script.to_string()],
+                shell: true,
+                env: [(
+                    "OPENGENI_TEST_AGENT_PGID".to_string(),
+                    agent_group.to_string(),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let resp = tokio::time::timeout(
+                Duration::from_secs(20),
+                retry_transient_spawn(|| platform.exec(&req)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the exec must finish"))
+            .unwrap_or_else(|error| panic!("{name}: exec failed: {error}"));
+            assert!(
+                !matches!(resp.exit_code, 90..=92),
+                "{name}: the command was not stopped by its own group signal (exit {}, stderr {:?})",
+                resp.exit_code,
+                String::from_utf8_lossy(&resp.stderr)
+            );
+        }
+        // This process is the agent here: it is still running, and nothing
+        // signalled its group.
+        assert_eq!(nix::sys::signal::kill(Pid::this(), None::<Signal>), Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), sibling.wait())
+                .await
+                .is_err(),
+            "a sibling command must survive another command's group signal"
+        );
+        sibling.terminate().expect("stop the sibling");
+        let _ = sibling.wait().await;
+    }
+
+    /// The Windows `kill 0`: a console control event sent to "every process on
+    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
+    /// process sharing the sender's console. A command therefore runs on a
+    /// console of its own: the agent (this test process) must not be among the
+    /// processes on a command's console. Skips where this process has no
+    /// console its children would share.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_does_not_share_the_agents_console() {
+        const LIST_CONSOLE: &str = "$sig = '[DllImport(\"kernel32.dll\")] public static extern uint GetConsoleProcessList(uint[] list, uint count);'\r\n\
+            $k = Add-Type -MemberDefinition $sig -Name ConsoleList -Namespace OpengeniTest -PassThru\r\n\
+            $list = New-Object 'uint[]' 256\r\n\
+            $n = $k::GetConsoleProcessList($list, 256)\r\n\
+            if ($n -eq 0) { 'none' } else { ($list[0..($n - 1)]) -join ' ' }\r\n";
+        let (platform, dir) = rooted();
+        let script = dir.path().join("list-console.ps1");
+        std::fs::write(&script, LIST_CONSOLE).expect("write the console probe");
+        let argv: Vec<String> = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain([script.to_string_lossy().into_owned()])
+        .collect();
+        let this = std::process::id().to_string();
+        let on_console = |output: &[u8]| {
+            String::from_utf8_lossy(output)
+                .split_whitespace()
+                .any(|pid| pid == this)
+        };
+        // A plain child shares this process's console, if it has one.
+        let inherited = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the console probe");
+        assert!(
+            inherited.status.success(),
+            "the console probe failed: {inherited:?}"
+        );
+        if !on_console(&inherited.stdout) {
+            eprintln!("skipped: this process has no console its children share");
+            return;
+        }
+        let req = ExecRequest {
+            command: argv,
+            ..Default::default()
+        };
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec the console probe");
+        assert_eq!(
+            resp.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&resp.stderr)
+        );
+        assert!(
+            !on_console(&resp.stdout),
+            "a command shares the agent's console: {}",
+            String::from_utf8_lossy(&resp.stdout)
+        );
     }
 
     #[tokio::test]

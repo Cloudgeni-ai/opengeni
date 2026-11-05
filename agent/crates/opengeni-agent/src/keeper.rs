@@ -19,6 +19,9 @@
 //! * `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` are passed on and stop the
 //!   agent for good; `SIGUSR1` and `SIGUSR2` are passed on. A signal ignored
 //!   when the keeper started (`nohup`, a background job) stays ignored by both.
+//! * A stop signal one of the agent's own commands sent (`kill -1` in a
+//!   command reaches the keeper too) does not stop the keeper, and an agent
+//!   such a signal ended is started again.
 //! * The keeper exits with the agent's exit status. An agent that exits by
 //!   itself, with any status, is not started again.
 //! * A keeper killed outright takes its agent with it (`PR_SET_PDEATHSIG`), as
@@ -39,6 +42,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{kill, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{alarm, getpid, getppid, Pid};
+use opengeni_agent_platform::signal_sender::{self, SignalDelivery};
 
 use crate::cli::{Cli, Command};
 
@@ -201,6 +205,7 @@ pub(crate) fn keep(executable: &Path) -> Option<ExitCode> {
         args: std::env::args_os().skip(1).collect(),
         watched,
         stopping: None,
+        from_command: None,
         restarts: 0,
     };
     let Ok(first) = keeper.start(None) else {
@@ -216,6 +221,9 @@ struct Keeper {
     watched: SigSet,
     /// The stop signal received, if any: the agent is not started again.
     stopping: Option<Signal>,
+    /// The last stop signal one of the agent's commands sent, which the agent
+    /// got too: an agent it ended is started again.
+    from_command: Option<Signal>,
     /// How many times the agent was started again.
     restarts: u32,
 }
@@ -254,7 +262,7 @@ impl Keeper {
             if let Some(stop) = self.stopping {
                 return signal_exit_code(stop);
             }
-            if !restarts_after(signal) {
+            if !starts_again(signal, self.from_command.take()) {
                 return signal_exit_code(signal);
             }
             if started.elapsed() >= HEALTHY_RUN {
@@ -295,9 +303,13 @@ impl Keeper {
             if let Some(end) = reap(agent) {
                 return end;
             }
-            let Ok(signal) = self.watched.wait() else {
+            let Some((signal, delivery)) = self.next_signal() else {
                 continue;
             };
+            if STOP_SIGNALS.contains(&signal) && sent_by_command(delivery, Some(agent)) {
+                self.from_command = Some(signal);
+                continue;
+            }
             if STOP_SIGNALS.contains(&signal) {
                 self.stopping = Some(signal);
             }
@@ -312,10 +324,10 @@ impl Keeper {
         let seconds = u32::try_from(duration.as_secs().max(1)).unwrap_or(u32::MAX);
         alarm::set(seconds);
         loop {
-            let Ok(signal) = self.watched.wait() else {
+            let Some((signal, delivery)) = self.next_signal() else {
                 continue;
             };
-            if STOP_SIGNALS.contains(&signal) {
+            if STOP_SIGNALS.contains(&signal) && !sent_by_command(delivery, None) {
                 alarm::cancel();
                 self.stopping = Some(signal);
                 return false;
@@ -328,6 +340,32 @@ impl Keeper {
             }
         }
     }
+}
+
+impl Keeper {
+    /// Waits for the next watched signal and its sender.
+    fn next_signal(&self) -> Option<(Signal, SignalDelivery)> {
+        let watched: Vec<i32> = self.watched.iter().map(|signal| signal as i32).collect();
+        let delivery = signal_sender::wait_for_signal(&watched).ok()?;
+        Some((Signal::try_from(delivery.signal).ok()?, delivery))
+    }
+}
+
+/// Whether one of the agent's commands, a descendant of this keeper other
+/// than `agent` itself, sent `delivery`. Says so when it did.
+fn sent_by_command(delivery: SignalDelivery, agent: Option<Pid>) -> bool {
+    let keeper = getpid().as_raw();
+    let from_command = delivery.sender.is_some_and(|sender| {
+        Some(sender) != agent.map(Pid::as_raw) && signal_sender::is_command_of(sender, keeper)
+    });
+    if from_command {
+        eprintln!(
+            "opengeni-agent: the keeper keeps running: one of the agent's own commands (pid {}) sent it signal {} (for example `kill -1`, which signals every process of the user)",
+            delivery.sender.unwrap_or_default(),
+            delivery.signal
+        );
+    }
+    from_command
 }
 
 /// How the agent ended.
@@ -367,6 +405,13 @@ fn restarts_after(signal: Signal) -> bool {
             | Signal::SIGFPE
             | Signal::SIGSYS
     )
+}
+
+/// Whether an agent `signal` ended is started again: after a kill or crash,
+/// and after the stop signal one of its own commands sent (`from_command`),
+/// which the keeper did not obey either.
+fn starts_again(signal: Signal, from_command: Option<Signal>) -> bool {
+    restarts_after(signal) || from_command == Some(signal)
 }
 
 fn next_backoff(backoff: Duration) -> Duration {
@@ -471,6 +516,56 @@ mod tests {
         ] {
             assert!(!restarts_after(signal), "{signal}");
         }
+    }
+
+    #[test]
+    fn an_agent_its_own_commands_stop_signal_ended_starts_again() {
+        assert!(starts_again(Signal::SIGHUP, Some(Signal::SIGHUP)));
+        assert!(starts_again(Signal::SIGKILL, Some(Signal::SIGTERM)));
+        assert!(!starts_again(Signal::SIGHUP, None));
+        assert!(!starts_again(Signal::SIGHUP, Some(Signal::SIGTERM)));
+    }
+
+    /// A stop signal from one of the agent's commands (a descendant of the
+    /// keeper below the agent) is not obeyed; one from the agent itself, the
+    /// keeper's parent or the kernel is.
+    #[test]
+    fn only_the_agents_commands_count_as_its_commands() {
+        let mut agent = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30 & echo $!; wait")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start an agent stand-in");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(agent.stdout.take().expect("stdout")),
+            &mut line,
+        )
+        .expect("its command's pid");
+        let command: i32 = line.trim().parse().expect("a pid");
+        let agent_pid = Pid::from_raw(i32::try_from(agent.id()).expect("pid"));
+        let from = |sender: Option<i32>| SignalDelivery {
+            signal: Signal::SIGTERM as i32,
+            sender,
+        };
+        assert!(sent_by_command(from(Some(command)), Some(agent_pid)));
+        assert!(!sent_by_command(
+            from(Some(agent_pid.as_raw())),
+            Some(agent_pid)
+        ));
+        assert!(!sent_by_command(
+            from(Some(getppid().as_raw())),
+            Some(agent_pid)
+        ));
+        assert!(!sent_by_command(
+            from(Some(getpid().as_raw())),
+            Some(agent_pid)
+        ));
+        assert!(!sent_by_command(from(None), Some(agent_pid)));
+        let _ = kill(Pid::from_raw(command), Signal::SIGKILL);
+        let _ = agent.kill();
+        let _ = agent.wait();
     }
 
     #[test]

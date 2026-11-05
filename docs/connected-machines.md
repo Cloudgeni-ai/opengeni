@@ -1025,6 +1025,28 @@ a process that keeps the agent's hidden console host open after the agent exits
 delays that start until it ends, because the task skips a tick while its previous
 run is still going.
 
+A command cannot stop the agent by signalling a process group. Each command runs
+in a process group of its own (on Windows a job object and a hidden console of its
+own), so `kill 0`, `kill -TERM -<its group>` or a console control event to its own
+console reach only that command and what it started, never the agent or other
+commands. `kill -1` in a command signals every process of the user, the agent
+included. On Linux the agent therefore keeps running when one of its own
+commands sends it `SIGTERM` or `SIGINT`, and a foreground agent's keeper ignores
+every stop signal from such a command and starts again an agent one of them
+ended (`SIGHUP`, `SIGQUIT`). They tell a command from other senders by the sending
+process: a descendant of the agent, or a process in the process group, session or
+operation cgroup of one of its commands. Nothing
+is blocked: the command still receives every signal, and a stop signal from
+anywhere else (the service manager, the desktop app, a person's terminal,
+`opengeni-agent stop`) stops the agent as before. A sender that already exited
+cannot be placed and counts as anywhere else. A command's `SIGKILL` cannot be
+refused: after `kill -9 -1` a `--system` service, the macOS LaunchAgent and a
+compute sandbox's guest init start the agent again, while a foreground agent's
+keeper dies with it. Some cases still leave the agent offline after `kill -1`:
+under a systemd user service it also stops the user's own service manager, which
+stops its services until the user logs in again, and an agent hosted by the
+desktop app ends with the app.
+
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators

@@ -25,6 +25,12 @@ mod process_group;
 #[cfg(target_os = "macos")]
 pub use process_group::process_group_has_live_children;
 
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod signal_origin;
+#[cfg(target_os = "linux")]
+pub use signal_origin::{relay_signals, wait_for_signal, SignalDelivery, SignalRelay};
+
 /// Configures `command` to set its own Linux OOM victim bias to `score` after
 /// `fork` but before user code can run or create descendants. `score` must be in
 /// the kernel ABI's nonnegative range; values above 1000 are capped at the ABI
