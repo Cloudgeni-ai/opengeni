@@ -1,5 +1,5 @@
 import type { FileAsset, ResourceRef } from "@opengeni/sdk";
-import { FileIcon, ImageIcon } from "lucide-react";
+import { ImageIcon } from "lucide-react";
 import { useContext } from "react";
 import { cn } from "../lib/cn";
 import { useOpenGeniText } from "../messages/runtime";
@@ -13,9 +13,10 @@ import {
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 
 /**
- * The files attached to a message that is not in the timeline yet (a queued
- * message): images as small pictures loaded from the server, other files by
- * name. Shows nothing until the files resolve, or without a client.
+ * The images attached to a message that is not in the timeline yet (a queued
+ * message), as small pictures loaded from the server. Other files stay in the
+ * row's resource count, so a row without images keeps its height. Shows
+ * nothing until the files resolve, or without a client.
  */
 export function StoredFileThumbnails({
   workspaceId,
@@ -39,24 +40,14 @@ export function StoredFileThumbnails({
   if (!source || !ready) return null;
   const shown = fileIds.flatMap((fileId, index) => {
     const file = files.get(fileId);
-    return file ? [{ file, key: `${index}:${fileId}` }] : [];
+    return file && isStoredImage(file) ? [{ file, key: `${index}:${fileId}` }] : [];
   });
   if (shown.length === 0) return null;
   return (
     <div className={cn("flex min-w-0 flex-wrap gap-1.5", className)} data-stored-file-thumbnails="">
-      {shown.map(({ file, key }) =>
-        isStoredImage(file) ? (
-          <StoredImageThumbnail key={key} source={source} file={file} />
-        ) : (
-          <span
-            key={key}
-            className="inline-flex min-w-0 max-w-[200px] items-center gap-1 rounded-og-md border border-og-border bg-og-surface-2 px-1.5 py-0.5 text-og-xs text-og-fg-muted"
-          >
-            <FileIcon aria-hidden="true" className="size-3 shrink-0" />
-            <span className="truncate">{file.filename}</span>
-          </span>
-        ),
-      )}
+      {shown.map(({ file, key }) => (
+        <StoredImageThumbnail key={key} source={source} file={file} />
+      ))}
     </div>
   );
 }
@@ -66,7 +57,7 @@ function StoredImageThumbnail({ source, file }: { source: StoredFileSource; file
   const lightbox = useLightboxOptional();
   const preview = useStoredFilePreview(source, file);
   const frame =
-    "flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2";
+    "flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2";
   if (!preview.url) {
     return (
       <span className={cn(frame, !preview.failed && "animate-pulse")} title={file.filename}>

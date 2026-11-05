@@ -405,7 +405,10 @@ function RowAction(props: {
   );
 }
 
-/** A queued message's files: images as small pictures from the server, other files by name. */
+/**
+ * A queued message's images as small pictures from the server. Other files
+ * are not repeated here, so a row without images keeps its height.
+ */
 function QueuedTurnFiles({
   source,
   resources,
@@ -422,64 +425,38 @@ function QueuedTurnFiles({
   if (!ready) return null;
   const shown = fileIds.flatMap((fileId, index) => {
     const file = files.get(fileId);
-    return file ? [{ file, key: `${index}:${fileId}` }] : [];
+    return file && isStoredImage(file) ? [{ file, key: `${index}:${fileId}` }] : [];
   });
   if (shown.length === 0) return null;
   return (
     <View
       style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, paddingLeft: 6, paddingBottom: 4 }}
     >
-      {shown.map(({ file, key }) =>
-        isStoredImage(file) ? (
-          <View
-            key={key}
-            accessibilityRole="image"
-            accessibilityLabel={file.filename}
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: theme.radius.sm,
-              overflow: "hidden",
-              borderWidth: 1,
-              borderColor: c.border,
-              backgroundColor: c["surface-2"],
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <StoredFileImage
-              source={source}
-              file={file}
-              style={{ width: "100%", height: "100%" }}
-              fallback={<Icon name="image" size={14} color={c["fg-subtle"]} />}
-            />
-          </View>
-        ) : (
-          <View
-            key={key}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 4,
-              maxWidth: 180,
-              height: 24,
-              paddingHorizontal: 7,
-              borderRadius: theme.radius.sm,
-              borderWidth: 1,
-              borderColor: c.border,
-              backgroundColor: c["surface-2"],
-            }}
-          >
-            <Icon name="file-text" size={11} color={c["fg-muted"]} />
-            <Text
-              numberOfLines={1}
-              style={{ ...fontStyle(theme), flexShrink: 1, fontSize: 11, color: c["fg-muted"] }}
-            >
-              {file.filename}
-            </Text>
-          </View>
-        ),
-      )}
+      {shown.map(({ file, key }) => (
+        <View
+          key={key}
+          accessibilityRole="image"
+          accessibilityLabel={file.filename}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: theme.radius.sm,
+            overflow: "hidden",
+            borderWidth: 1,
+            borderColor: c.border,
+            backgroundColor: c["surface-2"],
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <StoredFileImage
+            source={source}
+            file={file}
+            style={{ width: "100%", height: "100%" }}
+            fallback={<Icon name="image" size={14} color={c["fg-subtle"]} />}
+          />
+        </View>
+      ))}
     </View>
   );
 }

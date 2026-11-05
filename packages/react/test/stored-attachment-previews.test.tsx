@@ -245,7 +245,9 @@ describe("a queued message", () => {
     const picture = images(container)[0];
     expect(picture?.getAttribute("src")).toStartWith(`https://files.example/${IMAGE_ID}`);
     expect(picture?.getAttribute("alt")).toBe("whiteboard.png");
-    expect(container.textContent).toContain("quote.pdf");
+    // Only pictures are added to the row; other files stay in the resource count.
+    expect(images(container)).toHaveLength(1);
+    expect(container.textContent).not.toContain("quote.pdf");
   });
 
   test("shows its attached image in the session chrome's queue panel", async () => {
