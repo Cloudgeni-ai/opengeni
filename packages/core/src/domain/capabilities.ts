@@ -462,8 +462,14 @@ export function applyOperatorOAuthClientRequirement(
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
   if (typeof issuer !== "string" || !issuer) return item;
-  if (configured(issuer)) {
-    return { ...item, runtime: { ...item.runtime, operatorOAuthClient: { configured: true } } };
+  const isConfigured = configured(issuer);
+  // An installed row keeps its own status note; the setup note is for rows
+  // that are not on yet.
+  if (isConfigured || item.enabled) {
+    return {
+      ...item,
+      runtime: { ...item.runtime, operatorOAuthClient: { configured: isConfigured } },
+    };
   }
   return {
     ...item,

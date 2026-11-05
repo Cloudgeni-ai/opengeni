@@ -43,6 +43,16 @@ describe("operator OAuth client connectability", () => {
       CapabilityCatalogResponse.parse({ items: [projected], installations: [] }).items[0]?.runtime
         .operatorOAuthClient,
     ).toEqual({ configured: false });
+    // An installed row keeps its own status note.
+    const installed = applyOperatorOAuthClientRequirement(
+      item({
+        enabled: true,
+        runtime: { available: false, notes: "This installed connection is unavailable." },
+      }),
+      resolver("{}"),
+    );
+    expect(installed.runtime.operatorOAuthClient).toEqual({ configured: false });
+    expect(installed.runtime.notes).toBe("This installed connection is unavailable.");
   });
 
   test("matches the issuer key the OAuth start uses, ignoring a trailing slash", () => {
