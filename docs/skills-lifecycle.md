@@ -79,7 +79,7 @@ null), `expectedScopeVersion` and `reason`. Built-in, repository and inline
 session identities are not registry UUIDs and cannot be removed through this
 tool. Organization Skills are outside its scope. Off refuses new changes;
 Automatic applies deletion; Review first retains a removal proposal in
-Knowledge > Needs review without interrupting the task.
+Knowledge > Review without interrupting the task.
 An agent removes only Skills in its chat's own learning scope. The exception
 is work the verified owner started in their own Personal workspace: it may also
 remove that workspace's Skills, including a directly installed one, because

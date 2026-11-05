@@ -114,7 +114,7 @@ answer the user. Future-task retrieval excludes pending content; if a previous
 published revision exists, it remains current until approval.
 
 Related pending writes are collected into one review batch per task/run. A
-nonblocking chat card and Knowledge > Needs review show the same proposals.
+nonblocking chat card and Knowledge > Review show the same proposals.
 Approve all, edit and approve, and reject operate on exact revisions. A stale
 review cannot overwrite a newer correction. There is no second approval after
 the review decision and no `requires_action` interruption for Knowledge saves.
