@@ -326,6 +326,12 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /**
+   * Injectable MCP auto-connect transport (issuer discovery and key sets,
+   * Client ID Metadata Documents, and redeeming ID-JAGs at an app), still
+   * network-policy checked. For tests.
+   */
+  mcpAutoConnectFetch?: typeof fetch;
   /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
   mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;

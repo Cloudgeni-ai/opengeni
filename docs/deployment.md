@@ -675,6 +675,15 @@ Ingress there. An edge outside this chart must route the same paths to the API.
 If they reach the web application instead, discovery returns HTML and MCP
 clients cannot sign in.
 
+Auto-connect (Enterprise-Managed Authorization) needs nothing more in either
+direction. Claude and identity providers redeem ID-JAGs at the same
+`/oauth/token`, and the routes answer only while the switch is on with a
+public base URL. Opengeni's own per-organization issuer, for auto-connect
+organization connectors, is served under `/v1` and signs with a key encrypted
+by the same stable `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` that protects other
+connection material. Keep the public base URL stable: it is part of each organization's issuer URL that
+outside apps trust. Migrations `1263`, `1264` and `1265` are rolling.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention

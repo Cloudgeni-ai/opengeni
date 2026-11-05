@@ -7059,6 +7059,11 @@ export type OrganizationMcpConnection = {
   expiresAt: string;
   revokedAt: null;
   /**
+   * Set when it connected automatically, through an issuer the organization
+   * trusts (auto-connect). Its access is that issuer's, changed by an admin.
+   */
+  autoConnect?: { trustedIssuerId: string; issuerName: string } | null;
+  /**
    * Listed agents: whether the caller can disconnect this one. Everyone
    * disconnects their own; owners and admins anyone's, except only an owner an
    * owner's.

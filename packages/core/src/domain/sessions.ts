@@ -3856,6 +3856,7 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
+        autoConnect: { settings: unresolvedDeps.settings },
       }),
     );
   if (effectiveGoal) {
@@ -4873,6 +4874,7 @@ async function acceptSessionUserMessageInFileScope(
         source: connectionDelegationSource,
         targetSessionId: sessionId,
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+        autoConnect: { settings: deps.settings },
       });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);

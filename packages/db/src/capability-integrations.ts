@@ -1325,7 +1325,8 @@ export function organizationApiIntegrationRuntime(
       organizationConnector: {
         id: row.id,
         generation: row.generation,
-        login,
+        // API connectors never connect people automatically.
+        login: login === "auto_connect" ? "each_person" : login,
         auth: definition.auth,
       },
       ...(login === "organization_key" && placements.length > 0

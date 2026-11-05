@@ -190,6 +190,7 @@ export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./interaction-action-deadline";
@@ -15208,7 +15209,13 @@ export const IntegrationClientMetadata = /* @__PURE__ */ defineSchema(() =>
     client_name: z.enum(["Opengeni", "OpenGeni"]),
     redirect_uris: z.array(z.string().url()),
     token_endpoint_auth_method: z.literal("none"),
-    grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
+    grant_types: z.array(
+      z.enum([
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      ]),
+    ),
     response_types: z.array(z.literal("code")),
   }),
 );
