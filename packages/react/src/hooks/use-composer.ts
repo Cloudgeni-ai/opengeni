@@ -936,6 +936,10 @@ export function useComposer(
   }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
+  // A model, effort or speed pick is one deliberate click, not typing: it is
+  // saved without the typing pause, so clicking another chat right after it
+  // still keeps it.
+  const savePickPromptlyRef = useRef(false);
   const onSent = useCallback(
     (text: string, input: SendMessageInput) => {
       notifyComposerObserver(options.onSent, text, input);
@@ -1016,6 +1020,7 @@ export function useComposer(
     draftRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
+    savePickPromptlyRef.current = false;
     // Old saves may still be awaiting the network. Their generation fence
     // prevents settlement, and a fresh chain avoids blocking this target.
     saveChain.current = Promise.resolve();
@@ -1502,17 +1507,19 @@ export function useComposer(
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
     const base = draftRef.current;
-    const currentPolicy = policyRef.current;
-    if (!base || !currentPolicy) return null;
+    // The pick is part of the draft like its text: a model, effort or speed
+    // chosen without typing is saved too, so it survives opening another
+    // chat or reloading before the next Send.
+    if (!base || !policy) return null;
     return composerDraftPayload(
       base,
       value,
       restoredResources,
       annotations,
-      pickedPolicy(policyPickedRef, policyRef),
+      policyPicked ? policy : undefined,
       resolveSendExtras(sendExtrasRef.current).resources ?? [],
     );
-  }, [annotations, durableDrafts, restoredResources, targetKey, value]);
+  }, [annotations, durableDrafts, policy, policyPicked, restoredResources, targetKey, value]);
 
   const adoptDraftBase = useCallback(
     (next: ComposerDraft): void => {
@@ -2178,7 +2185,13 @@ export function useComposer(
       return;
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
-    const timer = window.setTimeout(() => void persistPayload(payload), 500);
+    const timer = window.setTimeout(
+      () => {
+        savePickPromptlyRef.current = false;
+        void persistPayload(payload);
+      },
+      savePickPromptlyRef.current ? 0 : 500,
+    );
     return () => window.clearTimeout(timer);
   }, [
     autosaveRetry,
@@ -3108,6 +3121,7 @@ export function useComposer(
       localEditRevision.current += 1;
       policyRef.current = next;
       policyPickedRef.current = true;
+      savePickPromptlyRef.current = true;
       setPolicyPicked(policyPickedRef.current);
       const shadow = {
         text: valueRef.current,

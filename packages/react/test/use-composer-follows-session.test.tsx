@@ -227,3 +227,105 @@ describe("useComposer follows the chat's own settings until the person picks", (
     await hook.unmount();
   });
 });
+
+describe("useComposer keeps a model, effort or speed pick made without typing", () => {
+  const OTHER_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+
+  /** Two chats behind one client, each with its own draft. */
+  function twoChats() {
+    const servers = {
+      [SESSION_ID]: chatServer({
+        model: "paid-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      }),
+      [OTHER_SESSION_ID]: chatServer({
+        model: "paid-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      }),
+    };
+    const of = (sessionId: string) => servers[sessionId as keyof typeof servers];
+    const client = fakeClient({
+      getComposerDraft: (workspaceId, sessionId, options) =>
+        of(sessionId).client.getComposerDraft(workspaceId, sessionId, options),
+      saveComposerDraft: (workspaceId, sessionId, request) =>
+        of(sessionId).client.saveComposerDraft(workspaceId, sessionId, request),
+      submitComposerDraft: (workspaceId, sessionId, request) =>
+        of(sessionId).client.submitComposerDraft(workspaceId, sessionId, request),
+    });
+    return { client, first: servers[SESSION_ID], other: servers[OTHER_SESSION_ID] };
+  }
+
+  test("an effort pick alone is saved and survives a reload", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    expect(hook.result.current.policy?.reasoningEffort).toBe("medium");
+
+    await act(() => hook.result.current.setReasoningEffort("high"));
+    await flush(600);
+    expect(chats.first.saves.at(-1)).toMatchObject({ text: "", reasoningEffort: "high" });
+    await hook.unmount();
+
+    // A reload: a fresh composer reads the saved pick back.
+    const reloaded = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    expect(reloaded.result.current.policy?.reasoningEffort).toBe("high");
+    expect(reloaded.result.current.sendPolicy?.reasoningEffort).toBe("high");
+    await reloaded.unmount();
+  });
+
+  test("an effort or model pick survives switching to another chat and back", async () => {
+    const chats = twoChats();
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client: chats.client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID as string,
+    );
+    await flush();
+    await act(() => hook.result.current.setReasoningEffort("xhigh"));
+    await act(() => hook.result.current.setModel("picked-model"));
+    // Well inside the typing pause: a pick is saved without waiting for it.
+    await flush(50);
+    expect(chats.first.saves.at(-1)).toMatchObject({
+      model: "picked-model",
+      reasoningEffort: "xhigh",
+    });
+
+    await hook.rerender(OTHER_SESSION_ID);
+    await flush();
+    // The other chat keeps its own settings.
+    expect(hook.result.current.policy).toMatchObject({
+      model: "paid-model",
+      reasoningEffort: "medium",
+    });
+    expect(chats.other.saves).toHaveLength(0);
+
+    await hook.rerender(SESSION_ID);
+    await flush();
+    expect(hook.result.current.policy).toMatchObject({
+      model: "picked-model",
+      reasoningEffort: "xhigh",
+    });
+
+    // The pick is what the next message uses.
+    await act(() => hook.result.current.setValue("with my pick"));
+    await flush(600);
+    await act(async () => expect(await hook.result.current.send()).toBe(true));
+    await flush();
+    expect(chats.first.submits[0]).toMatchObject({
+      model: "picked-model",
+      reasoningEffort: "xhigh",
+    });
+    await hook.unmount();
+  });
+});
