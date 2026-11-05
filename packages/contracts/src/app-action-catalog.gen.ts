@@ -864,8 +864,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/organization-connectors/:connectorId/connect",
     "request": [],
-    "response": [],
-    "permission": "connections:write"
+    "response": []
   },
   {
     "id": "continueAfterCapabilitySetup",
