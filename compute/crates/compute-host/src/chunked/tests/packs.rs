@@ -98,6 +98,32 @@ async fn an_archive_packs_its_chunks_and_comes_back_byte_for_byte() {
     assert_eq!(listed(&backend, "t/packs").await.len(), 1);
 }
 
+/// A sweep that takes stock while an archive uploads stops that try from
+/// publishing. The archive tries again with the same files at once, finds
+/// the pack the stopped try stored and publishes: it neither fails nor
+/// uploads the sandbox twice.
+#[tokio::test]
+async fn an_archive_a_sweep_takes_stock_of_in_flight_still_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    disk_of(&saved, *b"abcdefgh");
+    let backend = Arc::new(Counted::default());
+    let store = packed(&backend);
+    let sandbox = id("000000000000000000000000000000a7");
+    let sweep = store.chunks.clone();
+    let name = sandbox.to_string();
+    backend.before_pack(async move {
+        sweep.fence(&name).await.unwrap();
+    });
+    let cancel = CancellationToken::new();
+    let archived = store.archive(sandbox, at(2, 4), &saved, &cancel).await;
+    assert!(matches!(archived, Ok(Archive::Stored(_))), "{archived:?}");
+    assert_eq!(backend.take().1, 1, "the pack is uploaded once");
+    assert_eq!(listed(&backend, "t/packs").await.len(), 1);
+    let disk = fs::read(saved.disk.path()).unwrap();
+    assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
+}
+
 /// A copy an earlier release stored as one object per chunk keeps those
 /// objects: each is a pack of one chunk, named whole, so the next archive
 /// reuses it as it is, storing and copying nothing. Only chunks that
