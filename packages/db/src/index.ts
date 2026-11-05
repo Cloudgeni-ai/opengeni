@@ -87614,7 +87614,9 @@ export async function readSessionTurnSandboxBoxNotSaved(
  * box stays fenced and its drain keeps retrying under the existing policy.
  * Only a rotation some turn requested for this exact box (its process-start
  * restart event names the group and epoch) releases anyone. Returns how many
- * turns were released.
+ * turns were released. Waiting turns are locked in turn-id order, the order
+ * every other multi-turn writer uses, so two releases for one box (or a release
+ * and another writer) cannot deadlock.
  */
 export async function releaseSandboxProcessStartReplacementWaiters(
   db: Database,
@@ -87670,6 +87672,7 @@ export async function releaseSandboxProcessStartReplacementWaiters(
               and turn.status = 'recovering'
               and turn.metadata @> ${waitJson}::jsonb
               and exists (select 1 from replacement)
+            order by turn.id
             for update of turn
           )
           update session_turns turn
