@@ -80,6 +80,13 @@ function finalStage(source: string): string {
   return source.slice(starts.at(-1));
 }
 
+/** The Debian packages a final stage's apt lists name (`packages="…"` values), comments excluded. */
+function aptPackages(stage: string): string[] {
+  return [...stage.matchAll(/\b(?:[a-z]+_)?packages="([^"]*)"/gu)].flatMap((match) =>
+    match[1]!.split(/[\s\\]+/u).filter(Boolean),
+  );
+}
+
 /** A PATH directory with an executable stub for each name. */
 async function stubPath(names: string[]): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-default-commands-"));
@@ -105,18 +112,20 @@ describe("default sandbox commands", () => {
       expect({ path, check: check >= 0 }).toEqual({ path, check: true });
       // Nothing installed or removed after the check can escape it.
       const after = stage.slice(check + CHECK_STEP.length);
-      expect({ path, laterSteps: after.match(/^(?:RUN|COPY|ADD) /gmu) ?? [] }).toEqual({
+      // Instructions are case-insensitive; a later PATH or USER could also hide them.
+      expect({
         path,
-        laterSteps: [],
-      });
+        laterSteps: after.match(/^\s*(?:RUN|COPY|ADD|USER|ENV\s+PATH\b)\b.*$/gimu) ?? [],
+      }).toEqual({ path, laterSteps: [] });
     }
   });
 
   test("both default images install the added tools and link bunx to bun", async () => {
     for (const path of DOCKERFILES) {
       const stage = finalStage(await readFile(resolve(root, path), "utf8"));
+      const installed = aptPackages(stage);
       for (const name of PACKAGES) {
-        expect({ path, name, installed: new RegExp(`\\s${name}\\s`, "u").test(stage) }).toEqual({
+        expect({ path, name, installed: installed.includes(name) }).toEqual({
           path,
           name,
           installed: true,

@@ -89,7 +89,7 @@ printf 'opengeni\n' >"$work/member"
 # binutils strings, xxd and file read bytes.
 [ "$(printf 'opengeni\000' | strings)" = opengeni ] || fail "strings does not print strings"
 [ "$(printf A | xxd -p)" = 41 ] || fail "xxd does not dump bytes"
-file "$work/member" | grep -q text || fail "file does not identify a text file"
+file -b "$work/member" | grep -q text || fail "file does not identify a text file"
 # iproute2's ss and ip.
 ss -V >/dev/null || fail "ss does not run"
 ip -V >/dev/null || fail "ip does not run"
