@@ -593,6 +593,21 @@ offline/timeout control error during that discovery degrades to a short
 "repository skills unavailable" instruction for that run instead of failing the
 turn, and the next run discovers again.
 
+### Bundled rg and jq
+
+Release agents embed official, SHA-256-pinned builds of ripgrep and jq for
+their own platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows
+x64 and arm64). At start the agent writes them to
+`/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+(so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
+and appends that directory to the end of every command's PATH, including the
+PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
+Nothing is downloaded. Earlier generations are removed by the agent holding
+the instance lock. Exceptions: a command that starts a login shell may have
+PATH reset by the machine's profile, other architectures get no tools, and
+an agent built without them (development builds, or older releases until
+they update) leaves PATH unchanged.
+
 ## Create a session on a machine
 
 `createSession` grows two fields for a Connected-Machine target:

@@ -98,8 +98,16 @@ mod tests {
 
     #[test]
     fn appends_after_every_system_entry() {
-        let tools = Path::new(if cfg!(windows) { r"C:\og\tools" } else { "/og/tools" });
-        let system = if cfg!(windows) { r"C:\Windows\System32" } else { "/usr/bin" };
+        let tools = Path::new(if cfg!(windows) {
+            r"C:\og\tools"
+        } else {
+            "/og/tools"
+        });
+        let system = if cfg!(windows) {
+            r"C:\Windows\System32"
+        } else {
+            "/usr/bin"
+        };
         let path = append_directory(Some(joined(&[system])), tools).expect("extended");
         let entries = std::env::split_paths(&path).collect::<Vec<_>>();
         assert_eq!(entries, vec![PathBuf::from(system), tools.to_path_buf()]);
@@ -107,7 +115,11 @@ mod tests {
 
     #[test]
     fn leaves_a_path_that_already_has_the_directory() {
-        let tools = Path::new(if cfg!(windows) { r"C:\og\tools" } else { "/og/tools" });
+        let tools = Path::new(if cfg!(windows) {
+            r"C:\og\tools"
+        } else {
+            "/og/tools"
+        });
         let system = if cfg!(windows) { r"C:\Windows" } else { "/bin" };
         let current = joined(&[system, tools.to_str().expect("utf-8")]);
         assert_eq!(append_directory(Some(current), tools), None);
@@ -117,7 +129,10 @@ mod tests {
     #[test]
     fn a_missing_path_keeps_the_default_system_search() {
         let path = append_directory(None, Path::new("/og/tools")).expect("extended");
-        assert_eq!(path, OsString::from(format!("{DEFAULT_UNIX_PATH}:/og/tools")));
+        assert_eq!(
+            path,
+            OsString::from(format!("{DEFAULT_UNIX_PATH}:/og/tools"))
+        );
     }
 
     #[test]

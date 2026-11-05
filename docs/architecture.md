@@ -2284,6 +2284,20 @@ skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
+Bundled shell tools: every placement's shell has `rg` and `jq` from official
+release builds pinned by SHA-256 in
+`packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence notices beside
+it). Their directory is appended to the end of PATH, so a system copy always
+wins, and nothing is downloaded when a command runs. The machine agent embeds
+its own target's build (`agent/crates/opengeni-agent/src/shell_tools.rs`) and
+extends each command's PATH, covering compute sandboxes, selfhosted task
+containers, Connected Machines and run_on targets. For other managed backends
+the worker carries per-architecture Linux bundles and the `shell-tools` setup
+hook installs one beside the Codemode client (signed download, else the
+provider's file API; skipped when the image has both tools), at
+`/workspace/.opengeni/shell-tools/rg-<version>-jq-<version>`. Image and release
+builds get the bytes from `scripts/fetch-shell-tools.ts`.
+
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
 sandbox delivery and recovery. Programmatic review uses a linked durable action
 request and `waiting_for_approval`; the original attempt/catalog foreign key

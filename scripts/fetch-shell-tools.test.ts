@@ -83,9 +83,17 @@ describe("pinned shell tools manifest", () => {
       SHELL_TOOLS_TARGETS[target].jq,
     ]);
     const expected = linux.map((asset) => `${asset.sha256} ${asset.url}`).sort();
-    for (const path of ["docker/opengeni.Dockerfile", "docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
+    for (const path of [
+      "docker/opengeni.Dockerfile",
+      "docker/sandbox.Dockerfile",
+      "docker/desktop.Dockerfile",
+    ]) {
       const source = await readFile(join(root, path), "utf8");
-      const pins = [...source.matchAll(/^ADD --checksum=sha256:([0-9a-f]{64}) (\S+) \/cache\/([0-9a-f]{64})$/gmu)]
+      const pins = [
+        ...source.matchAll(
+          /^ADD --checksum=sha256:([0-9a-f]{64}) (\S+) \/cache\/([0-9a-f]{64})$/gmu,
+        ),
+      ]
         .map((match) => {
           expect(match[3]).toBe(match[1]!);
           return `${match[1]} ${match[2]}`;
@@ -99,13 +107,18 @@ describe("pinned shell tools manifest", () => {
   test("every agent build embeds the fetched tools", async () => {
     for (const path of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
       const source = await readFile(join(root, path), "utf8");
-      const builds = source.split("\n").filter((line) => /cargo build .*-p opengeni-agent\b/u.test(line));
+      const builds = source
+        .split("\n")
+        .filter((line) => /cargo build .*-p opengeni-agent\b/u.test(line));
       expect(builds.length).toBeGreaterThan(0);
-      for (const line of builds) expect(line).toContain("OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools");
+      for (const line of builds)
+        expect(line).toContain("OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools");
       expect(source).toContain("COPY --from=shell-tools-fetch /out/ /shell-tools/");
     }
     const worker = await readFile(join(root, "docker/opengeni.Dockerfile"), "utf8");
-    expect(worker).toContain("OPENGENI_SHELL_TOOLS_DIR=/tmp/shell-tools bun scripts/build-runtime-processes.ts worker");
+    expect(worker).toContain(
+      "OPENGENI_SHELL_TOOLS_DIR=/tmp/shell-tools bun scripts/build-runtime-processes.ts worker",
+    );
 
     // Release agents fetch the tools from build.rs: each agent build there
     // names its source in OPENGENI_RUNTIME_BUILD_ID and runs after Bun is set up.
@@ -114,7 +127,14 @@ describe("pinned shell tools manifest", () => {
     ) as {
       jobs: Record<
         string,
-        { steps: Array<{ name?: string; uses?: string; run?: string; env?: Record<string, string> }> }
+        {
+          steps: Array<{
+            name?: string;
+            uses?: string;
+            run?: string;
+            env?: Record<string, string>;
+          }>;
+        }
       >;
     };
     const steps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
@@ -160,12 +180,20 @@ describe("fetch-shell-tools", () => {
     expect(extractShellTool(zipAsset, zip)).toEqual(rg);
     expect(zipMember(zip, "other")).toBeNull();
 
-    const bare: ShellToolAsset = { url: "https://example.invalid/jq", sha256: sha256(jq), binarySha256: sha256(jq) };
+    const bare: ShellToolAsset = {
+      url: "https://example.invalid/jq",
+      sha256: sha256(jq),
+      binarySha256: sha256(jq),
+    };
     expect(extractShellTool(bare, jq)).toEqual(jq);
   });
 
   test("rejects a changed download and a changed executable", () => {
-    const bare: ShellToolAsset = { url: "https://example.invalid/jq", sha256: sha256(jq), binarySha256: sha256(jq) };
+    const bare: ShellToolAsset = {
+      url: "https://example.invalid/jq",
+      sha256: sha256(jq),
+      binarySha256: sha256(jq),
+    };
     expect(() => extractShellTool(bare, rg)).toThrow("does not match its pinned SHA-256");
     const bundle = buildManagedShellToolsBundle({ rg, jq, notices: new Uint8Array() });
     const wrongMember: ShellToolAsset = {
@@ -174,7 +202,9 @@ describe("fetch-shell-tools", () => {
       member: "jq",
       binarySha256: sha256(rg),
     };
-    expect(() => extractShellTool(wrongMember, bundle.bytes)).toThrow("does not match its pinned SHA-256");
+    expect(() => extractShellTool(wrongMember, bundle.bytes)).toThrow(
+      "does not match its pinned SHA-256",
+    );
     expect(tarMember(new Uint8Array(Bun.gunzipSync(bundle.bytes)), "missing")).toBeNull();
   });
 
@@ -183,7 +213,11 @@ describe("fetch-shell-tools", () => {
     process.env.OPENGENI_SHELL_TOOLS_CACHE = join(scratch, "empty-cache");
     try {
       await expect(
-        fetchShellTools({ out: join(scratch, "out"), targets: ["x86_64-unknown-linux-musl"], offline: true }),
+        fetchShellTools({
+          out: join(scratch, "out"),
+          targets: ["x86_64-unknown-linux-musl"],
+          offline: true,
+        }),
       ).rejects.toThrow("--offline");
     } finally {
       if (previous === undefined) delete process.env.OPENGENI_SHELL_TOOLS_CACHE;
@@ -200,7 +234,11 @@ describe("fetch-shell-tools", () => {
     process.env.OPENGENI_SHELL_TOOLS_CACHE = cache;
     try {
       await expect(
-        fetchShellTools({ out: join(scratch, "out2"), targets: ["x86_64-unknown-linux-musl"], offline: true }),
+        fetchShellTools({
+          out: join(scratch, "out2"),
+          targets: ["x86_64-unknown-linux-musl"],
+          offline: true,
+        }),
       ).rejects.toThrow("not in the cache");
     } finally {
       if (previous === undefined) delete process.env.OPENGENI_SHELL_TOOLS_CACHE;

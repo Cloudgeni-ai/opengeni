@@ -106,9 +106,7 @@ export function extractShellTool(asset: ShellToolAsset, bytes: Uint8Array): Uint
 }
 
 function cacheDirectory(): string {
-  return (
-    process.env.OPENGENI_SHELL_TOOLS_CACHE || join(homedir(), ".cache/opengeni/shell-tools")
-  );
+  return process.env.OPENGENI_SHELL_TOOLS_CACHE || join(homedir(), ".cache/opengeni/shell-tools");
 }
 
 async function assetBytes(asset: ShellToolAsset, offline: boolean): Promise<Uint8Array> {

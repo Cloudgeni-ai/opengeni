@@ -103,7 +103,14 @@ describe("managed shell tools PATH", () => {
 
   test("a system rg and jq win over the bundled ones", async () => {
     const directory = box();
-    await installManagedShellTools(editorSession(), tools, runner(imageBin), undefined, undefined, directory);
+    await installManagedShellTools(
+      editorSession(),
+      tools,
+      runner(imageBin),
+      undefined,
+      undefined,
+      directory,
+    );
     const line = managedShellToolsPathEnvironment(directory);
     const bundled = await shell(`${line}\nrg --version; jq --version`, imageBin);
     expect(bundled.stdout).toBe("ripgrep 15.2.0 (bundled)\njq-1.8.2-bundled\n");
@@ -119,7 +126,9 @@ describe("managed shell tools PATH", () => {
 
   test("rides with the managed Codemode client environment, after ogtool", () => {
     const lines = managedCodemodeClientEnvironment("/workspace/.opengeni/codemode-clients/x");
-    const ogtool = lines.findIndex((line) => line.includes("export PATH='/workspace/.opengeni/codemode-clients/x'"));
+    const ogtool = lines.findIndex((line) =>
+      line.includes("export PATH='/workspace/.opengeni/codemode-clients/x'"),
+    );
     const shellTools = lines.findIndex((line) => line.includes(MANAGED_SHELL_TOOLS_DIRECTORY));
     expect(ogtool).toBeGreaterThanOrEqual(0);
     expect(shellTools).toBeGreaterThan(ogtool);
@@ -137,7 +146,12 @@ describe("managed shell tools delivery", () => {
       const download = { x86_64: url, aarch64: url };
       const staged: string[] = [];
       const first = await installManagedShellTools(
-        editorSession(staged), tools, runner(imageBin), undefined, download, directory,
+        editorSession(staged),
+        tools,
+        runner(imageBin),
+        undefined,
+        download,
+        directory,
       );
       if (!existsSync(join(imageBin, "curl")) && !existsSync(join(imageBin, "wget"))) {
         expect(first).toBe("installed"); // staged instead
@@ -150,7 +164,12 @@ describe("managed shell tools delivery", () => {
       const commands: string[] = [];
       expect(
         await installManagedShellTools(
-          editorSession(), tools, runner(imageBin, commands), undefined, download, directory,
+          editorSession(),
+          tools,
+          runner(imageBin, commands),
+          undefined,
+          download,
+          directory,
         ),
       ).toBe("present");
       expect(commands).toHaveLength(1);
@@ -164,20 +183,32 @@ describe("managed shell tools delivery", () => {
     const staged: string[] = [];
     const deleted: string[] = [];
     const result = await installManagedShellTools(
-      editorSession(staged, deleted), tools, runner(imageBin), undefined, undefined, directory,
+      editorSession(staged, deleted),
+      tools,
+      runner(imageBin),
+      undefined,
+      undefined,
+      directory,
     );
     expect(result).toBe("installed");
     expect(staged).toHaveLength(1);
     expect(deleted).toEqual(staged);
     expect(existsSync(staged[0]!)).toBe(false);
-    expect((await shell(`${join(directory, "rg")} --version`, imageBin)).stdout).toContain("bundled");
+    expect((await shell(`${join(directory, "rg")} --version`, imageBin)).stdout).toContain(
+      "bundled",
+    );
   });
 
   test("a box whose image has rg and jq receives nothing", async () => {
     const directory = box();
     const staged: string[] = [];
     const result = await installManagedShellTools(
-      editorSession(staged), tools, runner(`${systemTools}:${imageBin}`), undefined, undefined, directory,
+      editorSession(staged),
+      tools,
+      runner(`${systemTools}:${imageBin}`),
+      undefined,
+      undefined,
+      directory,
     );
     expect(result).toBe("system");
     expect(staged).toEqual([]);
@@ -192,7 +223,12 @@ describe("managed shell tools delivery", () => {
     const directory = box();
     expect(
       await installManagedShellTools(
-        editorSession(), tools, runner(`${fake}:${imageBin}`), undefined, undefined, directory,
+        editorSession(),
+        tools,
+        runner(`${fake}:${imageBin}`),
+        undefined,
+        undefined,
+        directory,
       ),
     ).toBe("unsupported");
     expect(existsSync(directory)).toBe(false);
@@ -201,7 +237,12 @@ describe("managed shell tools delivery", () => {
   test("corrupted bytes install nothing and claim nothing", async () => {
     const directory = box();
     const result = await installManagedShellTools(
-      editorSession([], [], true), tools, runner(imageBin), undefined, undefined, directory,
+      editorSession([], [], true),
+      tools,
+      runner(imageBin),
+      undefined,
+      undefined,
+      directory,
     );
     expect(result).toBe("failed");
     expect(existsSync(join(directory, ".complete"))).toBe(false);
@@ -210,7 +251,12 @@ describe("managed shell tools delivery", () => {
 
   test("a provider without file ingress reports a failed delivery", async () => {
     const result = await installManagedShellTools(
-      {} as never, tools, runner(imageBin), undefined, undefined, box(),
+      {} as never,
+      tools,
+      runner(imageBin),
+      undefined,
+      undefined,
+      box(),
     );
     expect(result).toBe("failed");
   });
@@ -218,7 +264,17 @@ describe("managed shell tools delivery", () => {
 
 describe("managed shell tools setup hook", () => {
   test("runs only for backends whose boxes the worker sets up itself", () => {
-    for (const backend of ["docker", "modal", "daytona", "e2b", "runloop", "blaxel", "cloudflare", "vercel", "opensandbox"] as const) {
+    for (const backend of [
+      "docker",
+      "modal",
+      "daytona",
+      "e2b",
+      "runloop",
+      "blaxel",
+      "cloudflare",
+      "vercel",
+      "opensandbox",
+    ] as const) {
       expect(managedShellToolsBackend(backend)).toBe(true);
     }
     // The machine agent carries its own rg and jq on these.

@@ -115,7 +115,9 @@ fn create_shared_directory(path: &Path) -> PlatformResult<()> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| PlatformError::from_io("inspect shell tools directory", &error))?;
     if !metadata.is_dir() {
-        return Err(PlatformError::os("shell tools directory must not be a link"));
+        return Err(PlatformError::os(
+            "shell tools directory must not be a link",
+        ));
     }
     #[cfg(unix)]
     {
@@ -222,9 +224,15 @@ mod tests {
             let mode = |path: &Path| std::fs::metadata(path).expect("mode").permissions().mode();
             assert_eq!(mode(&directory) & 0o777, 0o755);
             assert_eq!(mode(&directory.join("rg")) & 0o777, 0o755);
-            assert_eq!(mode(&directory.join("THIRD-PARTY-NOTICES.txt")) & 0o777, 0o644);
+            assert_eq!(
+                mode(&directory.join("THIRD-PARTY-NOTICES.txt")) & 0o777,
+                0o644
+            );
         }
-        assert_eq!(materialize_into(root.path(), &FILES).expect("replay"), directory);
+        assert_eq!(
+            materialize_into(root.path(), &FILES).expect("replay"),
+            directory
+        );
     }
 
     #[test]
@@ -258,7 +266,10 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         assert!(install(Some(root.path())).expect("install").is_none());
         assert!(opengeni_agent_platform::shell_tools_directory().is_none());
-        assert!(std::fs::read_dir(root.path()).expect("root").next().is_none());
+        assert!(std::fs::read_dir(root.path())
+            .expect("root")
+            .next()
+            .is_none());
     }
 
     /// A release build materializes the exact embedded tools, which run.
@@ -268,7 +279,10 @@ mod tests {
         let files = embedded_files().expect("embedded");
         let root = tempfile::tempdir().expect("root");
         let directory = materialize_into(root.path(), &files).expect("materialize");
-        for (name, flag) in [(executable_name("rg"), "--version"), (executable_name("jq"), "--version")] {
+        for (name, flag) in [
+            (executable_name("rg"), "--version"),
+            (executable_name("jq"), "--version"),
+        ] {
             let output = std::process::Command::new(directory.join(name))
                 .arg(flag)
                 .output()

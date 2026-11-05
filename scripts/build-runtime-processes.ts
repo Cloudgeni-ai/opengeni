@@ -150,7 +150,10 @@ async function buildWorker(): Promise<void> {
   );
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
   await writeManagedCodemodeClient(repositoryRoot, join(outdir, "assets/codemode-client.json"));
-  await writeManagedShellTools(join(outdir, "assets/shell-tools"), process.env.OPENGENI_SHELL_TOOLS_DIR);
+  await writeManagedShellTools(
+    join(outdir, "assets/shell-tools"),
+    process.env.OPENGENI_SHELL_TOOLS_DIR,
+  );
 }
 
 async function buildArtifactSidecar(
