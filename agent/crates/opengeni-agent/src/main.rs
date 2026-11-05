@@ -456,8 +456,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Capture before any managed update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
     // A verified self-update may have exec'd this new binary from the exact old
-    // generated systemd unit. Refresh that narrowly-proven definition before
-    // admission, then let the manager restart us directly in `supervisor`.
+    // generated systemd unit. Refresh that narrowly-proven definition (its
+    // restart policy; systemd applies it on reload without restarting us)
+    // before admission.
     if let Err(error) = service::inspect_managed_service_definition() {
         warn!(
             %error,

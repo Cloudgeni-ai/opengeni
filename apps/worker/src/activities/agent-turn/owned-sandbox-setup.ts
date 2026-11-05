@@ -10,7 +10,14 @@ import {
   recordTurnStartupPhase,
 } from "../../observability-metrics";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
-import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
+import {
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
+} from "@opengeni/db";
+import {
+  createSandboxSetupReplayGuard,
+  recoverSandboxSetupFailure,
+} from "./sandbox-setup-agent-failure";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
@@ -18,6 +25,7 @@ import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 export type EagerOwnedSandboxSetupDeps = Pick<
   TurnStreamAttemptDeps,
   | "input"
+  | "attempt"
   | "db"
   | "observability"
   | "runtimeCancellationSignal"
@@ -161,8 +169,24 @@ export async function runEagerOwnedSandboxSetup(
   } catch (error) {
     ownedSandboxSetupOutcome = "failed";
     // The model stream has not started, and every setup step is idempotent,
-    // so an unanswered agent lets the same turn retry instead of failing it.
-    throw sandboxSetupFailure(setupReplayGuard, error);
+    // so an unanswered agent lets the same turn retry instead of failing it,
+    // and a box that cannot start programs is restarted once per turn.
+    throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
+      session: ownedEstablished.session,
+      backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      restartsThisTurn: async () => {
+        const turnId = deps.attempt.turnId;
+        if (!turnId) throw new Error("the attempt has no turn");
+        return await countSessionTurnSandboxProcessStartRestarts(deps.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+        });
+      },
+      publish: async (events) => {
+        await eventing.publish(events, true);
+      },
+      operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+    });
   } finally {
     await measure.flush();
     recordTurnStartupPhase(observability, {

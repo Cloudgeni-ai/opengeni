@@ -139,12 +139,13 @@ import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import {
   createObservability,
   errorCauseAttributes,
+  errorCauseMessage,
   failureDiagnostic,
   withTraceContext,
   withMcpTelemetry,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "./mcp/transport";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
 import {
@@ -199,6 +200,7 @@ import {
   stampRequestBillingOrigin,
   configureBillingLegacyAccounts,
   fundedBillingOrigin,
+  ownModelFunding,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -269,6 +271,8 @@ import {
   buildOpenGeniMcpProtocolServer,
   buildOpenGeniMcpServer,
   isOpenGeniMcpProtocolOnlyMessage,
+  mcpMessageNeedsSlackBotAvailability,
+  resolveSlackBotToolAvailability,
 } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -322,6 +326,7 @@ import {
 } from "./http/local-browser-boundary";
 import {
   alongsideAuthorization,
+  billingOriginForAccessGrant,
   requireLiveAgentAttemptGrant,
   withAccessGrantSessionRlsContext,
 } from "./access-grant-rls";
@@ -779,6 +784,16 @@ export function createAppComposition(deps: AppDependencies): {
       /* Preserve the original error response if the diagnostic sink fails. */
     }
     try {
+      // An internal error no route mapped to a response says why in the server
+      // log only (scrubbed and bounded); the response stays generic.
+      const causeMessage =
+        status === 500 &&
+        code === "internal_error" &&
+        error !== undefined &&
+        !(error instanceof ApiHttpError) &&
+        !(error instanceof HTTPException)
+          ? errorCauseMessage(error)
+          : undefined;
       observability.error("HTTP request failed", {
         method: c.req.method,
         route,
@@ -790,6 +805,7 @@ export function createAppComposition(deps: AppDependencies): {
         reasonKind: diagnostic?.causes[0]?.kind ?? "Response",
         ...(diagnostic ? { diagnosticId: diagnostic.diagnosticId } : {}),
         ...(error === undefined ? {} : errorCauseAttributes(error)),
+        ...(causeMessage === undefined ? {} : { causeMessage }),
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",
@@ -1621,6 +1637,12 @@ export function createAppComposition(deps: AppDependencies): {
             { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
             { observeAvailability: true },
           );
+          const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
+          if (billingOrigin === "api") {
+            selections = selections.filter(
+              ({ model }) => ownModelFunding(model) !== "subscription",
+            );
+          }
           if (!hasPermission(grant.permissions, "sessions:create")) {
             modelSelectionForbidden = true;
             selections = [];
@@ -1659,6 +1681,7 @@ export function createAppComposition(deps: AppDependencies): {
             accountId: grant.accountId,
             workspaceSettings: workspace?.settings ?? {},
             selections,
+            billingOrigin,
           });
         });
       } else if (context) {
@@ -1899,7 +1922,7 @@ export function createAppComposition(deps: AppDependencies): {
         { allow: "POST" },
       );
     }
-    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const transport = createApiMcpTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
       ...(auditProvenance ? { auditProvenance } : {}),
@@ -2009,7 +2032,7 @@ export function createAppComposition(deps: AppDependencies): {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const mcp = buildWorkspaceToolGatewayMcpServer(
@@ -2054,7 +2077,7 @@ export function createAppComposition(deps: AppDependencies): {
       (await isProtocolOnlyMcpRequest(boundedRequest))
     ) {
       await requireLiveAgentAttemptGrant(routeDeps, grant);
-      const transport = new WebStandardStreamableHTTPServerTransport({
+      const transport = createApiMcpTransport({
         enableJsonResponse: true,
       });
       const mcp = buildOpenGeniMcpProtocolServer(grant);
@@ -2094,7 +2117,7 @@ export function createAppComposition(deps: AppDependencies): {
             throw error;
           }
         };
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         if (c.req.method === "GET" || !grantUsesAttemptScopedMcp(grant)) {
@@ -2122,9 +2145,8 @@ export function createAppComposition(deps: AppDependencies): {
           typeof boundSessionId === "string"
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
-        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
-          authorizeBoundSession(),
-          () =>
+        const [, [mcpDeps, startedByPerson, fullAccess, slackBotAvailable]] =
+          await alongsideAuthorization(authorizeBoundSession(), () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
               // Fixed for the session's life: a person started it themselves.
@@ -2135,11 +2157,17 @@ export function createAppComposition(deps: AppDependencies): {
                     (authority) => authority !== null,
                   )
                 : false,
+              // Live: the bot tools are listed only while a bot is available.
+              // Read only for a tool listing or a bot tool call.
+              mcpRequestNeedsSlackBotAvailability(boundedRequest).then((needed) =>
+                needed ? resolveSlackBotToolAvailability(routeDeps.db, grant) : undefined,
+              ),
             ]),
-        );
+          );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          slackBotAvailable,
           appActions: sessionScope
             ? {
                 access: {
@@ -2822,6 +2850,17 @@ async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
   }
   const messages = Array.isArray(body) ? body : [body];
   return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
+}
+
+async function mcpRequestNeedsSlackBotAvailability(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself; nothing is listed.
+    return false;
+  }
+  return (Array.isArray(body) ? body : [body]).some(mcpMessageNeedsSlackBotAvailability);
 }
 
 async function requireMcpAccessGrantAuthorization(

@@ -4,6 +4,7 @@ import {
   AgentConfigError,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
@@ -25,6 +26,7 @@ import {
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
+  TranscriptionServiceError,
 } from "@opengeni/core";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -125,9 +127,28 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
  * callers can tell it from other 402s without matching message text.
  */
 export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
-  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  if (error instanceof TranscriptionServiceError && error.subscriptionCode) {
+    error = new HTTPException(
+      error.subscriptionCode === SUBSCRIPTION_API_UNAVAILABLE_CODE ? 403 : 402,
+      {
+        message: error.message,
+        cause: { allowed: false, code: error.subscriptionCode },
+      },
+    );
+  }
+  if (!(error instanceof HTTPException)) return null;
   const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
   if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (error.status === 403 && cause.code === SUBSCRIPTION_API_UNAVAILABLE_CODE) {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: cause.code },
+    });
+  }
+  if (error.status !== 402) return null;
   if (
     cause.code !== "insufficient_credits" &&
     cause.code !== API_CREDITS_REQUIRED_CODE &&

@@ -867,12 +867,14 @@ export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
       excludedMcpServerIds?: string[] | undefined;
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     }
   | {
       mode: "explicit";
       tools: ToolRef[];
       firstPartyMcpTools: FirstPartyMcpToolName[];
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     };
 
@@ -7418,6 +7420,13 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set for the person linking when they may link this Slack account as a
+   * member of the organization, without workspace access, once they confirm
+   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
+   * account when Slack says who it is.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {
@@ -10401,6 +10410,10 @@ export type {
   SubscriptionPlan,
   SubscriptionPlanCatalog,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,

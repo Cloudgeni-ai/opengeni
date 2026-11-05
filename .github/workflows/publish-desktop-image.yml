@@ -6,9 +6,11 @@ name: Publish desktop image
 # Every main commit already publishes its exact-SHA desktop image to GHCR with
 # the other canary images (ci.yml desktop-image) and records the digest in the
 # canary receipt, so deployments take the controller that matches their server.
+# Packaged release and canary charts pin their own source's desktop image.
 # Dispatch this workflow only to refresh the public ACR digest used as the
-# default pin (Helm desktop.imageRef and the runtime default). ACR Tasks cannot
-# parse this Dockerfile (ADD --checksum, FROM --platform).
+# source fallback pin (values.yaml desktop.imageRef and DEFAULT_MODAL_IMAGE_REF)
+# for unpackaged checkouts and runs without the chart. ACR Tasks cannot parse
+# this Dockerfile (ADD --checksum, FROM --platform).
 on:
   workflow_dispatch:
 

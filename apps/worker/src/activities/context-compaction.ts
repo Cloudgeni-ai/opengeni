@@ -42,7 +42,6 @@ import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
 import { projectRejectedProviderArtifacts } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
-import { currentAttemptSecretValues } from "./agent-turn/secret-values";
 
 export type MaybeCompactResult =
   | {
@@ -111,11 +110,6 @@ type CompactionInputRecoveryPayload = {
   /** A model switch: oldest transcript items too large for one summary request. */
   modelSwitchEarlierItemsOmitted?: number;
 };
-
-/** Known secret values masked in what a compaction sends to the provider. */
-function maskCompactionInput<T>(items: T): T {
-  return currentAttemptSecretValues()?.mask(items, "compaction_input") ?? items;
-}
 
 export async function maybeCompactContext(
   db: Database,
@@ -283,13 +277,10 @@ export async function maybeCompactContext(
     const materialized = options.materializeHistory
       ? await options.materializeHistory(input)
       : input;
-    const projected = sanitizeHistoryItemsForModel(
+    return sanitizeHistoryItemsForModel(
       options.projectModelInput ? await options.projectModelInput(materialized) : materialized,
       settings.modelToolOutputTruncationTokens,
     ) as CompactionItem[];
-    // The summarizer and remote compaction call the provider directly: known
-    // secret values are masked here as in every other model request.
-    return maskCompactionInput(projected);
   };
   const items = await projectForWire(canonicalItems);
   const decision = decideCompaction({
@@ -563,10 +554,7 @@ async function compactContextRemoteV2(
   const taken = options.requestRemoteCompactionV2.withheldWireHistory?.();
   const exact = taken && withheldHistoryCovers(taken, canonicalItems) ? taken : undefined;
   try {
-    compactionItem = await options.requestRemoteCompactionV2(
-      settings,
-      exact ? maskCompactionInput(exact) : items,
-    );
+    compactionItem = await options.requestRemoteCompactionV2(settings, exact ?? items);
   } catch (error) {
     if (!isExactContextLengthExceeded(error)) throw error;
     const retry = projectRemoteCompactionOverflowRetryInput(items);
@@ -728,7 +716,7 @@ async function compactContextPortable(
       withheldHistoryCovers(taken, canonicalItems)
         ? taken
         : undefined;
-    const exact = withheld ? buildCompactionPromptInput(maskCompactionInput(withheld)) : undefined;
+    const exact = withheld ? buildCompactionPromptInput(withheld) : undefined;
     const exactFits = exact ? await fits(exact) : false;
     const cut = exactFits
       ? canonicalItems.length

@@ -108,7 +108,7 @@ impl Sim {
                 cpu: 0,
                 save: limit + 64 * MIB,
                 disk,
-                fetch: limit + disk + 64 * MIB,
+                fetch: limit + 64 * MIB,
             };
             let state = if sim.rng.below(2) == 0 {
                 State::new(Level::Saved, Durability::Local, true)
@@ -163,6 +163,7 @@ impl Sim {
                 {
                     model.hydrating = true;
                     model.fetched = 0;
+                    model.headroom = model.size.disk;
                 }
             }
         }
@@ -372,6 +373,12 @@ impl Sim {
                     self.unread += bytes;
                 }
                 Step::Fetch => {
+                    // Fetch fills the same disk the guest will write, not
+                    // another copy alongside it.
+                    let disk = self.rng.below(model.headroom + 1);
+                    model.headroom -= disk;
+                    self.used += disk;
+                    self.unread += disk;
                     let bytes = self.rng.below(model.size.fetch / 2);
                     model.fetched += bytes;
                     self.used += bytes;

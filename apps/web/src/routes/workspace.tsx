@@ -15,6 +15,7 @@ import {
   type ComponentProps,
   type ReactNode,
 } from "react";
+import { CircleCheckIcon, LinkIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
@@ -111,6 +112,42 @@ export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspac
     <>
       You need access to <strong>{workspaceName}</strong> to connect your Slack account.
     </>
+  );
+}
+
+/**
+ * Linking a Slack account as an organization member who has no access to the
+ * link's workspace: first a confirmation naming the Slack account, then where
+ * to go. Linking gives them nothing else, so there is no workspace to open
+ * here: Slack is where they continue.
+ */
+export function SlackLinkPanel({
+  linked,
+  title,
+  description,
+  action,
+}: {
+  linked: boolean;
+  title: string;
+  description: ReactNode;
+  action: ReactNode;
+}) {
+  const Icon = linked ? CircleCheckIcon : LinkIcon;
+  return (
+    <section className="grid flex-1 place-items-center px-4 text-center">
+      <div
+        role={linked ? "status" : undefined}
+        className="w-full max-w-md rounded-lg border border-border bg-surface p-5"
+      >
+        <Icon
+          aria-hidden
+          className={`mx-auto mb-3 size-5 ${linked ? "text-status-idle" : "text-fg-muted"}`}
+        />
+        <h1 className="text-base font-semibold">{title}</h1>
+        <p className="mt-2 text-sm leading-5 text-fg-muted">{description}</p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>
+      </div>
+    </section>
   );
 }
 
@@ -327,6 +364,42 @@ export function WorkspaceShellRouteContent({
     }
   }
 
+  async function linkSlackAccount() {
+    if (!slackAccessRequest || slackAccessRequest.status !== "prepared") return;
+    const operation = beginSlackOperation();
+    if (!operation) return;
+    slackMutationBusy.current = true;
+    updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
+    try {
+      const request = await client.linkSlackUserAsOrganizationMember(
+        workspaceId,
+        slackAccessRequest.id,
+        {
+          expectedVersion: slackAccessRequest.version,
+          idempotencyKey: crypto.randomUUID(),
+        },
+      );
+      if (!ownsSlackOperation(operation)) return;
+      updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
+    } catch (error) {
+      if (ownsSlackOperation(operation)) {
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          error: userErrorText(error),
+        }));
+      }
+    } finally {
+      if (ownsSlackOperation(operation)) {
+        activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          busy: false,
+        }));
+      }
+    }
+  }
+
   async function cancelSlackAccess() {
     if (
       !slackAccessRequest ||
@@ -447,6 +520,57 @@ export function WorkspaceShellRouteContent({
         >
           {!slackAccessRequest && !slackAccessError ? (
             <LoadingPanel label="Checking Slack access" />
+          ) : slackAccessRequest?.status === "completed" && !slackAccessError ? (
+            <SlackLinkPanel
+              linked
+              title="Slack account linked"
+              description="You can go back to Slack."
+              action={
+                <Button asChild type="button" variant="outline">
+                  <Link to="/" onClick={context.clearSlackLinkContinuation}>
+                    Open Opengeni
+                  </Link>
+                </Button>
+              }
+            />
+          ) : slackAccessRequest?.status === "prepared" &&
+            slackAccessRequest.organizationMemberLink ? (
+            <SlackLinkPanel
+              linked={false}
+              title="Link your Slack account"
+              description={
+                slackAccessRequest.organizationMemberLink.slackAccountLabel ? (
+                  <>
+                    Link{" "}
+                    <strong className="font-medium text-fg">
+                      {slackAccessRequest.organizationMemberLink.slackAccountLabel}
+                    </strong>{" "}
+                    to your Opengeni account.
+                  </>
+                ) : (
+                  "Link this Slack account to your Opengeni account."
+                )
+              }
+              action={
+                <>
+                  <Button
+                    type="button"
+                    disabled={slackAccessBusy}
+                    onClick={() => void linkSlackAccount()}
+                  >
+                    Link
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={slackAccessBusy}
+                    onClick={() => void cancelSlackAccess()}
+                  >
+                    Cancel
+                  </Button>
+                </>
+              }
+            />
           ) : activePendingState ? (
             <ProblemPanel
               title={

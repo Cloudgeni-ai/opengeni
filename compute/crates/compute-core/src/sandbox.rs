@@ -130,7 +130,7 @@ pub(crate) struct Sandbox {
 pub(crate) struct LocalDisk {
     /// Bytes its disk may still grow by while its VM runs: its size's
     /// `disk` until [`crate::Input::DiskGrowth`] measures it, and again
-    /// from the end of each pause whose guest trimmed its disk.
+    /// from the end of each pause that trimmed it or fetch that replaced it.
     pub growth: u64,
     /// Whether a wake from object storage may still be writing its local
     /// copy: from that wake's start until [`crate::Input::Hydrating`]

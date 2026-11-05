@@ -60,6 +60,10 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  workspaceSizeFromArchiveDescriptor,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 
@@ -532,6 +536,7 @@ export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
@@ -597,6 +602,13 @@ export {
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
 export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  processStartFailureNullDeviceNote,
+} from "./selfhosted/process-start-failure";
+export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
   NO_WAKE_HEADER,
@@ -609,6 +621,9 @@ export {
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
+  CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE,
+  CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE,
+  type SelfhostedFaultContext,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
   FAULT_FIELD_WHAT_PRESERVED,

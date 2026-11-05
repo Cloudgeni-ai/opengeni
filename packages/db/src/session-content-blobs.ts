@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AttemptToolCatalog, ModelContextSnapshot } from "@opengeni/contracts";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
@@ -235,7 +235,11 @@ export async function readSessionContentBlobs(
     const rows = await tx
       .select({
         digest: schema.sessionContentBlobs.digest,
-        value: schema.sessionContentBlobs.value,
+        // As text, decoded once here. postgres.js already parses jsonb and
+        // drizzle's jsonb column parses a string result again, so a stored
+        // string that is itself JSON (a small request body, one chunk) would
+        // come back as the object it spells.
+        value: sql<string>`${schema.sessionContentBlobs.value}::text`,
       })
       .from(schema.sessionContentBlobs)
       .where(
@@ -245,7 +249,7 @@ export async function readSessionContentBlobs(
           anyOf(schema.sessionContentBlobs.digest, batch),
         ),
       );
-    for (const row of rows) values.set(row.digest, row.value);
+    for (const row of rows) values.set(row.digest, JSON.parse(row.value) as unknown);
   }
   for (const digest of unique) {
     if (!values.has(digest)) throw new SessionContentBlobMissingError(digest);

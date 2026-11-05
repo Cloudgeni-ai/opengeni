@@ -172,6 +172,7 @@ for (const node of calls) {
             workspaceId: "workspace",
             subjectId: "subject",
             workspaceSettings: {},
+            billingOrigin: "app",
           },
         ]);
       if (phase === "capability_settings")

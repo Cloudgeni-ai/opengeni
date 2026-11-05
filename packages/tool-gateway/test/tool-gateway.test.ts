@@ -7,7 +7,6 @@ import {
   ToolGatewayBlockedError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
-  ToolGatewayPathCollisionError,
   createWorkspaceToolGateway,
   parseVerifiedToolGatewayCatalog,
   type ToolGatewayDefinition,
@@ -383,23 +382,26 @@ describe("ToolGateway", () => {
     ).toThrow(ToolGatewayCatalogIntegrityError);
   });
 
-  test("rejects namespace paths that use a tool leaf as a prefix", () => {
-    expect(() =>
-      createWorkspaceToolGateway({
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        generation: 1,
-        definitions: [
-          { ...definition, codemodePath: ["docs", "search"] },
-          {
-            ...definition,
-            identity: { serverId: "docs", toolName: "search_advanced" },
-            modelName: "docs__search_advanced",
-            codemodePath: ["docs", "search", "advanced"],
-          },
-        ],
-      }),
-    ).toThrow(ToolGatewayPathCollisionError);
+  test("moves a namespace path that would extend a tool leaf beside it", () => {
+    const { catalog } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        { ...definition, codemodePath: ["docs", "search"] },
+        {
+          ...definition,
+          identity: { serverId: "docs", toolName: "search_advanced" },
+          modelName: "docs__search_advanced",
+          codemodePath: ["docs", "search", "advanced"],
+        },
+      ],
+      onWarnings: () => {},
+    });
+    expect(catalog.entries.map((entry) => entry.codemodePath)).toEqual([
+      ["docs", "search"],
+      ["docs", expect.stringMatching(/^search_advanced_[0-9a-f]{16}$/u)],
+    ]);
   });
 });
 

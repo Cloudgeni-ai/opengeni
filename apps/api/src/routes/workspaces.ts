@@ -1,7 +1,9 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import { billingOriginForAccessGrant } from "../access-grant-rls";
 import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
+  checkOwnSubscriptionPlan,
   deploymentRealtimeVoice,
   memberExecutionTargetUsable,
   realtimeVoiceRegionAllowed,
@@ -1367,6 +1369,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceSettings,
       organizationDefaults,
       residencySettings,
+      subscriptionAdmission,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1383,6 +1386,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         settings: deps.settings,
       }),
+      billingOriginForAccessGrant(deps, grant).then((origin) =>
+        checkOwnSubscriptionPlan(deps, grant.accountId, origin),
+      ),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1457,6 +1463,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected Codex" as const,
         description: "Deep session integration",
         ...availability(codexConnected, "Connect Codex to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       {
@@ -1465,6 +1478,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected SuperGrok" as const,
         description: "Direct SuperGrok speech-to-speech",
         ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       ...Object.values(ELEVENLABS_REALTIME_MODELS).map((model) => ({

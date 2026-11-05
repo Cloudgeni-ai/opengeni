@@ -1,5 +1,25 @@
 # @opengeni/codex
 
+## 6.10.0
+
+### Patch Changes
+
+- 232e713: Subscription voice no longer refuses to start when the Codex realtime remote configuration advertises a protocol version other than V3. That version is the desktop client's preference, not a requirement of the call endpoint, so the call now uses the pinned V3 model and architecture (as the Codex CLI does). A refused realtime negotiation now writes one server log line with the provider status, the failing stage, identifier-shaped provider error fields, and the call parameters with their source; the client still gets only the safe message.
+- 2a27f11: Subscription voice calls are created at `/wham/realtime/calls`, with a per-call voice session id in the `Voice-Session-Id` header and `session.voice_session_id`, as the official Codex desktop app does. The fallback model used when the remote configuration is unavailable is now `gpt-live-1.1-codex`.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b5201d5]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/network@6.10.0
+
 ## 6.9.0
 
 ### Patch Changes

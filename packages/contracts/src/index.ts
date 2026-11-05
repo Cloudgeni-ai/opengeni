@@ -4,6 +4,7 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
@@ -209,10 +210,6 @@ import {
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
-export * from "./secret-value-masking";
-export * from "./secret-shape-masking";
-export * from "./credential-names";
-export * from "./secret-field-hints";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -1456,6 +1453,9 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_S
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
+ * The first-party MCP lists the selected bot tools only while the workspace has
+ * a Slack bot available, and an attended bot send follows the person's own
+ * Slack send permission.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
@@ -5269,6 +5269,16 @@ export const SlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
     completedAt: primitives.string.datetime({ offset: true }).nullable(),
     createdAt: primitives.string.datetime({ offset: true }),
     updatedAt: primitives.string.datetime({ offset: true }),
+    /**
+     * Shown to the person linking when they may link this Slack account as a
+     * member of the organization, without workspace access, once they confirm
+     * it (`POST …/user-link-intents/:requestId/link`). The label names the
+     * Slack account when Slack says who it is.
+     */
+    organizationMemberLink: z
+      .object({ slackAccountLabel: z.string().min(1).max(256).nullable() })
+      .nullable()
+      .optional(),
   }),
 );
 export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
@@ -9001,6 +9011,12 @@ export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
  * Replace the complete durable session tool policy, or explicitly opt back in
  * to current workspace defaults. MCP servers and individual Opengeni tools
  * advance atomically under one policy version.
+ *
+ * `firstPartyMcpPermissions`, when supplied, replaces the session's
+ * first-party permission set under the same version, so a newly granted tool
+ * and the permission it needs arrive together. The caller must hold every
+ * permission; a child stays within its parent and an agent may only narrow.
+ * Omission keeps the current set.
  */
 export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
@@ -9010,6 +9026,7 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
         // When supplied, edit only connector exclusions and preserve built-in tools.
         // Omission explicitly resets the complete policy to workspace defaults.
         excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+        firstPartyMcpPermissions: z.array(Permission).min(1).max(100).optional(),
         expectedVersion: primitives.positiveInteger,
       })
       .strict(),
@@ -9018,6 +9035,7 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
         mode: z.literal("explicit"),
         tools: z.array(ToolRef).max(64),
         firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        firstPartyMcpPermissions: z.array(Permission).min(1).max(100).optional(),
         expectedVersion: primitives.positiveInteger,
       })
       .strict(),

@@ -1,5 +1,49 @@
 # Modular prompt changelog
 
+A configured agent with nothing to wait for or run code in no longer carries
+that guidance, and two answer rules follow the features they describe. As
+before, only text for an absent feature is omitted: compositions with the
+feature keep their bytes (`modular-parity-lock.test.ts`; its "none-with-features"
+cases now include artifacts, recorded from the composer just before this
+change). Nothing was reworded.
+
+- `wait_for_input` no longer follows human input. An answer to
+  `request_human_input` resumes the paused turn, and a new message starts one,
+  so a person needs no wait; compute, subagents, goals, schedules, browser,
+  media or workspaceAdmin (a `run_on` command finishes later) still bring it.
+  A configured agent's prefix is therefore the same
+  whether the API or a person started the turn. The Waiting section, the
+  monitoring sentences and every `wait_for_input` clause already follow the
+  tool.
+- The Codemode directive is sent to a configured session only when the turn
+  has a sandbox or Connected Machine to run `ogtool` from, or `run_on` to open
+  a Codemode-enabled shell elsewhere (otherwise the worker sets no
+  `codemodeAvailable` and seeds no token). Legacy sessions are unchanged.
+- Final answer: the web-sources sentence needs `webSearch` or `browser`.
+- Formatting rules: "Answer in chat by default …" needs `artifacts`; without
+  them there is nowhere else to answer.
+- The three `all-without-artifacts` locked cases are dropped (58 → 55): with
+  artifacts now gating a sentence, they no longer compose the pre-change bytes,
+  and the artifacts removal variant covers that omission instead.
+
+```text
+- An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.   (without webSearch or browser)
+- - Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.   (without artifacts)
+- Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox … inspect actual state before any separately authorized retry.   (configured session with no sandbox, Connected Machine or `run_on`)
+```
+
+Slack agent text is shorter. A chat started from Slack in an installation
+with agents keeps the same rules in fewer words: answer yourself by default,
+hand off only to an agent the person names (then exactly `NO_REPLY`), suggest
+a fitting agent without mentioning it, and use Memory and `slack_agent_chats`
+when context is missing. Cut: examples, rationale, "do not hand it back"
+(the server refuses a hand-back), and the propose line's card and icon details
+(the `slack_agent_propose` description has them). The agent roster describes
+the first 20 agents and names up to 30 more. The `slack_agent_handoff`,
+`slack_agent_suggest`, `slack_agent_chats` and `slack_agent_propose`
+descriptions drop what the server enforces or reports (one hop, never back,
+usable agents only, name character rules, the text to tell the person).
+
 A configured agent pays only for what it can use. Every section below is
 omitted only when its feature is absent; sessions that have the feature render
 byte for byte as before (`modular-parity-lock.test.ts` pins 58 such
@@ -197,6 +241,19 @@ the lines are shown as text, not as a sentence diff:
 - Make changes inside the workspace unless the user explicitly asks for another location. Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.
 - Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
 ```
+
+Connect cards despite unrelated strong matches. No prompt or tool description
+text changes. `tool_search` used to skip its integration catalog lookup
+whenever any installed tool matched strongly, so "posts on Slack" (matching a
+Slack bot tool) or "Linear issues" (matching meeting search) got no Connect
+card. It now skips the lookup only when a strong match is the named
+integration's own tool (beside strong matches reading the catalog only for a
+capitalised or unfamiliar word, waiting at most 1.5 seconds, and naming only
+distinctive mentions), and also recognises an
+integration's name with different spacing or case, a near spelling, or its
+vendor domain word. Catalog search ranks entries a query names first. The
+`notConnected` text is unchanged, and it appears on more searches than
+before.
 
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and

@@ -342,6 +342,34 @@ test("an explicit empty-workspace selection is a durable notice, not an agent re
   expect(items.some((item) => item.kind === "agent-message")).toBe(false);
 });
 
+test("an automatic restore from an older save tells the person when that save was made", () => {
+  const capturedAt = "2026-11-04T00:56:00.000Z";
+  const items = buildTimeline(englishText, [
+    event(1, "sandbox.recovery.selected", {
+      operationId: "00000000-0000-4000-8000-000000000001",
+      mode: "checkpoint",
+      capturedAt,
+    }),
+  ]);
+  const time = new Date(capturedAt).toLocaleString(englishText.locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  expect(items).toEqual([
+    expect.objectContaining({
+      kind: "notice",
+      tone: "input",
+      text: `This chat's workspace machine was lost, so its files were restored from a save made at ${time}. Changes made after that may be missing.`,
+    }),
+  ]);
+  // A malformed time shows nothing rather than "Invalid Date".
+  expect(
+    buildTimeline(englishText, [
+      event(2, "sandbox.recovery.selected", { mode: "checkpoint", capturedAt: "not a time" }),
+    ]),
+  ).toEqual([]);
+});
+
 function event(
   sequence: number,
   type: string,
