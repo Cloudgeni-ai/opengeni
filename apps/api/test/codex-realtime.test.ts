@@ -253,6 +253,14 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "Never state a result, status, change, name, number, time, or identifier the backend has not reported.",
     );
+    // While a delegation runs the voice model has no answer: it must not fill
+    // the wait with facts of its own or treat working notes as findings.
+    expect(captured?.instructions).toContain(
+      "is the backend's working notes while it runs: plans, guesses, and partial observations, not conclusions.",
+    );
+    expect(captured?.instructions).toContain(
+      "While a delegation is running you do not know its answer, even if you think you can guess it. Never answer a delegated question yourself from general knowledge, the session history, or progress notes",
+    );
     expect(captured?.instructions).not.toContain("complete standalone task");
     expect(captured?.instructions).not.toContain("make a reasonable assumption");
     expect(captured?.instructions).not.toContain("Opengeni");
