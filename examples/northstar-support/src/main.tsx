@@ -1,6 +1,8 @@
 import { RotateCcwIcon } from "lucide-react";
+import { OpengeniGlyph } from "./support-ticket";
+import { Kbd, MOD_KEY, StatusGlyph } from "./ticket-glyphs";
 import { AnimatePresence, motion } from "motion/react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   AgentPanelLoadBoundary,
@@ -45,6 +47,27 @@ function NorthstarApp() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState("TKT-2847");
 
+  function setAgent(enabled: boolean) {
+    agentPanelLoadLifecycle.setEnabled(enabled);
+    setAgentEnabled(enabled);
+    if (!enabled) setAgentPanelExpanded(false);
+    setSessionId(null);
+  }
+
+  // The shortcut always toggles from the latest rendered state.
+  const toggleAgentRef = useRef(() => setAgent(!agentEnabled));
+  toggleAgentRef.current = () => setAgent(!agentEnabled);
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        toggleAgentRef.current();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   if (demo.loading && !demo.state) {
     return <LoadingScreen />;
   }
@@ -67,9 +90,9 @@ function NorthstarApp() {
       className={
         agentEnabled
           ? agentPanelExpanded
-            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[248px_minmax(360px,1fr)_620px] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
-            : "northstar grid h-dvh min-w-[1120px] grid-cols-[264px_minmax(460px,1fr)_430px] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
-          : "northstar grid h-dvh min-w-[980px] grid-cols-[300px_minmax(0,1fr)] overflow-hidden bg-ns-paper transition-[grid-template-columns] duration-300 ease-out"
+            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[236px_minmax(360px,1fr)_620px] gap-2 overflow-hidden bg-ns-canvas p-2 pl-0 transition-[grid-template-columns] duration-300 ease-out"
+            : "northstar grid h-dvh min-w-[1120px] grid-cols-[252px_minmax(460px,1fr)_430px] gap-2 overflow-hidden bg-ns-canvas p-2 pl-0 transition-[grid-template-columns] duration-300 ease-out"
+          : "northstar grid h-dvh min-w-[980px] grid-cols-[276px_minmax(0,1fr)] gap-2 overflow-hidden bg-ns-canvas p-2 pl-0 transition-[grid-template-columns] duration-300 ease-out"
       }
       data-agent-enabled={agentEnabled}
       data-og-density="compact"
@@ -85,16 +108,11 @@ function NorthstarApp() {
         }}
       />
 
-      <main className="flex min-h-0 min-w-0 flex-col bg-ns-sheet">
+      <main className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl bg-ns-sheet shadow-[0_1px_3px_rgba(18,26,51,0.06),0_0_0_1px_rgba(18,26,51,0.07)]">
         <ProductHeader
           supportCase={selectedCase}
           agentEnabled={agentEnabled}
-          onAgentEnabledChange={(enabled) => {
-            agentPanelLoadLifecycle.setEnabled(enabled);
-            setAgentEnabled(enabled);
-            if (!enabled) setAgentPanelExpanded(false);
-            setSessionId(null);
-          }}
+          onAgentEnabledChange={setAgent}
           onReset={() => {
             setSessionId(null);
             setSelectedTicketId("TKT-2847");
@@ -120,7 +138,7 @@ function NorthstarApp() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 56 }}
             transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
-            className="min-h-0 min-w-0 overflow-hidden"
+            className="min-h-0 min-w-0 overflow-hidden rounded-xl shadow-[0_8px_30px_rgba(17,19,17,0.12),0_0_0_1px_rgba(17,19,17,0.9)]"
           >
             <AgentPanelPresenceGate>
               <AgentPanelLoadBoundary>
@@ -156,18 +174,20 @@ function ProductHeader({
   onReset: () => void;
 }) {
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between gap-6 border-b border-ns-line bg-ns-sheet px-8">
-      <p className="min-w-0 truncate text-[13px] text-ns-muted">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-6 border-b border-ns-line px-6">
+      <p className="flex min-w-0 items-center gap-2 text-[13px] text-ns-muted">
+        <span>{supportCase.ticket.inbox === "mine" ? "My inbox" : "Unassigned"}</span>
+        <span className="text-ns-line-strong">/</span>
+        <StatusGlyph status={supportCase.ticket.status} />
         <span className="font-semibold text-ns-ink">{supportCase.ticket.id}</span>
-        <span className="ml-3">{supportCase.customer.name}</span>
       </p>
 
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
         <button
           type="button"
           onClick={onReset}
           title="Put every ticket back to its starting state"
-          className="inline-flex h-9 items-center gap-2 rounded-md px-3 text-[13px] font-medium text-ns-muted transition-colors hover:bg-ns-paper hover:text-ns-ink"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium text-ns-muted transition-colors hover:bg-black/[0.04] hover:text-ns-ink"
         >
           <RotateCcwIcon className="size-3.5" />
           Reset demo
@@ -178,33 +198,20 @@ function ProductHeader({
           role="switch"
           aria-checked={agentEnabled}
           aria-label="Opengeni"
+          aria-keyshortcuts="Meta+J Control+J"
           onClick={() => onAgentEnabledChange(!agentEnabled)}
           className={
             agentEnabled
-              ? "flex h-9 items-center gap-2.5 rounded-full bg-og-ink pl-2 pr-4 text-[13px] font-medium text-white transition-colors"
-              : "flex h-9 items-center gap-2.5 rounded-full border border-ns-line-strong bg-ns-sheet pl-2 pr-4 text-[13px] font-medium text-ns-ink transition-colors hover:border-og-ink"
+              ? "flex h-8 items-center gap-2 rounded-lg bg-og-ink pl-2.5 pr-1.5 text-[13px] font-medium text-white transition-colors"
+              : "group flex h-8 items-center gap-2 rounded-lg bg-og-ink pl-2.5 pr-1.5 text-[13px] font-medium text-white shadow-[0_1px_2px_rgba(17,19,17,0.2)] transition-colors hover:bg-black"
           }
           style={{ fontFamily: "var(--font-og)" }}
         >
-          <span
-            aria-hidden="true"
-            className={
-              agentEnabled
-                ? "relative h-5 w-9 rounded-full bg-og-aqua transition-colors"
-                : "relative h-5 w-9 rounded-full bg-ns-line-strong transition-colors"
-            }
-          >
-            <motion.span
-              className={
-                agentEnabled
-                  ? "absolute top-0.5 size-4 rounded-full bg-og-ink"
-                  : "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_2px_rgba(18,26,51,0.25)]"
-              }
-              animate={{ left: agentEnabled ? 18 : 2 }}
-              transition={{ type: "spring", stiffness: 520, damping: 36 }}
-            />
-          </span>
-          {agentEnabled ? "Opengeni is on" : "Turn on Opengeni"}
+          <OpengeniGlyph
+            className={agentEnabled ? "size-3.5 text-og-aqua" : "size-3.5 text-white"}
+          />
+          {agentEnabled ? "Close Opengeni" : "Ask Opengeni"}
+          <Kbd tone="dark">{`${MOD_KEY}J`}</Kbd>
         </button>
       </div>
     </header>

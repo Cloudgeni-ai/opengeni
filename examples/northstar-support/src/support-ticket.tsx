@@ -1,4 +1,12 @@
-import { CheckIcon, ChevronDownIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ClockIcon } from "lucide-react";
+import {
+  PRIORITY_LABEL,
+  PriorityGlyph,
+  STATUS_LABEL,
+  StatusGlyph,
+  Kbd,
+  MOD_KEY,
+} from "./ticket-glyphs";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import type { SupportDemoState, SupportDomainEvent, TicketPriority, TicketStatus } from "./types";
@@ -63,6 +71,9 @@ export function SupportTicketView({
   const { ticket } = state;
   const [updatingField, setUpdatingField] = useState<"status" | "priority" | null>(null);
   const due = sla(ticket.slaDueAt);
+  const changedByAgent = ticket.activity[0]?.actor === "Opengeni agent";
+  const summary = lastEvent?.type === "ticket.updated" ? lastEvent.summary.toLowerCase() : "";
+  const changed = { status: summary.includes("status"), priority: summary.includes("priority") };
 
   async function updateField(field: "status" | "priority", value: TicketStatus | TicketPriority) {
     setUpdatingField(field);
@@ -83,20 +94,22 @@ export function SupportTicketView({
         <div
           className={
             agentEnabled
-              ? "mx-auto grid w-full max-w-[820px] gap-10 px-8 pb-16 pt-8"
-              : "mx-auto grid w-full max-w-[1180px] gap-12 px-10 pb-16 pt-9 xl:grid-cols-[minmax(0,1fr)_300px]"
+              ? "mx-auto grid w-full max-w-[820px] gap-10 px-8 pb-16 pt-10"
+              : "mx-auto grid w-full max-w-[1180px] gap-14 px-12 pb-16 pt-12 xl:grid-cols-[minmax(0,1fr)_288px]"
           }
         >
           <div className="min-w-0">
             <header>
-              <h2 className="text-[30px] font-semibold leading-[1.15] tracking-[-0.03em] text-ns-ink">
+              <h2 className="text-[34px] font-semibold leading-[1.1] tracking-[-0.035em] text-ns-ink">
                 {ticket.subject}
               </h2>
-              <p className="mt-2 text-[14px] text-ns-muted">
-                Opened by email {relativeTime(ticket.createdAt)}
+              <p className="mt-2.5 text-[14px] text-ns-muted">
+                {state.customer.primaryContact.name} at {state.customer.name} wrote in by email{" "}
+                {relativeTime(ticket.createdAt)}
                 {ticket.tags.length > 0 ? (
                   <>
-                    , tagged{" "}
+                    {" "}
+                    about{" "}
                     {ticket.tags.map((tag, index) => (
                       <span key={tag}>
                         {index > 0 ? (index === ticket.tags.length - 1 ? " and " : ", ") : null}
@@ -107,52 +120,38 @@ export function SupportTicketView({
                 ) : null}
               </p>
 
-              <dl className="mt-6 flex flex-wrap items-end gap-x-8 gap-y-4 border-y border-ns-line py-4">
-                <Property label="Priority">
-                  <ControlSelect
-                    label="Priority"
-                    value={ticket.priority}
-                    busy={updatingField === "priority"}
-                    changed={lastEvent?.summary.toLowerCase().includes("priority") ?? false}
-                    options={[
-                      ["low", "Low"],
-                      ["normal", "Normal"],
-                      ["high", "High"],
-                      ["urgent", "Urgent"],
-                    ]}
-                    onChange={(value) => void updateField("priority", value as TicketPriority)}
-                  />
-                </Property>
-                <Property label="Status">
-                  <ControlSelect
-                    label="Status"
-                    value={ticket.status}
-                    busy={updatingField === "status"}
-                    changed={lastEvent?.summary.toLowerCase().includes("status") ?? false}
-                    options={[
-                      ["open", "Open"],
-                      ["investigating", "Investigating"],
-                      ["waiting_on_customer", "Waiting on customer"],
-                      ["resolved", "Resolved"],
-                    ]}
-                    onChange={(value) => void updateField("status", value as TicketStatus)}
-                  />
-                </Property>
-                <Property label="Assignee">
-                  <span className="text-[14px] font-medium">{ticket.assignee}</span>
-                </Property>
-                <Property label="Response SLA">
-                  <span
-                    className={
-                      due.overdue
-                        ? "text-[14px] font-medium text-ns-alert"
-                        : "text-[14px] font-medium"
-                    }
-                  >
-                    {due.label}
+              <div className="mt-5 flex flex-wrap items-center gap-2">
+                <ChipSelect
+                  label="Status"
+                  value={ticket.status}
+                  busy={updatingField === "status"}
+                  changed={changed.status}
+                  byAgent={changedByAgent}
+                  glyph={<StatusGlyph status={ticket.status} />}
+                  options={Object.entries(STATUS_LABEL)}
+                  onChange={(value) => void updateField("status", value as TicketStatus)}
+                />
+                <ChipSelect
+                  label="Priority"
+                  value={ticket.priority}
+                  busy={updatingField === "priority"}
+                  changed={changed.priority}
+                  byAgent={changedByAgent}
+                  glyph={<PriorityGlyph priority={ticket.priority} />}
+                  options={Object.entries(PRIORITY_LABEL)}
+                  onChange={(value) => void updateField("priority", value as TicketPriority)}
+                />
+                <Chip label="Assignee">
+                  <span className="grid size-4 place-items-center rounded-full bg-[#d9cdbd] text-[8px] font-bold text-[#4d4134]">
+                    {initials(ticket.assignee)}
                   </span>
-                </Property>
-              </dl>
+                  {ticket.assignee}
+                </Chip>
+                <Chip label="Response SLA" tone={due.overdue ? "alert" : "default"}>
+                  <ClockIcon className="size-3.5" />
+                  {due.label}
+                </Chip>
+              </div>
 
               <AnimatePresence>
                 {lastEvent ? (
@@ -161,17 +160,28 @@ export function SupportTicketView({
                     initial={{ opacity: 0, y: -4 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0 }}
-                    className="mt-3 flex items-center gap-2 text-[13px] font-medium text-ns-ok"
+                    className={
+                      changedByAgent
+                        ? "mt-4 flex items-center gap-2 text-[13px] font-medium text-og-green"
+                        : "mt-4 flex items-center gap-2 text-[13px] font-medium text-ns-ok"
+                    }
+                    style={changedByAgent ? { fontFamily: "var(--font-og)" } : {}}
                     role="status"
                   >
-                    <CheckIcon className="size-3.5" />
-                    {lastEvent.summary}
+                    {changedByAgent ? (
+                      <OpengeniGlyph className="size-3.5" />
+                    ) : (
+                      <CheckIcon className="size-3.5" />
+                    )}
+                    {changedByAgent
+                      ? `Opengeni: ${lowerFirst(lastEvent.summary)}`
+                      : lastEvent.summary}
                   </motion.p>
                 ) : null}
               </AnimatePresence>
             </header>
 
-            <div className="mt-8 space-y-8">
+            <div className="mt-10 space-y-8">
               <Conversation state={state} />
               <ResponseComposer
                 contactName={state.customer.primaryContact.name}
@@ -193,15 +203,6 @@ export function SupportTicketView({
         </div>
       </div>
     </article>
-  );
-}
-
-function Property({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-[12px] text-ns-subtle">{label}</dt>
-      <dd className="mt-1 flex h-8 items-center">{children}</dd>
-    </div>
   );
 }
 
@@ -318,8 +319,8 @@ function ResponseComposer({
     <section
       className={
         mode === "note"
-          ? "rounded-lg border border-[#ecd9ad] bg-ns-note transition-colors focus-within:border-[#c9a24f]"
-          : "rounded-lg border border-ns-line-strong bg-ns-sheet transition-colors focus-within:border-ns-navy"
+          ? "rounded-xl bg-ns-note shadow-[0_0_0_1px_#ecd9ad,0_4px_16px_rgba(18,26,51,0.05)] transition-shadow focus-within:shadow-[0_0_0_1.5px_#c9a24f,0_4px_16px_rgba(18,26,51,0.07)]"
+          : "rounded-xl bg-ns-sheet shadow-[0_0_0_1px_var(--color-ns-line),0_4px_16px_rgba(18,26,51,0.05)] transition-shadow focus-within:shadow-[0_0_0_1.5px_var(--color-ns-navy),0_4px_16px_rgba(18,26,51,0.07)]"
       }
     >
       <div className="flex items-center gap-1 px-3 pt-2">
@@ -340,6 +341,12 @@ function ResponseComposer({
       <textarea
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            event.preventDefault();
+            void submit();
+          }
+        }}
         rows={3}
         aria-label={mode === "reply" ? "Reply to customer" : "Internal note"}
         placeholder={
@@ -355,9 +362,10 @@ function ResponseComposer({
           type="button"
           onClick={() => void submit()}
           disabled={!draft.trim() || sending}
-          className="h-9 rounded-md bg-ns-navy px-4 text-[13px] font-semibold text-white transition-colors hover:bg-ns-navy-hover disabled:cursor-not-allowed disabled:bg-ns-line-strong disabled:text-white"
+          className="inline-flex h-8 items-center gap-2 rounded-lg bg-ns-navy pl-3.5 pr-1.5 text-[13px] font-semibold text-white transition-colors hover:bg-ns-navy-hover disabled:cursor-not-allowed disabled:bg-ns-line-strong"
         >
           {sending ? "Saving" : mode === "reply" ? "Send reply" : "Add note"}
+          <Kbd tone="dark">{`${MOD_KEY}↵`}</Kbd>
         </button>
       </div>
     </section>
@@ -400,9 +408,10 @@ function CustomerContext({ state }: { state: SupportDemoState }) {
       <h3 id="customer-heading" className="text-[16px] font-semibold tracking-[-0.01em]">
         {customer.name}
       </h3>
-      <p className="mt-1 text-[13px] text-ns-muted">
-        {customer.plan} plan, {moneyFormatter.format(customer.arr)} a year, customer since{" "}
-        {monthYearFormatter.format(new Date(customer.joinedAt))}
+      <p className="mt-1 text-[13px] leading-5 text-ns-muted">
+        {customer.plan} plan, {moneyFormatter.format(customer.arr)} a year
+        <br />
+        Customer since {monthYearFormatter.format(new Date(customer.joinedAt))}
       </p>
       <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4">
         <Metric label="Health score" value={String(customer.healthScore)} unit="/100" />
@@ -499,6 +508,10 @@ function ActivityLog({ state }: { state: SupportDemoState }) {
   );
 }
 
+function lowerFirst(value: string): string {
+  return value ? value[0]!.toLowerCase() + value.slice(1) : value;
+}
+
 export function OpengeniGlyph({ className }: { className?: string }) {
   return (
     <svg viewBox="71 17 184 184" aria-hidden="true" className={className}>
@@ -510,11 +523,40 @@ export function OpengeniGlyph({ className }: { className?: string }) {
   );
 }
 
-function ControlSelect({
+const chipBase =
+  "inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium shadow-[inset_0_0_0_1px_var(--color-ns-line)]";
+
+function Chip({
+  label,
+  tone = "default",
+  children,
+}: {
+  label: string;
+  tone?: "default" | "alert";
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      title={label}
+      className={
+        tone === "alert"
+          ? `${chipBase} bg-ns-alert-tint text-ns-alert shadow-none`
+          : `${chipBase} text-ns-ink`
+      }
+    >
+      <span className="sr-only">{label}: </span>
+      {children}
+    </span>
+  );
+}
+
+function ChipSelect({
   label,
   value,
   busy,
   changed,
+  byAgent,
+  glyph,
   options,
   onChange,
 }: {
@@ -522,21 +564,29 @@ function ControlSelect({
   value: string;
   busy: boolean;
   changed: boolean;
+  byAgent: boolean;
+  glyph: React.ReactNode;
   options: ReadonlyArray<readonly [string, string]>;
   onChange: (value: string) => void;
 }) {
+  const tone = !changed
+    ? "text-ns-ink hover:bg-black/[0.035]"
+    : byAgent
+      ? "bg-[#e9f8f3] text-ns-ink shadow-[inset_0_0_0_1.5px_var(--color-og-aqua),0_0_0_4px_rgba(159,227,211,0.35)]"
+      : "bg-ns-navy-tint text-ns-ink";
   return (
-    <label className="relative -ml-2 inline-flex">
-      <span className="sr-only">{label}</span>
+    <label
+      title={label}
+      className={`relative ${chipBase} pr-7 transition-shadow focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ns-navy/50 ${tone}`}
+    >
+      {glyph}
+      {options.find(([optionValue]) => optionValue === value)?.[1] ?? value}
       <select
+        aria-label={label}
         value={value}
         disabled={busy}
         onChange={(event) => onChange(event.target.value)}
-        className={
-          changed
-            ? "h-8 appearance-none rounded-md [field-sizing:content] bg-[#e6f6f1] py-0 pl-2 pr-7 text-[14px] font-medium text-ns-ink outline-none ring-1 ring-og-aqua transition-colors"
-            : "h-8 appearance-none rounded-md [field-sizing:content] bg-transparent py-0 pl-2 pr-7 text-[14px] font-medium text-ns-ink outline-none transition-colors hover:bg-black/[0.04]"
-        }
+        className="absolute inset-0 cursor-pointer appearance-none opacity-0 disabled:cursor-wait"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue}>

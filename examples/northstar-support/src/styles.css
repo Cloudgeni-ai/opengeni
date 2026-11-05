@@ -8,6 +8,7 @@
    ends and the agent begins. */
 @theme {
   --color-ns-paper: #f5f6f8;
+  --color-ns-canvas: #e9ecf1;
   --color-ns-rail: #eceef2;
   --color-ns-sheet: #ffffff;
   --color-ns-line: #e1e4ea;
@@ -44,7 +45,7 @@ body,
 }
 
 body {
-  background: var(--color-ns-paper);
+  background: var(--color-ns-canvas);
   color: var(--color-ns-ink);
 }
 

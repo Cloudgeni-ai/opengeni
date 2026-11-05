@@ -1,4 +1,11 @@
-import { EyeIcon, LoaderCircleIcon, Maximize2Icon, Minimize2Icon, PencilIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  EyeIcon,
+  LoaderCircleIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  PencilIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { Markdown, OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import { OpenGeniClient } from "@opengeni/sdk";
@@ -71,7 +78,7 @@ function SupportAgentPanelView({
 
   return (
     <aside className="northstar-agent-panel flex h-full min-h-0 flex-col border-l border-og-ink bg-og-offwhite text-og-fg">
-      <header className="flex h-16 shrink-0 items-center justify-between gap-4 bg-og-ink px-5 text-white">
+      <header className="relative flex h-14 shrink-0 items-center justify-between gap-4 bg-og-ink px-5 text-white after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-[linear-gradient(90deg,#9fe3d3,#fbfbf8_55%,#ffb787)] after:opacity-60">
         <div className="flex min-w-0 items-center gap-2.5">
           <OpengeniGlyph className="size-[22px] shrink-0 text-og-aqua" />
           <h2 className="text-[16px] font-semibold tracking-[-0.01em]">Opengeni</h2>
@@ -118,60 +125,69 @@ function SupportAgentPanelView({
           />
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pb-6 pt-8">
-          <p className="text-[14px] text-og-fg-muted">
-            Opengeni will work this ticket with Northstar&apos;s own tools.
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-5 pt-9">
+          <h3 className="text-[24px] font-semibold leading-[1.2] tracking-[-0.025em] text-og-fg">
+            Hand this ticket to Opengeni
+          </h3>
+          <p className="mt-2 max-w-[34ch] text-[14px] leading-[1.55] text-og-fg-muted">
+            It works inside Northstar with the same tools you use, and every change lands on the
+            ticket as it happens.
           </p>
-          <blockquote className="mt-4 border-l-2 border-og-aqua pl-4 text-[19px] leading-[1.45] tracking-[-0.01em] text-og-fg">
-            {demoPrompt(supportCase)}
-          </blockquote>
 
-          <h3 className="mt-9 text-[13px] font-semibold text-og-fg">What it can do here</h3>
-          <ul className="mt-3 space-y-2.5 text-[14px] leading-5">
+          <ul className="mt-7 divide-y divide-og-ink/[0.07] border-y border-og-ink/[0.07] text-[14px]">
             {(
               [
-                ["read", `Read ${supportCase.ticket.id} and its conversation`],
-                ["read", `Read ${supportCase.customer.name} account health and usage`],
-                ["write", "Change the ticket's priority and status"],
-                ["write", "Add internal notes for your team"],
+                ["read", `Reads ${supportCase.ticket.id} and its conversation`],
+                ["read", `Reads ${supportCase.customer.name} account health and usage`],
+                ["write", "Changes the ticket's priority and status"],
+                ["write", "Adds internal notes for your team"],
               ] as const
             ).map(([access, label]) => (
-              <li key={label} className="flex items-start gap-3">
+              <li key={label} className="flex items-center gap-3 py-2.5">
                 {access === "read" ? (
-                  <EyeIcon
-                    className="mt-0.5 size-4 shrink-0 text-og-fg-subtle"
-                    aria-label="Reads"
-                  />
+                  <EyeIcon className="size-4 shrink-0 text-og-fg-subtle" aria-label="Reads" />
                 ) : (
-                  <PencilIcon
-                    className="mt-0.5 size-4 shrink-0 text-og-green"
-                    aria-label="Writes"
-                  />
+                  <PencilIcon className="size-4 shrink-0 text-og-green" aria-label="Writes" />
                 )}
                 <span className="text-og-fg">{label}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-4 text-[13px] leading-5 text-og-fg-muted">
-            It can&apos;t email the customer or touch other tickets. Every change shows up on the
-            left as it happens.
+          <p className="mt-3 text-[13px] leading-5 text-og-fg-subtle">
+            It can&apos;t email the customer or open other tickets.
           </p>
 
           <div className="mt-auto pt-8">
             {startError ? (
-              <p className="mb-3 rounded-md bg-[#fbece8] px-3 py-2.5 text-[13px] leading-5 text-[#9b3322]">
+              <p className="mb-3 rounded-lg bg-[#fbece8] px-3 py-2.5 text-[13px] leading-5 text-[#9b3322]">
                 {startError.message}
               </p>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void startDemo()}
-              disabled={starting || !health?.ok}
-              className="flex h-11 w-full items-center justify-center gap-2.5 rounded-md bg-og-ink text-[14px] font-semibold text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:opacity-45"
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void startDemo();
+              }}
+              className="rounded-2xl bg-white p-3 shadow-[0_0_0_1px_rgba(17,19,17,0.1),0_10px_30px_-12px_rgba(17,19,17,0.25)]"
             >
-              {starting ? <LoaderCircleIcon className="size-4 animate-spin" /> : null}
-              {starting ? "Starting" : `Investigate ${supportCase.ticket.id}`}
-            </button>
+              <p className="px-1.5 pt-1 text-[14.5px] leading-[1.55] text-og-fg">
+                {demoPrompt(supportCase)}
+              </p>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <span className="pl-1.5 text-[12px] text-og-fg-subtle">
+                  Runs on this workspace&apos;s default model
+                </span>
+                <button
+                  type="submit"
+                  disabled={starting || !health?.ok}
+                  className="inline-flex h-9 shrink-0 items-center gap-2 rounded-xl bg-og-ink pl-3.5 pr-2 text-[13px] font-semibold text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {starting ? <LoaderCircleIcon className="size-4 animate-spin" /> : null}
+                  {starting ? "Starting" : "Start"}
+                  <ArrowUpIcon className="size-4 rounded-md bg-og-aqua p-0.5 text-og-ink" />
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

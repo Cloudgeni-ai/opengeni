@@ -1,5 +1,6 @@
-import { SearchIcon } from "lucide-react";
-import { useDeferredValue, useState } from "react";
+import { InboxIcon, SearchIcon, UserRoundPlusIcon } from "lucide-react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { Kbd, MOD_KEY, PRIORITY_LABEL, PriorityGlyph, StatusGlyph } from "./ticket-glyphs";
 import type { SupportCase, SupportWorkspaceState } from "./types";
 
 type InboxFilter = "mine" | "unassigned";
@@ -10,12 +11,6 @@ function relativeTime(value: string): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours}h`;
   return `${Math.round(hours / 24)}d`;
-}
-
-function priorityLabel(priority: SupportCase["ticket"]["priority"]): string {
-  if (priority === "urgent") return "Urgent";
-  if (priority === "high") return "High";
-  return "";
 }
 
 export function SupportInbox({
@@ -31,6 +26,7 @@ export function SupportInbox({
 }) {
   const [filter, setFilter] = useState<InboxFilter>("mine");
   const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const mineCount = state.cases.filter(({ ticket }) => ticket.inbox === "mine").length;
   const unassignedCount = state.cases.filter(({ ticket }) => ticket.inbox === "unassigned").length;
@@ -42,6 +38,18 @@ export function SupportInbox({
     );
   });
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   function switchFilter(nextFilter: InboxFilter) {
     setFilter(nextFilter);
     setQuery("");
@@ -52,22 +60,27 @@ export function SupportInbox({
   }
 
   return (
-    <aside className="flex h-dvh min-h-0 flex-col border-r border-ns-line bg-ns-rail text-ns-ink">
-      <header className="shrink-0 px-5 pt-5">
-        <div className="flex h-7 items-center gap-2.5">
-          <NorthstarMark className="size-[22px] text-ns-navy" />
-          <p className="text-[16px] font-bold tracking-[-0.02em] text-ns-navy">Northstar</p>
+    <aside className="flex h-full min-h-0 flex-col text-ns-ink">
+      <header className="shrink-0 px-3 pt-3">
+        <div className="flex h-8 items-center gap-2 px-2">
+          <NorthstarMark className="size-5 text-ns-navy" />
+          <p className="text-[15px] font-bold tracking-[-0.02em] text-ns-navy">Northstar</p>
         </div>
 
-        <h1 className="mt-8 text-[22px] font-semibold tracking-[-0.025em]">Inbox</h1>
-
-        <label className="mt-3 flex h-9 items-center gap-2 rounded-md border border-ns-line bg-ns-sheet px-2.5 text-ns-subtle transition-colors focus-within:border-ns-navy">
+        <label className="mt-4 flex h-9 items-center gap-2 rounded-lg bg-ns-sheet/70 px-2.5 text-ns-subtle shadow-[inset_0_0_0_1px_var(--color-ns-line)] transition-shadow focus-within:bg-ns-sheet focus-within:shadow-[inset_0_0_0_1.5px_var(--color-ns-navy)]">
           <SearchIcon className="size-3.5 shrink-0" />
           <input
+            ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setQuery("");
+                event.currentTarget.blur();
+              }
+            }}
             aria-label="Search tickets"
-            placeholder="Search tickets or customers"
+            placeholder="Search"
             className="min-w-0 flex-1 bg-transparent text-[13px] text-ns-ink outline-none placeholder:text-ns-subtle"
           />
           {query ? (
@@ -78,30 +91,32 @@ export function SupportInbox({
             >
               Clear
             </button>
-          ) : null}
+          ) : (
+            <Kbd>{`${MOD_KEY}K`}</Kbd>
+          )}
         </label>
 
-        <div
-          className="mt-3 grid grid-cols-2 gap-1 rounded-md bg-black/[0.045] p-1"
-          role="group"
-          aria-label="Inbox"
-        >
-          <InboxFilterButton
+        <nav className="mt-3 space-y-px" aria-label="Inbox views">
+          <ViewButton
+            icon={<InboxIcon className="size-4" />}
             active={filter === "mine"}
-            label="Mine"
+            label="My inbox"
             count={mineCount}
             onClick={() => switchFilter("mine")}
           />
-          <InboxFilterButton
+          <ViewButton
+            icon={<UserRoundPlusIcon className="size-4" />}
             active={filter === "unassigned"}
             label="Unassigned"
             count={unassignedCount}
             onClick={() => switchFilter("unassigned")}
           />
-        </div>
+        </nav>
       </header>
 
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+      <div className="mx-5 mt-3 h-px shrink-0 bg-ns-line" />
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-2">
         <ul className="space-y-px">
           {visibleCases.map((supportCase) => (
             <li key={supportCase.ticket.id}>
@@ -115,7 +130,7 @@ export function SupportInbox({
           ))}
         </ul>
         {visibleCases.length === 0 ? (
-          <div className="px-3 py-10">
+          <div className="px-2 py-8">
             <p className="text-[13px] font-semibold text-ns-ink">
               {query ? `No tickets match “${query}”` : "Nothing waiting here"}
             </p>
@@ -128,7 +143,7 @@ export function SupportInbox({
         ) : null}
       </div>
 
-      <footer className="flex shrink-0 items-center gap-3 border-t border-ns-line px-5 py-3.5">
+      <footer className="flex shrink-0 items-center gap-2.5 px-5 pb-4 pt-2">
         <div className="grid size-7 place-items-center rounded-full bg-[#d9cdbd] text-[11px] font-semibold text-[#4d4134]">
           MC
         </div>
@@ -153,89 +168,14 @@ export function NorthstarMark({ className }: { className?: string }) {
   );
 }
 
-function TicketRow({
-  supportCase,
-  selected,
-  agentConnected,
-  onClick,
-}: {
-  supportCase: SupportCase;
-  selected: boolean;
-  agentConnected: boolean;
-  onClick: () => void;
-}) {
-  const { customer, ticket } = supportCase;
-  const priority = priorityLabel(ticket.priority);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={selected ? "page" : undefined}
-      className={
-        selected
-          ? "relative w-full rounded-md bg-ns-sheet px-3 py-3 text-left shadow-[0_0_0_1px_var(--color-ns-line)]"
-          : "relative w-full rounded-md px-3 py-3 text-left transition-colors hover:bg-black/[0.035]"
-      }
-    >
-      {selected ? (
-        <span className="absolute inset-y-2.5 left-0 w-[3px] rounded-r bg-ns-navy" />
-      ) : null}
-      <div className="flex items-baseline gap-2">
-        {ticket.unread ? (
-          <span
-            className="size-[7px] shrink-0 -translate-y-px self-center rounded-full bg-ns-star"
-            aria-label="Unread"
-          />
-        ) : null}
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ns-muted">
-          {customer.name}
-        </span>
-        <span className="shrink-0 text-[12px] text-ns-subtle">
-          {relativeTime(ticket.createdAt)}
-        </span>
-      </div>
-      <p
-        className={
-          ticket.unread || selected
-            ? "mt-1 line-clamp-2 text-[14px] font-semibold leading-[1.35] tracking-[-0.01em] text-ns-ink"
-            : "mt-1 line-clamp-2 text-[14px] leading-[1.35] text-ns-ink/80"
-        }
-      >
-        {ticket.subject}
-      </p>
-      <div className="mt-2 flex items-center gap-3 text-[12px]">
-        <span className="text-ns-subtle">{ticket.id}</span>
-        {priority ? (
-          <span
-            className={
-              ticket.priority === "urgent"
-                ? "font-semibold text-ns-alert"
-                : "font-semibold text-[#9a6206]"
-            }
-          >
-            {priority}
-          </span>
-        ) : null}
-        {agentConnected ? (
-          <span
-            className="ml-auto inline-flex items-center gap-1.5 font-medium text-og-green"
-            style={{ fontFamily: "var(--font-og)" }}
-          >
-            <span className="size-1.5 rounded-full bg-og-green" />
-            Opengeni
-          </span>
-        ) : null}
-      </div>
-    </button>
-  );
-}
-
-function InboxFilterButton({
+function ViewButton({
+  icon,
   active,
   label,
   count,
   onClick,
 }: {
+  icon: React.ReactNode;
   active: boolean;
   label: string;
   count: number;
@@ -248,11 +188,84 @@ function InboxFilterButton({
       onClick={onClick}
       className={
         active
-          ? "rounded-[5px] bg-ns-sheet px-2 py-1.5 text-[13px] font-semibold text-ns-ink shadow-[0_1px_2px_rgba(18,26,51,0.12)]"
-          : "rounded-[5px] px-2 py-1.5 text-[13px] font-medium text-ns-muted transition-colors hover:text-ns-ink"
+          ? "flex h-8 w-full items-center gap-2.5 rounded-md bg-black/[0.06] px-2 text-[13px] font-semibold text-ns-ink"
+          : "flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-[13px] font-medium text-ns-muted transition-colors hover:bg-black/[0.04] hover:text-ns-ink"
       }
     >
-      {label} <span className="ml-1 font-normal text-ns-subtle">{count}</span>
+      <span className={active ? "text-ns-navy" : "text-ns-subtle"}>{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      <span className="text-[12px] font-medium tabular-nums text-ns-subtle">{count}</span>
+    </button>
+  );
+}
+
+function TicketRow({
+  supportCase,
+  selected,
+  agentConnected,
+  onClick,
+}: {
+  supportCase: SupportCase;
+  selected: boolean;
+  agentConnected: boolean;
+  onClick: () => void;
+}) {
+  const { customer, ticket } = supportCase;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={selected ? "page" : undefined}
+      className={
+        selected
+          ? "relative w-full rounded-lg bg-ns-sheet px-2.5 py-2.5 text-left shadow-[0_1px_2px_rgba(18,26,51,0.08),0_0_0_1px_var(--color-ns-line)]"
+          : "relative w-full rounded-lg px-2.5 py-2.5 text-left transition-colors hover:bg-black/[0.04]"
+      }
+    >
+      <div className="flex items-start gap-2.5">
+        <span className="mt-[3px]" title={ticket.status.replaceAll("_", " ")}>
+          <StatusGlyph status={ticket.status} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p
+            className={
+              ticket.unread || selected
+                ? "line-clamp-2 text-[13.5px] font-semibold leading-[1.35] tracking-[-0.01em] text-ns-ink"
+                : "line-clamp-2 text-[13.5px] leading-[1.35] text-ns-ink/75"
+            }
+          >
+            {ticket.subject}
+          </p>
+          <div className="mt-1.5 flex items-center gap-2 text-[12px] text-ns-subtle">
+            <span title={`${PRIORITY_LABEL[ticket.priority]} priority`}>
+              <PriorityGlyph priority={ticket.priority} className="size-3" />
+            </span>
+            <span className="min-w-0 truncate">{customer.name}</span>
+            {agentConnected ? (
+              <span
+                className="ml-auto inline-flex shrink-0 items-center gap-1 font-medium text-og-green"
+                style={{ fontFamily: "var(--font-og)" }}
+              >
+                <span className="relative flex size-1.5">
+                  <span className="absolute inset-0 animate-ping rounded-full bg-og-green/50" />
+                  <span className="relative size-1.5 rounded-full bg-og-green" />
+                </span>
+                Opengeni
+              </span>
+            ) : (
+              <span className="ml-auto shrink-0 tabular-nums">
+                {ticket.unread ? (
+                  <span
+                    className="mr-1.5 inline-block size-1.5 -translate-y-px rounded-full bg-ns-star"
+                    aria-label="Unread"
+                  />
+                ) : null}
+                {relativeTime(ticket.createdAt)}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
     </button>
   );
 }
