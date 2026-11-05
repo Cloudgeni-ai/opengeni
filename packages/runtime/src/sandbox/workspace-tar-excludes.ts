@@ -26,7 +26,11 @@ export function workspaceTarExcludeArgs(
   topLevelGlobs: readonly string[] = [],
 ): string[] {
   const patterns = [
-    ...literalPaths.map((path) => `./${escapeWorkspaceGlobPattern(path)}`),
+    // An empty path would become `./`, which excludes nothing (the SDK drops
+    // it as well).
+    ...literalPaths
+      .filter((path) => path.length > 0)
+      .map((path) => `./${escapeWorkspaceGlobPattern(path)}`),
     ...topLevelGlobs.map((glob) => `./${glob}`),
   ].sort();
   return [...new Set(patterns)].map((pattern) => shellQuoteTarArg(`--exclude=${pattern}`));

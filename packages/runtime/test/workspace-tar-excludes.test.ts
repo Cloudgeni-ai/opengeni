@@ -130,8 +130,18 @@ describe("backend workspace tar exclusions", () => {
     test(`${name} leaves out exactly the anchored, escaped ephemeral paths`, async () => {
       const { members, script } = await capture(workspaceTree());
       expect(members).toEqual(EXPECTED_MEMBERS);
-      for (const arg of workspaceTarExcludeArgs(EPHEMERAL)) expect(script).toContain(arg);
+      // The Agents SDK's own tar passes `--exclude=./target` and
+      // `--exclude=./w\[1\]/node_modules` (after shell unquoting).
+      expect(script).toContain("'--exclude=./target'");
+      expect(script).toContain("'--exclude=./w\\[1\\]/node_modules'");
       expect(script).not.toContain("'--exclude=target'");
     });
   }
+
+  test("an empty path is dropped instead of becoming a no-op `./` pattern", () => {
+    expect(workspaceTarExcludeArgs(["", "target"], [".opengeni-old-*"])).toEqual([
+      "'--exclude=./.opengeni-old-*'",
+      "'--exclude=./target'",
+    ]);
+  });
 });

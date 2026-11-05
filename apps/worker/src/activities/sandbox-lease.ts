@@ -830,7 +830,18 @@ function trackSettlingDrainCapture(lease: DrainCaptureIdentity): (error?: unknow
       return;
     }
     entry.remoteOnly = true;
-    void stillRunning.then(release, release);
+    // A tar that never returns stops deferring at the same bound
+    // (sandboxDrainCaptureSettlingInProcess); drop its entry then as well.
+    const expiry = setTimeout(
+      release,
+      Math.max(0, entry.startedAtMs + SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - Date.now()),
+    );
+    (expiry as { unref?: () => void }).unref?.();
+    const settled = () => {
+      clearTimeout(expiry);
+      release();
+    };
+    void stillRunning.then(settled, settled);
   };
 }
 
@@ -5200,6 +5211,17 @@ async function terminateDrainableBox(
     const abandonedForGood = captureAbandoned && !capturePublishedBeforeStop;
     if (abandonedForGood) {
       recordSandboxDrainCaptureFallback(observability, { backend, outcome: "abandoned" });
+      observability.warn(
+        "sandbox reaper: drain saves kept failing — stopped the box without a new save",
+        {
+          sandboxGroupId: row.sandboxGroupId,
+          leaseEpoch: row.leaseEpoch,
+          backend,
+          instanceId: lease.instanceId,
+          consecutiveFailures: lease.drainCaptureFailures?.count ?? 0,
+          lastSavedAt: unsavedSince ?? null,
+        },
+      );
     }
     if (lease.unobservableCommandDrainIds?.length) {
       recordSandboxCommandContainment(
@@ -5214,10 +5236,12 @@ async function terminateDrainableBox(
         const {
           captureAbandoned: _abandoned,
           unsavedSince: _unsavedSince,
+          omittedPaths: _omittedPaths,
           ...savedPayload
         } = terminatedEventPayload as typeof terminatedEventPayload & {
           captureAbandoned?: true;
           unsavedSince?: string | null;
+          omittedPaths?: string[];
         };
         await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
           type: "sandbox.box.terminated",
@@ -5227,6 +5251,10 @@ async function terminateDrainableBox(
                 persisted: true,
                 archiveRevision: capturePublishedBeforeStop.archiveRevision,
                 providerMissingBeforeCapture: false,
+                // The save that landed is the one the chat is told about.
+                ...(capturePublishedBeforeStop.omittedPaths
+                  ? { omittedPaths: capturePublishedBeforeStop.omittedPaths }
+                  : {}),
               }
             : terminatedEventPayload,
         });
@@ -5713,7 +5741,31 @@ export async function terminateProviderBox(
   const lateSettled = new Promise<void>((resolve) => {
     markLateSettled = resolve;
   });
+  // Set while this attempt stops the box after failed saves. The stop ends a
+  // still-running save's read, so its late failure arrives during the stop:
+  // that claim belongs to the cold commit then, and releasing it (and counting
+  // the failure) would refuse the commit and leave a stopped box draining.
+  let stopping = false;
+  let lateReleaseDeferred = false;
   const abandonCapture = async (): Promise<ProviderTerminationOutcome> => {
+    stopping = true;
+    let stopped = false;
+    try {
+      const outcome = await stopAfterFailedSaves();
+      stopped = outcome.terminated;
+      return outcome;
+    } finally {
+      if (!stopped) {
+        // No stop to commit: the late failure releases the claim as usual.
+        stopping = false;
+        if (lateReleaseDeferred) {
+          lateReleaseDeferred = false;
+          await releaseAfterCaptureFailure();
+        }
+      }
+    }
+  };
+  const stopAfterFailedSaves = async (): Promise<ProviderTerminationOutcome> => {
     // The claim still fences arrivals; this pure CAS proves it is still ours
     // and the lease was not re-armed before anything is stopped.
     const { wrote } = await persistArchive(null);
@@ -5756,15 +5808,7 @@ export async function terminateProviderBox(
       });
       return { terminated: true, providerMissingBeforeCapture: false };
     }
-    // Counted as `abandoned` once the cold commit records the stop.
-    observability.warn(
-      "sandbox reaper: drain saves kept failing — stopped the box without a new save",
-      {
-        ...logIdentity,
-        consecutiveFailures: lease.drainCaptureFailures?.count ?? 0,
-        lastSavedAt: lease.recovery.archive.current?.capturedAt ?? null,
-      },
-    );
+    // Counted (and logged) as `abandoned` once the cold commit records the stop.
     return { terminated: true, providerMissingBeforeCapture: true, captureAbandoned: true };
   };
   // A reduced save of this lease that outlived its hard bound may still be
@@ -5882,7 +5926,9 @@ export async function terminateProviderBox(
           // Capture has now rejected and this timed-out path can never reach
           // provider teardown. Release only our unpublished claim so a waiting
           // turn can re-arm the intact live box; stale callbacks are DB-fenced.
-          void releaseAfterCaptureFailure();
+          // While this attempt stops the box the claim is the cold commit's.
+          if (stopping) lateReleaseDeferred = true;
+          else void releaseAfterCaptureFailure();
           if (omitPaths) {
             recordSandboxDrainCaptureFallback(observability, {
               backend,

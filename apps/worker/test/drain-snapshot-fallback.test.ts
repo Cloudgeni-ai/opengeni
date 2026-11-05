@@ -184,6 +184,7 @@ function nativeSnapshotsFailingClient(
   rebuildable: string = REBUILDABLE,
   tarDelayMs = 0,
   tarGate?: Promise<void>,
+  onDelete?: () => void,
 ) {
   const captures: string[][] = [];
   const sessions: Array<{ state: { manifest: { ephemeralPersistencePaths(): Set<string> } } }> = [];
@@ -238,6 +239,7 @@ function nativeSnapshotsFailingClient(
       resumeExact: resume,
       async delete() {
         deletes += 1;
+        onDelete?.();
       },
     },
   };
@@ -721,6 +723,69 @@ describe("drain snapshot fallback", () => {
     expect(events).toEqual([expect.objectContaining({ persisted: true })]);
     expect(events[0]).not.toHaveProperty("captureAbandoned");
     expect(events[0]).not.toHaveProperty("unsavedSince");
+  }, 60_000);
+
+  // Review of the follow-up: the stop ends a still-running reduced save's
+  // read, so its late failure lands during the stop. The old late path then
+  // released the claim (and counted a failure), the cold commit found the
+  // claim gone, and the stopped box stayed draining with no notice or loss.
+  test("a reduced save the in-window stop kills leaves the stop's claim to the cold commit", async () => {
+    if (!available) return;
+    const epoch = 17;
+    const instanceId = "sb-stop-kills-tar";
+    const prior = priorSave("2026-11-04T01:30:00.000Z");
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 1, failingForMinutes: 5 },
+      prior,
+    );
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    await shared!.admin`
+      update sandbox_leases
+      set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${Math.max(1_000, leadMs - 60_000)} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    let killTar: () => void = () => undefined;
+    const tarRunning = new Promise<void>((_, reject) => {
+      killTar = () => reject(new Error("tar killed: the box was stopped"));
+    });
+    tarRunning.catch(() => undefined);
+    const provider = nativeSnapshotsFailingClient("succeeds", REBUILDABLE, 0, tarRunning, () =>
+      killTar(),
+    );
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    expect(provider.captures).toEqual([["apps/web/.next", "node_modules"]]);
+    expect(provider.deletes).toBe(1);
+    const [row] = await shared!.admin<
+      {
+        liveness: string;
+        capture_id: string | null;
+        loss: Record<string, unknown> | null;
+      }[]
+    >`
+      select liveness, archive_capture_id::text as capture_id,
+        resume_state -> 'opengeniProviderLoss' as loss
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row?.liveness).toBe("cold");
+    expect(row?.capture_id).toBeNull();
+    expect(row?.loss).toMatchObject({
+      captureAbandoned: true,
+      unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+    });
+    expect(await terminatedEvents(ids.sessionId)).toEqual([
+      expect.objectContaining({
+        captureAbandoned: true,
+        unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+      }),
+    ]);
   }, 60_000);
 
   test("the cold commit of a stop after failed saves finds the claim's save published and records no loss", async () => {

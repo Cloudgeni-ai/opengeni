@@ -53091,6 +53091,9 @@ export async function deliverPendingSandboxRestoreNotice(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // Best-effort at turn start and after a restore: never queue behind a
+        // long lock; a pending notice stays pending for the next delivery.
+        await tx.execute(sql`set local lock_timeout = '5s'`);
         return await withCompleteSandboxGroupScope(tx, async () => {
           const observed = await tx.execute<{
             id: string;
@@ -59103,7 +59106,7 @@ export async function confirmDrainCold(
   /** With `captureAbandoned`: a save of this exact claim had published after
    * all, before this commit. It committed an ordinary saved teardown instead:
    * no loss, no notice. Carries the save the box now restores from. */
-  capturePublishedBeforeStop?: { archiveRevision: string | null };
+  capturePublishedBeforeStop?: { archiveRevision: string | null; omittedPaths?: string[] };
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
   const backgroundCommandWakes: SessionWorkflowWake[] = [];
@@ -59149,6 +59152,15 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // A save of this exact claim that published before the stop makes this
+        // an ordinary saved teardown (decided under the lease lock below). The
+        // blocker decisions taken before that lock use the same effective
+        // truth, so a stopped box whose save landed keeps its supervised
+        // commands to their own supervision, like any saved teardown.
+        const observedPublishedBeforeStop =
+          input.captureAbandoned === true && observed.archive_capture_published_at !== null;
+        const observedProviderMissing =
+          input.providerMissingBeforeCapture === true && !observedPublishedBeforeStop;
         // The box is stopped (or proven gone) before this commit, and the cold
         // commit retires its epoch for good. Every open blocker it leaves on
         // that exact box can therefore never progress: a request a crashed
@@ -59162,8 +59174,7 @@ export async function confirmDrainCold(
         // settles as lost only with the missing-provider truth (0496), so a
         // stopped box keeps it to its own supervision path.
         const staleBlockers =
-          observed.instance_id &&
-          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
+          observed.instance_id && (input.providerStopped === true || observedProviderMissing)
             ? await rawRows<{ present: boolean }>(
                 tx,
                 sql`
@@ -59191,7 +59202,7 @@ export async function confirmDrainCold(
                         and process.state = 'active'
                     )
                   ) and (
-                    ${input.providerMissingBeforeCapture === true}
+                    ${observedProviderMissing}
                     or not exists (
                       select 1 from sandbox_retained_processes supervised
                       where supervised.lease_id = ${observed.id}
@@ -59206,7 +59217,7 @@ export async function confirmDrainCold(
               )
             : [];
         const blockerScope =
-          (input.providerMissingBeforeCapture ||
+          (observedProviderMissing ||
             observed.unobservable_command_drain_ids?.length ||
             observed.deadline_forced_admission_ids?.length ||
             staleBlockers[0]?.present === true) &&
@@ -59295,6 +59306,13 @@ export async function confirmDrainCold(
         // under the lease lock; nothing can publish on the claim after it.
         const capturePublishedBeforeStop =
           input.captureAbandoned === true && row.archive_capture_published_at !== null;
+        if (capturePublishedBeforeStop !== observedPublishedBeforeStop) {
+          // The save published between the unlocked read and the lock: the
+          // blocker set above was decided on the other outcome. Retry.
+          throw new LostProviderCommandSessionsChangedError(
+            "drain capture published while the cold commit locked its blockers",
+          );
+        }
         const providerMissingBeforeCapture =
           input.providerMissingBeforeCapture === true && !capturePublishedBeforeStop;
         const captureAbandoned = input.captureAbandoned === true && !capturePublishedBeforeStop;
@@ -59560,6 +59578,10 @@ export async function confirmDrainCold(
             ? {
                 capturePublishedBeforeStop: {
                   archiveRevision: current.archive.current?.revision ?? null,
+                  ...(current.archive.current?.version === 1 &&
+                  current.archive.current.omittedPaths?.length
+                    ? { omittedPaths: [...current.archive.current.omittedPaths] }
+                    : {}),
                 },
               }
             : {}),
