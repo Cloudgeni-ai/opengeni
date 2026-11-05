@@ -195,7 +195,7 @@ Rules:
 
 | Capability | Tools | In `"none"` |
 | --- | --- | --- |
-| `humanInput` | `request_human_input` (secret kind with `secrets`, Skill reviews with `skills: "manage"`) | on |
+| `humanInput` | `request_human_input` (secret kind with `secrets`, Skill reviews with `skills: "manage"`; never in a session that started unattended) | on |
 | `notifications` | `notify_user`, `notification_withdraw`, `inbox_tidy`, `call_user` (also need `humanInput`) | off |
 | `privacyFacts` | `privacy_facts` and its prompt rule | off |
 | `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | off |

@@ -412,7 +412,9 @@ internal operator agent usually starts from `"all"` minus what it must not do.
 `"none"` pays only for what the session can use on every call. It gets a
 neutral identity unless the session shares a workspace; `request_human_input`
 offers the secret kind only with `secrets` and Skill reviews only with
-`skills: "manage"`; `wait_for_input` comes only with a sandbox, `subagents`,
+`skills: "manage"`, and is left out when nobody can answer: pass
+`unattended: true` for a session no person answers (or turn `humanInput` off);
+`wait_for_input` comes only with a sandbox, `subagents`,
 `goals`, `schedules`, `browser`, `media` or `workspaceAdmin` (a person needs no
 wait: an answer resumes the turn), and Codemode guidance only with a sandbox or
 `run_on`; tool search

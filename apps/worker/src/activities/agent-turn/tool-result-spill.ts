@@ -24,6 +24,7 @@ import {
   spilledModelToolResult,
   type CodemodeTokenWriterSession,
   type SandboxFileDownload,
+  type SpilledToolResultReaders,
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
@@ -34,6 +35,28 @@ import type { ResumedTurnSandbox } from "../../sandbox-resume";
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 
 export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
+
+/**
+ * Which readers of a spilled copy this turn's model has: a shell whenever
+ * compute is attached (the same fact that attaches the sandbox tools), and
+ * the Files download tool when the turn's tools select the `files` server and
+ * the deployment's server allows that tool.
+ */
+export function spilledToolResultReadersForTurn(input: {
+  tools: ReadonlyArray<{ kind: string; id: string }>;
+  mcpServers: ReadonlyArray<{ id: string; allowedTools?: readonly string[] | undefined }>;
+  sandboxBackend: Settings["sandboxBackend"];
+}): SpilledToolResultReaders {
+  const files = input.tools.some((tool) => tool.kind === "mcp" && tool.id === "files")
+    ? input.mcpServers.find((server) => server.id === "files")
+    : undefined;
+  return {
+    shell: input.sandboxBackend !== "none",
+    fileDownload:
+      files !== undefined &&
+      (files.allowedTools === undefined || files.allowedTools.includes("files_get_download_url")),
+  };
+}
 
 /**
  * Where the spilled copy is for the shell of this attempt:
@@ -82,6 +105,8 @@ export class ToolResultSpill {
   spill = async (input: {
     operationId: string;
     result: AttemptToolResultValue;
+    /** The model's tools for opening the copy; undefined names both readers. */
+    readers?: SpilledToolResultReaders;
   }): Promise<AttemptToolResultValue> => {
     const { objectStorage } = this.deps;
     if (!objectStorage) {
@@ -136,13 +161,16 @@ export class ToolResultSpill {
     if (materialization === "deferred") {
       materialization = await this.materializeAfterSandboxStart(file);
     }
-    return spilledModelToolResult({
-      type: "tool_result_spilled",
-      sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
-      fileId: file.id,
-      byteSize: file.sizeBytes,
-      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    });
+    return spilledModelToolResult(
+      {
+        type: "tool_result_spilled",
+        sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
+        fileId: file.id,
+        byteSize: file.sizeBytes,
+        mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+      },
+      input.readers,
+    );
   };
 
   /**

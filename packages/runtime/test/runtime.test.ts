@@ -942,7 +942,9 @@ describe("structured human-input runtime boundary", () => {
       (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
     );
     if (!tool || tool.type !== "function") throw new Error("tool missing");
-    expect(tool.description).toContain("agentDecides");
+    // The result's note is where the model learns what to do; the description
+    // does not repeat it on every call.
+    expect(tool.description).not.toContain("agentDecides");
     expect(tool.description).toContain("message your parent agent instead");
     const output = JSON.parse(
       String(

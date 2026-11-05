@@ -150,5 +150,38 @@ describe("spilledModelToolResult", () => {
     expect((withoutCopy.content[1] as { text: string }).text).toBe(
       "The result was too large to show (64 bytes), so its exact JSON is saved as a workspace file. To read it, call files__files_get_download_url with fileId bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb and download it with the shell, then read the parts you need, for example with jq, head or grep.",
     );
+    // Both readers known present: the same text as when they are not known.
+    const both = { shell: true, fileDownload: true };
+    expect(spilledModelToolResult(receipt, both)).toEqual(projected);
+    expect(spilledModelToolResult({ ...receipt, sandboxPath: null }, both)).toEqual(withoutCopy);
+  });
+
+  test("names only the readers the session has", () => {
+    const fileId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const receipt = {
+      type: "tool_result_spilled" as const,
+      sandboxPath: null,
+      fileId,
+      byteSize: 64,
+      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+    };
+    const text = (sandboxPath: string | null, readers: { shell: boolean; fileDownload: boolean }) =>
+      (spilledModelToolResult({ ...receipt, sandboxPath }, readers).content[1] as { text: string })
+        .text;
+    const unreadable = `The result was too large to show (64 bytes), so none of it is shown here. Its exact JSON is saved as workspace file ${fileId}, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.`;
+    // No shell and no download tool (capabilities "none" without compute).
+    expect(text(null, { shell: false, fileDownload: false })).toBe(unreadable);
+    // A download URL alone is not readable without a shell, and a shell alone
+    // cannot fetch a copy that was never placed.
+    expect(text(null, { shell: false, fileDownload: true })).toBe(unreadable);
+    expect(text(null, { shell: true, fileDownload: false })).toBe(unreadable);
+    // A placed copy with a shell but no download tool: no download fallback.
+    const placed = text("/workspace/tool-results/x.json", { shell: true, fileDownload: false });
+    expect(placed).toBe(
+      "The result was too large to show (64 bytes), so its exact JSON is saved at /workspace/tool-results/x.json where your shell runs. With the shell, read the parts you need, for example with jq, head or grep, instead of printing it whole.",
+    );
+    for (const guidance of [unreadable, placed]) {
+      expect(guidance).not.toContain("files__files_get_download_url");
+    }
   });
 });
