@@ -269,7 +269,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected so agents can work on them. Opengeni Runner on a machine can serve this workspace alongside any other Opengeni workspaces or deployments it is already connected to."
+        description="Computers connected so agents can work on them. Agents can see and use a computer's screen only when it is shared."
       />
 
       <div className="pt-6">

@@ -4,6 +4,7 @@ import {
   builtinModelResidency,
   configuredProviders,
   modelRouteMeetsResidencyRequirement,
+  organizationCompatibleConnectionIdOf,
   resolveModelProvider,
 } from "@opengeni/config";
 import {
@@ -36,7 +37,7 @@ import {
   withChatReasoning,
   type ChatReasoning,
 } from "./chat-reasoning";
-import { instrumentedModelFetch, modelToolNameObservers } from "./model-provider-client";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
@@ -396,7 +397,6 @@ export function buildModelInstance(
       provider,
       modelId,
       instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
-      modelToolNameObservers(provider.id),
     );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
@@ -541,7 +541,10 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
-    if (modelName && isDirectModelId(modelName)) {
+    if (
+      modelName &&
+      (isDirectModelId(modelName) || organizationCompatibleConnectionIdOf(modelName) !== null)
+    ) {
       throw new Error("The selected model connection is unavailable");
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same

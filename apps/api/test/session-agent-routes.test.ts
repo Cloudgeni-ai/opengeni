@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  AGENT_CAPABILITY_IDS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   OPENING_TOOLS_METADATA_KEY,
   openingToolsFromTurnMetadata,
@@ -57,6 +58,10 @@ const RUNTIME_TOOLS = [
   "set_session_title",
   "wait_for_input",
 ];
+// A "none" create request leaves notifications off: only the turn mechanics remain.
+const NONE_RUNTIME_TOOLS = RUNTIME_TOOLS.filter(
+  (tool) => !["call_user", "inbox_tidy", "notification_withdraw", "notify_user"].includes(tool),
+);
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -293,7 +298,10 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
     const grant = await fixture();
     const config = await request(app(), await humanBearer(grant), "GET", "/v1/config/client");
     expect(config.json.agentConfig).toMatchObject({ enabled: true, defaultForNewSessions: true });
-    expect(config.json.agentConfig.capabilities).toHaveLength(14);
+    const ids = config.json.agentConfig.capabilities.map((entry: { id: string }) => entry.id);
+    expect(ids).toEqual([...AGENT_CAPABILITY_IDS]);
+    expect(ids).toContain("notifications");
+    expect(ids).toContain("privacyFacts");
   });
 
   test("MCP session_create exposes optional agent selection", async () => {
@@ -456,7 +464,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
 
     const none = await create(target, grant, { agent: { capabilities: "none" } });
     expect(none.status).toBe(202);
-    expect(sorted(none.json.firstPartyMcpTools)).toEqual(RUNTIME_TOOLS);
+    expect(sorted(none.json.firstPartyMcpTools)).toEqual(NONE_RUNTIME_TOOLS);
     expect(none.json.toolPolicy.mode).toBe("explicit");
     // No workspace connectors or built-in files/docs servers; the mandatory
     // first-party server is attached at runtime.

@@ -95,6 +95,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import * as schema from "../src/schema";
+import * as dbQueries from "../src/index";
 import { and, eq, sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
@@ -1221,6 +1222,170 @@ describe("clean session control plane", () => {
         executionGeneration: turn!.executionGeneration + 1,
       });
       expect(resumed?.metadata).not.toHaveProperty("sandboxLifecycleWait");
+    },
+  );
+
+  test.each(["replaced", "another turn replaced it", "no replacement"] as const)(
+    "a drain that cannot save a box that cannot start programs releases the turns waiting on it (%s)",
+    async (variant) => {
+      // A Modal box lost /bin/sh, so a turn asked to replace it, and this
+      // turn waits on the rotation. The drain's save keeps failing (the box
+      // stays draining, possibly for hours): no turn may wait on it. An
+      // ordinary rotation (no turn asked for a process-start replacement)
+      // keeps its waiters.
+      const queries = dbQueries as Partial<typeof dbQueries>;
+      const readReplacement = queries.readSessionTurnSandboxBoxNotSaved;
+      const releaseWaiters = queries.releaseSandboxProcessStartReplacementWaiters;
+      expect(typeof readReplacement).toBe("function");
+      expect(typeof releaseWaiters).toBe("function");
+      if (!readReplacement || !releaseWaiters) return;
+      const { grant, session } = await fixture();
+      const workspaceId = grant.workspaceId!;
+      await send(grant, session.id, "my box lost its shell");
+      const attemptId = crypto.randomUUID();
+      const workflowId = `session-${session.id}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = `dispatch-${crypto.randomUUID()}`;
+      const turn = await claimTestSessionWork(client.db, workspaceId, session.id, workflowId, {
+        attemptId,
+        workflowRunId,
+        dispatchId,
+      });
+      expect(turn).not.toBeNull();
+      const leaseEpoch = 7;
+      await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${workspaceId}, ${session.sandboxGroupId},
+        'draining', 0, 'sb-no-shell', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-no-shell')
+          )
+        ),
+        now(), 'operator', now() - interval '1 second'
+      )`;
+      if (variant === "replaced") {
+        const appended = await appendSessionEventsForTurnAttempt(
+          client.db,
+          workspaceId,
+          session.id,
+          turn!.id,
+          turn!.executionGeneration,
+          attemptId,
+          [
+            {
+              type: "sandbox.operation.started",
+              payload: {
+                name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+                reason: "process_start_failed",
+                sandboxGroupId: session.sandboxGroupId,
+                leaseEpoch,
+              },
+            },
+          ],
+        );
+        expect(appended.accepted).toBe(true);
+      }
+      if (variant === "another turn replaced it") {
+        await appendSessionEvents(client.db, workspaceId, session.id, [
+          {
+            type: "sandbox.operation.started",
+            payload: {
+              name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+              reason: "process_start_failed",
+              sandboxGroupId: session.sandboxGroupId,
+              leaseEpoch,
+            },
+          },
+        ]);
+      }
+      const notSaved = async () =>
+        await readReplacement(client.db, workspaceId, { sessionId: session.id, turnId: turn!.id });
+      // Nothing failed to save yet: every turn waits for the replacement.
+      expect(await notSaved()).toBeNull();
+      const wait = {
+        version: 1 as const,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+        reason: "rotation_in_progress" as const,
+      };
+      expect(
+        await requestSessionTurnRecovery(client.db, workspaceId, {
+          sessionId: session.id,
+          turnId: turn!.id,
+          triggerEventId: turn!.triggerEventId,
+          attemptId,
+          reason: "sandbox_lifecycle_transition",
+          detail: { sandboxGroupId: session.sandboxGroupId, leaseEpoch },
+          sandboxLifecycleWait: wait,
+        }),
+      ).toMatchObject({ action: "recovering" });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+      const waiting = { kind: "sandbox-lifecycle-wait" as const, ref: wait };
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+      const wake = async () =>
+        await withWorkspaceRls(client.db, workspaceId, async (db) => {
+          const [row] = await db
+            .select()
+            .from(schema.sessionWorkflowWakeOutbox)
+            .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+            .limit(1);
+          return row!;
+        });
+      const before = await wake();
+
+      // Another box (an older epoch) is not this one.
+      expect(
+        await releaseWaiters(client.db, {
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: leaseEpoch - 1,
+        }),
+      ).toBe(0);
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+
+      const released = await releaseWaiters(client.db, {
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+      });
+      // The box itself stays fenced and draining either way.
+      const lease = await dbQueries.readLease(client.db, workspaceId, session.sandboxGroupId);
+      expect(lease).toMatchObject({ liveness: "draining", leaseEpoch, instanceId: "sb-no-shell" });
+      expect(lease?.rotationRequestedAt).not.toBeNull();
+      if (variant === "no replacement") {
+        expect(released).toBe(0);
+        expect(await notSaved()).toBeNull();
+        expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+        expect((await wake()).wakeRevision).toBe(before.wakeRevision);
+        return;
+      }
+      expect(released).toBe(1);
+      const after = await wake();
+      expect(after.reason).toBe("sandbox_lifecycle_advanced");
+      expect(after.wakeRevision).toBeGreaterThan(before.wakeRevision);
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual({
+        kind: "runnable",
+      });
+      const next = await claimTestSessionWork(client.db, workspaceId, session.id, workflowId);
+      expect(next).toMatchObject({ id: turn!.id, status: "running" });
+      expect(next?.metadata).not.toHaveProperty("sandboxLifecycleWait");
+      // The released attempt, and a person's later retry of this turn, read
+      // the unsaved box and stop with clear copy instead of parking again.
+      expect(await notSaved()).toEqual({ sandboxGroupId: session.sandboxGroupId, leaseEpoch });
     },
   );
 

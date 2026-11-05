@@ -37,10 +37,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// memory that changed, the merged image where files cannot share
     /// extents, and its device state and chunk map; what its disk may grow
     /// by while it runs; and what a wake from object storage writes
-    /// locally: its disk, the memory image its pager fills, and its device
-    /// state. A disk of unknown length counts as a copy of its image as it
-    /// is today grown to the length `config` asks for, as a new sandbox's
-    /// is.
+    /// locally besides that same disk: the memory image its pager fills
+    /// and its device state. A disk of unknown length counts as today's
+    /// image grown to the length `config` asks for, as a new sandbox's is.
     pub(super) fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -58,8 +57,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cpu: u64::from(config.cpu_request()),
             save: limit * self.save_copies + SAVE_EXTRA,
             disk,
-            fetch: disk
-                .saturating_add(limit.next_multiple_of(self.allocation_unit.max(1)))
+            fetch: limit
+                .next_multiple_of(self.allocation_unit.max(1))
                 .saturating_add(SAVE_EXTRA),
         }
     }

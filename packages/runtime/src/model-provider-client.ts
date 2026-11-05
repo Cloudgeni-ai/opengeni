@@ -66,7 +66,6 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
-import type { ToolNameObservers } from "./provider-request-tool-names";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
@@ -87,16 +86,6 @@ let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
   runtimeMetricsHooks = hooks ?? null;
-}
-
-/** The outbound tool-name guard's observations for one provider, as metrics. */
-export function modelToolNameObservers(provider: string): ToolNameObservers {
-  return {
-    onToolNameRepair: ({ api, field }) =>
-      runtimeMetricsHooks?.onModelToolNameRepair?.({ provider, api, field }),
-    onToolNameRetry: ({ api, outcome }) =>
-      runtimeMetricsHooks?.onModelToolNameRetry?.({ provider, api, outcome }),
-  };
 }
 
 export function recordRuntimeMcpToolCallMetric(
@@ -187,7 +176,6 @@ export function buildOpenAIClientFromSettings(
         ),
       },
       {
-        ...modelToolNameObservers(providerId),
         modelRequestPolicy: (request) =>
           chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
       },
@@ -213,7 +201,6 @@ export function buildOpenAIClientFromSettings(
       ),
     },
     {
-      ...modelToolNameObservers(providerId),
       // Only the OpenAI platform; a compatible server keeps its own contract.
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withStorelessResponses(chatModelRequestPolicy)
@@ -572,6 +559,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   ) {
     throw new Error("This workspace's model connection key is unavailable");
   }
+  // A disconnected organization endpoint fails closed like its other accounts.
+  if (provider.kind === "direct-compatible-organization" && !provider.apiKey?.trim()) {
+    throw new Error("This organization's model endpoint key is unavailable");
+  }
   // A missing or revoked organization connection fails closed; it never
   // falls back to the deployment's own Azure or OpenAI credentials.
   if (provider.kind === "direct-openai-organization" && !provider.apiKey?.trim()) {
@@ -601,9 +592,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "opper-managed" ||
     provider.kind === "opper-workspace" ||
     provider.kind === "opper-organization";
-  // A workspace's own OpenAI-compatible server is an arbitrary URL: every
-  // request is DNS-pinned to public addresses and refuses redirects.
-  const compatibleEndpoint = provider.kind === "direct-compatible-workspace";
+  // A workspace's or organization's own OpenAI-compatible server is an
+  // arbitrary URL: every request is DNS-pinned to public addresses and
+  // refuses redirects.
+  const compatibleEndpoint =
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization";
   // Opper reuses the exact-upstream lookup so an unknown slug fails before
   // network I/O; its entries carry no Gateway route policy.
   const gatewayPolicies =
@@ -692,7 +686,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             ),
           },
           {
-            ...modelToolNameObservers(provider.id),
             modelRequestPolicy: modelRequestPolicyForProvider(
               provider,
               gatewayPolicies,
@@ -719,7 +712,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
-              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -803,7 +795,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
-              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,

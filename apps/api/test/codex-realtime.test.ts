@@ -9,9 +9,11 @@ import {
   CodexRealtimeBrokerError,
   OPENGENI_REALTIME_BASE_INSTRUCTIONS,
   brokerSessionCodexRealtime,
+  codexRealtimeFailureLogAttributes,
   openGeniRealtimeInstructions,
   type CodexRealtimeBrokerDependencies,
 } from "../src/codex-realtime";
+import { createObservability } from "@opengeni/observability";
 
 const request = {
   sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
@@ -391,5 +393,89 @@ describe("session Codex realtime broker", () => {
       { sessionId: "session-one", request, signal: abort.signal },
     );
     expect(signal).toBe(abort.signal);
+  });
+});
+
+describe("refused realtime negotiation log line", () => {
+  test("carries the provider reason under reviewed fields and keeps the client message safe", async () => {
+    const pending = brokerSessionCodexRealtime(
+      dependencies({
+        createCall: async () => {
+          throw new CodexRealtimeError(
+            "incompatible",
+            "Codex subscription realtime is unavailable",
+            404,
+            {
+              stage: "call",
+              providerErrorCode: "Not Found",
+              configSource: "fallback",
+              advertisedVersion: "v4",
+              providerModel: "gpt-live-1-codex",
+              providerArchitecture: "avas",
+            },
+          );
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    const error = await pending.catch((caught: unknown) => caught as CodexRealtimeBrokerError);
+    expect(error).toBeInstanceOf(CodexRealtimeBrokerError);
+    expect(error.message).toBe("Connected Codex subscription is not compatible with realtime V3");
+
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (line: string) => lines.push(line);
+    try {
+      createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      ).warn("Realtime WebRTC negotiation rejected", codexRealtimeFailureLogAttributes(error));
+    } finally {
+      console.warn = original;
+    }
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Realtime WebRTC negotiation rejected",
+      reason: "incompatible",
+      providerStatus: 404,
+      realtimeFailureMessage: "Codex subscription realtime is unavailable",
+      realtimeStage: "call",
+      providerErrorCode: "Not Found",
+      realtimeConfigSource: "fallback",
+      realtimeAdvertisedVersion: "v4",
+      realtimeProviderModel: "gpt-live-1-codex",
+      realtimeProviderArchitecture: "avas",
+    });
+  });
+
+  test("drops values outside the reviewed grammars", () => {
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (line: string) => lines.push(line);
+    try {
+      createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      ).warn("Realtime WebRTC negotiation rejected", {
+        realtimeStage: "elsewhere",
+        realtimeFailureMessage: 'Bearer "secret" for person@example.com',
+        providerErrorCode: "person@example.com",
+        realtimeProviderModel: "model with spaces",
+      });
+    } finally {
+      console.warn = original;
+    }
+    const line = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(line).not.toHaveProperty("realtimeStage");
+    expect(line).not.toHaveProperty("realtimeFailureMessage");
+    expect(line).not.toHaveProperty("providerErrorCode");
+    expect(line).not.toHaveProperty("realtimeProviderModel");
   });
 });

@@ -51,7 +51,11 @@ function choiceResponse(
       option("mine-1", "My Claude", { personal: true, source: "personal" }),
       option("other-provider", "Team Codex", { provider: "codex" }),
     ],
-    personal: { connectionsAllowed: true, fallbackAllowed: true, fallbackOptIn: false },
+    personal: {
+      connectionsAllowed: true,
+      fallbackAllowed: true,
+      fallbackOptIn: false,
+    },
     ...overrides,
   };
 }
@@ -84,7 +88,11 @@ async function render(
       const trigger = container.querySelector("button")!;
       await act(async () =>
         trigger.dispatchEvent(
-          new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            ctrlKey: false,
+          }),
         ),
       );
     },
@@ -161,7 +169,10 @@ test("SUB-FAIL-06 a withheld serving identity never borrows the chosen account l
 test("offers only the session provider's accounts, with the caller's own accounts grouped", async () => {
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () => choiceResponse(),
-    updateModelAccountPreferences: async () => ({ personalFallbackOptIn: false, version: 0 }),
+    updateModelAccountPreferences: async () => ({
+      personalFallbackOptIn: false,
+      version: 0,
+    }),
   });
   const view = await render(client);
   try {
@@ -181,7 +192,9 @@ test("offers only the session provider's accounts, with the caller's own account
 test("shows only the provider mark when the provider offers this person no accounts", async () => {
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
-      choiceResponse({ accounts: [option("x", "Team Codex", { provider: "codex" })] }),
+      choiceResponse({
+        accounts: [option("x", "Team Codex", { provider: "codex" })],
+      }),
   });
   const view = await render(client);
   try {
@@ -218,7 +231,11 @@ test("choosing sends the account and shows where it applies; a refused account i
       calls.push(request.connectionId);
       current = {
         ...current,
-        binding: { provider: "claude", connectionId: request.connectionId, choice: "explicit" },
+        binding: {
+          provider: "claude",
+          connectionId: request.connectionId,
+          choice: "explicit",
+        },
       };
       return {
         changed: true,
@@ -286,7 +303,11 @@ test("renders the API's cached windows without an aggregate remaining estimate o
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({
-        binding: { provider: "claude", connectionId: "team", choice: "explicit" },
+        binding: {
+          provider: "claude",
+          connectionId: "team",
+          choice: "explicit",
+        },
         accounts: [
           option("team", "Team Claude", {
             usage: {
@@ -296,11 +317,21 @@ test("renders the API's cached windows without an aggregate remaining estimate o
                 {
                   id: "five_hour",
                   usedPercent: 36,
-                  resetsAt: "2020-01-01T01:00:00Z",
+                  resetsAt: "2099-01-01T01:00:00Z",
                   status: "ok",
                 },
-                { id: "seven_day", usedPercent: null, resetsAt: null, status: "unknown" },
-                { id: "overage", usedPercent: 125, resetsAt: null, status: "unknown" },
+                {
+                  id: "seven_day",
+                  usedPercent: null,
+                  resetsAt: null,
+                  status: "unknown",
+                },
+                {
+                  id: "overage",
+                  usedPercent: 125,
+                  resetsAt: null,
+                  status: "unknown",
+                },
               ],
               exhaustedKind: null,
               exhaustedUntil: null,
@@ -316,16 +347,19 @@ test("renders the API's cached windows without an aggregate remaining estimate o
   const view = await render(client);
   try {
     await view.open();
-    expect(document.querySelector('[aria-label="5h used"]')?.getAttribute("aria-valuenow")).toBe(
-      "36",
-    );
-    expect(
-      document.querySelector('[aria-label="Overage used"]')?.getAttribute("aria-valuetext"),
-    ).toBe("125% used");
-    expect(document.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    const windows = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="subscription-usage-window"]'),
+    ];
+    // Every reported window, in the provider's order, with the share left.
+    expect(windows.map((window) => window.getAttribute("aria-label"))).toEqual([
+      expect.stringMatching(/^5h: 64% left, resets /),
+      "Week: Not reported yet",
+      "Extra usage: Unavailable",
+    ]);
+    expect(windows[0]!.getAttribute("aria-valuenow")).toBe("64");
+    expect(document.querySelectorAll('[role="meter"]')).toHaveLength(2);
     expect(document.body.textContent).toContain("Updated ");
-    expect(document.body.textContent).toContain("Reset passed; usage may be outdated");
-    expect(document.body.textContent).toContain("Unknown");
+    expect(document.body.textContent).toContain("Not reported yet");
     expect(document.body.textContent).not.toContain("% remaining");
     expect(refreshes).toBe(0);
   } finally {
@@ -340,7 +374,11 @@ test.each([
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({
-        binding: { provider: "claude", connectionId: "team", choice: "explicit" },
+        binding: {
+          provider: "claude",
+          connectionId: "team",
+          choice: "explicit",
+        },
         accounts: [option("team", "Team Claude", { usage })],
       }),
   });
@@ -357,7 +395,9 @@ test.each([
 test("a redacted binding does not borrow another visible account's usage", async () => {
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
-      choiceResponse({ binding: { provider: "claude", connectionId: null, choice: "explicit" } }),
+      choiceResponse({
+        binding: { provider: "claude", connectionId: null, choice: "explicit" },
+      }),
   });
   const view = await render(client);
   try {
@@ -375,7 +415,11 @@ test("retains account identity, plan, source, and the reason an inactive account
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({
-        binding: { provider: "claude", connectionId: "reconnect", choice: "explicit" },
+        binding: {
+          provider: "claude",
+          connectionId: "reconnect",
+          choice: "explicit",
+        },
         accounts: [
           option("reconnect", "Team Claude", {
             accountEmail: "team@example.test",
@@ -405,9 +449,14 @@ test("retains account identity, plan, source, and the reason an inactive account
     const rows = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
     const reconnect = rows.find((row) => row.textContent?.includes("Team Claude"))!;
     const error = rows.find((row) => row.textContent?.includes("Backup Claude"))!;
-    expect(reconnect.textContent).toContain("MaxNeeds reconnect");
-    expect(reconnect.title).toContain("team@example.test");
-    expect(error.textContent).toContain("ProError");
+    // Plans differ, so each row names its own; the chosen account is marked.
+    expect(reconnect.textContent).toContain("Max");
+    expect(reconnect.textContent).toContain("Next turn");
+    expect(reconnect.textContent).toContain("Needs reconnect");
+    expect(reconnect.textContent).toContain("team@example.test");
+    expect(reconnect.getAttribute("data-mark")).toBe("next_turn");
+    expect(error.textContent).toContain("Pro");
+    expect(error.textContent).toContain("Error");
     expect(reconnect.getAttribute("aria-disabled")).toBe("true");
     expect(error.getAttribute("aria-disabled")).toBe("true");
     await act(async () => error.click());
@@ -469,7 +518,11 @@ test.each([false, true])(
     const calls: Array<string | null> = [];
     let preferenceCalls = 0;
     let current = choiceResponse({
-      personal: { connectionsAllowed: true, fallbackAllowed: true, fallbackOptIn },
+      personal: {
+        connectionsAllowed: true,
+        fallbackAllowed: true,
+        fallbackOptIn,
+      },
     });
     const client = Object.assign(fakeClient({}), {
       getSessionModelAccount: async () => current,
@@ -482,7 +535,11 @@ test.each([false, true])(
         const choice = request.connectionId ? ("explicit" as const) : ("automatic" as const);
         current = {
           ...current,
-          binding: { provider: "claude", connectionId: request.connectionId, choice },
+          binding: {
+            provider: "claude",
+            connectionId: request.connectionId,
+            choice,
+          },
         };
         return {
           changed: true,
@@ -627,11 +684,13 @@ test("the bound account uses the top quota and other accounts retain their own u
       "36%",
     );
     expect(rows.find((row) => row.textContent?.includes("Other Claude"))!.textContent).toContain(
-      "74% used",
+      "26% left",
     );
-    expect(document.querySelector('[aria-label="5h used"]')?.getAttribute("aria-valuenow")).toBe(
-      "36",
-    );
+    expect(
+      document
+        .querySelector('[data-slot="subscription-usage-window"]')
+        ?.getAttribute("aria-valuenow"),
+    ).toBe("64");
   } finally {
     await view.cleanup();
   }
@@ -641,9 +700,16 @@ test("hides the fallback toggle where the organization does not allow personal f
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({
-        personal: { connectionsAllowed: true, fallbackAllowed: false, fallbackOptIn: false },
+        personal: {
+          connectionsAllowed: true,
+          fallbackAllowed: false,
+          fallbackOptIn: false,
+        },
       }),
-    updateModelAccountPreferences: async () => ({ personalFallbackOptIn: false, version: 0 }),
+    updateModelAccountPreferences: async () => ({
+      personalFallbackOptIn: false,
+      version: 0,
+    }),
   });
   const view = await render(client);
   try {

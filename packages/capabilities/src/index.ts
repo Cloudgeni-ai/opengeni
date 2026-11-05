@@ -9,5 +9,6 @@ export * from "./openapi";
 export * from "./operation-titles";
 export * from "./integration-definitions";
 export * from "./integration-presentations";
+export * from "./integration-names";
 export * from "./revision";
 export * from "./types";

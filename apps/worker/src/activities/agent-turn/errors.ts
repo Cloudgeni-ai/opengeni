@@ -1,7 +1,18 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { SandboxSetupAgentUnavailableError } from "./sandbox-setup-agent-failure";
+import {
+  isSandboxProcessStartFailure,
+  SANDBOX_MACHINE_RESTARTING_CODE,
+  SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
+  SandboxMachineBackError,
+  SandboxMachineReplacingError,
+  SandboxMachineRestartingError,
+  SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
+  SandboxSetupAgentUnavailableError,
+} from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -304,6 +315,7 @@ export function providerRecoveryResult(input: {
               input.failureCode === "provider_unavailable" ||
               input.failureCode === "upstream_connectivity_unavailable" ||
               input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_MACHINE_RESTARTING_CODE ||
               input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
               input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
               input.failureCode === "mcp_transport_timeout" ||
@@ -1616,7 +1628,11 @@ export function isTransientProviderError(error: unknown): boolean {
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  // A statusless error is typically a provider error event in the middle of a
+  // streamed response. One that tells the caller to retry (for example an
+  // OpenAI-compatible server that produced a malformed tool call) is a bad
+  // generation, not a request fault.
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout|\bplease (?:retry|try again)\b/i.test(
     message,
   );
 }
@@ -1755,6 +1771,72 @@ function sandboxSetupAgentUnavailableFailure(
     retryable: true,
     detail: setup.message,
   };
+}
+
+/**
+ * The sandbox could not start programs (see SandboxMachineRestartingError and
+ * SandboxProcessStartFailedError). A restarted box retries the same turn; any
+ * other process-start failure, typed or only marked in a wrapper's text, stops
+ * the turn with short copy, never the agent's raw message or command text.
+ */
+function sandboxProcessStartFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
+  const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
+  if (restarting instanceof SandboxMachineRestartingError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      return {
+        error: restarting.message,
+        code: SANDBOX_MACHINE_RESTARTING_CODE,
+        retryable: true,
+      };
+    }
+  }
+  const failed = nodes.find((node) => node instanceof SandboxProcessStartFailedError);
+  if (failed instanceof SandboxProcessStartFailedError) {
+    return {
+      error: failed.message,
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: failed.detail,
+    };
+  }
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
+    return {
+      error:
+        "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
+    };
+  }
+  return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
 }
 
 const SANDBOX_FAILURE_SUBJECT = {
@@ -2268,6 +2350,8 @@ function baseAgentRunFailurePayload(
   if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
   const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
   if (setupAgentUnavailable) return setupAgentUnavailable;
+  const processStart = sandboxProcessStartFailure(error);
+  if (processStart) return processStart;
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }

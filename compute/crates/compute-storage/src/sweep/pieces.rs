@@ -33,7 +33,7 @@ pub(super) async fn audit(
     delete: bool,
 ) -> Result<()> {
     let mut found = BTreeSet::new();
-    for area in [Area::Manifests, Area::Chunks] {
+    for area in Area::ALL {
         found.extend(tried("finding the periods stored", || store.periods(area)).await?);
     }
     tracing::info!(periods = found.len(), "sweep: listing every period again");
@@ -292,11 +292,11 @@ impl Listing<'_> {
     /// tried again from after the last page done.
     async fn one(&self, piece: Piece) -> Result<Found> {
         let unders = match piece {
-            Piece::Period(period) => [
-                format!("manifests/v2/{period}"),
-                format!("chunks/v2/{period}"),
-            ],
-            Piece::Legacy => ["manifests/v1".to_owned(), "chunks/v1".to_owned()],
+            Piece::Period(period) => Area::ALL
+                .iter()
+                .map(|area| format!("{}/{period}", area.periodic()))
+                .collect(),
+            Piece::Legacy => vec!["manifests/v1".to_owned(), "chunks/v1".to_owned()],
         };
         let mut found = Found {
             whole: true,

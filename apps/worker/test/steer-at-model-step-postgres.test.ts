@@ -702,3 +702,60 @@ test("several quick Steers while the model generates are read in order by one re
   expect(superseded[0]!.payload).toMatchObject({ cutOffText: "Let me" });
   expect(await interruptionCount(session.id)).toBe(0);
 });
+
+test("a Steer the watch notices while the step's own read is stale still hands over at that step", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  const bus = new MemoryEventBus();
+  const scripted = new ScriptedModel([
+    { id: `step-1-${session.id}`, output: [functionCall("local_fixture", {}, "call-1")] },
+    // Spent only when the stale read re-arms the watch: this request would go
+    // out unpreemptible and the Steer would wait for the step after it.
+    { id: `step-2-${session.id}`, output: [functionCall("local_fixture", {}, "call-2")] },
+    { id: `answer-${session.id}`, output: [assistantMessage("Status: step one is done.")] },
+  ]);
+  let toolDone = false;
+  let staleReadUsed = false;
+  let watchSaw!: () => void;
+  const watchSawSteer = new Promise<void>((resolve) => {
+    watchSaw = resolve;
+  });
+  const real = opengeniDb.hasPendingSteerForTurn;
+  const read = spyOn(opengeniDb, "hasPendingSteerForTurn").mockImplementation(
+    async (...args: Parameters<typeof real>) => {
+      if (toolDone && !staleReadUsed) {
+        staleReadUsed = true;
+        // The next step's admission reads first; its slower sibling checks
+        // keep it open while the person steers and the watch notices.
+        const before = await real(...args);
+        const after = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+        await send(ctx, session.id, "What is the status?", "steer");
+        await publishSince(ctx, session.id, bus, after);
+        await watchSawSteer;
+        return before;
+      }
+      const pending = await real(...args);
+      if (pending) watchSaw();
+      return pending;
+    },
+  );
+  const runtime = scriptedRuntime(scripted, async () => {
+    toolDone = true;
+  });
+  const startedAt = Date.now();
+  try {
+    expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+  } finally {
+    read.mockRestore();
+  }
+  expect(staleReadUsed).toBe(true);
+  // The turn handed over before its second model request, within moments.
+  expect(scripted.calls).toBe(1);
+  expect(Date.now() - startedAt).toBeLessThan(10_000);
+  const timeline = await events(ctx, session.id);
+  const superseded = timeline.filter((event) => event.type === "turn.superseded");
+  expect(superseded).toHaveLength(1);
+  expect(superseded[0]!.payload).toMatchObject({ reason: "steer", atModelStep: true });
+  expect(timeline.some((event) => JSON.stringify(event.payload).includes("call-2"))).toBe(false);
+  expect((await turns(session.id)).map((turn) => turn.status)).toEqual(["superseded", "queued"]);
+});

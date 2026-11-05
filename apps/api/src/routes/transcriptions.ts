@@ -30,18 +30,22 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json({ code: "region_restricted" }, 422);
     }
     const service = deps.transcription;
-    if (
-      !service ||
-      !(await service.available({
+    if (!service) return c.json({ code: "unavailable" }, 503);
+    try {
+      const context = {
         workspaceId,
+        accountId: grant.accountId,
         subjectId: grant.subjectId,
         preferredProvider: preferences?.preferredProvider,
         fallbackEnabled: preferences?.fallbackEnabled,
-      }))
-    ) {
-      return c.json({ code: "unavailable" }, 503);
-    }
-    try {
+      };
+      if (
+        !(service.selectProvider
+          ? await service.selectProvider(context)
+          : await service.available(context))
+      ) {
+        return c.json({ code: "unavailable" }, 503);
+      }
       const body = await audioRequest(c.req.raw, service.limits().maxSizeBytes);
       // Server-generated: the correlation id is client-chosen and a reused
       // settlement key would make every later call with it free.
@@ -69,6 +73,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json(response);
     } catch (error) {
       if (error instanceof TranscriptionServiceError) {
+        if (error.subscriptionCode) throw error;
         return c.json({ code: error.code }, error.status as never);
       }
       if (error instanceof TranscriptionBillingRefusedError) {

@@ -99,7 +99,7 @@ test("the summary lists what is on, then what is off and what the server doesn't
   );
   expect(on).toEqual(["humanInput", "skills", "knowledge"]);
   expect(container.textContent).toContain("Uses installed Skills.");
-  expect(container.textContent).toContain("Off: Images and video, Goals");
+  expect(container.textContent).toContain("Off: Notifications, Images and video, Goals");
   expect(container.textContent).toContain("Not enabled on this server: Web search.");
 });
 

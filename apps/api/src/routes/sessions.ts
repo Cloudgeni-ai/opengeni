@@ -378,7 +378,11 @@ import {
   type TerminalStreamMint,
   type ViewerServices,
 } from "../sandbox/viewer";
-import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
+import {
+  buildSessionCodexRealtimeBroker,
+  CodexRealtimeBrokerError,
+  codexRealtimeFailureLogAttributes,
+} from "../codex-realtime";
 import {
   acceptSessionUserMessage,
   validateSessionMcpCredentialUpdates,
@@ -1989,7 +1993,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       } catch (error) {
         const refused = realtimeVoiceRefusalResponse(c, error);
-        if (!refused) throw error;
         await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -2004,6 +2007,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
           ),
         ).catch(() => undefined);
+        if (!refused) throw error;
         return refused;
       }
       const broker =
@@ -2014,6 +2018,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               settings,
               { accountId: grant.accountId, workspaceId, sessionId },
               deps.codexFetch,
+              {
+                onConnectionRefused: (refusal) =>
+                  deps.observability?.warn(
+                    "Realtime WebRTC connection refused; trying the next connected subscription",
+                    codexRealtimeFailureLogAttributes(refusal),
+                  ),
+              },
             );
       try {
         const answer = await broker({
@@ -2092,6 +2103,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       if (!(error instanceof CodexRealtimeBrokerError)) throw error;
       const failure = codexRealtimeHttpFailure(error);
+      deps.observability?.warn(
+        "Realtime WebRTC negotiation rejected",
+        codexRealtimeFailureLogAttributes(error),
+      );
       return c.json(
         {
           error: {

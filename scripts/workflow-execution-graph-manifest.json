@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "c400134f67f0c7a8d7311d71019c8550b7b131ed4225aae562ba0cd73504dd07"
+      "sha256": "ad34a9de238ee57b91291ce8792acb5e10e86300aebf63a2841f3f8ab6283fb5"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "1c75627a71eee7b99696fa15dcfac524d984a0d99729fb2d5bdcf5e55316c7ec"
+      "sha256": "a32fdc7fcf7442eb5a8861bfdb4eba084d698685ee0fa0ed271cba07ccbe48dd"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -90,7 +90,7 @@
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
-      "sha256": "4cb5d3bb038e0a1f8997b83b93d02c7dbb579ef3c4bcc84cd831f2e3210c1288"
+      "sha256": "d83050b580e5dbb89635e035ab06a42120d13454f09ba91104aa0fc6f00f2946"
     },
     {
       "path": ".github/workflows/publish-canary.yml",
@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "a57642df55f10cec17ae9c485355b21a23ee1492590be1200ab937b6f0c53c37"
+      "sha256": "d3ff6b3faeb2fc01ac1e53e5785bf67b16f43afef97f27f4e21d293bbcbe1919"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
@@ -126,7 +126,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "ddcb67184d0492ca3911a520ee912f22f35f1463e53f84614ed689d07e585edd"
+      "sha256": "c8aec435a575cc6b93b3af4fbd28c64a5b26b618696a28fa7077189bd389c34b"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -306,6 +306,12 @@
     {
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
+      "step": "Allow unprivileged user namespaces for the agent's namespace tests",
+      "sha256": "0a1a20a7c4c58d02d5102702566514003267dffe4733afe6d11230900653a143"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
       "step": "cargo build --release --workspace",
       "sha256": "edf73b5fcb65b446c151c1bef82227f31164cbf8a4321051d2f1f535ffa4e2f6"
     },
@@ -313,7 +319,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "0472457afcd7d85cf00dddf60b569a51a0e4a670237f69eed4789634ca1c9e96"
+      "sha256": "c6713d108b004717903c7303c4e999f824dc4502a0ebba25ae6e562f19a1095e"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -1153,7 +1159,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "7720250bac9a13e634839d616a7274b06b8d8b0c1870fd8d3cc7bceccf4f34f0"
+      "sha256": "db623f05b43f1abd04e80c5b212d8f84eb3d4897eb9b6e5441ba635e76b6b98f"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1531,13 +1537,19 @@
       "workflow": ".github/workflows/publish-canary-chart.yml",
       "job": "publish",
       "step": "Package exact chart",
-      "sha256": "dc8b7635f45d5b2b79a8de039a293e494ce0f073104945832728b968a2b52b9d"
+      "sha256": "c991c239c9b586b5a11191689e1c4e8934796dd515b2643478a5bb2220fbfca3"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
       "job": "publish",
       "step": "Reconcile or publish and verify bytes",
       "sha256": "c1eae7a09c30ad919a582142d56e6c8483e903810a75a0765e830e9c025cb9a0"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary-chart.yml",
+      "job": "publish",
+      "step": "Resolve exact-source desktop image",
+      "sha256": "83c14e8586fb035aa83ba9c48b61ee2aee8d7114c5ca4515eabae537dacb20b3"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
@@ -1627,7 +1639,7 @@
       "workflow": ".github/workflows/publish-packages.yml",
       "job": "publish",
       "step": "Require successful protected source CI",
-      "sha256": "e7e60563d07547dbbd75973d2ba0e5dd9e5e0e8627f441b323372c9a5c10de9a"
+      "sha256": "ff44ed1f88c20ad298c21582914aefa5e02631294fa129675510eb4c4f6d89a5"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",
@@ -1770,8 +1782,14 @@
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
+      "step": "Make room for the desktop candidate",
+      "sha256": "ce761828efbc188840bd0759dafb03da008ca496b537335723ab06961e420469"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
       "step": "Package the deterministic immutable Helm chart candidate",
-      "sha256": "1ee9fe40597a905e62b682be2032058b38bbce0f4028e2ad95fa46350315038d"
+      "sha256": "e27fd84847b289ab16b715927a1fe0150a102c6c4857c66464d7af9b440784e5"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1795,7 +1813,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Refuse occupied run-scoped candidate tags",
-      "sha256": "470b6fba1bda98f6d67392f9e7ec1df30c946506ec9c23f457f3449f8ead3b98"
+      "sha256": "4590a29a274d508048731dbda6c07a356b6a4000420f96cefddfbfcf26a5cb35"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1826,6 +1844,12 @@
       "job": "candidate",
       "step": "Resolve candidate identity",
       "sha256": "acc453965326f8aa632c3e648a347f5b46c4f209f5ae5e978a5978657b68bb7d"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
+      "step": "Resolve desktop candidate digest",
+      "sha256": "3f23534d8dde68b4e264e59ff162a0c518aab3c1d03d7a01845da82b2a47d2bb"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1861,7 +1885,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Verify candidate images support anonymous pull",
-      "sha256": "9a113e744aee2a393d378f25d93311502df7070015343cdc4d1039f58006de27"
+      "sha256": "bcccb4135a492a2522337a782a3d503b62ddead5f02912a4a3cabf4175dadc2d"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",

@@ -1,4 +1,9 @@
 import { version as sdkVersion } from "../package.json";
+import type {
+  BillingAlertSettings,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
+} from "@opengeni/contracts/billing-credit-notifications";
 import {
   copyObservedSessionSequence,
   recordObservedSessionSequence,
@@ -468,6 +473,11 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointsResponse,
+  CreateOrganizationCompatibleEndpointRequest,
+  ReplaceOrganizationCompatibleEndpointKeyRequest,
+  CreateOrganizationCompatibleEndpointModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -522,6 +532,10 @@ import type {
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -6337,6 +6351,81 @@ export class OpenGeniClient {
     );
   }
 
+  /** List the organization's OpenAI-compatible endpoints and their models. */
+  async listOrganizationCompatibleEndpoints(
+    organizationId: string,
+  ): Promise<OrganizationCompatibleEndpointsResponse> {
+    return await this.requestJson<OrganizationCompatibleEndpointsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+    );
+  }
+
+  /** Connect an OpenAI-compatible endpoint with its first model. */
+  async createOrganizationCompatibleEndpoint(
+    organizationId: string,
+    request: CreateOrganizationCompatibleEndpointRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+      request,
+    );
+  }
+
+  /** Replace an OpenAI-compatible endpoint's API key. */
+  async replaceOrganizationCompatibleEndpointKey(
+    organizationId: string,
+    connectionId: string,
+    request: ReplaceOrganizationCompatibleEndpointKeyRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/key`,
+      request,
+    );
+  }
+
+  /** Disconnect an OpenAI-compatible endpoint; its models stop at once. */
+  async revokeOrganizationCompatibleEndpoint(
+    organizationId: string,
+    connectionId: string,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /** Add a model to an OpenAI-compatible endpoint. */
+  async createOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    request: CreateOrganizationCompatibleEndpointModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Remove a model from an OpenAI-compatible endpoint. */
+  async deleteOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
   /** Remove the workspace's own allowlist so it uses its organization's list as is. */
   async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
@@ -7702,6 +7791,22 @@ export class OpenGeniClient {
     return await this.requestJson<SlackUserLinkAccessRequest>(
       "POST",
       `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/request-access`,
+      request,
+    );
+  }
+
+  /**
+   * Link the Slack account as a member of the organization, without workspace
+   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   */
+  async linkSlackUserAsOrganizationMember(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/link`,
       request,
     );
   }
@@ -11683,6 +11788,36 @@ export class OpenGeniClient {
 
   // --- Billing (account-scoped) --------------------------------------------------------------------
 
+  async getBillingAlertSettings(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("GET", "/v1/billing/alerts", undefined, options);
+  }
+
+  async updateBillingAlertSettings(
+    request: UpdateBillingAlertSettingsRequest,
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("PUT", "/v1/billing/alerts", request);
+  }
+
+  async listBillingCreditNotifications(
+    options: { accountId?: string } = {},
+  ): Promise<ListBillingCreditNotificationsResponse> {
+    return this.requestJson("GET", "/v1/billing/notifications", undefined, options);
+  }
+
+  async markBillingCreditNotificationRead(
+    notificationId: string,
+    options: { accountId?: string } = {},
+  ): Promise<{ ok: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/billing/notifications/${encodeURIComponent(notificationId)}/read`,
+      undefined,
+      options,
+    );
+  }
+
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
     return await this.requestJson<BillingSummary>("GET", "/v1/billing", undefined, {
       ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
@@ -11914,6 +12049,25 @@ export class OpenGeniClient {
     options: { accountId?: string } = {},
   ): Promise<BillingSubscriptionCatalog> {
     return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
+  }
+
+  async getBillingAutoTopUp(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("GET", "/v1/billing/auto-top-up", undefined, options);
+  }
+
+  /** Owner-only. enabled:true explicitly consents to recurring off-session threshold charges. */
+  async updateBillingAutoTopUp(
+    request: UpdateBillingAutoTopUpRequest,
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("PUT", "/v1/billing/auto-top-up", request);
+  }
+
+  async createBillingAutoTopUpSetupSession(
+    request: CreateBillingAutoTopUpSetupSessionRequest,
+  ): Promise<CreateBillingAutoTopUpSetupSessionResponse> {
+    return await this.requestJson("POST", "/v1/billing/auto-top-up/setup", request);
   }
 
   async createSubscriptionCheckout(

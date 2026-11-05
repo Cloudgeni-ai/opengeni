@@ -11,6 +11,7 @@ import {
   SLACK_AGENT_INTRO_CHANNELS_MAX,
   SLACK_AGENT_NAME_MAX_LENGTH,
   SLACK_AGENT_OPEN_LABEL,
+  SLACK_AGENT_OPEN_NARROWED_NOTICE,
   slackAgentCallText,
   slackAgentNameKey,
   slackAgentNameProblem,
@@ -198,7 +199,7 @@ export function SlackAgentFormPage({
         .filter(Boolean)
         .join(" ")
     : undefined;
-  // Opening an agent to anyone in Slack is an organization admin's call; any
+  // Opening an agent to the organization in Slack is an organization admin's call; any
   // admin of the workspace can close it again. The API enforces both.
   const agentAccountId = agent
     ? accessContext?.workspaceGrants.find((grant) => grant.workspaceId === agent.targetWorkspaceId)
@@ -482,6 +483,7 @@ export function SlackAgentFormPage({
             onCheckedChange={setOpen}
           />
         ) : null}
+        {agent?.open ? <Notice>{SLACK_AGENT_OPEN_NARROWED_NOTICE}</Notice> : null}
       </FieldStack>
     </FormPage>
   );

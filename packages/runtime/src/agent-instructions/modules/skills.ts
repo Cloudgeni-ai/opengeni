@@ -1,9 +1,12 @@
-import { blocks, bullets, type AgentPromptModule } from "../types";
+import { blocks, bullets, skillsReadable, type AgentPromptModule } from "../types";
 
-/** Reading and following Skills. Present whenever Skills are readable. */
+/**
+ * Reading and following Skills. Present whenever a Skill can be read: Skill
+ * management is on, or reading is on and the Skill index is not empty.
+ */
 export const skillsModule: AgentPromptModule = {
   id: "skills",
-  applies: (context) => context.capabilities.skills !== false,
+  applies: skillsReadable,
   render: () =>
     blocks(
       "# Using skills",
