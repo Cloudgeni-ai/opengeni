@@ -201,7 +201,7 @@ rows:
 | `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews and compact answerable questions (ids, kinds, prompts, option ids and labels; no secret specs) plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
-| `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
+| `child_waiting_capacity` | immediate | a long subscription capacity wait armed on the child (reset at least 15 minutes away, unknown, or needing a person); carries `resetsAt` and tells the parent that `session_set_model` moves the waiting turn to a model with capacity | `child-waiting-capacity:<child>:<waiter>` |
 | `child_progress` | deferred | the child's agent `goal_progress`; a newer note supersedes an older still-pending one | `child-progress:<child>:<receipt>` |
 
 Delivery into the parent happens through `addSessionSystemUpdateWithSourceMutation`:
@@ -267,10 +267,10 @@ terminal state changes commit; the already-checkpointed provider proof remains
 eligible for a settlement-only retry and provider execution is never replayed.
 
 The five new kinds are produced only while
-`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from
-before these kinds existed throws on an unknown kind, so enable the flag only
-once the whole fleet runs an image that understands them. Delivery and
-consumption of an already committed notice never read the flag.
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default on): a worker from
+before these kinds existed (before August 2026) throws on an unknown kind, so
+a fleet still running such an image sets the flag to false until it is gone.
+Delivery and consumption of an already committed notice never read the flag.
 
 Rollout and rollback rule: once the flag has produced rows, a pre-notice image
 must never restart while any new-kind row is still pending in
