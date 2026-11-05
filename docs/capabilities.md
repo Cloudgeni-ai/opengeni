@@ -510,7 +510,7 @@ and reject an upgrade that would silently remove a configured facet.
 
 The Knowledge Source facet kind (`knowledge_source`, for example the former
 Drive and OneDrive `drive-content` facets) was removed with integration
-Knowledge sync; migration 1261 deleted its stored definitions and bindings. The
+Knowledge sync; migration 1275 deleted its stored definitions and bindings. The
 kind stays in the public SDK enum until the next major, and the facet browse
 and source routes answer 410. Recurring Drive or OneDrive work uses an ordinary
 agent schedule with the account's tools. See [Google Drive](google-drive.md) for the

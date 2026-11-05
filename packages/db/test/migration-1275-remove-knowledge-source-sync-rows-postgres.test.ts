@@ -9,7 +9,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const migration = "1261_remove_knowledge_source_sync_rows.sql";
+const migration = "1275_remove_knowledge_source_sync_rows.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const subjectId = "user:retired-knowledge-sync";
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -26,7 +26,7 @@ type RoutineMetadata = {
 };
 
 // Signature, owner, grants, SECURITY DEFINER and search path of the three
-// routines 1261 replaces.
+// routines 1275 replaces.
 async function rewrittenRoutines(): Promise<RoutineMetadata[]> {
   return [
     ...(await owned!.admin<RoutineMetadata[]>`
@@ -153,7 +153,7 @@ async function count(table: string, column: string, value: string): Promise<numb
   return row!.count;
 }
 
-describe.skipIf(!realDatabase)("1261 removes retired Knowledge sync rows", () => {
+describe.skipIf(!realDatabase)("1275 removes retired Knowledge sync rows", () => {
   test("deletes every source task with its runs and sync rows, keeps chat history, and is idempotent", async () => {
     const at = await scope();
     const native = await task(at, {
