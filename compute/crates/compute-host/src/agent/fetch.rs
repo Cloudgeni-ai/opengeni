@@ -4,7 +4,9 @@
 //!
 //! The fetch writes the image's file to local disk, so it is booked with
 //! the core like any other write first: the store is asked for the file's
-//! length, the agent books it, and only then does the fetch start.
+//! length, the agent books it, and only then does the fetch start. One
+//! that fits only once disk relief is in waits for it, booked meanwhile
+//! (see [`compute_core::Input::Wants`]).
 //!
 //! An image an earlier agent left on the host is checked against its id
 //! first: when it matches, the creates go on with it, and the store is
@@ -17,14 +19,14 @@
 
 use std::sync::Arc;
 
-use compute_core::{DiskSpace, Input};
+use compute_core::{CreateRoom, DiskSpace, Input};
 use compute_engine::{Engine, EngineError};
 
 use crate::protocol::{Id, ImageId, SandboxConfig};
 use crate::rootfs::Missing;
 use crate::store::{OwnerEpoch, Store};
 
-use super::disk::AfterReading;
+use super::disk::{AfterReading, unwanted};
 use super::{Event, HostAgent, HostError, Reply};
 
 /// Inodes a fetch takes: the image's file and its staging name.
@@ -114,22 +116,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             bytes: crate::disk_growth::disk_bound(length, self.allocation_unit),
             inodes: FETCH_INODES,
         };
-        if let Some((resource, needed, free)) = self.core.disk_shortage(disk) {
-            if self.core.disk_awaits_reading(disk) {
+        match self.core.disk_room_for(self.now(), key.0, disk) {
+            CreateRoom::Fits => {}
+            CreateRoom::AwaitsReading(..) => {
+                // Booked meanwhile, so disk relief frees it.
+                self.want_disk(key.0, disk);
                 self.after_reading(AfterReading::Fetch(image, length));
                 return;
             }
-            return self.fetch_ended(
-                image,
-                &Err(HostError::HostFull {
-                    id: key,
-                    resource,
-                    needed,
-                    free,
-                }),
-            );
+            CreateRoom::Short(resource, needed, free) => {
+                return self.fetch_ended(
+                    image,
+                    &Err(HostError::HostFull {
+                        id: key,
+                        resource,
+                        needed,
+                        free,
+                    }),
+                );
+            }
         }
-        self.input(Input::Writes { key: key.0, disk });
+        self.inputs([unwanted(key.0), Input::Writes { key: key.0, disk }]);
         let (rootfs, store) = (Arc::clone(&self.rootfs), Arc::clone(&self.store));
         let events = self.events_tx.clone();
         tokio::spawn(async move {
@@ -149,10 +156,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(fetch) = self.fetching.remove(&image) else {
             return;
         };
-        self.input(Input::Writes {
-            key: fetch.key.0,
-            disk: DiskSpace::default(),
-        });
+        self.inputs([
+            unwanted(fetch.key.0),
+            Input::Writes {
+                key: fetch.key.0,
+                disk: DiskSpace::default(),
+            },
+        ]);
         if let Err(error) = result {
             tracing::warn!(%image, %error, "creates naming an image could not have it");
         }

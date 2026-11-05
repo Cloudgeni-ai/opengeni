@@ -8,6 +8,8 @@ export const ClaudeUsageWindowId = /* @__PURE__ */ defineSchema(() =>
     "seven_day",
     "seven_day_opus",
     "seven_day_sonnet",
+    // The separate weekly Fable limit (Claude Max and Ultra, Oct 2026).
+    "seven_day_fable",
     "seven_day_overage_included",
     "overage",
   ]),
@@ -49,7 +51,7 @@ export const ClaudeSubscriptionUsage = /* @__PURE__ */ defineSchema(() =>
     .object({
       connected: primitives.boolean,
       credentialVersion: z.number().int().positive().nullable(),
-      windows: z.array(ClaudeUsageWindow).max(6),
+      windows: z.array(ClaudeUsageWindow).max(7),
       observedAt: z.string().datetime().nullable(),
       source: z.enum(["response_headers", "provider"]).nullable(),
       refreshStatus: z.enum([

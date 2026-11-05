@@ -48,6 +48,7 @@ import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { archiveRestoreScript } from "../providers/opensandbox-adapter";
 import {
+  COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
   CONNECTION_REPLACED_DETAIL_KEY,
   NEVER_SENT_DETAIL_KEY,
   RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY,
@@ -123,13 +124,17 @@ export type ComputeTurnDeps = Pick<
   opJournal?: NonNullable<SelfhostedSessionDeps["opStream"]>["journal"];
 };
 
-function agentOfflineError(message: string): SelfhostedControlError {
+function agentOfflineError(
+  message: string,
+  detail?: Record<string, string>,
+): SelfhostedControlError {
   return new SelfhostedControlError({
     message,
     code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
     reason: "agent_offline",
     retryable: false,
     agentOffline: true,
+    ...(detail ? { detail } : {}),
   });
 }
 
@@ -223,8 +228,10 @@ export class ComputeWakeGate {
         return connection;
       }
       if (this.now() >= deadline) {
+        const seconds = Math.round(this.deps.readyTimeoutMs / 1000);
         throw agentOfflineError(
-          `The agent of compute sandbox ${this.deps.sandboxId} did not answer within ${Math.round(this.deps.readyTimeoutMs / 1000)}s.`,
+          `The agent of compute sandbox ${this.deps.sandboxId} did not answer within ${seconds}s.`,
+          { [COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY]: String(seconds) },
         );
       }
       await this.sleep(Math.min(delayMs, Math.max(0, deadline - this.now())));
@@ -559,6 +566,13 @@ export class ComputeSandboxSession extends SelfhostedSession {
 
   /** Nothing to start: a request to a sleeping sandbox wakes it. */
   async start(): Promise<void> {}
+
+  /** Boot this box afresh from its disk (files kept, programs ended). Used
+   * when its running system can no longer start programs; the next request
+   * wakes it on a new agent connection. */
+  async restartMachine(): Promise<void> {
+    await this.computeDeps.control.restart(this.state.sandboxId);
+  }
 
   async running(): Promise<boolean> {
     try {

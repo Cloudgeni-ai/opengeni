@@ -364,13 +364,18 @@ export type ProviderPresentation = Pick<
   | "modelToastName"
   | "connectionManagerDescription"
 > & {
-  /** Azure OpenAI is connected for the organization only. */
-  provider: ProviderConnectionConfig["provider"] | "openai" | "azure_openai";
+  /** OpenAI, Azure OpenAI and OpenAI-compatible endpoints use this view at organization scope only. */
+  provider: ProviderConnectionConfig["provider"] | "openai" | "azure_openai" | "openai_compatible";
   /** Where the key is billed, for the page's aside. */
   billedTo: string;
   analyticsAction?: AnalyticsAction | undefined;
   /** A non-secret resource endpoint saved with the key (Azure OpenAI). */
   endpointField?: ProviderEndpointField | undefined;
+  /**
+   * What a fixed, non-secret endpoint is called on the page's aside when it
+   * can't be changed with the key (a compatible endpoint's base URL).
+   */
+  endpointLabel?: string | undefined;
   /** What a custom model is called here: "model", or "deployment" for Azure OpenAI. */
   customModelNoun?: string | undefined;
   /** Custom models can be added only once the key is connected (each is checked against it). */
@@ -1897,8 +1902,8 @@ export function ProviderConnectionPage({
                       : "Not connected"}
               </DetailAsideItem>
             )}
-            {config.endpointField && state.connected && state.endpoint ? (
-              <DetailAsideItem label={config.endpointField.label}>
+            {(config.endpointField ?? config.endpointLabel) && state.connected && state.endpoint ? (
+              <DetailAsideItem label={config.endpointField?.label ?? config.endpointLabel}>
                 <span className="font-mono text-xs break-all">{state.endpoint}</span>
               </DetailAsideItem>
             ) : null}

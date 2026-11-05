@@ -4,6 +4,7 @@ import {
   builtinModelResidency,
   configuredProviders,
   modelRouteMeetsResidencyRequirement,
+  organizationCompatibleConnectionIdOf,
   resolveModelProvider,
 } from "@opengeni/config";
 import {
@@ -27,7 +28,6 @@ import {
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
 } from "./provider-history-adapter";
-import { requestFunctionToolNames } from "./provider-tool-names";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -366,7 +366,6 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
-              knownToolNames: requestFunctionToolNames(request.tools),
             }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
@@ -542,7 +541,10 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
-    if (modelName && isDirectModelId(modelName)) {
+    if (
+      modelName &&
+      (isDirectModelId(modelName) || organizationCompatibleConnectionIdOf(modelName) !== null)
+    ) {
       throw new Error("The selected model connection is unavailable");
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same

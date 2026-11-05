@@ -131,6 +131,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       modelId = (
         await resolveDefaultSessionModelForSelections(deps.db, {
           settings: resolved.catalogSettings,
+          billingOrigin: await billingOriginForAccessGrant(deps, caller.grant),
           accountId: caller.accountId,
           workspaceSettings: workspace?.settings ?? {},
           selections: resolved.selections,
@@ -153,8 +154,14 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
   return {
     async listModels(caller) {
       const { selections: all } = await selections(caller);
+      const origin = await billingOriginForAccessGrant(deps, caller.grant);
       return all
-        .filter((entry) => isWorkspaceModelAdmissible(entry) && servedBySingleModelCalls(entry))
+        .filter(
+          (entry) =>
+            isWorkspaceModelAdmissible(entry) &&
+            servedBySingleModelCalls(entry) &&
+            !(origin === "api" && ownModelFunding(entry.model) === "subscription"),
+        )
         .map(({ model }) => ({
           id: model.id,
           label: model.label,
@@ -235,8 +242,16 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         });
         if (!admission.allowed) {
           throw new ModelCallError({
-            status: admission.denial === "insufficient_credits" ? 402 : 429,
-            type: "insufficient_quota",
+            status:
+              admission.denial === "subscription_api_unavailable"
+                ? 403
+                : admission.denial === "insufficient_credits"
+                  ? 402
+                  : 429,
+            type:
+              admission.denial === "subscription_api_unavailable"
+                ? "invalid_request_error"
+                : "insufficient_quota",
             code: admission.apiCreditsRequired
               ? API_CREDITS_REQUIRED_CODE
               : admission.byokPaidCreditRequired

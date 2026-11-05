@@ -36,7 +36,7 @@ import {
   useProviderConnection,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { codexUsageReadings, useCodexSubscriptions } from "@/components/codex-connection";
+import { codexUsageWindows, useCodexSubscriptions } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import {
@@ -112,6 +112,12 @@ import {
 } from "@/components/models/supergrok-models";
 import { useOrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
+import {
+  COMPATIBLE_ENDPOINT_CHOICE,
+  CompatibleEndpointConnectPage,
+  CompatibleEndpointView,
+  useOrganizationCompatibleEndpoints,
+} from "@/components/models/organization-compatible-endpoints";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -121,7 +127,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
-import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { billingClassForModel, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
 import {
@@ -239,9 +245,15 @@ export function useOrganizationModelAccounts({
       },
     }),
   };
+  // The organization's OpenAI-compatible endpoints: it can connect several.
+  const orgCompatible = useOrganizationCompatibleEndpoints({
+    client,
+    organizationId: orgId,
+    enabled: gatewaysEnabled,
+  });
   // Which workspaces can use what is being connected, per provider.
   const [audiences, setAudiences] = useState<Partial<Record<string, ConnectAudience>>>({});
-  return { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences };
+  return { orgCodex, orgGrok, orgClaude, orgGateways, orgCompatible, audiences, setAudiences };
 }
 
 export type OrganizationModelAccounts = ReturnType<typeof useOrganizationModelAccounts>;
@@ -423,7 +435,7 @@ export function WorkspaceModelsPageBody({
 
   /* The organization's own accounts: read only for people who manage them. */
   const orgId = organizationId ?? "";
-  const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
+  const { orgCodex, orgGrok, orgClaude, orgGateways, orgCompatible, audiences, setAudiences } =
     organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
@@ -898,6 +910,7 @@ export function WorkspaceModelsPageBody({
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
         gateways={orgGateways}
+        compatible={orgCompatible.enabled}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect-org:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
@@ -913,7 +926,9 @@ export function WorkspaceModelsPageBody({
     // sign in or paste the key.
     const provider = step.provider;
     const accessKind =
-      provider === "codex" || provider === "supergrok" ? provider : ORGANIZATION_KIND[provider];
+      provider === "codex" || provider === "supergrok" || provider === "openai_compatible"
+        ? provider
+        : ORGANIZATION_KIND[provider];
     const audience: ConnectAudience = audiences[provider] ?? EVERYONE;
     const signingIn =
       provider === "codex"
@@ -954,7 +969,9 @@ export function WorkspaceModelsPageBody({
             ? accountKey(provider, connectionId, true)
             : provider === "claude_subscription"
               ? accountKey("claude", connectionId, true)
-              : accountKey("gateway", provider, true);
+              : provider === "openai_compatible"
+                ? accountKey("compatible", connectionId, true)
+                : accountKey("gateway", provider, true);
         toast.error("Connected, but its Available in couldn't be saved", {
           description: "Every workspace can use it until you change Available in.",
           action: {
@@ -964,7 +981,18 @@ export function WorkspaceModelsPageBody({
         });
       }
     };
-    if (provider === "codex") {
+    if (provider === "openai_compatible") {
+      page = (
+        <CompatibleEndpointConnectPage
+          endpoints={orgCompatible}
+          onClose={backToList}
+          onConnected={(id) => nav.openAccount(accountKey("compatible", id, true))}
+          fields={fields}
+          blockedReason={blockedReason}
+          afterSave={(id) => limitAfterConnect(id)}
+        />
+      );
+    } else if (provider === "codex") {
       page = (
         <OrgCodexConnectPage
           codex={orgCodex}
@@ -1028,6 +1056,12 @@ export function WorkspaceModelsPageBody({
           reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
           onClose={back}
           onConnected={(id) => (id ? orgClaudePlaces.openAccount(id) : backToList())}
+        />
+      ) : provider === "openai_compatible" ? (
+        <CompatibleEndpointConnectPage
+          endpoints={orgCompatible}
+          onClose={back}
+          onConnected={(id) => nav.openAccount(accountKey("compatible", id, true))}
         />
       ) : (
         <ProviderConnectPage
@@ -1097,7 +1131,8 @@ export function WorkspaceModelsPageBody({
       ) : (
         <ProviderConnectPage
           key={provider}
-          state={gateways[provider]}
+          // A compatible endpoint is the organization's only: no "connect:" step names it.
+          state={gateways[provider as GatewayId]}
           onClose={backToList}
           onConnected={() => nav.openAccount(accountKey("gateway", provider))}
           fields={note}
@@ -1207,6 +1242,16 @@ export function WorkspaceModelsPageBody({
             organizationName={organizationName}
             onClose={back}
           />
+        ) : key.provider === "compatible" ? (
+          <CompatibleEndpointView endpoints={orgCompatible} connectionId={key.id}>
+            {(state) => (
+              <ProviderAccessPage
+                state={state}
+                organizationName={organizationName}
+                onClose={back}
+              />
+            )}
+          </CompatibleEndpointView>
         ) : (
           <ProviderAccessPage
             state={orgGateways[key.id as GatewayId]}
@@ -1272,6 +1317,20 @@ export function WorkspaceModelsPageBody({
         }
       />
     );
+  } else if (key?.provider === "compatible") {
+    page = (
+      <CompatibleEndpointView endpoints={orgCompatible} connectionId={key.id}>
+        {(state) => (
+          <OrganizationGatewayPage
+            state={state}
+            labels={labels}
+            onBack={backToList}
+            onConnect={() => nav.openView("connect-org:openai_compatible")}
+            onEditAccess={() => nav.openView("model-access", account)}
+          />
+        )}
+      </CompatibleEndpointView>
+    );
   } else if (key?.provider === "gateway") {
     page = key.organization ? (
       <OrganizationGatewayPage
@@ -1329,6 +1388,7 @@ export function WorkspaceModelsPageBody({
           orgGrok={orgGrok}
           orgClaude={orgClaude}
           orgGateways={orgGateways}
+          orgCompatible={orgCompatible}
           liveCodexUsage={Object.fromEntries(
             codex.accounts
               .filter((candidate) => candidate.source === "organization")
@@ -1345,6 +1405,7 @@ export function WorkspaceModelsPageBody({
     const listedOrgGateways = organizationAdmin
       ? GATEWAYS.filter((id) => providerListed(orgGateways[id]))
       : [];
+    const listedOrgEndpoints = organizationAdmin ? orgCompatible.endpoints : [];
     // People who can't read the organization's keys see the ones that reach
     // this workspace, from the models it can use.
     const readyOrgKeys = organizationAdmin
@@ -1361,7 +1422,7 @@ export function WorkspaceModelsPageBody({
       superGrokListedCount(grok),
       claudeEnabled ? claudeListedCount(claude) : 0,
       listedGateways.length,
-      listedOrgGateways.length,
+      listedOrgGateways.length + listedOrgEndpoints.length,
       readyOrgKeys.length,
       // Your own subscriptions, kept in your Personal workspace.
       ownWorkspaceId
@@ -1469,6 +1530,22 @@ export function WorkspaceModelsPageBody({
                     onOpen={() => nav.openAccount(accountKey("gateway", id, true))}
                   />
                 ))}
+                {listedOrgEndpoints.map((endpoint) => (
+                  <CompatibleEndpointView
+                    key={`org:compatible:${endpoint.id}`}
+                    endpoints={orgCompatible}
+                    connectionId={endpoint.id}
+                  >
+                    {(state) => (
+                      <OrganizationGatewayRow
+                        state={state}
+                        labels={labels}
+                        workspace={here}
+                        onOpen={() => nav.openAccount(accountKey("compatible", endpoint.id, true))}
+                      />
+                    )}
+                  </CompatibleEndpointView>
+                ))}
                 {readyOrgKeys.map((id) => (
                   <ListRow
                     key={`org:${id}`}
@@ -1496,7 +1573,7 @@ export function WorkspaceModelsPageBody({
                 {workspacePage ? (
                   <Section
                     title="OpenAI, Azure OpenAI and compatible endpoints"
-                    description="Use your own API key for models in this workspace."
+                    description="Use this workspace’s own OpenAI or Azure OpenAI key. OpenAI-compatible endpoints are connected for the organization, from Connect provider."
                   >
                     <DirectModelProviderConnections
                       key={workspaceId}
@@ -1598,22 +1675,15 @@ export function WorkspaceModelsPageBody({
   );
 }
 
-/** A Codex account's weekly usage, as a workspace that uses it reads it. */
+/** A Codex account's reported usage windows, as a workspace that uses it reads them. */
 function codexUsageReadout(
   codex: ReturnType<typeof useCodexSubscriptions>,
   accountId: string,
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const readings = codexUsageReadings(live.usage, codex.now);
-  const weekly = readings[0]!;
-  return weekly.percent === null ? null : (
-    <UsageReadout
-      percent={weekly.percent}
-      window="this week"
-      resets={usageResets(readings, weekly.label)}
-    />
-  );
+  const windows = codexUsageWindows(live.usage, codex.now);
+  return windows.length === 0 ? null : <SubscriptionUsageCell windows={windows} now={codex.now} />;
 }
 
 function modelCount(count: number): string {
@@ -1953,7 +2023,8 @@ type ConnectChoice =
   | "openrouter"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1969,6 +2040,7 @@ export function ConnectPickerPage({
   grok,
   claude = "hidden",
   gateways,
+  compatible = false,
   backLabel = "Models",
   onClose,
   onPick,
@@ -1989,6 +2061,11 @@ export function ConnectPickerPage({
   grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
   claude?: "available" | "hidden";
   gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
+  /**
+   * Offer the organization's own OpenAI-compatible endpoints. It can connect
+   * several, so the row always opens a new one.
+   */
+  compatible?: boolean;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
@@ -2043,6 +2120,7 @@ export function ConnectPickerPage({
           }),
         )
       : []),
+    ...(compatible ? [{ id: "openai_compatible" as const, ...COMPATIBLE_ENDPOINT_CHOICE }] : []),
   ];
   return (
     <DetailPage

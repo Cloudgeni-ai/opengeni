@@ -868,12 +868,14 @@ export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
       excludedMcpServerIds?: string[] | undefined;
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     }
   | {
       mode: "explicit";
       tools: ToolRef[];
       firstPartyMcpTools: FirstPartyMcpToolName[];
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     };
 
@@ -2100,6 +2102,8 @@ export type Session = {
         waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
+        /** Paused descendants whose work is parked for Resume. Absent from older servers. */
+        pausedWorkDescendants?: number | undefined;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         unreadFailedDescendants?: number | undefined;
@@ -4747,7 +4751,8 @@ export type ModelConnectionAccessKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
@@ -4772,6 +4777,7 @@ export type ClaudeUsageWindow = {
     | "seven_day"
     | "seven_day_opus"
     | "seven_day_sonnet"
+    | "seven_day_fable"
     | "seven_day_overage_included"
     | "overage";
   usedPercent: number | null;
@@ -4854,6 +4860,47 @@ export type OrganizationProviderCustomModelsResponse = {
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export type OrganizationCompatibleEndpoint = {
+  id: string;
+  status: "active" | "revoked";
+  version: number;
+  /** The public HTTPS base URL, usually ending in `/v1`. */
+  baseUrl: string;
+  /** `chat` for Chat Completions, `responses` for the Responses API. */
+  api: "chat" | "responses";
+  label: string | null;
+  /** The endpoint's active models. */
+  models: OrganizationProviderCustomModel[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationCompatibleEndpointsResponse = {
+  endpoints: OrganizationCompatibleEndpoint[];
+};
+/** Connect an endpoint with its first model; the API checks it with a short test request first. */
+export type CreateOrganizationCompatibleEndpointRequest = {
+  operationId: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api?: "chat" | "responses" | undefined;
+  label?: string | undefined;
+};
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
+  operationId: string;
+  expectedVersion: number;
+  apiKey: string;
+};
+export type CreateOrganizationCompatibleEndpointModelRequest = {
+  operationId: string;
+  upstreamModelId: string;
+};
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
@@ -5623,6 +5670,11 @@ export type CodexConnectPoll =
       plan?: string | null;
       accountId?: string;
       isActive?: boolean;
+      /**
+       * Opengeni's Codex models this account offers, read once from its live
+       * model list at connect time. Absent when that read failed.
+       */
+      models?: Array<{ id: string; label: string }>;
     };
 
 /**
@@ -7413,6 +7465,13 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set for the person linking when they may link this Slack account as a
+   * member of the organization, without workspace access, once they confirm
+   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
+   * account when Slack says who it is.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {
@@ -8122,6 +8181,15 @@ export type ScheduledTaskAgentConfigInput = {
   memoryScope?: SessionMemoryScope | undefined;
   agentAccess?: SessionAgentAccess | undefined;
   skills?: ScheduledTaskSkill[] | undefined;
+  /**
+   * Opengeni tools and permissions of each chat the task starts, as on
+   * session create. Set once at creation (an update that names them is
+   * refused); omitted, an agent's task keeps its own chat's selection and any
+   * other task follows the defaults. Permissions must be held by the creating
+   * credential. Only a task that starts its own chats can carry them.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -11546,6 +11614,7 @@ export type UpdateSessionMcpToolPermissionsRequest = {
 export type AgentCapabilityId =
   | "webSearch"
   | "humanInput"
+  | "notifications"
   | "skills"
   | "goals"
   | "subagents"
@@ -11557,7 +11626,8 @@ export type AgentCapabilityId =
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
-  | "workspaceAdmin";
+  | "workspaceAdmin"
+  | "privacyFacts";
 
 /** `read` reads installed Skills; `manage` also changes them. */
 export type AgentSkillsCapability = "read" | "manage" | false;
@@ -11565,6 +11635,7 @@ export type AgentSkillsCapability = "read" | "manage" | false;
 export type AgentCapabilityToggles = {
   webSearch?: boolean | undefined;
   humanInput?: boolean | undefined;
+  notifications?: boolean | undefined;
   skills?: AgentSkillsCapability | undefined;
   goals?: boolean | undefined;
   subagents?: boolean | undefined;
@@ -11577,6 +11648,7 @@ export type AgentCapabilityToggles = {
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
   workspaceAdmin?: boolean | undefined;
+  privacyFacts?: boolean | undefined;
 };
 
 /**
@@ -11613,6 +11685,7 @@ export type WorkspaceAgentDefaults = {
 export type ResolvedAgentCapabilities = {
   webSearch: boolean;
   humanInput: boolean;
+  notifications: boolean;
   skills: AgentSkillsCapability;
   goals: boolean;
   subagents: boolean;
@@ -11625,6 +11698,7 @@ export type ResolvedAgentCapabilities = {
   workspaceFiles: boolean;
   workspaceConnectors: boolean;
   workspaceAdmin: boolean;
+  privacyFacts: boolean;
 };
 
 export type ResolvedAgentConfig = {

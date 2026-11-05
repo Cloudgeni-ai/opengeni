@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
 import type { UpdateBillingAutoTopUpRequest } from "@opengeni/contracts";
 import { isTransactionHandle, rawRows, withAccountRls, type Database } from "./database";
-import { applyCreditLedgerEntryOnce, getBillingBalance, getBillingCustomer } from "./index";
+import { applyCreditLedgerEntryOnce } from "./credit-ledger";
+import { getBillingBalance } from "./credit-balances";
+import { getBillingCustomer } from "./billing-customer";
 import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
 
 export type AutoTopUpSettingsRow = {

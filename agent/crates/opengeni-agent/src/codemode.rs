@@ -20,6 +20,8 @@ use crate::cli::{
 };
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
+mod connection_failure;
+
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
 const TOKEN_ENV: &str = "OPENGENI_CODEMODE_TOKEN";
 const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
@@ -33,6 +35,10 @@ pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection (TCP and TLS) that is not up by then is blocked or dropped;
+/// failing here names that instead of waiting out the whole request timeout
+/// and reporting a server that did not answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUEUED_RENOTIFY_INTERVAL: Duration = Duration::from_secs(2);
@@ -143,6 +149,10 @@ pub enum CodemodeError {
     InvalidArguments(String),
     #[error("Codemode request failed: {0}")]
     Transport(String),
+    /// A request got no HTTP answer for a known network reason; the message
+    /// names it and what to check.
+    #[error("{0}")]
+    Unreachable(String),
     #[error("Codemode request failed with HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
     #[error("Codemode response was invalid: {0}")]
@@ -686,6 +696,7 @@ impl CodemodeClient {
                 reqwest::header::HeaderValue::from_static(API_CONTRACT_REVISION),
             )]))
             .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| CodemodeError::Transport(error.to_string()))?;
@@ -935,15 +946,29 @@ fn unescape_secret_references(raw: &str) -> String {
 }
 
 fn transport_error(error: &reqwest::Error) -> CodemodeError {
+    transport_error_for(error, None)
+}
+
+/// `request_url` names the host when reqwest leaves the URL off the error,
+/// as it does for failures while reading a body.
+fn transport_error_for(error: &reqwest::Error, request_url: Option<&Url>) -> CodemodeError {
     // reqwest's display omits Authorization headers. The URL is non-secret; the
     // attempt bearer never becomes part of it.
-    CodemodeError::Transport(error.to_string())
+    match connection_failure::describe_connection_failure(
+        error,
+        request_url,
+        std::time::SystemTime::now(),
+    ) {
+        Some(message) => CodemodeError::Unreachable(message),
+        None => CodemodeError::Transport(error.to_string()),
+    }
 }
 
 async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     mut response: Response,
 ) -> Result<T, CodemodeError> {
     let status = response.status();
+    let url = response.url().clone();
     let limit = if status.is_success() {
         MAX_RESPONSE_BYTES
     } else {
@@ -953,7 +978,7 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| transport_error(&error))?
+        .map_err(|error| transport_error_for(&error, Some(&url)))?
     {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(CodemodeError::InvalidResponse(format!(
@@ -2445,6 +2470,126 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("connection closed"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_named_instead_of_a_bare_send_error() {
+        // Bound but not listening: connections are refused, and no parallel
+        // test can take the port meanwhile.
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = reserved.local_addr().expect("address");
+        let client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        drop(reserved);
+        assert_eq!(
+            message,
+            format!(
+                "Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_dns_lookup_names_the_host_and_the_resolver() {
+        let client = CodemodeClient::new(
+            "http://opengeni-codemode-test.invalid/codemode",
+            "fixture".into(),
+        )
+        .unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        assert!(
+            message.starts_with(
+                "Can't reach Opengeni: DNS lookup for opengeni-codemode-test.invalid failed"
+            ),
+            "{message}"
+        );
+        let hint = if cfg!(target_os = "linux") {
+            "Check /etc/resolv.conf."
+        } else {
+            "Check this machine's DNS settings."
+        };
+        assert!(message.ends_with(hint), "{message}");
+        assert!(!message.contains("fixture"));
+    }
+
+    #[tokio::test]
+    async fn a_call_that_loses_opengeni_after_the_catalog_names_the_cause_and_its_operation() {
+        // A second socket shares the listener's port from the start and never
+        // listens. Once the listener closes, it keeps the port bound, so the
+        // submission and its read-back that follow the catalog are refused
+        // and no parallel test can take the port in between.
+        let shared_socket = || {
+            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+            socket.set_reuseaddr(true).expect("reuseaddr");
+            #[cfg(unix)]
+            socket.set_reuseport(true).expect("reuseport");
+            socket
+        };
+        let listening = shared_socket();
+        listening
+            .bind("127.0.0.1:0".parse().unwrap())
+            .expect("bind");
+        let address = listening.local_addr().expect("address");
+        let reserved = shared_socket();
+        reserved.bind(address).expect("share the port");
+        let listener = listening.listen(16).expect("listen");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            drop(listener);
+            write_response(
+                &mut stream,
+                &json!({
+                    "attemptId": "11111111-1111-4111-8111-111111111111",
+                    "digest": "d".repeat(64), "entries": [{
+                        "identity": {"serverId":"demo","toolName":"write"},
+                        "modelName":"demo__write", "codemodePath":["demo","write"],
+                        "inputSchema":{"type":"object"}, "source":"mcp", "approval":"none"
+                    }]
+                }),
+            )
+            .await;
+        });
+        let client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        let error = client
+            .call_as(
+                CodemodeCallArgs {
+                    tool: "demo.write".into(),
+                    arguments: "{}".into(),
+                    full: false,
+                    save_image: None,
+                },
+                "operation-refused".to_string(),
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        drop(reserved);
+        // Under heavy load Linux occasionally resets instead of refusing a
+        // connection to the closed listener's port; both are named causes.
+        let message = error.to_string();
+        let prefix = format!(
+            "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} "
+        );
+        assert!(
+            [
+                "was refused. Check this machine's network, firewall and proxy settings.",
+                "closed unexpectedly. If it keeps happening, check this machine's network and proxy settings.",
+            ]
+            .iter()
+            .any(|cause| message == format!("{prefix}{cause}")),
+            "{message}"
+        );
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["operationId"], "operation-refused");
+        assert!(receipt["error"]["state"].is_null());
+        assert!(receipt["error"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("Do not automatically start another call"));
     }
 
     async fn read_request(stream: &mut TcpStream) -> String {

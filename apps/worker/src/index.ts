@@ -54,10 +54,12 @@ import type {
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
   StartRecordingWorkflow,
+  StartRigProviderImageRefresh,
   StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
+import { rigProviderImageRefreshWorkflowId } from "./activities/rig-provider-image-refresh";
 import { createTurnTaskQueueStatsClient } from "./turn-task-queue-reader";
 import { installTemporalRuntimeLogging } from "./temporal-runtime-logger";
 import {
@@ -468,6 +470,7 @@ export async function createWorkerWorkflowSignaler(
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   startSessionTitleWorkflow: StartSessionTitleWorkflow;
   startRecordingWorkflow: StartRecordingWorkflow;
+  startRigProviderImageRefresh: StartRigProviderImageRefresh;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -680,6 +683,23 @@ export async function createWorkerWorkflowSignaler(
         throw error;
       }
     },
+    startRigProviderImageRefresh: async ({ workspaceId, versionId, contentHash }) => {
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: rigProviderImageRefreshWorkflowId({ versionId, contentHash }),
+          // One automatic attempt per version, content and day. A failed
+          // rebuild is not retried by every following turn; the next day or
+          // an explicit verify tries again.
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ workspaceId, versionId }],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
+    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -783,7 +803,9 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
   onDrainStarted?: () => void;
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /** Host-owned final containment after a stalled cleanup has drained peers.
-   * The standalone process exits; embedded hosts own their termination policy. */
+   * The standalone process exits; embedded hosts own their termination policy.
+   * Supplying it also lets `run()` resolve once only contained finalizers
+   * remain in flight, so the host must exit its process after `run()` settles. */
   terminateWorker?: () => void;
   /**
    * Exact catalog posture required by the standalone runtime. Embedded hosts
@@ -904,6 +926,11 @@ export async function createOpenGeniWorkerService(
       options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
     const startRecordingWorkflow =
       options.activityDependencies.startRecordingWorkflow ?? signaler?.startRecordingWorkflow;
+    // Optional: hosts without a Temporal client simply skip automatic rebuilds.
+    const startRigProviderImageRefresh =
+      options.activityDependencies.startRigProviderImageRefresh ??
+      signaler?.startRigProviderImageRefresh ??
+      null;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
@@ -933,9 +960,10 @@ export async function createOpenGeniWorkerService(
         startVideoGenerationWorkflow,
         startSessionTitleWorkflow,
         startRecordingWorkflow,
+        startRigProviderImageRefresh,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
-          cleanupContainment.request();
+          return cleanupContainment.request();
         },
       },
     });
@@ -1036,6 +1064,9 @@ export async function createOpenGeniWorkerService(
   cleanupContainment = createWorkerCleanupContainment({
     drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
     ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
+    ...(activeWorkerBundle.worker.inFlightActivities
+      ? { inFlightActivities: () => activeWorkerBundle.worker.inFlightActivities?.() }
+      : {}),
     observability,
     // A stalled cleanup drains peers through the ordinary turn sequence:
     // natural grace, WORKER_SHUTDOWN checkpoint, SDK force stop. Terminate
@@ -1048,6 +1079,9 @@ export async function createOpenGeniWorkerService(
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
     cleanupContainmentRequested: activeCleanupContainment.requested,
+    // Only a host that exits the process may stop with a stalled finalizer
+    // still executing; the exit is what ends that JavaScript.
+    ...(options.terminateWorker ? { contained: activeCleanupContainment.contained } : {}),
     ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {

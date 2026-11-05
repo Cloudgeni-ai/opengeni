@@ -1215,6 +1215,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationCompatibleEndpoint",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints",
+    "request": [
+      "CreateOrganizationCompatibleEndpointRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
+    "id": "createOrganizationCompatibleEndpointModel",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models",
+    "request": [
+      "CreateOrganizationCompatibleEndpointModelRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
+    ]
+  },
+  {
     "id": "createOrganizationConnector",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/connectors",
@@ -1776,6 +1801,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "deleteOrganizationCompatibleEndpointModel",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId",
+    "request": [
+      "DeleteOrganizationProviderCustomModelRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -4896,6 +4932,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "linkSlackUserAsOrganizationMember",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
+    "request": [
+      "SlackUserLinkAccessMutationRequest"
+    ],
+    "response": [
+      "SlackUserLinkAccessRequest"
+    ]
+  },
+  {
     "id": "listAccessibleDocuments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/documents",
@@ -5654,6 +5701,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ClaudeSubscriptionAccountsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationCompatibleEndpoints",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints",
+    "request": [],
+    "response": [
+      "OrganizationCompatibleEndpointsResponse"
     ]
   },
   {
@@ -8249,6 +8305,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
+    "id": "replaceOrganizationCompatibleEndpointKey",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/key",
+    "request": [
+      "ReplaceOrganizationCompatibleEndpointKeyRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "replacePersonalGitHubRepositorySelections",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
@@ -8428,6 +8498,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "KnowledgeEntryWriteReceipt"
+    ]
+  },
+  {
+    "id": "revokeOrganizationCompatibleEndpoint",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId",
+    "request": [
+      "RevokeOrganizationModelProviderConnectionRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
     ]
   },
   {

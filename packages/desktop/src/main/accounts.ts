@@ -35,6 +35,33 @@ export interface AccountsState {
   activeId: string | null;
 }
 
+/**
+ * Where Cancel on the sign-in page goes: back to the account the person came
+ * from while it is still signed in, else the first signed-in account.
+ */
+export function accountToReturnTo(
+  state: AccountsState,
+  cameFromId: string | null,
+): StoredAccount | null {
+  const signedIn = state.accounts.filter((account) => !account.signedOut);
+  return signedIn.find((account) => account.id === cameFromId) ?? signedIn[0] ?? null;
+}
+
+/**
+ * The account the sign-in page's Cancel returns to, after showing `target`
+ * while `from` was active: leaving a signed-in account for a signed-out one
+ * remembers it, a chain of signed-out ones keeps it, and reaching a signed-in
+ * account forgets it.
+ */
+export function cameFromAfterShowing(
+  from: StoredAccount | null,
+  target: StoredAccount,
+  cameFromId: string | null,
+): string | null {
+  if (!target.signedOut) return null;
+  return from && from.id !== target.id && !from.signedOut ? from.id : cameFromId;
+}
+
 /** The operating system's secret storage (Electron `safeStorage`). */
 export interface SecretCipher {
   available(): boolean;

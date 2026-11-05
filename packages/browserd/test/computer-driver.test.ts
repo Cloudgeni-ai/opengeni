@@ -777,178 +777,26 @@ describe("ComputerDriver", () => {
     }
   });
 
-  test("a backend's failure text is redacted in full before it is bounded", async () => {
-    const raw = ["{{", "secret:Desk/token", "}}"].join("");
-    for (const secret of [
-      "line-one\nline-two-secret",
-      `long-${"x".repeat(3_000)}-secret`,
-      "trailing-secret \n",
-    ]) {
-      const transport = new FixtureNativeTransport();
-      transport.dispatchError = new ComputerBackendError(
-        "driver_failed",
-        `CUA type_text refused the operation: could not type ${secret} into the field`,
-        false,
-        false,
-      );
-      const driver = new ComputerDriver({
-        computerSessionId,
-        controllerGeneration,
-        client: transport,
-      });
-      const error = await driver
-        .dispatch({
-          ...typeCommand(raw),
-          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-        })
-        .then(
-          () => null,
-          (caught: unknown) => caught as Error,
-        );
-      expect(error?.message).toBe(
-        "CUA type_text refused the operation: could not type [secret] into the field",
-      );
-    }
-  });
-
-  test("a read failure's backend text is redacted against typed secrets", async () => {
-    const raw = ["{{", "secret:Desk/read token", "}}"].join("");
-    const secret = "read-path-secret-0123456789";
-    const transport = new FixtureNativeTransport();
-    const driver = new ComputerDriver({
-      computerSessionId,
-      controllerGeneration,
-      client: transport,
-    });
-    await driver.dispatch({
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-    });
-    transport.targetsError = new ComputerBackendError(
-      "driver_failed",
-      `CUA list_windows did not return a valid result: window ${secret} is gone`,
-      false,
-      false,
-    );
-    const error = await driver.listTargets().then(
-      () => null,
-      (caught: unknown) => caught as Error,
-    );
-    expect(error?.message).toBe(
-      "CUA list_windows did not return a valid result: window [secret] is gone",
-    );
-  });
-
-  test("never pastes text that carries a resolved secret", async () => {
+  test("pastes a resolved value the layout cannot type, like any other text", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
     });
-    const raw = "{{secret:Desk/password}}";
-    const typing: ComputerActionCommand = {
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: "pÆss密" },
-    };
-    const error = await driver.dispatch(typing).then(
-      () => null,
-      (caught: unknown) => caught as Error,
-    );
-    expect(error).toMatchObject({ code: "unsupported" });
-    expect(error?.message).not.toContain("pÆss密");
-    expect(transport.calls).toEqual([
-      ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
-    ]);
-  });
-
-  test("a secret the layout cannot type is refused without naming a character or the clipboard", async () => {
     const raw = ["{{", "secret:Desk/password", "}}"].join("");
-    const untypeable =
-      "the desktop keyboard layout cannot type every character of this secret, and secrets are never pasted; nothing was typed, so ask the person to enter it";
-    const refusals: Array<[ComputerBackendError, string]> = [
-      [
-        new ComputerBackendError(
-          "unsupported",
-          "X11 keymap cannot type Unicode scalar U+00F8; use clipboard paste",
-          false,
-          false,
-        ),
-        untypeable,
-      ],
-      [
-        new ComputerBackendError(
-          "unsupported",
-          "the active keyboard layout cannot type U+00F8; use clipboard paste",
-          false,
-          false,
-        ),
-        untypeable,
-      ],
-      [
-        new ComputerBackendError(
-          "timeout",
-          "the keyboard layout is not ready yet; retry, or use clipboard paste",
-          true,
-          false,
-        ),
-        "the keyboard layout is not ready yet; retry",
-      ],
-    ];
-    for (const [refusal, message] of refusals) {
-      const transport = new UntypeableTextTransport();
-      transport.refusal = refusal;
-      const driver = new ComputerDriver({
-        computerSessionId,
-        controllerGeneration,
-        client: transport,
-      });
-      const error = await driver
-        .dispatch({
-          ...typeCommand(raw),
-          secretValues: { [referenceKey(parseSecretReference(raw))]: "Søren1!" },
-        })
-        .then(
-          () => null,
-          (caught: unknown) => caught as Error,
-        );
-      expect(error).toMatchObject({
-        name: "InteractionDefiniteDriverError",
-        code: refusal.code,
-        retryable: refusal.retryable,
-        message,
-      });
-      expect(error?.message).not.toContain("U+");
-      expect(error?.message).not.toContain("clipboard");
-      expect(transport.calls).toEqual([
-        ["dispatch", { type: "keyboard", action: "type", value: "Søren1!" }],
-      ]);
-    }
-  });
-  test("redacts a typed secret from later observations of the field that holds it", async () => {
-    const transport = new EchoingFieldTransport();
-    const driver = new ComputerDriver({
-      computerSessionId,
-      controllerGeneration,
-      client: transport,
-    });
-    const raw = ["{{", "secret:Desk/api key", "}}"].join("");
-    const secret = "sk-live-0123456789abcdef";
-    const typed = await driver.dispatch({
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-    });
-    expect(JSON.stringify(typed)).not.toContain(secret);
-    expect(transport.typed).toBe(secret);
-    // A later observation carries no secret of its own, yet the desktop
-    // still shows the field's value: it stays redacted.
-    const later = await driver.observe("window-1");
-    expect(JSON.stringify(later)).not.toContain(secret);
-    expect(later.semantic?.kind === "snapshot" && later.semantic.roots[0]).toMatchObject({
-      role: "textbox",
-      value: "[secret]",
-    });
-    expect(JSON.stringify(await driver.listTargets())).not.toContain(secret);
+    const value = "pÆss密";
+    await expect(
+      driver.dispatch({
+        ...typeCommand(raw),
+        secretValues: { [referenceKey(parseSecretReference(raw))]: value },
+      }),
+    ).resolves.toMatchObject({ observationId: "observation-2" });
+    expect(transport.calls).toEqual([
+      ["dispatch", { type: "keyboard", action: "type", value }],
+      ["validate", { type: "clipboard", operation: "paste", text: value }],
+      ["dispatch", { type: "clipboard", operation: "paste", text: value }],
+    ]);
   });
 });
 
@@ -1149,37 +997,6 @@ function typeCommand(value: string): ComputerActionCommand {
   return { ...command(), action: { type: "keyboard", action: "type", value } };
 }
 
-/** A desktop whose text field (and window title) shows what was typed into it. */
-class EchoingFieldTransport extends FixtureNativeTransport {
-  typed = "";
-
-  private field(observationId: string) {
-    return {
-      ...observation(observationId),
-      roots: [
-        { ref: "e1", role: "textbox", name: "API key", value: this.typed, states: [], actions: [] },
-      ],
-    };
-  }
-
-  override async observe() {
-    return { ...this.field("observation-1"), frameId: this.observationFrameId };
-  }
-
-  override async targets() {
-    return (await super.targets()).map((entry) => ({ ...entry, title: `Settings ${this.typed}` }));
-  }
-
-  override async dispatch(nativeCommand: ComputerBackendActionCommand) {
-    if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
-      this.typed = nativeCommand.action.value;
-    return this.field("observation-2");
-  }
-}
-
-/** Numbers frames when a capture lands, like the native helpers, whose newest
- * frame of a target alone keeps its authority. Starts with no frame, as after
- * an action. */
 class NewestFrameTransport extends FixtureNativeTransport {
   frames: string[] = [];
   primers = 0;

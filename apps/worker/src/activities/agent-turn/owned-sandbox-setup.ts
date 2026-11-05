@@ -1,4 +1,5 @@
 import {
+  discardHeldSoftSetupFailureNotices,
   runOwnedSandboxSetup,
   withRunCredentialsSession,
   type GitCredentialTokenWriterSession,
@@ -10,7 +11,15 @@ import {
   recordTurnStartupPhase,
 } from "../../observability-metrics";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
-import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
+import {
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
+} from "@opengeni/db";
+import {
+  createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
+  recoverSandboxSetupFailure,
+} from "./sandbox-setup-agent-failure";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
@@ -18,6 +27,7 @@ import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 export type EagerOwnedSandboxSetupDeps = Pick<
   TurnStreamAttemptDeps,
   | "input"
+  | "attempt"
   | "db"
   | "observability"
   | "runtimeCancellationSignal"
@@ -89,7 +99,7 @@ export async function runEagerOwnedSandboxSetup(
     // credential session callback. Materialize host-managed run credentials
     // before any setup command (including provider login hooks), then decorate
     // setup commands so they source the active generation.
-    await measure("credential_materialization", () =>
+    const runCredentialSoftFailure = await measure("credential_materialization", () =>
       deps.attachRunCredentialRenewal(
         eagerSetupSession as RunCredentialCommandSession,
         deps.initialRunCredentialMaterial,
@@ -115,6 +125,9 @@ export async function runEagerOwnedSandboxSetup(
             settings: deps.runSettings,
             environment: deps.sandboxEnvironment,
             measureSetup: measure,
+            ...(runCredentialSoftFailure
+              ? { priorSoftSetupFailures: [runCredentialSoftFailure] }
+              : {}),
             ...(options.preparedInput ? { preparedInput: options.preparedInput } : {}),
             ...(options.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
             onRuntimeEvent: async (event) => {
@@ -161,8 +174,32 @@ export async function runEagerOwnedSandboxSetup(
   } catch (error) {
     ownedSandboxSetupOutcome = "failed";
     // The model stream has not started, and every setup step is idempotent,
-    // so an unanswered agent lets the same turn retry instead of failing it.
-    throw sandboxSetupFailure(setupReplayGuard, error);
+    // so an unanswered agent lets the same turn retry instead of failing it,
+    // and a box that cannot start programs is restarted once per turn.
+    throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
+      session: ownedEstablished.session,
+      backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      boxReplacement: modalSandboxBoxReplacer(deps.db, {
+        backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: sandboxState.sandboxGroupId,
+        box: eagerResolvedSandbox,
+        session: ownedEstablished.session,
+      }),
+      restartsThisTurn: async () => {
+        const turnId = deps.attempt.turnId;
+        if (!turnId) throw new Error("the attempt has no turn");
+        return await countSessionTurnSandboxProcessStartRestarts(deps.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+        });
+      },
+      publish: async (events) => {
+        await eventing.publish(events, true);
+      },
+      operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+    });
   } finally {
     await measure.flush();
     recordTurnStartupPhase(observability, {
@@ -213,7 +250,11 @@ export function createEagerOwnedSandboxSetup(
         await prestarted;
         // A box rebound while the setup ran (rotation, recovery) gets its
         // own setup; the prestarted one only covered the earlier box.
+        // Its held notices join this stream's input when the run starts.
         if (sandboxIdentity(deps.sandboxState) === startedFor) return;
+        // Its setup failure notices describe the earlier box; the new box's
+        // setup reports its own.
+        discardHeldSoftSetupFailureNotices(deps.agent);
       }
       await runSetup(deps, options);
     },

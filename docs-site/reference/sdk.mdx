@@ -10,6 +10,8 @@ bun add @opengeni/sdk
 
 `@opengeni/sdk` is an ESM-only TypeScript client. It uses standard `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
 
+SDK and embedded-product usage spends credits, not plan credit. Connected AI subscriptions are for paid-plan use in the Opengeni apps, not the API. Omit the model to use an eligible credit-billed default, or select a credit-billed model explicitly.
+
 ### CommonJS hosts
 
 Load the SDK with dynamic `import()` inside an async function:
@@ -165,4 +167,4 @@ The facade is text-only. See [Keep your existing chat UI](/integrate/existing-ch
 
 ## Compatibility
 
-Clients and servers are compatible within the same major version. See [Going to production](/integrate/production#keep-sdk-and-server-compatible).
+Server updates don't break existing integrations, so a pinned SDK keeps working (rare exceptions, such as emergency security fixes, are announced with migration notes). See [Going to production](/integrate/production#keep-sdk-and-server-compatible).

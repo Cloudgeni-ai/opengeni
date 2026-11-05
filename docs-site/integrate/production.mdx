@@ -19,7 +19,9 @@ To hear when work finishes, or to give each run short-lived credentials from you
 
 ## Understand costs
 
-On [app.opengeni.ai](https://app.opengeni.ai), usage is paid with prepaid credits, or billed by your provider when you connect your own model subscription or key. When credits run out, the turn ends and the session continues after a top-up.
+API and embedded-product usage spends prepaid credits, not monthly plan credit. Connected AI subscriptions cannot serve API requests, even on a paid plan. Choose a credit-billed model, or connect your own provider API key; own-key fees follow the deployment's configuration and are currently paused at 0% on [app.opengeni.ai](https://app.opengeni.ai). Your provider still bills its own key usage.
+
+In the Opengeni apps, Free provides eligible accounts $10 monthly trial credit. Pro starts at $20/month; Pro, Max and Enterprise include connected AI subscriptions with no usage fee, within the provider's limits. When credits run out on a credit-billed model, add credits before continuing.
 
 - One turn can include several model calls and tool calls. Long goals and large tool schemas cost more.
 - `getBillingUsage` returns usage for accounting (requires billing permission).
@@ -37,7 +39,7 @@ describes the spend rule, receipt semantics and top-up integration.
 
 ## Keep SDK and server compatible
 
-SDKs and servers are compatible within a major version; changes within a major are additive. Use the same version for all `@opengeni` packages, and read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+Server updates don't break existing integrations: the API only grows, so a pinned SDK keeps working and you upgrade when you want new features. Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes. Pin all `@opengeni` packages to the same version, install stable releases (the npm `latest` tag) rather than canaries, and let your code ignore unknown response fields and event types. Deprecated members keep working; their docs name the replacement. Read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
 
 ## Keep the tool surface minimal
 

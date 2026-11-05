@@ -18,6 +18,9 @@
 //!   or `memory_mib` ends its running programs, as it boots afresh from
 //!   its disk; new requests or a longer disk keep them. Its disk may only
 //!   grow.
+//! - `POST /v1/sandboxes/{id}/restart` boots it afresh from its disk,
+//!   keeping its files and shape: handed off as a resize does, even awake,
+//!   its next wake boots it from its disk, ending its running programs.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
 //! - `POST /v1/sandboxes/{id}/templates`, `GET /v1/templates` and `GET` and
@@ -406,6 +409,9 @@ pub struct HostView {
     /// Processor time in millicores a wake can still reserve on it.
     pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
+    /// Disk in MiB it frees for a sandbox without losing anything, by
+    /// disk relief (ADR 30); placement counts it as free.
+    pub disk_reclaimable_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
 }
@@ -647,6 +653,17 @@ async fn resize<S: Store>(
     Ok(Json(SandboxView::of(service, row)))
 }
 
+async fn restart<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<SandboxView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let service = &api.0.service;
+    let row = service.restart(&team, parse_id(&id)?).await?;
+    Ok(Json(SandboxView::of(service, row)))
+}
+
 async fn connect<S: Store>(
     State(api): State<Api<S>>,
     Path((id, port)): Path<(String, u32)>,
@@ -726,6 +743,7 @@ async fn hosts<S: Store>(
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,
+            disk_reclaimable_mib: known.capacity.disk_reclaimable_mib,
             sandboxes: known.capacity.sandboxes,
             awake: known.capacity.awake,
         })
@@ -776,6 +794,7 @@ pub fn router<S: Store>(
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))
         .route("/v1/sandboxes/{id}/move", post(move_to::<S>))
         .route("/v1/sandboxes/{id}/resize", post(resize::<S>))
+        .route("/v1/sandboxes/{id}/restart", post(restart::<S>))
         .route("/v1/sandboxes/{id}/connect/{port}", get(connect::<S>))
         .route(
             "/v1/sandboxes/{id}/templates",

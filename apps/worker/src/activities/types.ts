@@ -75,6 +75,19 @@ export type StartRecordingWorkflow = (input: {
   ownerSubjectId: string;
 }) => Promise<"started" | "already_running">;
 
+/**
+ * Start the clean-replay verification that rebuilds a sandbox environment
+ * version's provider image for the deployment's current base image. The
+ * start is deduplicated per version, expected content and UTC day, so every
+ * turn that meets the stale image may ask without starting more than one
+ * rebuild a day.
+ */
+export type StartRigProviderImageRefresh = (input: {
+  workspaceId: string;
+  versionId: string;
+  contentHash: string;
+}) => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -124,6 +137,7 @@ export type SharedActivityServices = {
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
   startRecordingWorkflow?: StartRecordingWorkflow | null;
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -171,8 +185,9 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   /** Host-owned containment: stop polling and checkpoint peer turns before exit.
-   * Bare activity embedders must provide their own worker lifecycle edge. */
-  requestWorkerDrain: () => void;
+   * Bare activity embedders must provide their own worker lifecycle edge. It may
+   * return a release that the caller invokes if its stalled cleanup recovers. */
+  requestWorkerDrain: () => void | (() => void);
   /** Deterministic test clock for the cleanup-only monitor. */
   turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;

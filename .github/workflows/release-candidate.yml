@@ -281,7 +281,7 @@ jobs:
           CANDIDATE_TAG: ${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher desktop; do
             ref="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}:${CANDIDATE_TAG}"
             digest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$ref")"
             if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -504,6 +504,42 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The Modal Computer/Browser box is not a BOM role, but the packaged chart
+      # pins it by digest as desktop.imageRef, so every release carries the box
+      # built from its own source. It is large: free the runner first.
+      - name: Make room for the desktop candidate
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker buildx prune --all --force
+          df -h /
+
+      - name: Build and push desktop candidate
+        id: build-desktop
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/desktop.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Resolve desktop candidate digest
+        id: desktop
+        env:
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-desktop.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Verify candidate images support anonymous pull
         env:
           REGISTRY: ${{ steps.registry.outputs.registry }}
@@ -514,6 +550,7 @@ jobs:
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           ARTIFACT_MATERIALIZER_DIGEST: ${{ steps.artifact-materializer.outputs.digest }}
           ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ steps.artifact-outbox-dispatcher.outputs.digest }}
+          DESKTOP_DIGEST: ${{ steps.desktop.outputs.digest }}
         run: |
           set -euo pipefail
 
@@ -523,7 +560,7 @@ jobs:
           # consume.
           docker logout "$REGISTRY"
           helm registry logout "$REGISTRY"
-          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher desktop; do
             digest_var="$(printf '%s_DIGEST' "$role" | tr '[:lower:]-' '[:upper:]_')"
             expected="${!digest_var}"
             image="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}@${expected}"
@@ -557,6 +594,7 @@ jobs:
         id: chart
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          DESKTOP_IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop@${{ steps.desktop.outputs.digest }}
         run: |
           set -euo pipefail
           mkdir -p .release/charts .release/chart-proof
@@ -567,7 +605,8 @@ jobs:
               --chart "$GITHUB_WORKSPACE/deploy/helm/opengeni" \
               --output "$GITHUB_WORKSPACE/$chart_path" \
               --version "$RELEASE_VERSION" \
-              --app-version "$RELEASE_VERSION"
+              --app-version "$RELEASE_VERSION" \
+              --desktop-image-ref "$DESKTOP_IMAGE_REF"
           )
           chart_bytes_sha256="$(sha256sum "$chart_path" | awk '{print $1}')"
           (
@@ -576,12 +615,21 @@ jobs:
               --chart "$GITHUB_WORKSPACE/deploy/helm/opengeni" \
               --output "$GITHUB_WORKSPACE/.release/chart-proof/opengeni.tgz" \
               --version "$RELEASE_VERSION" \
-              --app-version "$RELEASE_VERSION"
+              --app-version "$RELEASE_VERSION" \
+              --desktop-image-ref "$DESKTOP_IMAGE_REF"
           )
           cmp "$chart_path" .release/chart-proof/opengeni.tgz
           helm lint "$chart_path"
           test "$(helm show chart "$chart_path" | awk '$1 == "version:" { print $2 }')" = "$RELEASE_VERSION"
           test "$(helm show chart "$chart_path" | awk '$1 == "appVersion:" { print $2 }')" = "$RELEASE_VERSION"
+          # Release gate: the chart's default Modal desktop pin is exactly the
+          # desktop image this candidate built from the same source.
+          helm show values "$chart_path" > .release/chart-proof/values.yaml
+          grep -qxF "  imageRef: \"${DESKTOP_IMAGE_REF}\"" .release/chart-proof/values.yaml || {
+            echo "packaged chart desktop.imageRef is not this candidate's desktop image ${DESKTOP_IMAGE_REF}" >&2
+            exit 1
+          }
+          echo "Desktop pin: \`${DESKTOP_IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
           printf '%s  %s\n' "$chart_bytes_sha256" "$chart_path" > evidence/release-chart.sha256
           echo "bytes_sha256=$chart_bytes_sha256" >> "$GITHUB_OUTPUT"
           echo "artifact=opengeni-${RELEASE_VERSION}.tgz" >> "$GITHUB_OUTPUT"

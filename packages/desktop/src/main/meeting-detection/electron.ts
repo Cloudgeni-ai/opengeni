@@ -66,13 +66,26 @@ export interface CreateMeetingDetectionOptions {
    * waits for another page. The newest by default.
    */
   chooseTarget?: MeetingDetectionOptions["chooseTarget"];
+  /**
+   * Reminders before the active account's calendar meetings, with one click
+   * to join and start recording. None by default.
+   */
+  calendar?: MeetingDetectionOptions["calendar"];
+  /** A recording didn't stop when the person chose Stop: show the account whose page records. */
+  revealPage?: MeetingDetectionOptions["revealPage"];
+  /** The account a recording page belongs to, for the stop card; null when there is only one. */
+  describePage?: MeetingDetectionOptions["describePage"];
+  /** A page started or stopped recording. */
+  recordingChanged?: MeetingDetectionOptions["recordingChanged"];
+  /** How long a recording page has to say it stopped. {@link STOP_CONFIRM_MS} by default. */
+  stopConfirmMs?: number;
   log?: (message: string, error?: unknown) => void;
 }
 
 /**
  * Meeting detection for an Electron app. Answer the page with
  * `handleMeetingDetectionIpc`, call `start()` once the app is ready and
- * `stop()` as it quits.
+ * `shutdown()` as it quits.
  */
 export function createMeetingDetection(options: CreateMeetingDetectionOptions): MeetingDetection {
   const file = options.logDir ? meetingDetectionFileLog(options.logDir) : null;
@@ -106,6 +119,11 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     }),
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
+    ...(options.calendar ? { calendar: options.calendar } : {}),
+    ...(options.revealPage ? { revealPage: options.revealPage } : {}),
+    ...(options.describePage ? { describePage: options.describePage } : {}),
+    ...(options.recordingChanged ? { recordingChanged: options.recordingChanged } : {}),
+    ...(options.stopConfirmMs !== undefined ? { stopConfirmMs: options.stopConfirmMs } : {}),
     log,
   });
 }

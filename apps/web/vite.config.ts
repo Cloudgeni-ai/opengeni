@@ -67,6 +67,17 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The shared subscription account display: the chat header's
+              // account menu and the Models settings rows both draw it. Its
+              // file sits beside the settings-only models pages, so without
+              // this leaf it joins settings-pages and a chat load fetches the
+              // whole management surface through the account menu.
+              name: "subscription-account-display",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]models[\\/]subscription-usage|lib[\\/]subscription-accounts)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Startup's permission, organization and account-email helpers
               // read these small pure modules. Entry-aware grouping can fold
               // them into the app-context chunk, which imports the API chunk

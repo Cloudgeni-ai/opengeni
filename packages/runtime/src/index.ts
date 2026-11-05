@@ -1,18 +1,6 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
-  activeAttemptSecretValues,
-  installToolResultSecretMasking,
-  secretMaskedTool,
-  secretValueModelInputFilter,
-  withAttemptSecretValues,
-} from "./tool-result-secret-masking";
-import {
-  firstPartySecretValuesMeta,
-  installToolResultSecretMasking,
-  secretMaskedToolResolver,
-} from "./tool-result-secret-masking";
-export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
   renderCommandCompletionNotice,
@@ -27,6 +15,25 @@ import {
   installCommandCompletionDelivery,
   type CommandCompletionDelivery,
 } from "./command-completion-delivery";
+import {
+  installSandboxSetupNoticeDelivery,
+  queueSandboxSetupNotice,
+  takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
+} from "./sandbox-setup-notices";
+export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
+import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
+  softFailingSetupHooks,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
+import { SandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
+export {
+  softRunCredentialWriteFailure,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -171,7 +178,6 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
-  FIRST_PARTY_SECRET_VALUES_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -191,6 +197,8 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  requestHumanInputToolParameters,
+  type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   type ResolvedAgentConfig,
@@ -227,7 +235,6 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
-  type SecretValueMemory,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
@@ -266,6 +273,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+import { uniqueListedMcpTools } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -447,7 +455,9 @@ import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
+  agentSharesWorkspace,
   composeModularAgentInstructions,
+  NEUTRAL_AGENT_IDENTITY,
   resolveAgentIdentity,
   rigInstructions,
   UNATTENDED_SESSION_GUIDANCE,
@@ -462,6 +472,7 @@ import {
 export {
   AGENT_PROMPT_MODULES,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
@@ -522,6 +533,13 @@ import {
   sandboxCommandStillRunning,
   sandboxCommandStdout,
 } from "./sandbox/command-result";
+import {
+  ownedBoxRepairCommand,
+  ownedBoxRepairHost,
+  ownedBoxRepairNote,
+  parseOwnedBoxRepairOutput,
+  type OwnedBoxRepairReport,
+} from "./sandbox/owned-box-repair";
 import {
   sandboxHookOperationPurpose,
   withSandboxOperationPurpose,
@@ -594,6 +612,7 @@ import {
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -2355,6 +2374,14 @@ export type BuildAgentOptions = {
   toolSearchMeaningRanker?: import("./tool-discovery-meaning").ToolMeaningRanker | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
+  /**
+   * `false` when the host proved from frozen facts that nothing this attempt
+   * attaches is deferred (see the worker's `turnToolRouterExpected`). Pending
+   * background preparation alone then exposes no search router, and the
+   * instructions omit tool discovery. Tools that do turn out searchable still
+   * expose it, so nothing becomes unreachable. Omitted keeps today's rule.
+   */
+  toolRouterExpected?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2362,6 +2389,11 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * Whether this session has a parent agent (frozen at create). `false` leaves
+   * the parent-agent guidance out of `request_human_input`; omitted keeps it.
+   */
+  subSession?: boolean;
   /**
    * The session is unattended (frozen at create): no person will see or answer
    * a question until the task ends. Both compositions say so, and the
@@ -2721,21 +2753,21 @@ export type BuildAgentOptions = {
   /**
    * The attempt's credential profile: variables added to the environment of
    * every sandbox command (exec_command and background commands), resolved
-   * through `secretResolver` (so the values are remembered and masked like
-   * any other resolved value). Omitted: commands get no profile variables.
+   * through `secretResolver` like any other reference. Omitted: commands get
+   * no profile variables.
    */
   credentials?: CredentialEnvironment | null;
-  /**
-   * The attempt's known secret values (docs/secrets.md, Masking). Every tool
-   * result is masked with it before the model, the run state or history sees it.
-   */
-  secretValueMemory?: SecretValueMemory | null;
   /**
    * The session's finished background commands, delivered with the next
    * plain-text tool result (command-completion-delivery.ts). Applied while
    * settings.experimentCutPolling is on.
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
+  /**
+   * Receives each sandbox setup notice appended to a tool result
+   * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
+   */
+  onSandboxSetupNoticeDelivered?: (appended: string) => void;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -2858,6 +2890,79 @@ function gitBindingDiscoveryApplies(
  * attachments deliberately select nothing here: a turn with a file must share
  * the cached instructions of a turn without one.
  */
+type HumanInputWireSchemaNode = {
+  properties?: Record<string, HumanInputWireSchemaNode>;
+  required?: string[];
+  enum?: unknown[];
+  items?: HumanInputWireSchemaNode;
+};
+
+let fullHumanInputWireParameters: unknown;
+
+/**
+ * The model-facing schema of a reduced `request_human_input`: the full
+ * contract exactly as the Agents SDK converts it, with only the disabled
+ * fields removed. Converting a reduced zod schema directly would take the
+ * SDK's other converter, which adds length keywords and can make the reduced
+ * schema larger than the full one. The reduced zod schema still parses calls.
+ */
+function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
+  fullHumanInputWireParameters ??= agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description: "",
+    parameters: RequestHumanInputToolInput,
+    execute: () => "",
+  }).parameters;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode;
+  if (features.secrets && features.skillReview) return schema;
+  const question = schema.properties?.questions?.items;
+  if (!question?.properties) throw new Error("request_human_input schema has no question object");
+  const drop = (field: string) => {
+    delete question.properties![field];
+    if (question.required) question.required = question.required.filter((name) => name !== field);
+  };
+  if (!features.secrets) {
+    drop("secret");
+    const kind = question.properties.kind;
+    if (kind?.enum) kind.enum = kind.enum.filter((value) => value !== "secret");
+  }
+  if (!features.skillReview) drop("skillReview");
+  return schema;
+}
+
+function withHumanInputWireParameters<T extends { parameters: unknown }>(
+  features: HumanInputQuestionFeatures,
+  built: T,
+): T {
+  if (features.secrets && features.skillReview) return built;
+  return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
+}
+
+/**
+ * The tool view the modular composer reads. An attempt that cannot install the
+ * search router (see `lazyToolTransportFor`) has no tool search, so the
+ * composer leaves out its guidance even when the host did not say so.
+ */
+function modularToolAvailability(
+  settings: Settings,
+  options: BuildAgentOptions,
+): { toolAvailability?: AgentPromptToolAvailability } {
+  const view = options.agentPromptToolAvailability;
+  if (lazyToolTransportFor(settings, options)) return view ? { toolAvailability: view } : {};
+  return { toolAvailability: { ...(view ?? { unavailable: [] }), toolSearchAbsent: true } };
+}
+
+/**
+ * The Skill index layer renders unless it is already in history. A configured
+ * session leaves out an empty index: there is nothing to read.
+ */
+function skillCatalogLayerApplies(
+  options: Pick<BuildAgentOptions, "skillCatalog" | "skillCatalogInHistory" | "agentConfig">,
+): boolean {
+  if (!options.skillCatalog || options.skillCatalogInHistory) return false;
+  return !(options.agentConfig && options.skillCatalog.length === 0);
+}
+
 export function agentPromptResourcesFor(
   settings: Settings,
   resources: readonly ResourceRef[],
@@ -2872,6 +2977,7 @@ export function agentPromptResourcesFor(
     | "secrets"
     | "unattended"
     | "personalGitHubLogin"
+    | "skillCatalog"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2902,6 +3008,8 @@ export function agentPromptResourcesFor(
       ? { commandCompletionDelivery: true }
       : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
+    // A host-supplied index that lists no Skill: nothing to read this turn.
+    ...(options.skillCatalog?.length === 0 ? { skillsReadable: false } : {}),
   };
 }
 
@@ -2963,12 +3071,15 @@ function inspectModularAgentInstructions(
   config: ResolvedAgentConfig,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const identity = resolveAgentIdentity({
     sessionIdentity: config.identity,
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
+    ...(agentSharesWorkspace(config.capabilities, resources)
+      ? {}
+      : { defaultIdentity: NEUTRAL_AGENT_IDENTITY }),
   });
-  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
     // An unattended session gets no human-input tool, so no clause offers it.
     capabilities: resources.unattended
@@ -2977,17 +3088,15 @@ function inspectModularAgentInstructions(
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
     resources,
-    ...(options.agentPromptToolAvailability
-      ? { toolAvailability: options.agentPromptToolAvailability }
-      : {}),
+    ...modularToolAvailability(settings, options),
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
-    ...(options.skillCatalog && !options.skillCatalogInHistory
-      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+    ...(skillCatalogLayerApplies(options)
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog!) }
       : {}),
     workspaceGovernance: options.workspaceGovernance,
     workspaceMemory: options.workspaceMemory,
@@ -3065,13 +3174,13 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
       layers.push({
@@ -3211,7 +3320,11 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose. In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.";
+
+/** Rendered only for a session with a parent agent (nested depth above zero). */
+const HUMAN_INPUT_PARENT_DESCRIPTION =
+  "In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
 
 /** Appended to the tool result when the person chose "Let the agent decide". */
 export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
@@ -3540,79 +3653,94 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
+  const humanInputFeatures: HumanInputQuestionFeatures = {
+    secrets: toolFamilies.secrets,
+    skillReview: toolFamilies.skills === "manage",
+  };
   const humanInputTool = !toolFamilies.humanInput
     ? null
-    : agentTool({
-        name: HUMAN_INPUT_TOOL_NAME,
-        description: toolFamilies.secrets
-          ? `${HUMAN_INPUT_TOOL_DESCRIPTION} ${HUMAN_INPUT_SECRET_DESCRIPTION}`
-          : HUMAN_INPUT_TOOL_DESCRIPTION,
-        parameters: RequestHumanInputToolInput,
-        needsApproval: true,
-        inputGuardrails: [
-          {
-            name: "validate_human_input_request",
-            run: async ({ toolCall }) => {
-              // Switched to work without a person after the chat started: the
-              // tool stays (its list never changes) but nobody would answer.
-              if (options.unattendedNow) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  UNATTENDED_PERSON_REFUSAL_TEXT,
-                );
-              }
-              let input: unknown;
-              try {
-                input = JSON.parse(toolCall.arguments);
-              } catch {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                );
-              }
-              const parsed = RequestHumanInputToolInput.safeParse(input);
-              if (!parsed.success) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                );
-              }
-              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
-              if (approvalRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
-              }
-              const secretRejection = await secretQuestionRejection(parsed.data, {
-                enabled: toolFamilies.secrets,
-                hasActingHuman: options.secrets?.hasActingHuman ?? false,
-                ...(options.secrets?.validateQuestionVault
-                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
-                  : {}),
-              });
-              if (secretRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
-              }
-              return ToolGuardrailFunctionOutputFactory.allow();
+    : withHumanInputWireParameters(
+        humanInputFeatures,
+        agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          // Built from the enabled features: the parent-agent text only with a
+          // parent, the secret kind and spec only with secrets, the Skill review
+          // reference only with Skill management. Calls are still validated
+          // against the full contract below.
+          description: [
+            HUMAN_INPUT_TOOL_DESCRIPTION,
+            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
+          ]
+            .filter((part): part is string => typeof part === "string")
+            .join(" "),
+          parameters: requestHumanInputToolParameters(humanInputFeatures),
+          needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                // Switched to work without a person after the chat started: the
+                // tool stays (its list never changes) but nobody would answer.
+                if (options.unattendedNow) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    UNATTENDED_PERSON_REFUSAL_TEXT,
+                  );
+                }
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                const parsed = RequestHumanInputToolInput.safeParse(input);
+                if (!parsed.success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                  );
+                }
+                const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+                if (approvalRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
+                }
+                const secretRejection = await secretQuestionRejection(parsed.data, {
+                  enabled: toolFamilies.secrets,
+                  hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                  ...(options.secrets?.validateQuestionVault
+                    ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                    : {}),
+                });
+                if (secretRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
             },
+          ],
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+              ...(settled.response.outcome === "skipped" && settled.response.agentDecides
+                ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
+                : {}),
+            });
           },
-        ],
-        // A missing/mismatched durable response is a protocol integrity failure,
-        // not model-visible tool output the agent may reason past.
-        errorFunction: null,
-        execute: (_input, _context, details) => {
-          const settled = options.humanInputResponse;
-          if (!settled) {
-            throw new Error("Human-input tool resumed without a durable response");
-          }
-          const resumedCallId = details?.toolCall?.callId;
-          if (resumedCallId && resumedCallId !== settled.toolCallId) {
-            throw new Error("Human-input response does not belong to the resumed tool call");
-          }
-          return JSON.stringify({
-            requestId: settled.requestId,
-            ...settled.response,
-            ...(settled.response.outcome === "skipped" && settled.response.agentDecides
-              ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
-              : {}),
-          });
-        },
-      });
+        }),
+      );
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -3745,10 +3873,11 @@ export function buildOpenGeniAgent(
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
-    // Last, so it masks exactly what every other wrapper hands to the model.
-    if (options.secretValueMemory) {
-      installToolResultSecretMasking(agent, options.secretValueMemory);
-    }
+    installSandboxSetupNoticeDelivery(agent, {
+      ...(options.onSandboxSetupNoticeDelivered
+        ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+        : {}),
+    });
     return agent;
   }
 
@@ -3901,11 +4030,31 @@ export function buildOpenGeniAgent(
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
-  // Last, so it masks exactly what every other wrapper hands to the model.
-  if (options.secretValueMemory) {
-    installToolResultSecretMasking(agent, options.secretValueMemory);
-  }
+  installSandboxSetupNoticeDelivery(agent, {
+    ...(options.onSandboxSetupNoticeDelivered
+      ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+      : {}),
+  });
   return agent;
+}
+
+/**
+ * The lazy tool transport this attempt installs, or undefined when it has no
+ * search router: no transport, or the deployment turned tool search off and
+ * the session never exposed the router.
+ */
+function lazyToolTransportFor(
+  settings: Settings,
+  options: Pick<BuildAgentOptions, "lazyToolTransport" | "agentConfig" | "toolRouterInHistory">,
+): NonNullable<BuildAgentOptions["lazyToolTransport"]> | undefined {
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  if (!transport) return undefined;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return undefined;
+  return transport;
 }
 
 /**
@@ -3927,13 +4076,8 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport =
-    options.lazyToolTransport ??
-    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  const transport = lazyToolTransportFor(settings, options);
   if (!transport) return;
-  const enabled =
-    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -4004,6 +4148,7 @@ function maybeInstallLazyToolTransport(
           label: route.account ? `${route.connector} (${route.account})` : route.connector,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
+          ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
         };
         for (const name of server.modelToolNames()) accounts.set(name, account);
       }
@@ -4023,6 +4168,7 @@ function maybeInstallLazyToolTransport(
       }
       return published;
     },
+    options.toolRouterExpected !== false,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -7389,19 +7535,12 @@ export function attemptToolCallMeta(
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const {
-    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored,
-    [FIRST_PARTY_SECRET_VALUES_META_KEY]: _ignoredValues,
-    ...transportMeta
-  } = context.transportMeta ?? {};
+  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
+    context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
-    // The values this call's arguments resolved to, so the first-party server
-    // masks them in what it stores and returns (docs/secrets.md, Masking).
-    // Never logged; third-party servers never see it.
-    ...(serverId === "opengeni" ? firstPartySecretValuesMeta(context.operationId) : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {
@@ -8189,6 +8328,30 @@ function isIntegrationInvocationOutcomeUnknownError(error: unknown): boolean {
   } catch {
     // Typed error recognition is observational. Preserve the source failure.
     return false;
+  }
+}
+
+/**
+ * A generated OpenAPI/GraphQL integration call that failed with a known
+ * outcome (rejected before or by the provider, nothing left half-done): a
+ * provider redirect, a missing parameter, an expired authorization. It is an
+ * ordinary tool error the model can act on, not an unavailable tool.
+ */
+function recoverableIntegrationFailure(
+  error: unknown,
+): { code: string; message: string; status?: number; retryable: boolean } | undefined {
+  try {
+    if (!(error instanceof IntegrationInvocationError)) return undefined;
+    if (error.outcome !== "failed" && error.outcome !== "not_started") return undefined;
+    return {
+      code: error.code,
+      message: error.message,
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+      retryable: error.retryable,
+    };
+  } catch {
+    // Typed error recognition is observational. Preserve the source failure.
+    return undefined;
   }
 }
 
@@ -9439,10 +9602,14 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (this.closed) throw new Error("local model tool server is closed");
     const environment = await this.requiredAttemptToolEnvironment();
     const sourceCallId = modelMcpSourceCallId(toolName);
+    // Bind the call to the tool this server advertised: if another server's
+    // tool won this model name in the catalog, the call is not found.
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        ...(expectedIdentity === undefined ? {} : { expectedIdentity }),
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9777,13 +9944,21 @@ export class PrefixedMcpServer implements MCPServer {
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
-      const exposed = tools
+      const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
-          if (prior !== undefined && prior !== tool.name)
-            throw new Error("MCP model tool identity collision");
+          if (prior !== undefined && prior !== tool.name) {
+            // Two different names would share one model name and so one
+            // executor. Keep the first; the other is unavailable this turn.
+            console.warn("[mcp] server listed two tools with one model name; skipping the later", {
+              event: "mcp_tool_model_name_collision",
+              serverId: this.registryId,
+              toolName: tool.name.slice(0, 256),
+            });
+            return null;
+          }
           this.originalToolNames.set(name, tool.name);
           const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
           if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
@@ -9811,7 +9986,8 @@ export class PrefixedMcpServer implements MCPServer {
               ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
-        });
+        })
+        .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
@@ -9905,6 +10081,9 @@ export class PrefixedMcpServer implements MCPServer {
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
           ...(sourceCallId === undefined ? {} : { sourceCallId }),
+          // Bind the call to this server's own tool: a model name the catalog
+          // gave to another server's tool is not found, never rerouted.
+          expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -10172,6 +10351,27 @@ export class PrefixedMcpServer implements MCPServer {
         recordOutcome("outcome_uncertain");
         throw error;
       }
+      // A generated integration's known-outcome failure goes back to the model
+      // as the tool's error, on any server: it says what the provider rejected
+      // and the tool stays usable with corrected arguments.
+      const integrationFailure = options?.propagateInvocationErrors
+        ? undefined
+        : recoverableIntegrationFailure(error);
+      if (integrationFailure) {
+        recordOutcome(
+          integrationFailure.code === "connection_required" ||
+            integrationFailure.code === "authorization_rejected"
+            ? "auth_needed"
+            : "provider_declared_error",
+        );
+        return boundedMcpToolResult({
+          isError: true,
+          content: [
+            { type: "text", text: JSON.stringify({ ok: false, error: integrationFailure }) },
+          ],
+          structuredContent: { ok: false, error: integrationFailure },
+        });
+      }
       recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
@@ -10298,9 +10498,9 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: secretMaskedToolResolver(
+    resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+      mcpToolResolverForAgent(agent),
     ),
   });
 }
@@ -10503,11 +10703,6 @@ export type RunAgentStreamOptions = {
    * same for every model call of the run.
    */
   searchRecordForm?: SearchRecordForm;
-  /**
-   * Masks known secret values in the instructions and input of every model
-   * call, after every filter that can add input (docs/secrets.md, Masking).
-   */
-  secretMaskingInputFilter?: CallModelInputFilter;
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -10856,6 +11051,7 @@ async function runAgentStreamInternal(
         ? { codemodeClientDownload: ownedCodemodeClientDownload }
         : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+      onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
@@ -10906,8 +11102,6 @@ async function runAgentStreamInternal(
             prepared.modelInputAlreadyProjected === true,
           ),
         ),
-        // Secret masking runs after every filter that can add model input.
-        measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
         measuredModelInputFilter(
           "input_filter_context",
           deferCompactionToModelBoundary(
@@ -10965,6 +11159,7 @@ async function runAgentStreamInternal(
                 "sandbox_session_manifest_inventory",
                 (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
               );
+              deliverHeldSandboxSetupNotices(agent, prepared);
               return runScopedRunner(settings, agent, inputWaitYield).run(
                 agent,
                 prepared.input,
@@ -11047,6 +11242,7 @@ async function runAgentStreamInternal(
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
+          onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
         },
       )
     : undefined;
@@ -11081,8 +11277,6 @@ async function runAgentStreamInternal(
         "input_filter_modality",
         modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       ),
-      // Secret masking runs after every filter that can add model input.
-      measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
       measuredModelInputFilter(
         "input_filter_context",
         deferCompactionToModelBoundary(
@@ -11140,6 +11334,7 @@ async function runAgentStreamInternal(
               "sandbox_agent_manifest_inventory",
               (agent as { defaultManifest?: Manifest }).defaultManifest,
             );
+            deliverHeldSandboxSetupNotices(agent, prepared);
             return runScopedRunner(settings, agent, inputWaitYield).run(
               agent,
               prepared.input,
@@ -11157,20 +11352,60 @@ function appendSandboxFileDownloadFailureNote(
   input: PreparedAgentInput,
   failures: SandboxFileDownloadFailure[],
 ): void {
-  const note = sandboxFileDownloadFailureNote(failures);
+  appendPreparedInputNote(input, sandboxFileDownloadFailureNote(failures));
+}
+
+/**
+ * Append a platform note to this turn's model input, after the person's
+ * message. False when that input cannot take one.
+ */
+function appendPreparedInputNote(input: PreparedAgentInput, note: string): boolean {
   if (!note) {
-    return;
+    return true;
   }
   if (typeof input.input === "string") {
     input.input = [input.input, "", note].join("\n");
-    return;
+    return true;
   }
   if (Array.isArray(input.input)) {
     input.input = [
       ...input.input,
       { type: "message", role: "user", content: note } as AgentInputItem,
     ];
+    return true;
   }
+  return false;
+}
+
+/**
+ * Route a setup notice: into the turn's input while the model has not started,
+ * otherwise held for the next tool result.
+ */
+function sandboxSetupNoticeSink(
+  agent: Agent<any, any>,
+  preparedInput: PreparedAgentInput | undefined,
+): (notice: string) => void {
+  return (notice) => {
+    if (preparedInput && appendPreparedInputNote(preparedInput, notice)) return;
+    queueSandboxSetupNotice(agent, notice);
+  };
+}
+
+/** Notices held by setup that finished before this run starts join its input. */
+function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: PreparedAgentInput) {
+  const held = takeSandboxSetupNotices(agent);
+  if (held && !appendPreparedInputNote(prepared, held)) {
+    queueSandboxSetupNotice(agent, held);
+  }
+}
+
+/**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
 }
 
 /**
@@ -11198,9 +11433,9 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: secretMaskedToolResolver(
+    resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+      mcpToolResolverForAgent(agent),
     ),
   };
 }
@@ -11379,6 +11614,9 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
+export { isAlwaysVisibleBaseToolName } from "./lazy-tool-transport";
+export { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "./codex-tool-search";
+export { connectableIntegrationsNamedIn } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
@@ -11663,6 +11901,9 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Setup steps the worker ran first that already failed softly (run
+     * credential files), reported in the same notice as the hooks'. */
+    priorSoftSetupFailures?: readonly SoftSetupFailure[];
     /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
     recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
@@ -11728,6 +11969,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    onSetupNotice: sandboxSetupNoticeSink(agent, opts.preparedInput),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -11737,7 +11979,19 @@ export async function runOwnedSandboxSetup(
   // (effective backend "selfhosted"): the box is the user's REAL computer — the
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
+  // Setup steps that failed softly this turn, including the worker's own
+  // earlier steps (run credential files), reported in one notice below.
+  const softFailures: SoftSetupFailure[] = [...(opts.priorSoftSetupFailures ?? [])];
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // clock or resolver the agent broke is repaired before anything below needs
+    // the network (rig setup, clones, the Codemode client). Never on any other
+    // backend, and above all never on a connected machine.
+    if ((agentActiveSandboxBackend.get(agent) ?? settings.sandboxBackend) === "compute") {
+      const repair = await repairOwnedComputeBox(setupSession, environment, opts.commandRunner);
+      const note = repair ? ownedBoxRepairNote(repair) : null;
+      if (note && opts.preparedInput) appendPreparedInputNote(opts.preparedInput, note);
+    }
     if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
       const execute = async (): Promise<void> => {
         await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
@@ -11767,8 +12021,30 @@ export async function runOwnedSandboxSetup(
         await execute();
       }
     }
-    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
+    // A hook failure the box itself caused (a full /workspace, a blocked
+    // path) must not fail every later turn before the model can fix it: the
+    // turn starts and the model is told what failed (sandbox-setup-soft-failure.ts).
+    await runBeforeAgentStartHooks(
+      setupSession,
+      softFailingSetupHooks(ownedTurnPrivateHooks, softFailures, (failure) => {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "platform setup step failed softly; the turn continues with a notice",
+            event: "sandbox.setup.soft_failure",
+            hookId: failure.hookId,
+            cause: failure.cause.kind,
+            ...(failure.cause.kind === "command_failed"
+              ? { exitCode: failure.cause.exitCode }
+              : {}),
+          }),
+        );
+      }),
+      ownedHookContext,
+    );
   }
+  const softFailureNotice = softSetupFailureNotice(softFailures);
+  if (softFailureNotice) sandboxSetupNoticeSink(agent, opts.preparedInput)(softFailureNotice);
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
   // workspace-relative, integrity-verified, read-only, and atomic; repository,
@@ -12579,7 +12855,54 @@ export type SandboxLifecycleHookContext = {
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
   commandRunner?: SandboxLifecycleCommandRunner;
+  /**
+   * Model-facing text a hook needs the agent to read, such as where a
+   * repository folder was moved aside. Delivered with the turn's input when
+   * setup runs before the model, otherwise with the next tool result.
+   */
+  onSetupNotice?: (notice: string) => void;
 };
+
+/**
+ * Check a compute box's clock and resolver against the worker and repair what
+ * is broken (see sandbox/owned-box-repair). Best effort: a failed check never
+ * fails setup, but a Steer/Pause cancellation still stops it.
+ */
+async function repairOwnedComputeBox(
+  session: SandboxSessionLike,
+  environment: Record<string, string>,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<OwnedBoxRepairReport | null> {
+  let result: unknown;
+  try {
+    result = await withSandboxOperationPurpose("box_repair", () =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: ownedBoxRepairCommand({
+            workerEpochSeconds: Date.now() / 1000,
+            host: ownedBoxRepairHost(environment),
+          }),
+          workdir: "/workspace",
+          yieldTimeMs: 30_000,
+          maxOutputTokens: 1_000,
+        },
+        commandRunner,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+    });
+    return null;
+  }
+  const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
+  if (report.clock || report.dns) {
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
+  }
+  return report;
+}
 
 async function runSandboxLifecycleCommand(
   session: SandboxSessionLike,
@@ -14429,6 +14752,107 @@ export async function refreshGitCredentialBindingTokenFiles(
 const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
 
 /**
+ * The clone script's report of a folder it moved aside instead of deleting:
+ * this prefix, the run's token in brackets, a colon, then the target, the new
+ * path and a reason code, tab-separated.
+ */
+const RECOVERED_REPOSITORY_PREFIX = "Notice: moved repository folder aside";
+const RECOVERED_REPOSITORY_NAME = /^\.opengeni-recovered-\d{8}T\d{6}Z(?:-\d+)?$/u;
+const RECOVERED_REPOSITORY_REASONS: Record<string, string> = {
+  unreadable: "it was not a readable Git work tree",
+  "remote-commits": "the remote now has commits",
+};
+
+/** A fresh token for one clone run's move-aside reports. */
+export function repositoryRecoveryNoticeToken(): string {
+  return randomUUID().replaceAll("-", "");
+}
+
+/** One repository folder the clone hook moved aside before cloning fresh. */
+export type RecoveredRepositoryFolder = {
+  /** Absolute path of the repository folder, as the sandbox sees it. */
+  target: string;
+  /** Absolute path the earlier copy now has. */
+  movedTo: string;
+  /** Workspace-relative mount path of the repository. */
+  path: string;
+  /** Workspace-relative path of the earlier copy. */
+  movedToPath: string;
+  reason: string;
+};
+
+/**
+ * The folders the clone script reported moving aside. Only whole lines carrying
+ * this run's token count, for this hook's own repository targets moved to
+ * their own recovery sibling, with a known reason code: no other output (a
+ * remote's fetch messages) can add an entry or choose its text.
+ */
+export function recoveredRepositoryFolders(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  token: string,
+): RecoveredRepositoryFolder[] {
+  if (!/^[0-9a-f]{32}$/u.test(token)) return [];
+  const linePrefix = `${RECOVERED_REPOSITORY_PREFIX} [${token}]: `;
+  // The longest matching mount path, so `app` never claims `repos/acme/app`.
+  const repositories = resources
+    .map((resource) => ({ resource, mountPath: resourceMountPath(resource) }))
+    .sort((left, right) => right.mountPath.length - left.mountPath.length);
+  const recovered: RecoveredRepositoryFolder[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    if (!line.startsWith(linePrefix)) continue;
+    const fields = line.slice(linePrefix.length).split("\t");
+    if (fields.length !== 3) continue;
+    const [target = "", movedTo = "", code = ""] = fields;
+    const repository = repositories.find(({ mountPath }) => target.endsWith(`/${mountPath}`));
+    if (!repository) continue;
+    const recoveredName = movedTo.slice(target.length);
+    if (!movedTo.startsWith(target) || !RECOVERED_REPOSITORY_NAME.test(recoveredName)) continue;
+    const pinned = repository.resource.expectedCommitSha;
+    const reason =
+      code === "pin"
+        ? pinned
+          ? `its checked-out commit is not the pinned commit ${pinned}`
+          : undefined
+        : RECOVERED_REPOSITORY_REASONS[code];
+    if (!reason) continue;
+    if (recovered.some((entry) => entry.movedTo === movedTo)) continue;
+    recovered.push({
+      target,
+      movedTo,
+      path: repository.mountPath,
+      movedToPath: `${repository.mountPath}${recoveredName}`,
+      reason,
+    });
+  }
+  return recovered;
+}
+
+/** The clone event's workspace-relative record of folders moved aside. */
+function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
+  return folders.length > 0
+    ? {
+        recoveredRepositories: folders.map((folder) => ({
+          path: folder.path,
+          movedTo: folder.movedToPath,
+        })),
+      }
+    : {};
+}
+
+/** Model text for repository folders the clone hook moved aside. */
+export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
+  if (folders.length === 0) return "";
+  return [
+    "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+    ...folders.map(
+      (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
+    ),
+    "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+  ].join("\n");
+}
+
+/**
  * Wall-clock bound for one automatically attached (optional) repository clone,
  * and the share of the repository-clone lifecycle command all optional clones
  * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
@@ -14483,33 +14907,135 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
+  // not a broken repository: Git only refuses to read it. Trust exactly that
+  // path (and its resolved form) in the global Git config and keep the work
+  // tree as it is. The message is matched in the C locale, in both wordings.
+  "  repository_trust_owner() {",
+  '    trust_output="$(export LC_ALL=C; repository_git -C "$target" rev-parse --is-inside-work-tree 2>&1 >/dev/null)" && return 0',
+  '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
+  '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
+  '    for trust_path in "$target" "$trust_resolved"; do',
+  '      if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$trust_path"; then continue; fi',
+  "      trust_attempt=0",
+  // Parallel clones share one global config file; retry its lock briefly.
+  '      until command git config --global --add safe.directory "$trust_path" 2>/dev/null; do',
+  "        trust_attempt=$((trust_attempt + 1))",
+  '        if [ "$trust_attempt" -ge 5 ]; then break; fi',
+  "        sleep 1",
+  "      done",
+  "    done",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
+  "    else",
+  '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
+  "    fi",
+  "  }",
+  // Whether a readable work tree still serves the pinned commit. The clone
+  // records the commit it materialized, so the agent's own commits, branches
+  // and rebases keep the folder while the pin is unchanged, and a changed pin
+  // (in either direction) does not. Folders cloned before the record existed
+  // count when HEAD is the pin or built on it, and get the record.
+  "  repository_pin_kept() {",
+  '    if [ -z "$expected_commit" ]; then return 0; fi',
+  '    pin_recorded="$(repository_git -C "$target" config --get opengeni.materializedCommit 2>/dev/null || true)"',
+  '    if [ -n "$pin_recorded" ]; then',
+  '      if [ "$pin_recorded" = "$expected_commit" ]; then return 0; fi',
+  "      return 1",
+  "    fi",
+  '    pin_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '    if [ -z "$pin_head" ]; then return 1; fi',
+  '    if [ "$pin_head" != "$expected_commit" ] && ! repository_git -C "$target" merge-base --is-ancestor "$expected_commit" "$pin_head" >/dev/null 2>&1; then return 1; fi',
+  '    repository_git -C "$target" config opengeni.materializedCommit "$expected_commit" >/dev/null 2>&1 || true',
+  "    return 0",
+  "  }",
+  // Never delete a folder that may hold work. Rename it to a sibling (a mount
+  // point cannot be renamed, so its entries are moved, which copies them across
+  // the mount), report where it went, and let the caller clone fresh into the
+  // empty target. The argument is the reason code the hook turns into text.
+  "  repository_move_aside() {",
+  '    move_base="${target}.opengeni-recovered-$(date -u +%Y%m%dT%H%M%SZ)"',
+  '    move_path="$move_base"',
+  "    move_index=1",
+  '    while [ -e "$move_path" ] || [ -L "$move_path" ]; do',
+  "      move_index=$((move_index + 1))",
+  '      move_path="${move_base}-${move_index}"',
+  "    done",
+  '    if ! mv "$target" "$move_path" 2>/dev/null; then',
+  // A concurrent setup already moved it.
+  '      if [ ! -e "$target" ] && [ ! -L "$target" ]; then return 0; fi',
+  "      move_failed=1",
+  '      if [ -d "$target" ] && [ ! -L "$target" ] && mkdir "$move_path" 2>/dev/null; then',
+  '        find "$target" -mindepth 1 -maxdepth 1 -exec mv -- {} "$move_path/" \\; 2>/dev/null || true',
+  '        if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "          move_failed=0",
+  "        else",
+  // Keep the folder whole: put back what was moved.
+  '          find "$move_path" -mindepth 1 -maxdepth 1 -exec mv -- {} "$target/" \\; 2>/dev/null || true',
+  '          rmdir "$move_path" 2>/dev/null || true',
+  "        fi",
+  "      fi",
+  '      if [ "$move_failed" -ne 0 ]; then',
+  '        if [ -e "$move_path" ]; then',
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted; some entries are in $move_path." >&2',
+  "        else",
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted." >&2',
+  "        fi",
+  "        exit 1",
+  "      fi",
+  "    fi",
+  // One write per line, tagged with this run's token so no other output
+  // (a remote's fetch messages) can pass for it.
+  `    printf '%s [%s]: %s\\t%s\\t%s\\n' ${shellQuote(RECOVERED_REPOSITORY_PREFIX)} "\${OPENGENI_REPOSITORY_NOTICE_TOKEN:-}" "$target" "$move_path" "$1" >&2`,
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
   // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
   // this check forever. A full-repo target must actually BE a work tree to be
-  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-  // the mount path before the repo exists). Subpath extracts are not git repos —
-  // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  // skipped; anything else is moved aside, never deleted, and rebuilt. Subpath
+  // extracts are not git repos: for those the plain non-empty check stands (no
+  // stronger signal is available, pinned or not).
+  '    if [ -n "$subpath" ]; then',
+  '      echo "Repository resource already present at $target"',
+  "      return 0",
+  "    fi",
+  "    repository_trust_owner",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      present_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '      if [ -n "$expected_commit" ]; then',
+  "        if repository_pin_kept; then",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "        repository_move_aside pin",
   // An empty remote materializes as an unborn branch (below). If the remote now
   // has that branch and the mount still holds nothing but `.git` (no agent work,
   // committed or not), clone it properly instead of keeping the stub. Commits
   // on any other branch keep the stub: re-fetching the requested ref would fail.
-  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
-  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  '      elif [ -z "$present_head" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '        echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  // The stub Opengeni created holds no work while it has no refs and nothing
+  // staged, as Git itself confirms; anything more is moved aside like any
+  // other work.
+  '        if stub_refs="$(repository_git -C "$target" for-each-ref 2>/dev/null)" && [ -z "$stub_refs" ] && stub_files="$(repository_git -C "$target" ls-files 2>/dev/null)" && [ -z "$stub_files" ]; then',
+  '          rm -rf "$target/.git"',
   "        else",
-  '          echo "Repository resource already present at $target"',
-  "          return 0",
+  "          repository_move_aside remote-commits",
   "        fi",
   "      else",
-  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
   "      fi",
+  // Only Opengeni's own temporary clones, nested by a lost install race.
+  '    elif [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name "${target##*/}.tmp.*" -print -quit 2>/dev/null)" ]; then',
+  '      echo "Re-materializing partial repository resource at $target" >&2',
+  '      find "$target" -mindepth 1 -maxdepth 1 -name "${target##*/}.tmp.*" -exec rm -rf {} +',
   "    else",
   '      echo "Re-materializing partial repository resource at $target" >&2',
+  "      repository_move_aside unreadable",
   "    fi",
-  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
@@ -14582,6 +15108,9 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    rm -rf "$tmp"',
   "    exit 1",
   "  fi",
+  '  if [ -n "$expected_commit" ] && [ -z "$subpath" ]; then',
+  '    repository_git -C "$tmp" config opengeni.materializedCommit "$expected_commit"',
+  "  fi",
   '  if [ -n "$subpath" ]; then',
   '    if [ ! -e "$tmp/$subpath" ]; then',
   '      echo "Repository subpath not found: $subpath" >&2',
@@ -14601,14 +15130,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // Two concurrent turn holders can race this install: without the existence
   // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
   // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-  // accept it; a non-empty non-repo survivor here is a mount point the manifest
-  // re-filled — install into it by content copy instead of rename.
+  // accept it. Anything else that appeared there is moved aside, never
+  // overwritten; an empty survivor is a mount point, so install into it by
+  // content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-  '        rm -rf "$tmp"',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  "        if repository_pin_kept; then",
+  '          rm -rf "$tmp"',
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "        repository_move_aside pin",
+  '      elif [ -f "$target" ] || [ -L "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "        repository_move_aside unreadable",
   "      fi",
+  "    fi",
+  '    if [ -e "$target" ]; then',
   '      cp -a "$tmp/." "$target/"',
   '      rm -rf "$tmp"',
   "    else",
@@ -15454,6 +15991,7 @@ export async function runRepositoryCloneHook(
   let stagedCloneScript: string | null = null;
   // A successful program has moved every staged broker seed into its token file.
   let brokerSeedsConsumed = false;
+  let recoveredFolders: RecoveredRepositoryFolder[] = [];
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -15469,9 +16007,12 @@ export async function runRepositoryCloneHook(
       gitCredentialBindings,
       context.runAs,
     );
+    // Per run, inline with the seeds, so the staged program stays reusable.
+    const noticeToken = repositoryRecoveryNoticeToken();
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+      `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -15569,6 +16110,20 @@ export async function runRepositoryCloneHook(
         }
       }
     }
+    // A folder moved aside stays moved even when a later clone fails, so the
+    // model hears where it is either way.
+    recoveredFolders = recoveredRepositoryFolders(
+      sandboxCommandOutput(result),
+      resources,
+      noticeToken,
+    );
+    if (recoveredFolders.length > 0) {
+      console.warn("[sandbox] repository folders were moved aside before a fresh clone", {
+        movedCount: recoveredFolders.length,
+        repositoryCount: resources.length,
+      });
+      context.onSetupNotice?.(recoveredRepositoryFoldersNote(recoveredFolders));
+    }
     assertSandboxCommandSucceeded(result, "Repository clone hook");
     brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
@@ -15586,6 +16141,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
   } catch (error) {
@@ -15594,6 +16150,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         error: errorMessage(error),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
     throw error;
@@ -15647,8 +16204,10 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(
+    throw new SandboxLifecycleCommandExitError(
       `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+      exitCode,
+      output,
     );
   }
   if (exitCode === null) {

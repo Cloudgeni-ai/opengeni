@@ -11,6 +11,8 @@ export { INSTRUCTION_PRECEDENCE, renderBaseBehavior } from "./base-behavior";
 export { renderRuntimeMechanics } from "./runtime-mechanics";
 export {
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
+  agentSharesWorkspace,
   identityFromLegacyTemplate,
   resolveAgentIdentity,
 } from "./identity";

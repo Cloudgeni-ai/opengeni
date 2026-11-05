@@ -7,7 +7,6 @@ import {
   type ModelRequest,
 } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { maskSecretValues } from "@opengeni/contracts";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
@@ -977,21 +976,6 @@ describe("Claude searches outside the Claude transport", () => {
     });
     expect(JSON.stringify(kept)).toBe(JSON.stringify([item, cited]));
     expect(projectHostedSearchEvidence(kept[0]!)).toMatchObject({ role: "user" });
-  });
-
-  test("a search keeps its session's form when secret masking copies it", () => {
-    const kept = projectHistoryForProvider([item, cited], "anthropic-messages", {
-      searchRecordForm: "runtime",
-    });
-    // Masking happens between the filters and the transport, and rebuilds
-    // any item holding a known secret value.
-    const masked = maskSecretValues(kept, [{ value: "opengeni release notes", label: "[secret]" }]);
-    expect(masked[0]).not.toBe(kept[0]);
-    for (const api of ["responses", "chat"] as const) {
-      const projected = projectHistoryForProvider(masked, api);
-      expect(projected[0]).toMatchObject({ type: "message", role: "user" });
-      expect(JSON.stringify(projected)).not.toContain("opengeni release notes");
-    }
   });
 
   test("the compaction transcript names the query and sources without encrypted pages", () => {

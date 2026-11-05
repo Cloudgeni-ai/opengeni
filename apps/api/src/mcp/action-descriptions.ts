@@ -283,6 +283,41 @@ const RULES: Rule[] = [
   },
   {
     method: "GET",
+    pattern: /\/model-providers\/openai_compatible\/endpoints$/,
+    text: () =>
+      "List the organization's OpenAI-compatible endpoints (base URL, API style and model ids), without their keys.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/openai_compatible\/endpoints$/,
+    text: () =>
+      "Connect an OpenAI-compatible endpoint for the organization: a public HTTPS base URL (usually ending in /v1), an API key and a model id. An organization can connect several. Organization admins.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/key$/,
+    text: () =>
+      "Replace the API key of an organization OpenAI-compatible endpoint. The key is stored encrypted and never shown again.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-providers\/openai_compatible\/endpoints\/:connectionId$/,
+    text: () => "Disconnect an organization OpenAI-compatible endpoint.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/models$/,
+    text: () =>
+      "Add another model id to an organization OpenAI-compatible endpoint, so it appears in the model picker.",
+  },
+  {
+    method: "DELETE",
+    pattern:
+      /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/models\/:customModelId$/,
+    text: () => "Remove a model id from an organization OpenAI-compatible endpoint.",
+  },
+  {
+    method: "GET",
     pattern: /\/codex\/overview$/,
     text: () =>
       "Codex overview for a workspace: connected accounts, which source it uses (organization or its own) and their status.",

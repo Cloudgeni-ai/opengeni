@@ -15,6 +15,7 @@ import {
   type BillingBalance,
   type ConnectionMetadata,
   type OrganizationModelDefaults,
+  type BillingOrigin,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
@@ -29,6 +30,8 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   getOrganizationModelDefaults,
+  chargeBillingOrigin,
+  readScheduledTaskBillingOrigin,
   spendableCreditMicros,
   type ConnectionModelRestrictions,
   type Database,
@@ -47,6 +50,7 @@ import {
   ownSubscriptionPlanAllows,
   ownSubscriptionPlanRequired,
 } from "./billing/byok-platform-fee";
+import { fundedBillingOrigin } from "./billing-origin";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -289,6 +293,8 @@ export async function resolveDefaultSessionModelForSelections(
     organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
     /** Request-local ledger snapshot, shared with the catalog's funding projection. */
     creditBalance?: BillingBalance;
+    /** API work cannot choose a connected subscription, including saved defaults. */
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<DefaultModelSelection> {
   const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
@@ -332,10 +338,14 @@ async function withoutUnusableOwnSubscriptions(
     settings: Settings;
     accountId: string;
     selections: readonly WorkspaceModelSelection[];
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<readonly WorkspaceModelSelection[]> {
   const isOwnSubscription = (selection: WorkspaceModelSelection) =>
     ownModelFunding(selection.model) === "subscription";
+  if (chargeBillingOrigin(input.billingOrigin) === "api") {
+    return input.selections.filter((selection) => !isOwnSubscription(selection));
+  }
   if (
     !ownSubscriptionPlanRequired(input.settings, input.accountId) ||
     !input.selections.some(
@@ -354,6 +364,7 @@ async function withoutUnusableOwnSubscriptions(
 export type WorkspaceModelSelectionContext = {
   accountId: string;
   workspaceId: string;
+  billingOrigin?: BillingOrigin | null;
   /**
    * The subject whose connected-subscription authority applies: the
    * authenticated caller for direct creates, or a scheduled task's immutable
@@ -677,6 +688,7 @@ export async function resolveDefaultSessionModel(
     accountId: context.accountId,
     workspaceSettings,
     selections: resolveWorkspaceModelSelection(selectionInput),
+    ...(context.billingOrigin ? { billingOrigin: context.billingOrigin } : {}),
   });
 }
 
@@ -698,6 +710,14 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    billingOrigin: fundedBillingOrigin(
+      task.accountId,
+      await readScheduledTaskBillingOrigin(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+      }),
+    ),
     claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

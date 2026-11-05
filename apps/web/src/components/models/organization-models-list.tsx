@@ -37,7 +37,11 @@ import {
   providerListed,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { codexAccountName, codexUsageReadings, planLabel } from "@/components/codex-connection";
+import {
+  CompatibleEndpointView,
+  type OrganizationCompatibleEndpoints,
+} from "@/components/models/organization-compatible-endpoints";
+import { codexAccountName, codexUsageWindows, planLabel } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import {
   AllowedModelsRow,
@@ -89,7 +93,7 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
@@ -352,6 +356,7 @@ export function OrganizationModelsList({
   orgGrok,
   orgClaude,
   orgGateways,
+  orgCompatible,
   liveCodexUsage,
   onOpenAccount,
   onOpenWorkspace,
@@ -385,6 +390,8 @@ export function OrganizationModelsList({
   orgGrok: SuperGrokSubscriptions;
   orgClaude: ClaudeSubscriptions;
   orgGateways: Record<GatewayId, ProviderConnection>;
+  /** The organization's OpenAI-compatible endpoints; owners and admins only. */
+  orgCompatible?: OrganizationCompatibleEndpoints | undefined;
   /** Weekly usage by account, as the settings workspace reads the accounts it uses. */
   liveCodexUsage: Readonly<Record<string, ReactNode>>;
   /** Opens an organization account (`org:...`). */
@@ -639,13 +646,15 @@ export function OrganizationModelsList({
   }
 
   const orgKeyIds = administrator ? GATEWAYS.filter((id) => providerListed(orgGateways[id])) : [];
+  const orgEndpoints = administrator && orgCompatible ? orgCompatible.endpoints : [];
   const loadingAccounts =
     loadingWorkspaces ||
     (administrator &&
       (orgCodex.loading ||
         (!orgGrok.unavailable && orgGrok.loading) ||
         (claudeEnabled && orgClaude.loading) ||
-        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled)));
+        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled) ||
+        Boolean(orgCompatible?.loading)));
   const visible: Record<AccountGroupId, boolean> = {
     codex:
       groups.codex.length > 0 ||
@@ -665,6 +674,7 @@ export function OrganizationModelsList({
     !visible.claude &&
     !visible.supergrok &&
     orgKeyIds.length === 0 &&
+    orgEndpoints.length === 0 &&
     keyRows.length === 0;
   const connect = (
     <RowButton variant="default" onClick={onConnect}>
@@ -799,7 +809,10 @@ export function OrganizationModelsList({
               administrator && !orgGrok.unavailable ? orgGrok.loadError : null,
               () => void orgGrok.refresh(),
             )}
-            {credits.visible || keyRows.length > 0 || orgKeyIds.length > 0 ? (
+            {credits.visible ||
+            keyRows.length > 0 ||
+            orgKeyIds.length > 0 ||
+            orgEndpoints.length > 0 ? (
               <AccountGroupHeading>Pay as you go</AccountGroupHeading>
             ) : null}
             <OpenGeniCreditsRow
@@ -816,6 +829,23 @@ export function OrganizationModelsList({
                 onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
               />
             ))}
+            {orgCompatible
+              ? orgEndpoints.map((endpoint) => (
+                  <CompatibleEndpointView
+                    key={`org:compatible:${endpoint.id}`}
+                    endpoints={orgCompatible}
+                    connectionId={endpoint.id}
+                  >
+                    {(state) => (
+                      <OrganizationKeyRow
+                        state={state}
+                        labels={labels}
+                        onOpen={() => onOpenAccount(accountKey("compatible", endpoint.id, true))}
+                      />
+                    )}
+                  </CompatibleEndpointView>
+                ))
+              : null}
             {keyRows}
           </RowList>
         )}
@@ -1016,21 +1046,14 @@ function OrganizationDefaultsSection({
 
 export { possessive };
 
-/** Cached weekly usage an account carries, for a row with no live reading. */
+/** The cached usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {
-  const readings = codexUsageReadings(
+  const windows = codexUsageWindows(
     { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
     Date.now(),
   );
-  const weekly = readings[0]!;
-  if (weekly.percent === null) return null;
-  return (
-    <UsageReadout
-      percent={weekly.percent}
-      window="this week"
-      resets={usageResets(readings, weekly.label)}
-    />
-  );
+  if (windows.length === 0) return null;
+  return <SubscriptionUsageCell windows={windows} />;
 }
 
 type AccountGroupId = "codex" | "claude" | "supergrok";
@@ -1155,7 +1178,7 @@ function OrganizationCodexRow({
     account,
     !workspaceOwned,
   );
-  const readings = codexUsageReadings(live.data?.usage, Date.now());
+  const windows = codexUsageWindows(live.data?.usage, Date.now());
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const reconnect = account.status !== "active";
   return (
@@ -1174,15 +1197,11 @@ function OrganizationCodexRow({
         ) : workspaceOwned ? (
           usage
         ) : live.loading ? (
-          <UsageReadout percent={null} window="this week" loading />
+          <SubscriptionUsageCell windows={[]} loading />
         ) : live.error || live.data?.status === "error" ? (
           <span className="text-xs text-fg-muted">Usage unavailable</span>
         ) : live.data ? (
-          <UsageReadout
-            percent={readings[0]!.percent}
-            window="this week"
-            resets={usageResets(readings, readings[0]!.label)}
-          />
+          <SubscriptionUsageCell windows={windows} />
         ) : (
           usage
         ),

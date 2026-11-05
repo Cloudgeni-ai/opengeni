@@ -528,6 +528,9 @@ export function formatErrorMessage(
       message = "The conversation list changed. Refresh and try again.";
     } else if (error.status === 401) {
       message = "Sign in to continue.";
+    } else if (error.details?.code === "subscription_api_unavailable") {
+      message =
+        "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.";
     } else if (error.status === 403) {
       message = "You don’t have permission to do that.";
     } else if (error.status === 404) {

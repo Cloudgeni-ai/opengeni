@@ -154,7 +154,6 @@ import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings"
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 import { assertTurnSandboxBackendServed } from "./sandbox-route";
-import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -291,6 +290,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
       startSessionTitleWorkflow,
+      startRigProviderImageRefresh,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -769,6 +769,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
+            startRigProviderImageRefresh: startRigProviderImageRefresh ?? null,
           });
           if ("exit" in governance) return governance.exit;
           await assertTurnModelConnection(db, providerTurn, {
@@ -1403,6 +1404,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -1866,6 +1868,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
             promptToolAvailability: toolRuntime.promptToolAvailability,
+            toolRouterInHistory: toolRuntime.toolRouterInHistory,
+            toolRouterExpected: toolRuntime.toolRouterExpected,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1978,6 +1982,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -2017,6 +2022,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const eagerOwnedSandboxSetup = createEagerOwnedSandboxSetup(
             {
               input,
+              attempt,
               db,
               observability,
               runtimeCancellationSignal,
@@ -2358,16 +2364,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          // One known-secret memory per attempt: tool results, model input and
-          // every durable write of this attempt are masked with it.
-          const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
-          // Work that outlives the attempt (process-wide caches started inside
-          // it) neither keeps these values nor masks with them afterwards.
           // EU-only inference: model requests are refused until the claim
           // binds this context to the turn's settings.
-          return runWithAttemptSecretValues(secretValues, () =>
-            withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span)),
-          ).finally(() => secretValues.dispose());
+          return withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span));
         }),
       );
     } catch (error) {

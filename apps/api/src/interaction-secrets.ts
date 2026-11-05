@@ -280,6 +280,11 @@ function isUnsupportedSync(error: unknown): boolean {
   return status === 404 || status === 405 || name === "BrowserControlUnsupportedError";
 }
 
+/** The relying parties the browser holds passkeys for (no key material). */
+function loadedRpIds(credentials: readonly BrowserPasskeyCredential[]): string[] {
+  return [...new Set(credentials.map((credential) => credential.rpId))].sort();
+}
+
 /**
  * Load the principal's passkeys into the BrowserSession and write back what
  * happened since the last sync. Best effort: a failure is logged and never
@@ -403,7 +408,20 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       }
       throw error;
     }
-    if (response.events.length === 0) return { saved: 0, asserted: 0 };
+    // The write-back after an action reports what it found even when the
+    // browser held passkeys and none was used, so a sign-in that never reached
+    // the authenticator is told apart from one that never had the passkey.
+    const reportUnused = input.refresh !== true && (state?.credentials.length ?? 0) > 0;
+    if (response.events.length === 0) {
+      if (reportUnused) {
+        input.log?.("browser.passkey.synced", {
+          saved: 0,
+          asserted: 0,
+          loadedRpIds: loadedRpIds(state!.credentials),
+        });
+      }
+      return { saved: 0, asserted: 0 };
+    }
     const processed: string[] = [];
     const itemByCredential = new Map(
       (state?.credentials ?? []).map((credential) => [credential.credentialId, credential.itemId]),
@@ -442,8 +460,12 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     // New items are loaded with their item IDs so later assertions write back.
     const refreshed = saved > 0 ? await lease() : null;
     await input.client.passkeySync(request(refreshed, processed));
-    if (saved > 0 || asserted > 0) {
-      input.log?.("browser.passkey.synced", { saved, asserted });
+    if (saved > 0 || asserted > 0 || reportUnused) {
+      input.log?.("browser.passkey.synced", {
+        saved,
+        asserted,
+        loadedRpIds: loadedRpIds(state?.credentials ?? []),
+      });
     }
     return { saved, asserted };
   } catch (error) {

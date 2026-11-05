@@ -17,11 +17,14 @@ export function claudeSubscriptionCapacity(
   const relevant = (id: ClaudeUsageWindow["id"]): boolean => {
     if (id === "seven_day_opus") return /^claude-opus-/.test(upstreamModelId);
     if (id === "seven_day_sonnet") return /^claude-sonnet-/.test(upstreamModelId);
+    if (id === "seven_day_fable") return /^claude-fable-/.test(upstreamModelId);
     return id === "five_hour" || id === "seven_day";
   };
   const applicable = usage.windows.filter((window) => relevant(window.id));
   const relevantClaim = (id: ClaudeUsageWindow["id"] | null) =>
-    id === "seven_day_opus" || id === "seven_day_sonnet" ? relevant(id) : true;
+    id === "seven_day_opus" || id === "seven_day_sonnet" || id === "seven_day_fable"
+      ? relevant(id)
+      : true;
   const restrictions = (usage.requestRestrictions ?? []).filter(
     (item) =>
       item.status === "rejected" &&

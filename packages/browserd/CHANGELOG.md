@@ -1,5 +1,41 @@
 # @opengeni/browserd
 
+## 0.4.22
+
+### Patch Changes
+
+- 2a4e056: Navigating a managed browser tab to a `javascript:` URL now completes when the script runs, instead of failing with "browser could not navigate to the requested URL (net::ERR_ABORTED)" and an unknown outcome. Chromium answers such a URL as an aborted load because it runs in the current document rather than loading a new one. The tab keeps its page, or shows the document the script returned, and later actions in a batch go on from there.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/interaction@6.10.0
+
+## 0.4.21
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/interaction@6.9.0
+
+## 0.4.20
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/interaction@6.8.0
+
 ## 0.4.19
 
 ### Patch Changes
