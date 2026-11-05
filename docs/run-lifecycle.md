@@ -1102,7 +1102,7 @@ unchanged.
 - **Deleted agent or missing revision.** The chat continues as a plain chat
   without the layer. If the agent row is gone and an earlier edit item
   exists, one item withdraws it. The turn never fails for this.
-- **Claim gate (migration 1261).** A BEFORE INSERT trigger on
+- **Claim gate (migration 1276).** A BEFORE INSERT trigger on
   `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
   with a non-NULL `agent_prompt_revision` unless the claim set
   `opengeni.agent_instructions_protocol_v1 = '1'`. The worker sets it
