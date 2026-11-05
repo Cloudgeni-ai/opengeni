@@ -136,6 +136,17 @@ export type SessionWorkflowClient = {
     ownerSubjectId: string;
   }) => Promise<void>;
   /**
+   * Tell a meeting's speakers apart while it is still being recorded. Starting
+   * it while it runs does nothing. Optional: without it the speakers are told
+   * apart only after the meeting ends, which takes longer.
+   */
+  startRecordingSpeakerScan?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
    * Record an agent's browser recording whose frame bundle is uploaded and
    * make its video. Starting it again for the same recording while it runs,
    * or after it finished, does nothing.
@@ -170,6 +181,7 @@ export type ManagedEmailMessage = {
     | "password_reset"
     | "organization_user_setup"
     | "sign_in_method_changed"
+    | "billing_credit_notification"
     | "site_abuse_notice";
   from: string;
   to: string;

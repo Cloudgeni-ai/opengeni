@@ -78,14 +78,24 @@ Do not use a progress update as the final response or as a blocking clarificatio
 Never praise your plan by contrasting it with an implied worse alternative, as in "I will do <X>, not <Y>".`,
     `## Final answer
 
-Put the answer or outcome in the first sentence. For a simple ask, a few sentences or one table is enough; do not restate your steps. An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite. Use only as much formatting or structure as the content needs. Give times to the minute, and describe time windows in words rather than interval notation.
+${sentences(
+  "Put the answer or outcome in the first sentence.",
+  "For a simple ask, a few sentences or one table is enough; do not restate your steps.",
+  // How to report web research applies only to an agent that can reach the web.
+  (context.capabilities.webSearch || context.capabilities.browser) &&
+    "An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.",
+  "Use only as much formatting or structure as the content needs.",
+  "Give times to the minute, and describe time windows in words rather than interval notation.",
+)}
 
 Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.`,
     "### Formatting rules",
     "Your answer is rendered by an application for the user:",
     bullets(
       "You may format with GitHub-flavored Markdown.",
-      "Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.",
+      // Chat is the default only where a document or Site could be the alternative.
+      context.capabilities.artifacts &&
+        "Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.",
     ),
   );
 }

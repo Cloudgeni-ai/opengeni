@@ -335,7 +335,9 @@ export function readyAt(pull: QueuedPull): number {
  * batch is being split, priority batches and its halves take turns: after a
  * priority batch went ahead of a half, that half goes next, so a steady stream
  * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
- * CI and batcher changes run alone. A priority PR already in a failed batch's
+ * CI and batcher changes run alone; while a failed batch is being split, the
+ * oldest one outside its halves takes turns with them when no priority PR
+ * waits. A priority PR already in a failed batch's
  * halves keeps its place there: building every priority PR again would retest
  * the batch that just failed, unsplit, on every pass.
  */
@@ -393,6 +395,25 @@ export function nextBatch(
     return { kind: "build", members, pending, ...ahead };
   }
 
+  // A CI or batcher change outside the halves runs alone, so no priority fill
+  // can carry it, and new failures can keep a bisection going for as long as PRs
+  // keep arriving. When no priority PR is waiting, the oldest such change takes
+  // the turn a priority batch would: it goes ahead of the next half, and that
+  // half goes after it, so the two take turns.
+  const starved =
+    pending.length && !halvesFirst
+      ? ready.find((p) => alone(p) && !bisecting.has(p.number))
+      : undefined;
+  // It carries what the bisection blamed, so the half after it keeps it.
+  if (starved)
+    return {
+      kind: "build",
+      members: [starved],
+      pending,
+      aheadOfBisection: true,
+      ...(blame.length ? { blame } : {}),
+    };
+
   // A half holding a priority PR runs before the other halves; the halves are
   // independent, so their order only decides which PRs land sooner.
   const holdsPriority = (group: number[]) =>
@@ -422,10 +443,13 @@ export function nextBatch(
         ...carried,
       };
     }
+    // A group larger than a batch runs its first maxBatch PRs; the others stay
+    // next in line as their own group instead of dropping out of the retest.
+    const overflow = group.slice(settings.maxBatch).map((p) => p.number);
     return {
       kind: "build",
       members: group.slice(0, settings.maxBatch),
-      pending: rest,
+      pending: overflow.length ? [overflow, ...rest] : rest,
       ...carried,
     };
   }
@@ -571,7 +595,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
             : "its CI failed",
         });
-        blame = blamed(blame, result.runs);
+        // What a batch built ahead of a bisection failed in says nothing about
+        // the bisection's halves.
+        if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
         halvesFirst = manifest.aheadOfBisection === true;
         if (numbers.length === 1) {
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;

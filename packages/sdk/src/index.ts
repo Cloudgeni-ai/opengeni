@@ -1,3 +1,11 @@
+export type {
+  BillingAlertSettings,
+  UpdateBillingAlertSettingsRequest,
+  BillingCreditNotification,
+  BillingCreditNotificationKind,
+  BillingCreditNotificationDetails,
+  ListBillingCreditNotificationsResponse,
+} from "@opengeni/contracts/billing-credit-notifications";
 export { isConnectedMachineOutcomeUnknownOutput } from "./connected-machine-output";
 export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
@@ -1028,6 +1036,11 @@ export type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointsResponse,
+  CreateOrganizationCompatibleEndpointRequest,
+  ReplaceOrganizationCompatibleEndpointKeyRequest,
+  CreateOrganizationCompatibleEndpointModelRequest,
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,

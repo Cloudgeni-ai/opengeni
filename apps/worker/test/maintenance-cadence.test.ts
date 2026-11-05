@@ -215,6 +215,7 @@ describe("internal maintenance jobs", () => {
       workflow: { start: async () => undefined, signalWithStart: async () => undefined } as never,
     });
     expect(Object.fromEntries(cadences.map((c) => [c.job, c.periodMs]))).toEqual({
+      "billing-credit-alerts": 60_000,
       "subscription-usage-retention": 60_000,
       "session-workflow-wake-dispatcher": 10_000,
       "knowledge-indexing": KNOWLEDGE_INDEXING_PERIOD_MS,

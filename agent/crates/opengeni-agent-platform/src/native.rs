@@ -79,6 +79,8 @@ impl NativePlatform {
     /// [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
+        #[cfg(unix)]
+        crate::null_device::prime();
         let home_dir = user_home_dir();
         let workspace_root = resolve_workspace_root(
             std::env::current_dir().ok(),
@@ -99,6 +101,8 @@ impl NativePlatform {
     /// the user overrides the workspace root).
     #[must_use]
     pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
+        #[cfg(unix)]
+        crate::null_device::prime();
         Self {
             workspace_root: workspace_root.into(),
             home_dir: user_home_dir(),
@@ -328,11 +332,13 @@ fn requested_policy(
 /// anchor's stdin writer open; a runner crash closes it in the kernel, causing
 /// the anchor to kill the operation cgroup when present or its own process group
 /// otherwise. Keeping this private child unreaped also fences numeric PGID reuse.
+/// Its stderr is already the agent's kept null device, so the script never
+/// names `/dev/null`: a removed one would otherwise skip every kill below.
 #[cfg(unix)]
 const UNIX_EXEC_ANCHOR: &str = "\
 while IFS= read -r _; do :; done; \
-if [ -n \"$1\" ] && printf '1' > \"$1\" 2>/dev/null; then exit 0; fi; \
-kill -KILL -- \"-$$\" 2>/dev/null || kill -KILL \"-$$\" 2>/dev/null || true";
+if [ -n \"$1\" ] && printf '1' > \"$1\"; then exit 0; fi; \
+kill -KILL -- \"-$$\" || kill -KILL \"-$$\" || true";
 
 struct ExecOutput {
     exit_code: i32,
@@ -421,8 +427,10 @@ impl ExecProcessGroup {
             .process_group(0)
             .kill_on_drop(true)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // The retained null device, never `/dev/null` by path: a machine
+            // whose `/dev/null` was removed must still start programs.
+            .stdout(crate::null_device::null_stdio())
+            .stderr(crate::null_device::null_stdio());
         #[cfg(target_os = "linux")]
         let _ = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
         #[cfg(target_os = "linux")]
@@ -1120,6 +1128,31 @@ fn spawn_contained_with_policy(
     })
 }
 
+/// The longest program name a spawn error repeats.
+const PROGRAM_NAME_LIMIT: usize = 160;
+
+/// A program name for an error message: one line, bounded, so an error can
+/// never carry a whole script.
+fn describe_program(program: &std::ffi::OsStr) -> String {
+    let text = program.to_string_lossy();
+    let line: String = text
+        .chars()
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            // The message quotes the name, so it never holds a `"` itself.
+            '"' => '\'',
+            c => c,
+        })
+        .collect();
+    let line = line.trim();
+    if line.chars().count() > PROGRAM_NAME_LIMIT {
+        let head: String = line.chars().take(PROGRAM_NAME_LIMIT).collect();
+        format!("{head}…")
+    } else {
+        line.to_string()
+    }
+}
+
 #[async_trait]
 impl Platform for NativePlatform {
     fn host_identity(&self) -> HostIdentity {
@@ -1241,6 +1274,9 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
+        // Name the program actually started (the shell in shell mode), never the
+        // command text: a shell command can be a whole script.
+        let program = describe_program(cmd.as_std().get_program());
         spawn_contained_with_policy(
             cmd,
             self.cgroups.as_deref(),
@@ -1248,13 +1284,15 @@ impl Platform for NativePlatform {
             run_as.as_ref(),
         )
         .map_err(|e| {
-            PlatformError::from_io(
-                &format!(
-                    "spawn or apply execution containment for {}",
-                    req.command[0]
-                ),
-                &e,
-            )
+            // Quoted, so the runtime can tell a program name (which may hold
+            // spaces or backslashes) from an older agent's command text.
+            let context = format!("spawn or apply execution containment for program \"{program}\"");
+            #[cfg(unix)]
+            let context = match crate::null_device::spawn_failure_note(&e) {
+                Some(note) => format!("{context} ({note})"),
+                None => context,
+            };
+            PlatformError::from_io(&context, &e)
         })
     }
 
@@ -1865,6 +1903,182 @@ mod tests {
     }
 
     const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
+
+    /// Names how the re-executed child hides `/dev` (`rw` or `ro` tmpfs).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_MODE";
+    /// The parent's mount namespace, so the child can prove it is in another one
+    /// before it mounts anything over `/dev`.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_PARENT_NS_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_PARENT_NS";
+
+    /// The `unshare` arguments that give a child a private mount namespace it
+    /// may mount in: a plain mount namespace when the tests run as root, else a
+    /// rootless user namespace. `None` where neither is permitted.
+    #[cfg(target_os = "linux")]
+    fn private_mount_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
+        const ROOT: &[&str] = &["--mount", "--propagation", "private"];
+        let works = |args: &[&str]| {
+            std::process::Command::new("unshare")
+                .args(args)
+                .arg("true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        // Real root tries its own form first: in a rootless user namespace it
+        // would no longer be real root, so the repair would never be checked.
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
+            Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
+        } else {
+            None
+        }
+    }
+
+    /// Regression: a chat's command ran `rm -rf /dev/null` as root on a compute
+    /// box, and every later process start failed with "not found: spawn or apply
+    /// execution containment" until the box was rebooted. The agent must keep
+    /// starting programs once `/dev/null` is gone, whether or not it can put the
+    /// device back (`rw`: repair allowed as real root; `ro`: never repairable).
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_starts_programs_after_dev_null_is_removed() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_null_device_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_NULL_DEVICE_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /dev child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_starts_programs_after_dev_null_is_removed`]: hides `/dev` behind an
+    /// empty tmpfs in this private mount namespace, then starts a program.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_starts_programs_after_dev_null_is_removed"]
+    async fn hidden_null_device_child() {
+        let Ok(mode) = std::env::var(HIDDEN_NULL_DEVICE_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /dev outside a private mount namespace"
+        );
+        // The agent is up (platform built) before the device disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", &mode, "none", "/dev"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty /dev");
+        assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
+
+        let response = platform
+            .exec(&echo_request("still-starts"))
+            .await
+            .expect("a program starts after /dev/null was removed");
+        assert!(
+            String::from_utf8_lossy(&response.stdout).contains("still-starts"),
+            "stdout: {:?}",
+            response.stdout
+        );
+        let state = crate::null_device::inspect(Path::new("/dev/null"));
+        if mode == "ro" {
+            assert_eq!(state, crate::null_device::NullDeviceState::Missing);
+        } else if nix::unistd::geteuid().is_root() && in_initial_user_namespace() {
+            // Real root may mknod, so the agent puts the device back.
+            assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
+        }
+        eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+    }
+
+    /// Whether this process's root is the machine's root, not a user
+    /// namespace's (which may not create device nodes).
+    #[cfg(target_os = "linux")]
+    fn in_initial_user_namespace() -> bool {
+        std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|map| map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"])
+    }
+
+    #[test]
+    fn spawn_errors_name_a_bounded_single_line_program() {
+        let script = format!("node -e '\nconst raw = 1;\n{}'", "x".repeat(500));
+        let described = describe_program(std::ffi::OsStr::new(&script));
+        assert!(!described.contains('\n'), "{described}");
+        assert!(
+            described.chars().count() <= PROGRAM_NAME_LIMIT + 1,
+            "{described}"
+        );
+        assert_eq!(describe_program(std::ffi::OsStr::new("/bin/sh")), "/bin/sh");
+        assert_eq!(
+            describe_program(std::ffi::OsStr::new("/opt/a \"b\"/run")),
+            "/opt/a 'b'/run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_names_the_program_not_its_arguments() {
+        let (platform, _dir) = rooted();
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    "/nonexistent/opengeni-missing-program".to_string(),
+                    "--secret-argument".to_string(),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect_err("a missing program cannot start");
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "spawn or apply execution containment for program \"/nonexistent/opengeni-missing-program\""
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("--secret-argument"), "{message}");
+    }
 
     #[cfg(any(unix, windows))]
     fn descendant_command(parent_fixture: &str) -> Vec<String> {

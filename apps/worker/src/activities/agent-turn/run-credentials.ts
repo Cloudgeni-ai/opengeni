@@ -17,6 +17,8 @@ import {
   type CodemodeTokenWriterSession,
   RunMcpCredentials,
   selectedSessionRemoteMcpTargets,
+  softRunCredentialWriteFailure,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { codemodeWorkspaceUrl, type Settings } from "@opengeni/config";
 import {
@@ -121,6 +123,35 @@ export type PrepareRunCredentialsDeps = {
   connectionScope: { accountId: string; workspaceId: string };
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
 };
+
+/**
+ * Write a turn's run credential files. The first write of an attempt
+ * (`initial`) into a box whose own disk is full, over quota or read-only does
+ * not fail the turn: every earlier generation and staging folder is cleared
+ * instead (deleting needs no free space), so no older credentials stay active
+ * that this turn no longer grants, and the soft failure is returned for the
+ * model's notice. A clear that also fails, a renewal write, and any other
+ * failure throw the write's error.
+ */
+export async function writeRunCredentialFilesSoftly(input: {
+  initial: boolean;
+  write: () => Promise<void>;
+  clear: () => Promise<void>;
+}): Promise<SoftSetupFailure | null> {
+  try {
+    await input.write();
+    return null;
+  } catch (error) {
+    const failure = input.initial ? softRunCredentialWriteFailure(error) : null;
+    if (!failure) throw error;
+    try {
+      await input.clear();
+    } catch {
+      throw error;
+    }
+    return failure;
+  }
+}
 
 export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   return withSandboxStartupPhases(
@@ -666,12 +697,12 @@ async function prepareRunCredentialsObserved(
     credentialSession: RunCredentialCommandSession | undefined,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ): Promise<void> => {
-    if (!runCredentialResolver) return;
+  ): Promise<SoftSetupFailure | null> => {
+    if (!runCredentialResolver) return null;
     const previous = renewals.runCredentialRenewal;
     renewals.runCredentialRenewal = null;
     await previous?.stop();
-    if (renewals.runCredentialRenewalClosed) return;
+    if (renewals.runCredentialRenewalClosed) return null;
     renewals.runCredentialSession = credentialSession ?? null;
     initialMaterial = currentRunCredentialMaterial;
 
@@ -698,9 +729,13 @@ async function prepareRunCredentialsObserved(
               : undefined,
           ),
       );
-      return;
+      return null;
     }
-    if (!initialMaterial) return;
+    if (!initialMaterial) return null;
+    // The first write into a box whose own disk is full (or read-only) does
+    // not fail the turn: the model is told and can free space, and renewal
+    // writes the files again (sandbox-setup-soft-failure.ts).
+    let softFailure: SoftSetupFailure | null = null;
 
     const write = async (
       material: NormalizedRunCredentialMaterial | null,
@@ -726,31 +761,50 @@ async function prepareRunCredentialsObserved(
         return;
       }
 
-      if (credentialSession)
-        await runWorkspaceMutationForSandbox(
-          requireTargetSandbox(),
-          "runCredentialMaterialization",
-          async () =>
-            await materializeRunCredentials(credentialSession, material, {
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
-              ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
-              ...(material.authNeeded.length > 0 &&
-              Object.keys(material.environment).length === 0 &&
-              material.files.length === 0
-                ? { prunePreviousGenerations: true }
-                : {}),
-              ...(eventing.toolCancellationFenceRef.current
-                ? {
-                    commandRunner: eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      eventing.toolCancellationFenceRef.current,
-                    ),
-                  }
-                : {}),
-            }),
-        );
+      if (credentialSession) {
+        const commandRunner = eventing.toolCancellationFenceRef.current
+          ? eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+              eventing.toolCancellationFenceRef.current,
+            )
+          : undefined;
+        const failure = await writeRunCredentialFilesSoftly({
+          initial: pruneOtherAttempts,
+          write: async () =>
+            await runWorkspaceMutationForSandbox(
+              requireTargetSandbox(),
+              "runCredentialMaterialization",
+              async () =>
+                await materializeRunCredentials(credentialSession, material, {
+                  sessionId: input.sessionId,
+                  attemptId: input.attemptId,
+                  executionGeneration: attempt.executionGeneration,
+                  ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+                  ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+                  ...(material.authNeeded.length > 0 &&
+                  Object.keys(material.environment).length === 0 &&
+                  material.files.length === 0
+                    ? { prunePreviousGenerations: true }
+                    : {}),
+                  ...(commandRunner ? { commandRunner } : {}),
+                }),
+            ),
+          clear: async () =>
+            await runWorkspaceMutationForSandbox(
+              requireTargetSandbox(),
+              "runCredentialClear",
+              async () =>
+                await clearRunCredentials(credentialSession, input.sessionId, commandRunner),
+            ),
+        });
+        if (failure) {
+          softFailure = failure;
+          observability.warn("Run credential files could not be written; the turn continues", {
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+            cause: failure.cause.kind,
+          });
+        }
+      }
       throwIfTurnOperationCancelled(cancellationSignal);
       applyMcpCredentials();
       currentRunCredentialMaterial = material;
@@ -766,7 +820,7 @@ async function prepareRunCredentialsObserved(
     // refreshes are renewals, not fresh provisions that degrade to empty
     // auth-needed state on a provider transport failure.
     await write(initialMaterial, true);
-    if (renewals.runCredentialRenewalClosed) return;
+    if (renewals.runCredentialRenewalClosed) return softFailure;
     const controller = startRunCredentialRenewalLoop({
       initialExpiresAt: runCredentialRenewalExpiry(initialMaterial),
       resolve: async () =>
@@ -800,7 +854,7 @@ async function prepareRunCredentialsObserved(
     });
     if (renewals.runCredentialRenewalClosed) {
       await controller.stop();
-      return;
+      return softFailure;
     }
     renewals.runCredentialRenewal = controller;
     const initialExpiryMs = runCredentialRenewalExpiry(initialMaterial)?.getTime() ?? null;
@@ -808,6 +862,7 @@ async function prepareRunCredentialsObserved(
       await controller.refreshNow();
       throwIfTurnOperationCancelled(cancellationSignal);
     }
+    return softFailure;
   };
 
   // Remote MCP-only turns may never establish a sandbox. Start the same

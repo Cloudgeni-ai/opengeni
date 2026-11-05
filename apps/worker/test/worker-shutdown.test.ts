@@ -329,6 +329,123 @@ describe("shutdown phase telemetry", () => {
       expect(lifecycle.state()).toBe("failed");
     },
   );
+
+  // A stalled finalizer's activity never completes, so the SDK keeps its
+  // native activity poll (a second reference to the native worker) open; its
+  // force stop then fails in finalizeShutdown. The host stops first.
+  test("a contained worker stops cleanly once peers settle, before the SDK force stop", async () => {
+    const read = captureLogs();
+    const obs = structuredObservability();
+    let inFlight = 3;
+    let drains = 0;
+    let terminated = false;
+    let rejectSdkRun!: (error: Error) => void;
+    const sdkRun = new Promise<void>((_resolve, fail) => {
+      rejectSdkRun = fail;
+    });
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        drains++;
+        return lifecycle.drain("stalled turn finalization");
+      },
+      terminate: () => {
+        terminated = true;
+      },
+      inFlightActivities: () => inFlight,
+      checkIntervalMs: 5,
+      observability: obs,
+      timeoutMs: 10_000,
+    });
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability: obs,
+      cleanupContainmentRequested: containment.requested,
+      contained: containment.contained,
+      worker: { run: () => sdkRun, shutdown() {} },
+      closeOwnedResources: async () => {},
+    });
+    let settled = false;
+    const run = lifecycle.run().then(() => {
+      settled = true;
+    });
+    containment.request();
+    expect(drains).toBe(1);
+    // Peers are still draining or checkpointing: the host keeps waiting.
+    await Bun.sleep(30);
+    expect(settled).toBe(false);
+    inFlight = 1;
+    await run;
+    expect(lifecycle.state()).toBe("stopped");
+    expect(terminated).toBe(false);
+    // The SDK run that can never finalize rejects later; nothing observes it.
+    rejectSdkRun(
+      Object.assign(new Error("Worker still in use: Expected 1 reference, but got 2"), {
+        name: "IllegalStateError",
+      }),
+    );
+    await Bun.sleep(0);
+    const phases = read().filter((entry) => entry.surface === "worker_shutdown");
+    expect(phases.map(({ outcome }) => outcome)).toEqual(["contained", "contained", "closed"]);
+    expect(JSON.stringify(read())).not.toContain("Worker still in use");
+    let code: number | undefined;
+    await runWorkerProcessEntrypoint(
+      () => run,
+      (value) => {
+        code = value;
+      },
+    );
+    expect(code).toBe(0);
+    containment.finished();
+  });
+
+  test("a finalizer that recovers releases its hold and the worker stops normally", async () => {
+    const read = captureLogs();
+    const obs = structuredObservability();
+    let inFlight = 2;
+    let finishSdkRun!: () => void;
+    const sdkRun = new Promise<void>((resolve) => {
+      finishSdkRun = resolve;
+    });
+    const containment = createWorkerCleanupContainment({
+      drain: () => lifecycle.drain("stalled turn finalization"),
+      terminate: () => undefined,
+      inFlightActivities: () => inFlight,
+      checkIntervalMs: 5,
+      observability: obs,
+      timeoutMs: 10_000,
+    });
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability: obs,
+      cleanupContainmentRequested: containment.requested,
+      contained: containment.contained,
+      worker: {
+        run: async () => {
+          await sdkRun;
+          containment.finished();
+        },
+        shutdown() {},
+      },
+      closeOwnedResources: async () => {},
+    });
+    const run = lifecycle.run();
+    const release = containment.request();
+    release();
+    // One activity (a peer) still runs, and no stalled finalizer holds the
+    // containment: the host must not stop under it.
+    inFlight = 1;
+    await Bun.sleep(30);
+    expect(lifecycle.state()).toBe("draining");
+    inFlight = 0;
+    finishSdkRun();
+    await run;
+    expect(lifecycle.state()).toBe("stopped");
+    expect(
+      read()
+        .filter((entry) => entry.surface === "worker_shutdown")
+        .map(({ outcome }) => outcome),
+    ).toEqual(["stopped", "closed"]);
+  });
 });
 
 describe("standalone process exit", () => {

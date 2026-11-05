@@ -8,6 +8,8 @@ import {
 } from "@opengeni/core";
 import {
   automaticSessionTitleFanoutDue,
+  evaluateBillingCreditAlerts,
+  listBillingCreditAlertAccounts,
   browserDeadlineCheckpointDue,
   knowledgeIndexDue,
   maintainSubscriptionPlans,
@@ -70,6 +72,7 @@ export const INTERNAL_MAINTENANCE_JOBS = [
   "browser-deadline-checkpoint",
   "subscription-plan-maintenance",
   "subscription-usage-retention",
+  "billing-credit-alerts",
 ] as const;
 export type InternalMaintenanceJob = (typeof INTERNAL_MAINTENANCE_JOBS)[number];
 
@@ -148,6 +151,34 @@ export async function internalMaintenanceCadences(input: {
   const jobs = new Set(input.jobs ?? INTERNAL_MAINTENANCE_JOBS);
   const taskQueue = settings.temporalTaskQueue;
   const cadences: MaintenanceCadence[] = [];
+  if (jobs.has("billing-credit-alerts")) {
+    let cursor: string | null = null;
+    let accounts: string[] = [];
+    cadences.push({
+      job: "billing-credit-alerts",
+      periodMs: 60_000,
+      hasWork: async () => {
+        accounts = await listBillingCreditAlertAccounts(db, cursor);
+        if (accounts.length === 0) cursor = null;
+        return accounts.length > 0;
+      },
+      start: async () => {
+        for (const accountId of accounts) {
+          try {
+            await evaluateBillingCreditAlerts(db, accountId);
+          } catch (error) {
+            observability.warn("Credit alert evaluation failed", {
+              accountId,
+              error: errorMessage(error),
+            });
+          }
+          cursor = accountId;
+        }
+        if (accounts.length < 50) cursor = null;
+        return "started";
+      },
+    });
+  }
   if (jobs.has("subscription-usage-retention")) {
     cadences.push({
       job: "subscription-usage-retention",

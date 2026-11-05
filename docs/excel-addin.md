@@ -67,6 +67,19 @@ Excel on the web, Windows and Mac.
   browser and computer capability. Where authorized, its schema is in the
   first request with the goal and wait tools, so an Excel request starts with
   `excel_run` instead of a tool search.
+- **Files in and out.** `excel_run` also moves whole workbooks. `files` lists
+  up to five chat artifactIds the turn may read: the API resolves them to
+  retained artifact references, the pane downloads them as the person and the
+  code gets them as `files[i]` (`artifactId`, `name`, `contentType`, `base64`)
+  for `Excel.createWorkbook` or `context.workbook.insertWorksheetsFromBase64`.
+  `saveCopyAs` names a copy: after the code runs, the pane reads the whole
+  workbook with `Office.context.document.getFileAsync` (compressed, in slices
+  of up to 4 MB, unsaved changes included), uploads it as the person with the
+  chat's audience as its scope, and the API checks the upload (ready, the
+  person's, the expected scope, an .xlsx, just made) and publishes it to the
+  chat, so the result's `copy` gives an artifactId the agent links. Runs that
+  move files get the longer run timeout. A copy that fails keeps the code's
+  own result and reports why in `copy.error`.
 
 ## Behaviour to keep
 
@@ -76,6 +89,8 @@ Excel on the web, Windows and Mac.
   whose users share one service credential stays isolated per workspace.
 - A run whose result never arrives is reported as unknown, never as failed: the
   code may have changed the workbook.
+- A copy is always an .xlsx of the open workbook, never the file in OneDrive
+  or SharePoint itself, and it reaches only the people who can open the chat.
 - The sign-in window opens straight from the click (`promptBeforeOpen: false`)
   and falls back to Office's "allow this window" prompt only when a popup
   blocker stops it.
@@ -97,7 +112,11 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   workspace. Start a `WorkbookLink` with
   `ticket: () => client.createOfficeWorkbookTicket(workspaceId)` and
   `baseUrl` set to the product's Opengeni passthrough, such as
-  `"/api/opengeni"`. Follow Excel's theme with `officeTheme` and
+  `"/api/opengeni"`. Pass `files: { download, upload }` (normally
+  `client.downloadRetainedArtifact` and `client.uploadFile` in the pane's
+  workspace) so agents can open chat files in the workbook and save copies of
+  it to the chat; without it those runs fail with a plain error. Follow
+  Excel's theme with `officeTheme` and
   `watchOfficeTheme`, and send `workbookContextItem` plus
   `selectionContextItem` (fed by `watchSelection`) as `messageContext`.
   `workbookContextItem` names `excel_run` as its tool, so a chat that starts

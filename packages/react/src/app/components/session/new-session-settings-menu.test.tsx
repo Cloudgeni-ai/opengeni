@@ -171,6 +171,33 @@ test("picking a machine goes through the explicit compute path; offline ones can
   });
 });
 
+test("a machine row says what kind of computer it is and whether agents can use its screen", async () => {
+  const mac = {
+    ...(machine("studio") as object),
+    os: "macos",
+    arch: "aarch64",
+    hasDisplay: true,
+    allowScreenControl: true,
+  } as never;
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...choices({ machines: [machine("build-01"), mac] })}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Mac · Agents can use its screen");
+  expect(text).toContain("Linux · No screen");
+  expect(text).not.toContain("aarch64");
+  expect(text).not.toContain("x86_64");
+});
+
 test("in a menu, Runs on rows are menu radios that the keyboard reaches", async () => {
   const onComputeChange = mock();
   const onChange = mock();

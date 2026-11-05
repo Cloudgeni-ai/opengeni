@@ -1,4 +1,11 @@
-import type { EvalCase, Grade, FailureCategory, Receipts, ToolReceipt } from "./types";
+import type {
+  ApprovalAttempt,
+  EvalCase,
+  Grade,
+  FailureCategory,
+  Receipts,
+  ToolReceipt,
+} from "./types";
 
 /**
  * `count`: how many matching objects the service holds, when the verifier can tell.
@@ -169,6 +176,11 @@ function gradeApproved(
     );
     if (calls.some((call) => call === null || !call.completed))
       return fail("approval_problem", [...reasons, "an approved write never ran"]);
+    const wrong = testCase.approvedTool
+      ? calls.find((call) => call !== null && !testCase.approvedTool?.test(call.effectiveName))
+      : undefined;
+    if (wrong)
+      return fail("wrong_tool", [...reasons, `the approved write used ${wrong.effectiveName}`]);
     succeeded = calls.filter((call): call is ToolReceipt => call !== null && !call.errored);
     if (succeeded.length === 0)
       return failedCalls(receipts, testCase, reasons, "the approved write failed");
@@ -188,6 +200,46 @@ function gradeApproved(
     return fail("approval_problem", [...reasons, `one requested write applied ${applied} times`]);
   }
   return answerChecks(testCase, receipts, reasons);
+}
+
+/** The reason code of the 403 the product returns when someone other than a personal connection's owner approves. */
+const OWNER_ONLY_REFUSAL = "APPROVAL_REQUIRES_ACCOUNT_OWNER";
+
+/**
+ * Owner-only rows: the workspace key's approve attempt on the row's own tool
+ * must get the owner-only 403. Returns a failing grade, or null (with a
+ * reason added) when the refusal held.
+ */
+function ownerOnlyCheck(
+  testCase: EvalCase,
+  attempts: readonly ApprovalAttempt[],
+  reasons: string[],
+): Grade | null {
+  const tries = attempts.filter(
+    (attempt) =>
+      attempt.key === "workspace" &&
+      (!testCase.approvedTool || !attempt.tool || testCase.approvedTool.test(attempt.tool)),
+  );
+  if (tries.length === 0 || tries.some((attempt) => attempt.status === 0))
+    return fail("harness_error", [
+      ...reasons,
+      "no workspace-key approve attempt; set OPENGENI_EVAL_WORKSPACE_API_KEY",
+    ]);
+  if (tries.some((attempt) => attempt.status >= 200 && attempt.status < 300))
+    return fail("approval_problem", [
+      ...reasons,
+      "a workspace key approved a write on a personal connection",
+    ]);
+  const other = tries.find(
+    (attempt) => attempt.status !== 403 || attempt.code !== OWNER_ONLY_REFUSAL,
+  );
+  if (other)
+    return fail("harness_error", [
+      ...reasons,
+      `workspace-key approve got HTTP ${other.status} without the owner-only refusal: ${(other.detail ?? "").slice(0, 120)}`,
+    ]);
+  reasons.push("workspace key refused as not the owner (403)");
+  return null;
 }
 
 /** No integration tool ran: decide between wrong tool, made-up data and simply no tool. */
@@ -220,6 +272,7 @@ export function gradeCase(
   testCase: EvalCase,
   receipts: Receipts,
   verification: Verification | null = null,
+  attempts: readonly ApprovalAttempt[] = [],
 ): Grade {
   const reasons: string[] = [];
   if (receipts.humanInputRequests > 0)
@@ -270,10 +323,29 @@ export function gradeCase(
   }
 
   if (testCase.kind === "write") {
+    // The main key couldn't decide an approval: a setup problem, not the agent's.
+    const refused = attempts.find((attempt) => attempt.key === "main" && attempt.status === 403);
+    if (refused)
+      return fail("harness_error", [
+        ...reasons,
+        `the main key may not decide approvals here (403${refused.detail ? `: ${refused.detail.slice(0, 120)}` : ""}); for a personal connection it must be the owner's key`,
+      ]);
+    const ownApprovals = receipts.approvals.filter((approval) =>
+      ownIntegration(testCase, approval.integration),
+    );
+    const otherTool = testCase.approvedTool
+      ? ownApprovals.find((approval) => !testCase.approvedTool?.test(approval.name))
+      : undefined;
+    if (otherTool) return fail("wrong_tool", [...reasons, `asked to approve ${otherTool.name}`]);
     const undecided = receipts.approvals.some(
       (approval) => ownIntegration(testCase, approval.integration) && approval.decision === null,
     );
     if (undecided) return fail("approval_problem", [...reasons, "an approval was never decided"]);
+    // Without an approval, gradeApproved reports "no approval was requested".
+    if (testCase.ownerOnlyApproval && testCase.decision !== "reject" && ownApprovals.length > 0) {
+      const ownerFailure = ownerOnlyCheck(testCase, attempts, reasons);
+      if (ownerFailure) return ownerFailure;
+    }
     return testCase.decision === "reject"
       ? gradeDenied(testCase, receipts, verification, reasons)
       : gradeApproved(testCase, receipts, verification, reasons);

@@ -1,6 +1,7 @@
 import { codexSubscriptionHeaders, type CodexAuthHeaders } from "./api-client";
 import {
   CODEX_REALTIME_CALL_TIMEOUT_MS,
+  CODEX_REALTIME_CALLS_URL,
   CODEX_REALTIME_CONFIG_ID,
   CODEX_REALTIME_CONFIG_TIMEOUT_MS,
   CODEX_REALTIME_DEFAULT_VOICE,
@@ -8,7 +9,6 @@ import {
   CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK,
   CODEX_REALTIME_PROVIDER_MODEL_FALLBACK,
   CODEX_REALTIME_VERSION,
-  CODEX_RESPONSES_BASE,
   CODEX_WHAM_BASE,
 } from "./constants";
 import type { CodexFetch } from "./device-code";
@@ -331,8 +331,11 @@ export async function createCodexRealtimeCall(
   });
 
   const request = (async (): Promise<CodexRealtimeCallResult> => {
+    // One fresh voice session per provider call, named in both the header and
+    // the session body as the official Codex desktop app does.
+    const voiceSessionId = crypto.randomUUID();
     const response = await fetchImpl(
-      `${CODEX_RESPONSES_BASE}/realtime/calls?intent=quicksilver&architecture=${encodeURIComponent(providerConfig.architecture)}`,
+      `${CODEX_REALTIME_CALLS_URL}?intent=quicksilver&architecture=${encodeURIComponent(providerConfig.architecture)}`,
       {
         method: "POST",
         headers: {
@@ -341,6 +344,7 @@ export async function createCodexRealtimeCall(
           "openai-alpha": "quicksilver=v2",
           "session-id": input.sessionId,
           "thread-id": input.sessionId,
+          "voice-session-id": voiceSessionId,
         },
         body: JSON.stringify({
           sdp: input.sdp,
@@ -365,6 +369,7 @@ export async function createCodexRealtimeCall(
                   })),
                 }
               : {}),
+            voice_session_id: voiceSessionId,
           },
         }),
         signal: controller.signal,
