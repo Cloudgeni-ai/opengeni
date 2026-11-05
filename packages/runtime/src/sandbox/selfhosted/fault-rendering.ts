@@ -20,6 +20,7 @@ import {
   SelfhostedControlError,
   START_CONFIRMED_DETAIL_KEY,
 } from "./control-rpc";
+import { processStartFailureNullDeviceNote } from "./process-start-failure";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -33,6 +34,7 @@ export function selfhostedFaultClass(error: SelfhostedControlError): string {
     return "payload_too_large";
   if (error.reason === "agent_reconnecting") return "reconnecting";
   if (error.reason === "consent_required") return "consent";
+  if (error.processStartFailed) return "process_start";
   if (error.osNotFound || error.code === ErrorCode.ERROR_CODE_NOT_FOUND) return "not_found";
   if (error.fenced || error.code === ErrorCode.ERROR_CODE_FENCED) return "fenced";
   switch (error.code) {
@@ -59,6 +61,7 @@ export const SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES: ReadonlySet<string> = new 
   "draining",
   "payload_too_large",
   "reconnecting",
+  "process_start",
   "os",
   "stream",
   "protocol",
@@ -243,6 +246,19 @@ export function renderSelfhostedFault(
       tryNext:
         "wait a moment and try again; if this was a state-changing command, check whether it " +
         "already took effect before re-running it.",
+    });
+  }
+
+  if (error.processStartFailed) {
+    const nullDevice = processStartFailureNullDeviceNote(error.message);
+    return assemble(error, {
+      headline: "the machine could not start the program",
+      happened: `the machine could not start a process: ${error.message}`,
+      layer: "the machine's operating system — not your command",
+      preserved: "nothing ran; the command never started.",
+      tryNext: `${
+        nullDevice ? `${nullDevice}, so the machine` : "the machine likely"
+      } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it; for a workspace machine, retrying may restart it, and a new chat gets a fresh one.`,
     });
   }
 

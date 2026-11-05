@@ -560,6 +560,13 @@ export class ComputeSandboxSession extends SelfhostedSession {
   /** Nothing to start: a request to a sleeping sandbox wakes it. */
   async start(): Promise<void> {}
 
+  /** Boot this box afresh from its disk (files kept, programs ended). Used
+   * when its running system can no longer start programs; the next request
+   * wakes it on a new agent connection. */
+  async restartMachine(): Promise<void> {
+    await this.computeDeps.control.restart(this.state.sandboxId);
+  }
+
   async running(): Promise<boolean> {
     try {
       await this.computeDeps.control.get(this.state.sandboxId);

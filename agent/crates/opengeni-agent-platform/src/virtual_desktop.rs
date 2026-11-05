@@ -58,8 +58,10 @@ impl VirtualXvfb {
             .arg(&geometry)
             .arg("-nolisten")
             .arg("tcp")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            // The retained null device: a machine whose `/dev/null` was
+            // removed can still start its display.
+            .stdout(crate::null_device::null_stdio())
+            .stderr(crate::null_device::null_stdio())
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

@@ -598,6 +598,13 @@ export {
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
 export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  processStartFailureNullDeviceNote,
+} from "./selfhosted/process-start-failure";
+export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
   NO_WAKE_HEADER,

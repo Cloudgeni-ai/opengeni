@@ -240,6 +240,17 @@ export class ComputeControlClient {
     );
   }
 
+  /** Boot the sandbox afresh from its disk, keeping its files and shape. Its
+   * running programs end; the next request wakes it on a new agent
+   * connection. */
+  async restart(sandboxId: string): Promise<ComputeSandboxView> {
+    return await this.request<ComputeSandboxView>(
+      "POST",
+      `/v1/sandboxes/${encodeURIComponent(sandboxId)}/restart`,
+      {},
+    );
+  }
+
   /** The team's sandboxes whose metadata holds every given pair. */
   async list(metadata: Record<string, string> = {}): Promise<ComputeSandboxView[]> {
     const query = new URLSearchParams(metadata).toString();

@@ -2022,6 +2022,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const eagerOwnedSandboxSetup = createEagerOwnedSandboxSetup(
             {
               input,
+              attempt,
               db,
               observability,
               runtimeCancellationSignal,

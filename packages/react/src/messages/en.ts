@@ -2190,6 +2190,8 @@ export const englishMessages = {
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
   "lib.providerRecovery.theSandboxServiceIsTemporarily":
     "The sandbox service is temporarily unavailable",
+  "lib.providerRecovery.theWorkspaceMachineWasRestarted":
+    "The workspace machine couldn't start programs, so it was restarted",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
@@ -3999,6 +4001,8 @@ export const englishMessages = {
     "This tab cannot safely continue with the new server version. Reload it before sending or controlling work.",
   "providerRecoveryNotice.theTurnContinuesAutomaticallyAs":
     "The turn continues automatically as soon as the sandbox is ready.",
+  "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
+    "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
     "Your message is saved. {product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
@@ -5489,6 +5493,8 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.repositoryPreparationInterrupted":
     "Repository preparation interrupted",
   "timeline.platformActivityPresentation.repositoryReady": "Repository ready",
+  "timeline.platformActivityPresentation.restartingTheWorkspaceMachine":
+    "Restarting the workspace machine",
   "timeline.platformActivityPresentation.runtimeModelPreparationFailed":
     "Runtime/model preparation failed",
   "timeline.platformActivityPresentation.runtimeModelPreparationInterrupted":
@@ -5529,6 +5535,11 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.workerStarted": "Worker started",
   "timeline.platformActivityPresentation.workerStartupFailed": "Worker startup failed",
   "timeline.platformActivityPresentation.workerWaitInterrupted": "Worker wait interrupted",
+  "timeline.platformActivityPresentation.workspaceMachineRestarted": "Workspace machine restarted",
+  "timeline.platformActivityPresentation.workspaceMachineRestartFailed":
+    "Workspace machine restart failed",
+  "timeline.platformActivityPresentation.workspaceMachineRestartInterrupted":
+    "Workspace machine restart interrupted",
   "timeline.platformActivityRow.command": "Command",
   "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":
