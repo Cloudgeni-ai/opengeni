@@ -467,6 +467,11 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointsResponse,
+  CreateOrganizationCompatibleEndpointRequest,
+  ReplaceOrganizationCompatibleEndpointKeyRequest,
+  CreateOrganizationCompatibleEndpointModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -6337,6 +6342,81 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** List the organization's OpenAI-compatible endpoints and their models. */
+  async listOrganizationCompatibleEndpoints(
+    organizationId: string,
+  ): Promise<OrganizationCompatibleEndpointsResponse> {
+    return await this.requestJson<OrganizationCompatibleEndpointsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+    );
+  }
+
+  /** Connect an OpenAI-compatible endpoint with its first model. */
+  async createOrganizationCompatibleEndpoint(
+    organizationId: string,
+    request: CreateOrganizationCompatibleEndpointRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+      request,
+    );
+  }
+
+  /** Replace an OpenAI-compatible endpoint's API key. */
+  async replaceOrganizationCompatibleEndpointKey(
+    organizationId: string,
+    connectionId: string,
+    request: ReplaceOrganizationCompatibleEndpointKeyRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/key`,
+      request,
+    );
+  }
+
+  /** Disconnect an OpenAI-compatible endpoint; its models stop at once. */
+  async revokeOrganizationCompatibleEndpoint(
+    organizationId: string,
+    connectionId: string,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /** Add a model to an OpenAI-compatible endpoint. */
+  async createOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    request: CreateOrganizationCompatibleEndpointModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Remove a model from an OpenAI-compatible endpoint. */
+  async deleteOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}`,
+      request,
     );
   }
 

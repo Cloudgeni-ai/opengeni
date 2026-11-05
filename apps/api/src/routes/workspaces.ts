@@ -22,6 +22,7 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  listOrganizationCompatibleEndpointsForWorkspace,
   loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
@@ -751,6 +752,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
       organizationDefaults,
       creditBalance,
+      organizationCompatibleEndpoints,
     ] = await Promise.all([
       claudeCore.then((core) =>
         getWorkspaceConnectionModelRestrictions(
@@ -810,6 +812,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.settings.billingMode === "stripe"
         ? getBillingBalance(deps.db, grant.accountId)
         : Promise.resolve(undefined),
+      // The organization's own OpenAI-compatible endpoints this workspace can use.
+      catalogInputs?.then((inputs) => inputs.organizationCompatibleEndpoints) ??
+        listOrganizationCompatibleEndpointsForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+        }),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
     const connectionModelRestrictions = xaiCatalog.core
@@ -871,6 +879,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           models: organizationProviders.azure_openai?.models ?? [],
         },
       },
+      organizationCompatibleEndpoints,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.

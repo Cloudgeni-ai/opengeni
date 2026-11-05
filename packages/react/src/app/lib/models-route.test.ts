@@ -70,6 +70,24 @@ describe("Models URLs", () => {
     });
   });
 
+  test("compatible endpoints are organization accounts addressed by endpoint id", () => {
+    const id = "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+    expect(parseModelsAccount(`org:compatible:${id}`)).toBe(`org:compatible:${id}`);
+    expect(accountKeyOf(`org:compatible:${id}`)).toEqual({
+      provider: "compatible",
+      id,
+      organization: true,
+    });
+    expect(parseModelsAccount(`compatible:${id}`)).toBeUndefined();
+    expect(parseModelsAccount("org:compatible:not-a-uuid")).toBeUndefined();
+    expect(parseModelsView("connect-org:openai_compatible")).toBe("connect-org:openai_compatible");
+    expect(parseModelsView("connect:openai_compatible")).toBeUndefined();
+    expect(connectStepOf("connect-org:openai_compatible")).toEqual({
+      provider: "openai_compatible",
+      organization: true,
+    });
+  });
+
   test("a workspace's old Models URL opens its page in Organization settings > Models", () => {
     expect(
       workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: undefined }),

@@ -21,7 +21,12 @@ import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
-import { AzureOpenAIEndpoint } from "./direct-model-provider";
+import {
+  AzureOpenAIEndpoint,
+  CompatibleModelApi,
+  CompatibleModelBaseUrl,
+  CompatibleModelName,
+} from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import {
   isClaudeSubscriptionProviderId,
@@ -3974,6 +3979,78 @@ export const RevokeOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
 );
 export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
   typeof RevokeOrganizationModelProviderConnectionRequest
+>;
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    status: z.enum(["active", "revoked"]),
+    version: primitives.positiveInteger,
+    /** The public HTTPS base URL, usually ending in `/v1`. */
+    baseUrl: z.string().url(),
+    api: CompatibleModelApi,
+    label: primitives.nullableString,
+    /** The endpoint's active models. */
+    models: z.array(OrganizationProviderCustomModel),
+    createdAt: primitives.dateTime,
+    updatedAt: primitives.dateTime,
+  }),
+);
+export type OrganizationCompatibleEndpoint = z.infer<typeof OrganizationCompatibleEndpoint>;
+export const OrganizationCompatibleEndpointsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ endpoints: z.array(OrganizationCompatibleEndpoint) }),
+);
+export type OrganizationCompatibleEndpointsResponse = z.infer<
+  typeof OrganizationCompatibleEndpointsResponse
+>;
+/**
+ * Connect an OpenAI-compatible endpoint with its first model. The API checks
+ * the model with a short test request to the endpoint before saving.
+ */
+export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: primitives.uuid,
+      baseUrl: CompatibleModelBaseUrl,
+      apiKey: primitives.string.trim().min(1).max(8192),
+      model: CompatibleModelName,
+      api: CompatibleModelApi.default("chat"),
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(60)
+        .regex(/^[^\r\n|]+$/)
+        .optional(),
+    })
+    .strict(),
+);
+export type CreateOrganizationCompatibleEndpointRequest = z.input<
+  typeof CreateOrganizationCompatibleEndpointRequest
+>;
+/** Replace an endpoint's key; the API checks it against one of the endpoint's models first. */
+export const ReplaceOrganizationCompatibleEndpointKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger,
+      apiKey: primitives.string.trim().min(1).max(8192),
+    })
+    .strict(),
+);
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = z.infer<
+  typeof ReplaceOrganizationCompatibleEndpointKeyRequest
+>;
+/** Add a model to an endpoint; the API checks it with the endpoint's key first. */
+export const CreateOrganizationCompatibleEndpointModelRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operationId: primitives.uuid, upstreamModelId: CompatibleModelName }).strict(),
+);
+export type CreateOrganizationCompatibleEndpointModelRequest = z.infer<
+  typeof CreateOrganizationCompatibleEndpointModelRequest
 >;
 
 const turnInitiatorIdentityFields = {
