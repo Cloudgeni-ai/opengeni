@@ -515,6 +515,7 @@ fn managed_fetch_failure(
 fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {
     let output = std::process::Command::new(install_path)
         .arg("--version")
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output()
         .map_err(|source| UpdateError::Io {
             path: install_path.display().to_string(),

@@ -782,8 +782,11 @@ fn default_git_email_with(
 }
 
 /// A discarded stdio stream: the agent's retained null device on Unix, so a
-/// machine whose `/dev/null` was removed can still run the probe.
-fn discarded_stdio() -> std::process::Stdio {
+/// machine whose `/dev/null` was removed can still start the program. Use it
+/// for every stream a program the agent starts does not need, including stdin
+/// before `Command::output`, which otherwise opens `/dev/null` by path.
+#[must_use]
+pub fn discarded_stdio() -> std::process::Stdio {
     #[cfg(unix)]
     {
         null_device::null_stdio()

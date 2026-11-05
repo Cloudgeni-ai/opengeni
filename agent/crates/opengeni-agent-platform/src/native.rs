@@ -2128,6 +2128,21 @@ mod tests {
         assert!(mounted.success(), "mount an empty /dev");
         assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
 
+        // `Command::output` opens /dev/null by path for stdin, so the agent's
+        // other program starts (self-update check, metrics, service probes,
+        // app launch) hand it the retained device instead.
+        let bare = std::process::Command::new("true").output();
+        assert!(
+            bare.as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "{bare:?}"
+        );
+        let probed = std::process::Command::new("true")
+            .stdin(crate::discarded_stdio())
+            .output()
+            .expect("a program starts with the retained null device");
+        assert!(probed.status.success());
+
         let response = platform
             .exec(&echo_request("still-starts"))
             .await
