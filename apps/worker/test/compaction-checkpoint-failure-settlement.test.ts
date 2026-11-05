@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { DrizzleQueryError } from "drizzle-orm";
 import * as database from "@opengeni/db";
 import { GitHubRestAuthorityError } from "@opengeni/runtime/github-rest-mcp";
 import * as parentWake from "../src/activities/parent-wake";
@@ -35,7 +36,7 @@ function failureDeps(error: unknown, triggerType: string) {
     observability: {
       incrementCounter: () => undefined,
       observeHistogram: () => undefined,
-      warn: () => undefined,
+      warn: mock((_message: string, _attributes?: Record<string, unknown>) => undefined),
       error: () => undefined,
     },
     wakeSessionWorkflow: async () => undefined,
@@ -91,6 +92,15 @@ function delegationUnavailable(): GitHubRestAuthorityError {
   return new GitHubRestAuthorityError("Personal GitHub delegation is unavailable");
 }
 
+/** A lost database connection, with the driver provenance recovery requires. */
+function databaseConnectionLost(): Error {
+  return new DrizzleQueryError(
+    "select compact_requested from sessions where id = $1",
+    ["session-1"],
+    Object.assign(new Error("connection lost"), { name: "PostgresError", code: "40P01" }),
+  );
+}
+
 const restores: Array<() => void> = [];
 afterEach(() => {
   for (const restore of restores.splice(0)) restore();
@@ -104,18 +114,16 @@ function stubDependencies(requestPending: boolean | Error) {
     if (requestPending instanceof Error) throw requestPending;
     return requestPending;
   });
-  const warn = spyOn(console, "warn").mockImplementation(() => {});
   restores.push(
     () => deliver.mockRestore(),
     () => pending.mockRestore(),
-    () => warn.mockRestore(),
   );
-  return { deliver, pending, warn };
+  return { deliver, pending };
 }
 
 describe("a compaction checkpoint that fails", () => {
   test("settles as a failed compaction, keeps the session usable and consumes the request", async () => {
-    const { deliver, pending, warn } = stubDependencies(true);
+    const { deliver, pending } = stubDependencies(true);
     const { deps, control, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
 
     const result = await settleTurnFailure(deps as never);
@@ -145,11 +153,17 @@ describe("a compaction checkpoint that fails", () => {
     expect(settlement.events[1]!.payload).toEqual({ status: "idle" });
     expect(control.activityStatus).toBe("idle");
     expect(control.turnMetricOutcome).toBe("failed");
-    // Maintenance is not handed to a parent as a failed child turn right away.
+    // Not delivered to a parent right away; the settlement's own failed-child
+    // notice still reaches it through the reconciler.
     expect(deliver).not.toHaveBeenCalled();
-    // The full diagnostic stays in the log.
+    // The classification goes to telemetry, without the error message.
+    const warn = deps.observability.warn;
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[1]).toMatchObject({ sessionId: "session-1" });
+    expect(warn.mock.calls[0]?.[1]).toMatchObject({
+      sessionId: "session-1",
+      errorName: "GitHubRestAuthorityError",
+    });
+    expect(JSON.stringify(warn.mock.calls[0])).not.toContain("delegation");
   });
 
   test("leaves an already consumed request alone", async () => {
@@ -162,12 +176,27 @@ describe("a compaction checkpoint that fails", () => {
     expect(settlement).not.toHaveProperty("consumeRequestedCompactionFailure");
   });
 
-  test("an unreadable request is not settled idle, where it would be claimed again", async () => {
-    stubDependencies(new Error("database unavailable"));
-    const { deps, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
+  test("an unreadable request goes to database recovery, not idle where it would be claimed again", async () => {
+    stubDependencies(databaseConnectionLost());
+    const { deps, control, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
 
-    await expect(settleTurnFailure(deps as never)).rejects.toThrow();
+    await expect(settleTurnFailure(deps as never)).rejects.toMatchObject({
+      type: "OpenGeniPostClaimDatabaseRecovery",
+    });
     expect(settle).not.toHaveBeenCalled();
+    expect(control.activityStatus).toBe("recovering");
+  });
+
+  test("a recoverable error still recovers before the checkpoint is settled", async () => {
+    const { pending } = stubDependencies(true);
+    const { deps, control, settle } = failureDeps(databaseConnectionLost(), COMPACTION_TRIGGER);
+
+    await expect(settleTurnFailure(deps as never)).rejects.toMatchObject({
+      type: "OpenGeniPostClaimDatabaseRecovery",
+    });
+    expect(settle).not.toHaveBeenCalled();
+    expect(pending).not.toHaveBeenCalled();
+    expect(control.activityStatus).toBe("recovering");
   });
 
   test("a superseded settlement stays cancelled", async () => {

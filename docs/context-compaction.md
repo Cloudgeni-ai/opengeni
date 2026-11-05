@@ -634,6 +634,19 @@ unchanged history. A later human/API prompt, Steer, explicitly requested
 Compact, or genuinely new machine input can create newer truth and make one new
 attempt. The active history stays unchanged throughout.
 
+A standalone compaction execution (the idle checkpoint below, or an explicit
+`/compact` on an idle session) is maintenance, so any terminal failure that
+reaches the generic turn-failure settlement, for example while preparing its
+tools, settles the same way: `turn.failed` with `context_compaction_failed`,
+the session idle rather than failed, and a still-pending request consumed with
+`session.context.compaction.skipped(reason="summarization_failed")` so the
+execution is not claimed again. Every recovery path runs first. A failed read of
+the pending flag goes to post-claim database recovery instead of settling idle
+with the request still pending. The full diagnostic is logged; the recorded
+reason stays short. The timeline names an automatic compaction's failure
+(labelled Auto) with "Chat history is unchanged." and keeps "Request it again
+to retry." for a requested `/compact` or an overflow.
+
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
 and `response.incomplete` events are converted to ordinary non-2xx provider

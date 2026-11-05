@@ -232,6 +232,11 @@ repository identity, and current read/write permission before each provider
 request. `github_personal__*` tools are always attributed to the connected user;
 the separate `github_app__*` namespace acts as the Opengeni bot. Tool arguments
 cannot choose either actor or a repository outside the accepted resource set.
+A turn that carries no personal GitHub delegation (a compaction checkpoint, or a
+goal continuation with no earlier turn to copy from) leaves the
+`github_personal__*` tools out instead of failing; any turn other than
+compaction logs a warning. A delegation that only partly matches, or more than
+one, still fails closed.
 Writes use the attempt-frozen connector Allow/Ask/Block policy. When no explicit
 policy exists, the accepted repository write capability is authoritative and
 the action proceeds without manufacturing an approval requirement. Mutations

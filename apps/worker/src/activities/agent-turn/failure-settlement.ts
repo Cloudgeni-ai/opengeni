@@ -1708,14 +1708,20 @@ async function settleFailedCompactionCheckpoint(
   failureCode: string | undefined,
   notStartedToolCallIds: readonly string[],
 ): Promise<RunAgentTurnResult> {
-  const { input, db, control, eventing, claimedResult } = deps;
-  // The turn's recorded reason is short; keep the full diagnostic in the log.
-  console.warn("Compaction checkpoint failed", {
+  const { input, db, control, eventing, claimedResult, observability } = deps;
+  // The turn records a short reason; the classification goes to telemetry.
+  // Error class names only: never the message, which may hold content.
+  const diagnostic = safeErrorDiagnostic(error);
+  observability.warn("Compaction checkpoint failed", {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     attemptId: input.attemptId,
-    failureCode,
-    error: safeErrorDiagnostic(error),
+    failureCode: failureCode ?? "unknown",
+    // Many error subclasses keep the inherited name "Error"; their class
+    // name says more.
+    errorName:
+      error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error,
+    ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
   });
   // Consuming needs the request to still be pending (settlement is stale
   // otherwise); a checkpoint that already started has consumed it. A failed
