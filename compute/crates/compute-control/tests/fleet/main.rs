@@ -15,5 +15,6 @@ mod pointers;
 mod reach;
 mod resize;
 mod restart;
+mod room;
 mod support;
 mod templates;
