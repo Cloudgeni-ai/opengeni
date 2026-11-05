@@ -48,6 +48,7 @@ import {
   publishDurableSessionEvents,
   type EventBus,
 } from "@opengeni/events";
+import { isMcpAccountParameterChoiceError } from "@opengeni/runtime";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 export type CodemodeDispatcherScope = {
@@ -779,6 +780,10 @@ function boundedUtf16(value: string, max: number): string {
 }
 
 function safeErrorMessage(error: unknown): string {
+  if (isMcpAccountParameterChoiceError(error)) {
+    // Nothing was sent; the message names the account's values to choose from.
+    return boundedUtf16(error.message, CODEMODE_ERROR_MESSAGE_MAX);
+  }
   if (isSecretReferenceError(error)) {
     // References and the ready ask card only; never values.
     const output = error.toModelOutput();

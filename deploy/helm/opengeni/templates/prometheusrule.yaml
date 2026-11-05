@@ -238,6 +238,9 @@ spec:
           # its recovery request recorded is scheduled, not overdue, so
           # sustained 429s that keep some session in backoff stay silent.
           # Overdue > 5m held for 5m means a single session is >= 10m past due.
+          # The workflow-wake reaper re-wakes a stranded recovery about four
+          # minutes after its close; apps/worker's session-recovery-repair-alert
+          # test keeps this window clearly longer, so a self-repair never pages.
           expr: |
             max by (state) (
               opengeni_session_recovery_oldest_overdue_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
@@ -1781,17 +1784,28 @@ spec:
         - alert: OpenGeniCodexPromptCacheTelemetryMissing
           # A missing cached-token field is unknown, not a truthful 0% hit. Keep
           # that semantics and detect active calls with no usage observations.
+          # A call that reported no usage at all (status="no_usage", for example a
+          # terminal response without a usage object) is not a missing cache field.
+          # One call must not page: missing fields need at least 3 calls and over 5%
+          # of the calls that reported usage in 30m.
           # HTTP success is recorded at response headers, before streamed usage
           # is committed; counter skew does not prove a missing cached-token field.
-          # Absent usage needs at least 20 completed calls in 30m: after a worker restart the first
-          # increment of a new counter is invisible to rate(), so a handful of calls looks missing.
+          # Absent usage (no call reported usage) needs at least 20 completed calls in 30m: after a
+          # worker restart the first increment of a new counter is invisible to rate(), so a handful
+          # of calls looks missing.
           expr: |
-            (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            (
+              sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m])) >= 3
+              and on()
+              sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m]))
+              /
+              clamp_min(sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status=~"reported|missing"}[30m])), 1) > 0.05
+            )
             or
             (
               sum(increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",outcome="completed"}[30m])) >= 20
               and on()
-              (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription"}[30m])) or vector(0)) == 0
+              (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status=~"reported|missing"}[30m])) or vector(0)) == 0
             )
           for: 15m
           labels:
@@ -1801,7 +1815,7 @@ spec:
             headline: 'Codex cache metrics missing'
             user_impact: 'No user impact; we cannot measure Codex cache efficiency.'
             next_step: 'Not urgent: an engineer should check whether the Codex usage format changed.'
-            description: For 15m, Codex-subscription usage has explicitly omitted cached-token fields, or active HTTP-success traffic has produced no cache-usage observations. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
+            description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           expr: |

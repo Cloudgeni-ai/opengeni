@@ -16,6 +16,7 @@ import {
   PASSKEY_FIELD_NAMES,
   type SecretPrincipal,
   type SecretResolver,
+  secretNameKey,
 } from "@opengeni/contracts";
 import { createSecretResolver, createVaultService, type VaultService } from "@opengeni/core";
 import {
@@ -48,6 +49,37 @@ const HOLDER_PRINCIPALS_LIMIT = 1_024;
 const PROVIDER_PASSKEY_READS_PER_LEASE = 32;
 
 type PasskeyFieldName = (typeof PASSKEY_FIELD_NAMES)[number];
+
+const PASSKEY_FIELD_KEYS: ReadonlySet<string> = new Set(PASSKEY_FIELD_NAMES.map(secretNameKey));
+
+/** Why a leased item's passkey was not loaded into the browser. */
+export type PasskeyLeaseSkipReason =
+  /** A person must approve each use of the whole item (or of the passkey's own fields). */
+  | "approval_required"
+  /** Secrets are turned off for this chat. */
+  | "secrets_disabled"
+  /** No connected password manager is reachable from here. */
+  | "provider_unavailable"
+  /** The item's password manager cannot read passkeys. */
+  | "provider_cannot_read_passkeys"
+  /** Reading the passkey from the password manager failed. */
+  | "provider_read_failed"
+  /** The password manager no longer returns a passkey for the item. */
+  | "provider_returned_no_passkeys"
+  /** A hosted passkey item lacks its rpId, credentialId or privateKey. */
+  | "incomplete_passkey";
+
+/**
+ * Whether approval rules keep an item's passkey out of the browser. A rule on
+ * the whole item does. A rule on one field does only when the passkey uses
+ * that field: a hosted passkey item is made of its passkey fields, while a
+ * connected login's passkey is read from its password manager and uses none
+ * of the login's fields, so asking before its password is used leaves the
+ * passkey usable.
+ */
+function passkeyNeedsApproval(ruleFieldKeys: readonly string[], connected: boolean): boolean {
+  return ruleFieldKeys.some((key) => key === "" || (!connected && PASSKEY_FIELD_KEYS.has(key)));
+}
 
 function fieldKey(name: string): string {
   return name.toLowerCase();
@@ -86,7 +118,8 @@ export function createVaultInteractionSecretsPort(deps: {
     subjectId: string | null,
     principal?: AttemptSecretPrincipal,
   ) => VaultProviderRegistry;
-  /** Diagnostics for connected passkeys that could not be loaded or updated. */
+  /** Diagnostics: each lease's outcome (passkeys loaded, items skipped and
+   * why) and connected passkeys that could not be read or updated. */
   log?: (event: string, fields: Record<string, unknown>) => void;
 }): InteractionSecretsPort {
   const encryptionKey = deps.encryptionKey;
@@ -201,9 +234,9 @@ export function createVaultInteractionSecretsPort(deps: {
     row: VaultItemRow,
     registry: VaultProviderRegistry,
     budget: ReturnType<typeof createProviderCallBudget>,
-  ): Promise<BrowserPasskeyCredential[]> {
+  ): Promise<BrowserPasskeyCredential[] | "provider_cannot_read_passkeys"> {
     const { target, ref, provider } = await providerItem(principal, row, registry);
-    if (!provider.readPasskeys) return [];
+    if (!provider.readPasskeys) return "provider_cannot_read_passkeys";
     const passkeys: ProviderPasskey[] = await provider.readPasskeys(
       {
         connectionId: target.providerConnectionId,
@@ -234,6 +267,30 @@ export function createVaultInteractionSecretsPort(deps: {
     return row.vaultSource !== "opengeni" && (row.providerPasskeys?.length ?? 0) > 0;
   }
 
+  /** The last lease outcome logged per holder, so an unchanged one logs once. */
+  const loggedLeases = new Map<string, string>();
+
+  function logLease(
+    holder: string,
+    credentials: readonly BrowserPasskeyCredential[],
+    skipped: ReadonlyArray<{ itemId: string; reason: PasskeyLeaseSkipReason }>,
+  ): void {
+    if (!deps.log) return;
+    const fields = {
+      holder,
+      loaded: credentials.map(({ itemId, rpId }) => ({ itemId, rpId })),
+      skipped,
+    };
+    const outcome = JSON.stringify(fields);
+    if (loggedLeases.get(holder) === outcome) return;
+    loggedLeases.delete(holder);
+    loggedLeases.set(holder, outcome);
+    while (loggedLeases.size > HOLDER_PRINCIPALS_LIMIT) {
+      loggedLeases.delete(loggedLeases.keys().next().value!);
+    }
+    deps.log("browser.passkey.leased", fields);
+  }
+
   const passkeys: InteractionPasskeyStore = {
     async lease(principal, holder, ttlSeconds) {
       holders.delete(holder);
@@ -243,42 +300,59 @@ export function createVaultInteractionSecretsPort(deps: {
         holder,
         ttlSeconds,
       });
-      // An item that needs a person's approval for each use is never loaded
-      // into a browser without one.
-      const gated = new Set(
-        (
-          await listSecretApprovalRules(
-            deps.db,
-            { accountId: principal.accountId, workspaceId: principal.workspaceId },
-            itemIds,
-          )
-        ).map((rule) => rule.itemId),
-      );
+      const ruleFieldKeys = new Map<string, string[]>();
+      for (const rule of await listSecretApprovalRules(
+        deps.db,
+        { accountId: principal.accountId, workspaceId: principal.workspaceId },
+        itemIds,
+      )) {
+        ruleFieldKeys.set(rule.itemId, [...(ruleFieldKeys.get(rule.itemId) ?? []), rule.fieldKey]);
+      }
       const credentials: BrowserPasskeyCredential[] = [];
+      const skipped: Array<{ itemId: string; reason: PasskeyLeaseSkipReason }> = [];
+      const skip = (itemId: string, reason: PasskeyLeaseSkipReason) =>
+        skipped.push({ itemId, reason });
       let registry: VaultProviderRegistry | null | undefined;
       const budget = createProviderCallBudget(PROVIDER_PASSKEY_READS_PER_LEASE);
       for (const itemId of itemIds) {
-        if (gated.has(itemId)) continue;
         const row = await getVaultItem(deps.db, context(principal), { itemId });
-        if (isConnectedPasskeyItem(row)) {
-          if (!(await secretsEnabled(principal))) continue;
+        const connected = isConnectedPasskeyItem(row);
+        // A passkey that needs a person's approval for each use is never
+        // loaded into a browser without one.
+        if (passkeyNeedsApproval(ruleFieldKeys.get(itemId) ?? [], connected)) {
+          skip(itemId, "approval_required");
+          continue;
+        }
+        if (connected) {
+          if (!(await secretsEnabled(principal))) {
+            skip(itemId, "secrets_disabled");
+            continue;
+          }
           try {
             registry ??= await providerRegistry(principal);
-            if (registry) {
-              credentials.push(...(await providerCredentials(principal, row, registry, budget)));
+            if (!registry) {
+              skip(itemId, "provider_unavailable");
+              continue;
             }
+            const read = await providerCredentials(principal, row, registry, budget);
+            if (typeof read === "string") skip(itemId, read);
+            else if (read.length === 0) skip(itemId, "provider_returned_no_passkeys");
+            else credentials.push(...read);
           } catch (error) {
             // One unreachable password manager never blocks the other passkeys.
             deps.log?.("browser.passkey.provider_read_failed", {
               itemId,
               message: errorMessage(error),
             });
+            skip(itemId, "provider_read_failed");
           }
           continue;
         }
         const credential = await credentialFromItem(principal, row);
         if (credential) credentials.push(credential);
+        else skip(itemId, "incomplete_passkey");
       }
+      logLease(holder, credentials, skipped);
       return credentials;
     },
     async saveRegistered(principal, { credential, origin }) {
@@ -356,6 +430,7 @@ export function createVaultInteractionSecretsPort(deps: {
       }
     },
     async release(holder) {
+      loggedLeases.delete(holder);
       const principal = holders.get(holder);
       // Without the leasing principal (another API replica or a restart) the
       // lease simply expires after its TTL.

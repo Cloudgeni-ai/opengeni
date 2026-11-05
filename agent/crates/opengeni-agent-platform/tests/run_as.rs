@@ -521,6 +521,42 @@ async fn exec_enters_its_working_directory_as_the_user() {
     assert_eq!(&reply.stdout[..], b"behind a root-only parent");
 }
 
+#[tokio::test]
+async fn a_missing_workspace_root_is_recreated_for_the_agent_not_the_user() {
+    let Some(identity) = identity() else { return };
+    let dir = shared_dir();
+    let root = dir.path().join("workspace");
+    let platform = NativePlatform::with_root(&root);
+    // The user's command starts in the workspace root, which is gone.
+    let reply = exec_as(&platform, "pwd", USER).await;
+    assert_eq!(reply.exit_code, 0, "{reply:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reply.stdout).trim(),
+        root.to_string_lossy()
+    );
+    // It stays the agent's, open to every user, whatever the umask.
+    assert_eq!(owner(&root), owner(dir.path()));
+    let mode = std::fs::metadata(&root).expect("recreated").mode() & 0o7777;
+    assert_eq!(mode, 0o755);
+
+    // A placeholder home is never created for the user.
+    let placeholder = Path::new("/nonexistent");
+    if identity.home == placeholder && !placeholder.exists() {
+        let error = platform
+            .exec(&v1::ExecRequest {
+                command: vec!["pwd".to_string()],
+                shell: true,
+                cwd: "~".to_string(),
+                run_as: USER.into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("the placeholder home is not created");
+        assert_eq!(error.code(), v1::ErrorCode::NotFound, "{error}");
+        assert!(!placeholder.exists());
+    }
+}
+
 fn begin_request(path: &Path, content: &[u8], base: Option<&[u8]>) -> v1::FsWriteBegin {
     v1::FsWriteBegin {
         path: path.to_string_lossy().into_owned(),

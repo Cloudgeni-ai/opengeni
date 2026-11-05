@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_runners::compute::Compute;
+use compute_runners::github::wire::{Message, RawMessage};
 use compute_runners::github::{Credentials, Github, Removed, Scope};
 use compute_runners::pool::{self, BORN_KEY, ID_KEY, JIT_ENV, NAME_KEY, POOL_KEY, Pool};
 use fake::{Fake, Sandbox};
@@ -354,6 +355,107 @@ async fn a_message_whose_jobs_were_not_acquired_is_offered_again() {
     .await;
     stop.cancel();
     done.await.unwrap();
+}
+
+/// A message as the queue would send it: `jobs` and the jobs assigned.
+fn message(id: u64, jobs: &serde_json::Value, assigned: u32) -> Message {
+    let raw: RawMessage = serde_json::from_value(json!({
+        "messageId": id,
+        "messageType": "RunnerScaleSetJobMessages",
+        "body": jobs.to_string(),
+        "statistics": {"totalAssignedJobs": assigned},
+    }))
+    .unwrap();
+    Message::decode(&raw).unwrap()
+}
+
+/// Runner starts fail for want of room; GitHub takes back the jobs it
+/// assigned, which no runner took in time, so they no longer count as
+/// assigned, though they stay queued until a runner registers. The idle
+/// runner the pool had all along does not count: once there is room,
+/// fresh runners start for the jobs taken back, and only those.
+#[tokio::test]
+async fn jobs_github_took_back_get_fresh_runners_once_there_is_room() {
+    let fake = Fake::start().await;
+    let mut pool = pool(&fake, 1).await;
+    let ours = key(&fake);
+    {
+        // The idle runner asked for, settled long ago.
+        let mut world = fake.world();
+        world.runners.insert(7, ("ci-000000000007".into(), false));
+        world.sandboxes.insert(
+            "sbx-idle".into(),
+            Sandbox {
+                template: "runner-base".into(),
+                metadata: BTreeMap::from([
+                    (POOL_KEY.into(), ours.clone()),
+                    (NAME_KEY.into(), "ci-000000000007".into()),
+                    (ID_KEY.into(), "7".into()),
+                    (BORN_KEY.into(), "1000".into()),
+                ]),
+                env: BTreeMap::new(),
+            },
+        );
+    }
+    pool.reconcile().await.unwrap();
+    assert_eq!(fake.world().sandboxes.len(), 1, "the idle runner is kept");
+
+    // No host has room: the runners for two jobs assigned fail to start.
+    fake.world().create_failures = 1000;
+    pool.handle(&message(
+        1,
+        &json!([
+            {"messageType": "JobAssigned", "runnerRequestId": 31},
+            {"messageType": "JobAssigned", "runnerRequestId": 32},
+        ]),
+        2,
+    ))
+    .await;
+    // GitHub takes both back: completed, canceled, with no runner.
+    pool.handle(&message(
+        2,
+        &json!([
+            {"messageType": "JobCompleted", "runnerRequestId": 31, "runnerName": "", "result": "canceled"},
+            {"messageType": "JobCompleted", "runnerRequestId": 32, "result": "canceled"},
+        ]),
+        0,
+    ))
+    .await;
+    pool.reconcile().await.unwrap();
+    {
+        let world = fake.world();
+        assert_eq!(world.sandboxes.len(), 1, "{:#?}", world.sandboxes);
+        assert!(
+            world.sandboxes.contains_key("sbx-idle"),
+            "nothing goes meanwhile"
+        );
+        assert_eq!(world.runners.len(), 1, "a failed start's registration goes");
+    }
+
+    // Room returns: the next check starts a fresh runner for each job
+    // taken back.
+    let tried = 1000 - fake.world().create_failures;
+    assert!(tried >= 6, "each scale tried again: {tried}");
+    fake.world().create_failures = 0;
+    pool.reconcile().await.unwrap();
+    let fresh = |fake: &Fake| {
+        fake.world()
+            .sandboxes
+            .keys()
+            .filter(|id| *id != "sbx-idle")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let started = fresh(&fake);
+    assert_eq!(started.len(), 2, "{:#?}", fake.world().sandboxes);
+    assert_eq!(fake.world().runners.len(), 3);
+
+    // Owed no more: later checks start nothing, and the old idle runner
+    // makes way for the fresh ones.
+    pool.reconcile().await.unwrap();
+    pool.reconcile().await.unwrap();
+    assert_eq!(fresh(&fake), started);
+    assert!(fake.world().killed.contains(&"sbx-idle".to_owned()));
 }
 
 #[tokio::test]

@@ -772,6 +772,8 @@ export class ThisComputer {
         ...base,
         // While it moves into the app, its service is briefly off: still on.
         state: paused ? "paused" : "connected",
+        // Which machine this is in the workspace's list, whichever agent serves it.
+        enrollmentId: connection.agentId,
         reconnecting,
         ...(waitingOn ? { waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) } : {}),
         ...(permissions ? { permissions } : {}),

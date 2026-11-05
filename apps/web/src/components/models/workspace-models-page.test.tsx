@@ -138,6 +138,7 @@ const client = {
     }),
   ),
   listConnections: mock(async (): Promise<ConnectionMetadata[]> => []),
+  listOrganizationCompatibleEndpoints: mock(async (): Promise<unknown> => ({ endpoints: [] })),
   listClaudeSubscriptionAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -1152,6 +1153,29 @@ describe("Models list", () => {
       await act(async () => codexRow.click());
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Connect provider offers the organization's own OpenAI-compatible endpoint", async () => {
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.includes("OpenAI-compatible endpoint"),
+      )!;
+      expect(row.textContent).toContain("a base URL, an API key and a model ID");
+      await act(async () => row.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe(
+        "Connect an OpenAI-compatible endpoint",
+      );
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Base URL");
+      expect(text).toContain("Model ID");
     } finally {
       await cleanup(view);
     }

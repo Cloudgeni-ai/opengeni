@@ -4,6 +4,7 @@ import {
   builtinModelResidency,
   configuredProviders,
   modelRouteMeetsResidencyRequirement,
+  organizationCompatibleConnectionIdOf,
   resolveModelProvider,
 } from "@opengeni/config";
 import {
@@ -540,7 +541,10 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
-    if (modelName && isDirectModelId(modelName)) {
+    if (
+      modelName &&
+      (isDirectModelId(modelName) || organizationCompatibleConnectionIdOf(modelName) !== null)
+    ) {
       throw new Error("The selected model connection is unavailable");
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same

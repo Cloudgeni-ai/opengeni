@@ -1,15 +1,20 @@
+const RECEIPT_PREFIXES = [
+  "[connected machine] ",
+  "[workspace machine] ",
+  // The workspace machine's earlier name; receipts already stored in past
+  // chats keep it.
+  "[cloud computer] ",
+];
+
 /** Presentation-only recognition of the runtime's four-field uncertainty receipt,
- * from a Connected Machine or from the chat's own cloud computer (which speaks
- * the same machine protocol).
+ * from a Connected Machine or from the chat's own workspace machine (which
+ * speaks the same machine protocol).
  * Never use displayed tool output to decide whether an operation may be retried.
  * Ordinary command stdout has an exec banner and must not be classified by a
  * loose match for words such as "timeout" or "unknown".
  */
 export function isConnectedMachineOutcomeUnknownOutput(output: unknown): output is string {
-  if (
-    typeof output !== "string" ||
-    !(output.startsWith("[connected machine] ") || output.startsWith("[cloud computer] "))
-  )
+  if (typeof output !== "string" || !RECEIPT_PREFIXES.some((prefix) => output.startsWith(prefix)))
     return false;
   const lines = output.split("\n");
   return (

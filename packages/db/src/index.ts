@@ -1,3 +1,4 @@
+export * from "./billing-credit-notifications";
 import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
@@ -1304,6 +1305,10 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
 export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+export {
+  QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
+  QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
+} from "./quiescence-receipt-wake-repair";
 import {
   repairMissingQuiescenceReceiptWakesWith,
   type QuiescenceReceiptWakeRepairCursor,
@@ -7247,6 +7252,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * its generated sessions. An agent-created task stores its creating session's
  * explicit first-party selection (null follows defaults) and permission set
  * so a narrowed session cannot widen its permissions through a schedule.
+ * A human/API creator may instead name the tools and permissions at create
+ * (`agentConfig.firstPartyMcpTools` / `firstPartyMcpPermissions`), stored
+ * here with a null session policy.
  * Its owner's explicit access refresh re-freezes tools and permissions within their grants;
  * the session policy and optional credential restriction never change after
  * create. A restriction alone does not select tools or permissions.
@@ -48788,6 +48796,14 @@ type ProviderLossRecord = {
    * lifetime, or the compute control plane's own answer) the loss may at most
    * restore a checkpoint, never continue on an empty workspace. */
   deathProof?: ProviderDeathProof;
+  /** The drain stopped the box itself after its saves kept failing (it did
+   * not vanish). The people in the chat were told when it stopped, so the
+   * later restore of the save made at `unsavedSince` does not announce the
+   * loss a second time. */
+  captureAbandoned?: true;
+  /** With `captureAbandoned`: the time of the last good save the stop notice
+   * named, or null when there was none. Absent on records that predate it. */
+  unsavedSince?: string | null;
 };
 
 type ProviderDeathProof = {
@@ -49571,6 +49587,21 @@ async function acquireLeaseOnce(
             // Re-armed: whatever group end was requested did not happen.
             await tx.execute(sql`
               update sandbox_leases set group_end_requested_at = null, updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (Number(row.drain_capture_failures ?? 0) > 0) {
+            // Re-armed: the drain ended without a save, so its failures no
+            // longer describe the next one. A later drain starts with a full
+            // snapshot and no backoff, and only failures of that drain can
+            // lead to a reduced save or a stop (sandboxDrainCaptureFallback).
+            await tx.execute(sql`
+              update sandbox_leases set
+                drain_capture_failures = 0,
+                drain_capture_failure_epoch = null,
+                drain_capture_first_failed_at = null,
+                drain_capture_last_failed_at = null,
+                updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -52974,7 +53005,9 @@ export async function commitWarmingToWarm(
         // this commit, when that restore is verified, so a restore that fails,
         // retries or ends on an empty workspace never claims their files came
         // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity.
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
         const restoredFrom =
           automaticVerified &&
           rematerialization !== undefined &&
@@ -52983,7 +53016,7 @@ export async function commitWarmingToWarm(
             ? (automatic as Record<string, unknown>).capturedAt
             : undefined;
         const restoredNotice =
-          typeof restoredFrom === "string"
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
             ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
                 mode: "checkpoint" as const,
@@ -53026,6 +53059,18 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/** The drain's stop notice already told the people in the chat that changes
+ * after exactly this save were not kept. A restore of any other save, or a
+ * loss without that notice, is announced on its own. */
+function stopNoticeNamedSave(
+  loss: ProviderLossRecord | undefined,
+  restoredCapturedAt: string,
+): boolean {
+  if (loss?.captureAbandoned !== true || typeof loss.unsavedSince !== "string") return false;
+  const named = Date.parse(loss.unsavedSince);
+  return Number.isFinite(named) && named === Date.parse(restoredCapturedAt);
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -55012,13 +55057,16 @@ async function linkedLostProviderCommandSessionIdsTx(
 async function lockLostProviderCommandSessionsTx(
   tx: Database,
   input: LostProviderBlockerScope,
+  alsoLockSessionIds: readonly string[] = [],
 ): Promise<Set<string>> {
   const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
-  if (sessionIds.length) {
+  // One call, so every session row is taken in the same sorted order.
+  const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
+  if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
       controlLock: "share",
-      sessionIds,
+      sessionIds: toLock,
     });
   }
   return new Set(sessionIds);
@@ -58877,6 +58925,12 @@ export async function reArmDrainingLease(
           liveness = 'warm',
           -- Re-armed: whatever group end was requested did not happen.
           group_end_requested_at = null,
+          -- The drain ended without a save; its failures do not carry over to
+          -- the next drain (see sandboxDrainCaptureFallback).
+          drain_capture_failures = 0,
+          drain_capture_failure_epoch = null,
+          drain_capture_first_failed_at = null,
+          drain_capture_last_failed_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -58936,6 +58990,14 @@ export async function confirmDrainCold(
      * this commit. Only then may a crashed worker's orphaned request on it be
      * settled; a selfhosted machine or backend-less lease is never stopped. */
     providerStopped?: boolean;
+    /** With `providerMissingBeforeCapture`: the drain stopped the box itself
+     * after its saves kept failing. Its failed capture can never publish late. */
+    captureAbandoned?: boolean;
+    /** With `captureAbandoned`: the `sandbox.box.terminated` record telling
+     * the people in the chat which changes were not saved (since the last
+     * good save, `unsavedSince`). Appended in the same commit as the loss, so
+     * a later restore of exactly that save never announces it again. */
+    captureAbandonedNotice?: { unsavedSince: string | null; payload: Record<string, unknown> };
   },
 ): Promise<{
   wentCold: boolean;
@@ -59066,10 +59128,44 @@ export async function confirmDrainCold(
         // lease lock, matching the canonical session -> blocker -> lease lock
         // order used by retained-process settlement. Revalidate the lease after
         // locking the entire exact provider-owned blocker set.
+        // A box the drain stopped itself tells every member session in this
+        // commit (below). Appending locks the workspace and those session rows,
+        // so take them here, before any blocker or the lease, in the canonical
+        // order; the append then finds them already held.
+        const abandonedNoticeSessionIds =
+          input.captureAbandoned === true && input.captureAbandonedNotice
+            ? await withCompleteSandboxGroupScope(tx, async () =>
+                (
+                  await tx
+                    .select({ id: schema.sessions.id })
+                    .from(schema.sessions)
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, input.workspaceId),
+                        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+                      ),
+                    )
+                    .orderBy(asc(schema.sessions.id))
+                ).map((session) => session.id),
+              )
+            : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          lockedCommandSessions =
+            abandonedNoticeSessionIds.length > 0
+              ? await withCompleteSandboxGroupScope(tx, () =>
+                  lockLostProviderCommandSessionsTx(tx, blockerScope, abandonedNoticeSessionIds),
+                )
+              : await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        } else if (abandonedNoticeSessionIds.length > 0) {
+          await withCompleteSandboxGroupScope(tx, () =>
+            lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: abandonedNoticeSessionIds,
+            }),
+          );
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
@@ -59147,6 +59243,7 @@ export async function confirmDrainCold(
           input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
+          input.captureAbandoned !== true &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59245,12 +59342,22 @@ export async function confirmDrainCold(
                 row,
                 recovery,
                 workspaceLost
-                  ? providerLossRecordForLostRow(
-                      row,
-                      "drain_probe",
-                      now,
-                      input.providerMaxRemainingLifetimeMs,
-                    )
+                  ? {
+                      ...providerLossRecordForLostRow(
+                        row,
+                        "drain_probe",
+                        now,
+                        input.providerMaxRemainingLifetimeMs,
+                      ),
+                      ...(input.captureAbandoned === true
+                        ? {
+                            captureAbandoned: true as const,
+                            ...(input.captureAbandonedNotice
+                              ? { unsavedSince: input.captureAbandonedNotice.unsavedSince }
+                              : {}),
+                          }
+                        : {}),
+                    }
                   : undefined,
               ),
             )
@@ -59326,6 +59433,20 @@ export async function confirmDrainCold(
           );
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
+        }
+        if (
+          rows.length > 0 &&
+          workspaceLost &&
+          input.captureAbandoned === true &&
+          input.captureAbandonedNotice
+        ) {
+          const notice = input.captureAbandonedNotice;
+          await withCompleteSandboxGroupScope(tx, () =>
+            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+              type: "sandbox.box.terminated",
+              payload: notice.payload,
+            }),
+          );
         }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
@@ -65298,7 +65419,8 @@ async function foldWorkspaceArchiveOntoLease(
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       -- A published save ends any run of drain snapshot failures: the count
-      -- means failures since this box's last successful save.
+      -- means failures of this drain since this box's last successful save
+      -- (a re-arm to warm resets it too).
       drain_capture_failures = 0,
       drain_capture_failure_epoch = null,
       drain_capture_first_failed_at = null,
@@ -66438,6 +66560,32 @@ export async function readLease(
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+/** The session's sandbox group's latest save when it deliberately left
+ * rebuildable folders out (a drain's reduced save, DC-G3), else null. A later
+ * complete save replaces it, so the answer is current on every turn. */
+export async function readSandboxReducedSave(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ capturedAt: string; omittedPaths: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<LeaseRow>(sql`
+      select lease.* from sandbox_leases lease
+      join sessions session
+        on session.workspace_id = lease.workspace_id
+       and session.sandbox_group_id = lease.sandbox_group_id
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      limit 1
+    `);
+    const current = rows[0] ? recoveryStateFromLeaseRow(rows[0]).archive.current : null;
+    if (current?.version !== 1 || !Array.isArray(current.omittedPaths)) return null;
+    const omittedPaths = current.omittedPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    return omittedPaths.length ? { capturedAt: current.capturedAt, omittedPaths } : null;
   });
 }
 
@@ -87355,6 +87503,198 @@ export async function countSessionTurnSandboxProcessStartRestarts(
   });
 }
 
+/**
+ * Ask the lease to replace one exact live box whose programs cannot start
+ * (Modal: its /bin/sh is gone). The same operator rotation an image conflict
+ * requests: new arrivals are fenced instead of reusing the box, the drain
+ * grace is zero once its last holder leaves, and the reaper saves /workspace
+ * with the provider's own snapshot before ending the box, so the next acquire
+ * restores a fresh one. A box whose save fails stays draining under the
+ * existing capture policy, and arrivals keep waiting instead of reusing it.
+ * Null when the lease no longer names this box (another epoch or instance, or
+ * not live): nothing is changed.
+ */
+export async function requestSandboxProcessStartReplacement(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseEpoch: number;
+    instanceId: string;
+  },
+): Promise<{
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  liveness: "warm" | "draining";
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        lease_epoch: number | string;
+        instance_id: string;
+        liveness: "warm" | "draining";
+      }>(
+        scopedDb as unknown as Database,
+        sql`update sandbox_leases set
+            rotation_requested_at = coalesce(rotation_requested_at, now()),
+            rotation_reason = coalesce(rotation_reason, 'operator'),
+            expires_at = least(expires_at, now()),
+            updated_at = now()
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.leaseEpoch}
+            and instance_id = ${input.instanceId}
+            and liveness in ('warm', 'draining')
+          returning lease_epoch, instance_id, liveness`,
+      );
+      const row = rows[0];
+      return row
+        ? {
+            sandboxGroupId: input.sandboxGroupId,
+            leaseEpoch: Number(row.lease_epoch),
+            instanceId: row.instance_id,
+            liveness: row.liveness,
+          }
+        : null;
+    },
+  );
+}
+
+/** The box a turn asked to replace because it could not start programs. */
+export type SandboxProcessStartReplacementTarget = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+};
+
+/** Turn metadata naming a box that could not start programs and whose save
+ * failed while the turn waited on its replacement. */
+export const SANDBOX_BOX_NOT_SAVED_METADATA_KEY = "sandboxBoxNotSaved";
+
+/**
+ * The box a drain could not save while this turn waited on its replacement
+ * (it could not start programs), as recorded by
+ * {@link releaseSandboxProcessStartReplacementWaiters}. It holds across a
+ * person's retry: a retry fenced by the same unsaved box stops at once. Null
+ * when no such save failed while the turn waited.
+ */
+export async function readSessionTurnSandboxBoxNotSaved(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<SandboxProcessStartReplacementTarget | null> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ sandbox_group_id: string | null; lease_epoch: string | null }>(
+      scopedDb as unknown as Database,
+      sql`select turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'sandboxGroupId' as sandbox_group_id,
+          turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'leaseEpoch' as lease_epoch
+        from session_turns turn
+        where turn.workspace_id = ${workspaceId}
+          and turn.session_id = ${input.sessionId}
+          and turn.id = ${input.turnId}
+        limit 1`,
+    );
+    const leaseEpoch = Number(row?.lease_epoch);
+    return row?.sandbox_group_id && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
+      ? { sandboxGroupId: row.sandbox_group_id, leaseEpoch }
+      : null;
+  });
+}
+
+/**
+ * A drain could not save a box that a turn asked to replace because it could
+ * not start programs. No turn should wait, possibly until the provider's
+ * lifetime limit, on a save that keeps failing: every turn waiting on that
+ * box's rotation has its wait cleared, is marked with the unsaved box, and is
+ * woken, so its next attempt stops with clear copy (failure settlement). The
+ * box stays fenced and its drain keeps retrying under the existing policy.
+ * Only a rotation some turn requested for this exact box (its process-start
+ * restart event names the group and epoch) releases anyone. Returns how many
+ * turns were released.
+ */
+export async function releaseSandboxProcessStartReplacementWaiters(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string; leaseEpoch: number },
+): Promise<number> {
+  const waitJson = JSON.stringify({
+    [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+      reason: "rotation_in_progress",
+    } satisfies SandboxLifecycleWait,
+  });
+  const notSavedJson = JSON.stringify({
+    [SANDBOX_BOX_NOT_SAVED_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+    },
+  });
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const released = await rawRows<{
+        account_id: string;
+        session_id: string;
+        temporal_workflow_id: string | null;
+      }>(
+        tx,
+        sql`with replacement as (
+            select 1 from sessions requester
+            join session_events restart
+              on restart.workspace_id = requester.workspace_id
+              and restart.session_id = requester.id
+            where requester.workspace_id = ${input.workspaceId}
+              and requester.sandbox_group_id = ${input.sandboxGroupId}
+              and restart.type = 'sandbox.operation.started'
+              and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
+              and restart.payload->>'sandboxGroupId' = ${input.sandboxGroupId}
+              and restart.payload->>'leaseEpoch' = ${String(input.leaseEpoch)}
+            limit 1
+          ), waiting as (
+            select turn.id as turn_id, session.id as session_id, session.account_id,
+              session.temporal_workflow_id
+            from sessions session
+            join session_turns turn
+              on turn.workspace_id = session.workspace_id
+              and turn.session_id = session.id
+              and turn.id = session.active_turn_id
+            where session.workspace_id = ${input.workspaceId}
+              and session.sandbox_group_id = ${input.sandboxGroupId}
+              and session.status = 'recovering'
+              and turn.status = 'recovering'
+              and turn.metadata @> ${waitJson}::jsonb
+              and exists (select 1 from replacement)
+            for update of turn
+          )
+          update session_turns turn
+          set metadata = (turn.metadata - ${SANDBOX_LIFECYCLE_WAIT_METADATA_KEY})
+              || ${notSavedJson}::jsonb,
+            version = turn.version + 1,
+            updated_at = now()
+          from waiting
+          where turn.id = waiting.turn_id
+          returning waiting.account_id, waiting.session_id, waiting.temporal_workflow_id`,
+      );
+      for (const waiter of released) {
+        await enqueueSessionWorkflowWakeInTransaction(tx, {
+          accountId: waiter.account_id,
+          workspaceId: input.workspaceId,
+          sessionId: waiter.session_id,
+          temporalWorkflowId: waiter.temporal_workflow_id ?? `session-${waiter.session_id}`,
+          reason: "sandbox_lifecycle_advanced",
+        });
+      }
+      return released.length;
+    }),
+  );
+}
+
 export async function requestSessionTurnRecovery(
   db: Database,
   workspaceId: string,
@@ -96006,6 +96346,7 @@ export * from "./event-source-feeds";
 export * from "./automation-templates";
 export * from "./bot-templates";
 export * from "./organization-model-providers";
+export * from "./organization-compatible-model-endpoints";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
 export * from "./subscription-core-claude-oauth";

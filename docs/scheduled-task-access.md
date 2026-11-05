@@ -10,7 +10,14 @@ runs that create a chat, the task stores the chat's initial tool selection:
   account that can no longer be used). A pin narrows only its own connector;
   every other connector follows the owner's current accounts;
 - for a task an agent created, the creating session's Opengeni tools,
-  permissions and access policy (the creator policy, migration 0428).
+  permissions and access policy (the creator policy, migration 0428). A
+  person, key or app that creates the task over the API can set the same
+  creator selection with `agentConfig.firstPartyMcpTools` and
+  `agentConfig.firstPartyMcpPermissions`, as on session create: tools within
+  the deployment's allowed set, permissions the creating credential holds.
+  They are set once at creation and never stored in `agentConfig`; to change
+  them, or to give a task created without them the app's selection, create the
+  task again. Omitted, the runs follow the defaults as before.
 
 Only a person can pin, through the schedule editor or a human API call; agents,
 API keys and services receive 403. A schedule that posts into an existing chat
@@ -134,7 +141,11 @@ the deployment's configured key, a delegated service, or a delegated bearer
 are ownerless: the key stays the audited creator (`createdBy` with
 `kind: "service"`), runs use service authority with workspace accounts only,
 and anyone holding `scheduled_tasks:manage` (including the key) may change or
-run them.
+run them. Nobody can be notified or called from an ownerless task's run, so
+the chats it starts are not offered `notify_user`, `notification_withdraw`,
+`inbox_tidy` or `call_user`, and keep that exact tool list rather than
+following the defaults at each turn. An app that wants its users notified
+creates their schedules as them (`asUser`), which makes them the owner.
 
 A creator may lock a schedule with `creatorLocked: true` when creating it.
 Only the same creator subject can then change, run or delete it;

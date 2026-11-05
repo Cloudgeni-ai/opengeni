@@ -5,9 +5,12 @@ import {
   isSandboxProcessStartFailure,
   SANDBOX_MACHINE_RESTARTING_CODE,
   SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
   SandboxMachineBackError,
+  SandboxMachineReplacingError,
   SandboxMachineRestartingError,
   SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
   SandboxSetupAgentUnavailableError,
 } from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
@@ -65,7 +68,6 @@ import {
   ToolCallError,
   findInferenceRegionRestrictedError,
   SandboxBackendNotServedError,
-  sanitizeProcessStartFailureMessage,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1782,6 +1784,10 @@ function sandboxProcessStartFailure(
 ): ReturnType<typeof baseAgentRunFailurePayload> | null {
   const graph = structuredRecoveryCauseGraph(error);
   const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
   const back = nodes.find((node) => node instanceof SandboxMachineBackError);
   if (back instanceof SandboxMachineBackError) {
     const { uncertain } = uncertainMutationOutcome(graph, nodes);
@@ -1816,10 +1822,21 @@ function sandboxProcessStartFailure(
         "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
       code: SANDBOX_PROCESS_START_FAILED_CODE,
       retryable: false,
-      detail: sanitizeProcessStartFailureMessage(errorMessage(error)).slice(0, 2_000),
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
     };
   }
   return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
 }
 
 const SANDBOX_FAILURE_SUBJECT = {

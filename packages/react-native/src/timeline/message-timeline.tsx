@@ -41,6 +41,7 @@ import {
   timelineGroupContainsPresentedImage,
   timelineGroupIndexAtSequence,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react/timeline-model";
 import {
   useCallback,
@@ -142,6 +143,14 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
    */
   pause?: TimelineLivePause | null | undefined;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20pt); it is hidden from screen readers, so the row's words
+   * still say what is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   /** Replace the preparing visual (the web orb) — e.g. a product character. */
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
@@ -629,6 +638,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const context: GroupContext = {
     turnsWithOutput,
     facets: props.facets,
+    renderLiveMark: props.renderLiveMark,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
@@ -844,6 +854,7 @@ function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPr
 type GroupContext = {
   turnsWithOutput: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
@@ -931,6 +942,7 @@ function TimelineGroupView({
                   kind: "waiting",
                   since: base.since,
                   label: base.label,
+                  waitingOn: base.waitingOn,
                   preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
                 }
               : base.kind === "paused"
@@ -940,6 +952,7 @@ function TimelineGroupView({
           <TurnSummary
             items={group.items}
             status={status}
+            renderLiveMark={context.renderLiveMark}
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
