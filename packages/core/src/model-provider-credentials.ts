@@ -25,6 +25,7 @@ import {
   withOrganizationDirectCatalogProvider,
   withOrganizationDirectCredential,
   withOrganizationAzureOpenAIEntraCredential,
+  withOrganizationCompatibleProviders,
   withOrganizationOpperCatalogProvider,
   withOrganizationOpperCredential,
   withWorkspaceOpperCatalogProvider,
@@ -53,6 +54,8 @@ import {
   type Database,
   isWorkspaceEuOnly,
   loadModelProviderExecutionInputs,
+  decryptOrganizationCompatibleEndpointKeys,
+  listOrganizationCompatibleEndpointsForWorkspace,
   type ModelProviderExecutionInputs,
 } from "@opengeni/db";
 
@@ -379,6 +382,20 @@ export async function settingsWithOrganizationProviderCredentials(
       models,
     });
   }
+  // The organization's own OpenAI-compatible endpoints this workspace can
+  // use, each with its own decrypted key (none without an encryption key).
+  result = withOrganizationCompatibleProviders(
+    result,
+    decryptOrganizationCompatibleEndpointKeys(
+      settings,
+      prepared?.organizationCompatibleEndpoints ??
+        (await listOrganizationCompatibleEndpointsForWorkspace(db, {
+          accountId,
+          workspaceId,
+          includeCredentials: environmentsEncryptionKeyBytes(settings) !== null,
+        })),
+    ),
+  );
   for (const kind of CLAUDE_CONNECTION_KINDS) {
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");

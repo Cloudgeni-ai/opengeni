@@ -8,6 +8,15 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+API and SDK/embedded requests use credits, not monthly app-plan credit.
+Connected AI subscriptions are for paid-plan app work and cannot serve API
+requests; an explicit selection returns `subscription_api_unavailable` (403),
+and an omitted model skips subscription defaults. Own provider API keys remain
+supported. Their platform fee is configuration-driven; at
+`OPENGENI_BYOK_PLATFORM_FEE_BPS=0` there is no fee or paid-credit admission
+requirement for it. See [billing-origin.md](billing-origin.md) for funding and
+the existing internal-account legacy terms.
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
@@ -285,7 +294,9 @@ Every built-in tool and prompt section follows what the session can use, so
 without a shared workspace; `request_human_input` with the secret kind only
 under `secrets` and Skill reviews only under `skills: "manage"`;
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
-`browser`, `media` or a user-started turn; tool search only when a tool is
+`browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
+on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
+search only when a tool is
 deferred (an `optional` or connection-backed eager server still counts as
 deferred); no Skill index without Skills. Sessions with a feature get the same
 prompt as before. Saved workspace defaults and schedules keep notifications
@@ -584,6 +595,13 @@ beyond the creating session. Omitting `firstPartyMcpTools` inherits the
 deployment's non-connector default catalog, and omitting `tools` inherits
 workspace MCP defaults; explicit empty arrays suppress those respective
 selections.
+
+A scheduled task the app creates takes the same two fields in its
+`agentConfig` for the chats it starts; without them its runs get the
+deployment defaults, not the selection of the app's other chats. They are set
+once at creation, so give an older task the app's selection by creating it
+again. Create a user's schedules as that user (`asUser`): an ownerless task has
+nobody to notify, and its runs are not offered `notify_user` or `call_user`.
 
 Creating a workspace does not create a dedicated cluster or permanently
 running sandbox. It adds control-plane state and may require per-workspace

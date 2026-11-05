@@ -16,6 +16,9 @@ import {
   resolveModelProvider,
   validateModelCatalogSettings,
   withDirectModelProviders,
+  organizationCompatibleConnectionIdOf,
+  organizationCompatibleModelId,
+  withOrganizationCompatibleProviders,
 } from "../src";
 
 const connection = {
@@ -238,4 +241,67 @@ test("an OpenAI-compatible connection becomes one workspace-paid route bound to 
     }),
   ).toBeNull();
   expect(() => validateModelCatalogSettings(catalog)).toThrow("reserved");
+});
+
+test("an organization's compatible endpoints each become one organization-paid route", () => {
+  const base = getSettings({ OPENGENI_ENV: "test" });
+  const first = {
+    id: "00000000-0000-4000-8000-0000000000a1",
+    baseUrl: "https://inference.example.com/v1",
+    api: "chat" as const,
+    label: "Acme",
+    models: [{ upstreamModelId: "acme/fast-1" }, { upstreamModelId: "acme/fast-1" }],
+  };
+  const second = {
+    id: "00000000-0000-4000-8000-0000000000b2",
+    baseUrl: "https://models.example.org/v1",
+    api: "responses" as const,
+    models: [{ upstreamModelId: "coder:7b" }],
+  };
+  const empty = { ...second, id: "00000000-0000-4000-8000-0000000000c3", models: [] };
+  const fast = organizationCompatibleModelId(first.id, "acme/fast-1");
+  const coder = organizationCompatibleModelId(second.id, "coder:7b");
+  expect(fast).toBe(`organization-compatible-${first.id}/acme/fast-1`);
+  expect(organizationCompatibleConnectionIdOf(fast)).toBe(first.id);
+  expect(organizationCompatibleConnectionIdOf(`organization-compatible-${second.id}`)).toBe(
+    second.id,
+  );
+  expect(organizationCompatibleConnectionIdOf("organization-openai/gpt-5")).toBeNull();
+  expect(organizationCompatibleConnectionIdOf("organization-compatible-nope/x")).toBeNull();
+
+  const catalog = withOrganizationCompatibleProviders(base, [first, second, empty]);
+  const ids = configuredModels(catalog)
+    .map((row) => row.id)
+    .filter((id) => id.startsWith("organization-compatible-"));
+  // A repeated model is listed once; an endpoint without models adds nothing.
+  expect(ids.sort()).toEqual([coder, fast].sort());
+  const model = configuredModels(catalog).find((row) => row.id === fast)!;
+  expect(model.billing).toEqual({ upstreamPayer: "organization", metering: "external" });
+  expect(model.credentialSource).toEqual({ kind: "organization_connection", mechanism: "api_key" });
+  expect(model.residency).toMatchObject({ geography: "unknown", deploymentType: "unknown" });
+  expect(model.capabilities.functionCalling.runnable).toBe(true);
+  expect(policyChargesCreditsForModel(catalog, fast)).toBe(false);
+  expect(resolveModelProvider(catalog, coder)!.provider).toMatchObject({
+    kind: "direct-compatible-organization",
+    label: "models.example.org",
+    api: "responses",
+    baseUrl: "https://models.example.org/v1",
+  });
+
+  const executable = withOrganizationCompatibleProviders(base, [
+    { ...first, apiKey: "organization-secret" },
+  ]);
+  const route = resolveModelProvider(executable, fast)!;
+  expect(route.provider).toMatchObject({
+    kind: "direct-compatible-organization",
+    label: "Acme",
+    wireProfile: "openai",
+    apiKey: "organization-secret",
+  });
+  expect(route.model.upstreamModelId).toBe("acme/fast-1");
+  expect(JSON.stringify(model)).not.toContain("organization-secret");
+  // A later overlay replaces the earlier one rather than adding to it.
+  const replaced = withOrganizationCompatibleProviders(catalog, [second]);
+  expect(resolveModelProvider(replaced, fast)).toBeUndefined();
+  expect(withOrganizationCompatibleProviders(base, [])).toBe(base);
 });

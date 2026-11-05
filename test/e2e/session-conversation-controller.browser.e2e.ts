@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 
@@ -113,6 +113,93 @@ describe("persistent stock conversation controller", () => {
       } finally {
         await page.close();
       }
+    }, 60_000);
+  }
+
+  /*
+   * `agentSignals` at desktop and phone widths: off, the goal pill and the
+   * Activity button (agents and commands) are gone, while queued messages,
+   * approvals and questions still show and fit the width.
+   */
+  async function open(width: number, query: string, check: (page: Page) => Promise<void>) {
+    const errors: string[] = [];
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(`${baseUrl}/embedded-chat.html?${query}`, { waitUntil: "networkidle" });
+      await page.locator("[data-og-conversation-composer]").waitFor();
+      await check(page);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+      if (evidence) {
+        mkdirSync(evidence, { recursive: true });
+        const name = query.replace(/[^a-z0-9]+/gi, "-");
+        await page.screenshot({ path: `${evidence}/agent-signals-${name}-${width}.png` });
+      }
+      expect(errors).toEqual([]);
+    } catch (cause) {
+      throw new Error(`Browser check failed; page errors: ${errors.join("; ") || "none"}`, {
+        cause,
+      });
+    } finally {
+      await page.close();
+    }
+  }
+
+  const goalPill = (page: Page) => page.locator('[data-og-session-chrome-signal="goal"]');
+  const queueChip = (page: Page) => page.locator('[data-og-session-chrome-signal="queue"]');
+
+  for (const width of [1440, 390]) {
+    test(`by default the goal pill shows with its pause reason at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused", async (page) => {
+        await goalPill(page).waitFor();
+        expect(await goalPill(page).innerText()).toContain("Paused · agent");
+        expect(await queueChip(page).isVisible()).toBe(true);
+      });
+    }, 60_000);
+
+    test(`agentSignals off keeps the queue but hides the goal pill at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&signals=off", async (page) => {
+        await queueChip(page).waitFor();
+        expect(await queueChip(page).innerText()).toContain("2");
+        expect(await goalPill(page).count()).toBe(0);
+        expect(await page.getByRole("button", { name: "Session activity" }).count()).toBe(0);
+      });
+    }, 60_000);
+
+    test(`agentSignals off keeps approvals and questions at ${width}px`, async () => {
+      await open(width, "scenario=approval&goal=paused&signals=off", async (page) => {
+        const approve = page.getByRole("button", { name: "Approve action" });
+        await approve.waitFor();
+        const box = await approve.boundingBox();
+        expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+        expect(await goalPill(page).count()).toBe(0);
+      });
+      await open(width, "scenario=question&goal=paused&signals=off", async (page) => {
+        await page.getByText("Refund the duplicate $490.00 charge").first().waitFor();
+        expect(await goalPill(page).count()).toBe(0);
+      });
+    }, 60_000);
+
+    test(`a host mark leads the live turn row at ${width}px`, async () => {
+      await open(width, "scenario=running&mark=1", async (page) => {
+        const slot = page.locator("[data-og-live-mark]");
+        await slot.waitFor();
+        expect(await slot.getAttribute("data-og-live-mark")).toBe("working");
+        expect(await slot.getAttribute("aria-hidden")).toBe("true");
+        expect(await page.locator('[data-demo-mark="working"]').count()).toBe(1);
+        const mark = await slot.boundingBox();
+        const row = await page.locator("[data-og-exchange-status]").boundingBox();
+        // Leading edge of the row, no taller than the row's line.
+        expect(mark!.height).toBeLessThanOrEqual(20);
+        expect(mark!.x).toBeLessThan(row!.x);
+      });
+      await open(width, "scenario=running", async (page) => {
+        await page.locator("[data-og-exchange-status]").waitFor();
+        expect(await page.locator("[data-og-live-mark]").count()).toBe(0);
+      });
     }, 60_000);
   }
 });

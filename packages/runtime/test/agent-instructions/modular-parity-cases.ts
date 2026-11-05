@@ -10,8 +10,8 @@ import type { BuildAgentOptions } from "../../src/index";
 /**
  * Configured compositions in which every feature a conditional section reads
  * is present: web search, goals, something to learn into, something that can
- * resume a wait, a readable Skill index, privacy facts, the search router and
- * a shared workspace, rendered with tool search on (`PARITY_SETTINGS`). Their
+ * resume a wait, a readable Skill index, privacy facts, the search router,
+ * documents and Sites, and a shared workspace, rendered with tool search on (`PARITY_SETTINGS`). Their
  * composed bytes were recorded before the
  * pay-for-what-is-relevant gates existed, so a gate can only ever omit text
  * for an absent feature; it never changes a session that has the feature.
@@ -52,7 +52,6 @@ const GATE_NEUTRAL_REMOVALS: readonly AgentCapabilityId[] = [
   "subagents",
   "schedules",
   "browser",
-  "artifacts",
   "secrets",
   "knowledge",
   "workspaceFiles",
@@ -89,7 +88,12 @@ function cases(): Record<string, BuildAgentOptions> {
   for (const id of GATE_NEUTRAL_REMOVALS)
     add(`all-without-${id}`, capabilities("all", { [id]: false }));
   // The smallest configurations that still have every gated feature.
-  const minimal = { webSearch: true, goals: true, knowledge: true };
+  const minimal = {
+    webSearch: true,
+    goals: true,
+    knowledge: true,
+    artifacts: true,
+  };
   out["none-with-features/docker"] = {
     agentConfig: configured(capabilities("none", minimal)),
     activeSandboxBackend: "docker",
@@ -101,7 +105,7 @@ function cases(): Record<string, BuildAgentOptions> {
     lazyToolTransport: "generic_dispatch",
   };
   out["none-with-features-and-workspace/none"] = {
-    agentConfig: configured(capabilities("none", { ...minimal, artifacts: true })),
+    agentConfig: configured(capabilities("none", { ...minimal, workspaceFiles: true })),
     activeSandboxBackend: "none",
     lazyToolTransport: "generic_dispatch",
   };
@@ -112,6 +116,7 @@ function cases(): Record<string, BuildAgentOptions> {
         goals: true,
         skills: "manage",
         workspaceAdmin: true,
+        artifacts: true,
       }),
     ),
     activeSandboxBackend: "none",

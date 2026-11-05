@@ -41,6 +41,18 @@ delivery can be late or missed.
   so it is offered again; a session token that expired is refreshed once
   for the acquisition. After five failures in a row the session is given
   up and opened again.
+- **A job GitHub takes back still wants a runner.** When no runner takes
+  a job assigned to the set in time (its start failed for want of room,
+  say), GitHub takes the assignment back: the job is reported completed,
+  `canceled`, with no runner, and no longer counts as assigned. It stays
+  queued, but GitHub offers it again only once something changes, such
+  as a runner registering; an idle runner that was there already changes
+  nothing, and neither does a new session. So the pool owes each job
+  taken back a fresh runner, up to its maximum, on top of what it scales
+  to, and starts it as soon as there is room. Once GitHub offers the job
+  again it is assigned and scaled for as any, and the surplus idle runner
+  is removed. What is owed is held in memory only, so a restart in
+  between forgets it.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
   in its environment and its runner's name and id in its metadata, with
@@ -54,7 +66,12 @@ delivery can be late or missed.
   `docker/github-runner.Dockerfile`, released as
   `opengeni-compute-github-runner`. Its start command counts the runner as
   a running command (ADR 3), so a job that waits quietly is never put to
-  sleep, and runs Docker for the job. A runner takes one job and ends.
+  sleep, and runs Docker for the job. It starts the runner only once
+  Docker answers, and the image's own check (`COMPUTE_RUNNER_READY`, a
+  shell command) succeeds if it sets one: GitHub gives a job only to a
+  runner that has connected, so no job lands where Docker is not up yet.
+  It waits as long as that takes, within the sandbox's timeout, and
+  starts a dockerd that exits again. A runner takes one job and ends.
   A runner's sandbox is never archived or checkpointed, so it is its own
   only copy for as long as it runs: its host's guard never freezes it
   when the host loses touch with the control service

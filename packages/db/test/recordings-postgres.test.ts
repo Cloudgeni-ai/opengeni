@@ -905,7 +905,16 @@ describe("recordings", () => {
       ...recording.actor,
       recordingId: recording.recordingId,
     });
-    expect(keys).toHaveLength(4);
+    // Two uploaded pieces per track, and each audio track's speaker scan.
+    expect(keys).toHaveLength(6);
+    expect(keys).toEqual(
+      expect.arrayContaining(
+        [0, 1].map(
+          (trackNumber) =>
+            `workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/prepared/track-${trackNumber}.speakers`,
+        ),
+      ),
+    );
     expect(
       keys!.every((key) =>
         key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`),
@@ -1008,6 +1017,8 @@ describe("recordings", () => {
           select object_key from recording_chunks where recording_id = ${id}`
         ).map((row) => row.object_key),
         `workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-0.speakers`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-1.speakers`,
       ].sort(),
     );
     // Stamped but interrupted before the objects were gone: offered again,

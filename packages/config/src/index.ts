@@ -1994,6 +1994,20 @@ const SettingsSchema = z.object({
     .positive()
     .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
     .optional(),
+  // Hard provider-side timeout of a zero-holder drain snapshot. It is separate
+  // from the drain WAIT above: the wait only bounds how long one reaper attempt
+  // waits before retrying, while the snapshot itself keeps running and
+  // publishes late under its claim. When both were the same value, a
+  // workspace whose snapshot needed longer than the wait could never finish
+  // and the box stayed draining until the provider deadline. The effective
+  // value is never below the drain wait. Knob:
+  // OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS. Default 10min.
+  sandboxDrainProviderSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(600_000),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -2372,6 +2386,7 @@ const SettingsSchema = z.object({
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
+  billingAutoTopUpEnabled: EnvBoolean.default(false),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
   stripeCreditsProductId: z.string().optional(),
@@ -3651,6 +3666,7 @@ export const RegistryProviderKind = z.enum([
   "direct-compatible-workspace",
   "direct-openai-organization",
   "direct-azure-organization",
+  "direct-compatible-organization",
   "openrouter-workspace",
   "openrouter-organization",
   "opper-workspace",
@@ -3947,6 +3963,12 @@ export const ORGANIZATION_OPENAI_PROVIDER_ID = "organization-openai" as const;
 export const ORGANIZATION_OPENAI_MODEL_ID_PREFIX = "organization-openai/" as const;
 export const ORGANIZATION_AZURE_OPENAI_PROVIDER_ID = "organization-azure-openai" as const;
 export const ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX = "organization-azure-openai/" as const;
+/**
+ * Organization-owned OpenAI-compatible endpoints: several per organization,
+ * each its own provider `organization-compatible-<connection id>` whose models
+ * are `organization-compatible-<connection id>/<model id>`.
+ */
+export const ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX = "organization-compatible-" as const;
 /** Opper's OpenAI-compatible Chat Completions surface (Bearer key). */
 export const OPPER_BASE_URL = "https://api.opper.ai/v3/compat" as const;
 
@@ -4238,7 +4260,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id) || isDirectModelProviderId(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        isDirectModelProviderId(provider.id) ||
+        provider.id.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX)
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -6342,6 +6368,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
+    sandboxDrainProviderSnapshotTimeoutMs: optional(
+      "OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS",
+    ),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
@@ -6565,6 +6594,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
+    billingAutoTopUpEnabled: optional("OPENGENI_BILLING_AUTO_TOP_UP_ENABLED"),
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
@@ -6878,6 +6908,22 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+/** Hard provider-side timeout for one zero-holder drain snapshot: the
+ * configured budget, and at least twice the drain wait, so the wait (not the
+ * provider) is what ends an attempt and a slow but finite snapshot keeps
+ * running and publishes late under its claim. Only a wait at the maximum
+ * snapshot timeout leaves the two equal. `drainWaitMs` is the wait the durable
+ * drain child froze. */
+export function effectiveSandboxDrainProviderSnapshotTimeoutMs(
+  settings: Pick<Settings, "sandboxDrainProviderSnapshotTimeoutMs">,
+  drainWaitMs: number,
+): number {
+  return Math.min(
+    SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS,
+    Math.max(settings.sandboxDrainProviderSnapshotTimeoutMs, 2 * drainWaitMs),
+  );
 }
 
 /**
@@ -8101,6 +8147,93 @@ export function withOrganizationAzureOpenAIEntraCredential(
   );
 }
 
+const ORGANIZATION_COMPATIBLE_ID =
+  /^organization-compatible-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/;
+
+/** The registry provider id of one organization OpenAI-compatible endpoint. */
+export function organizationCompatibleProviderId(connectionId: string): string {
+  return `${ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX}${connectionId}`;
+}
+
+/** The product model id of a model served by one organization OpenAI-compatible endpoint. */
+export function organizationCompatibleModelId(
+  connectionId: string,
+  upstreamModelId: string,
+): string {
+  return `${organizationCompatibleProviderId(connectionId)}/${upstreamModelId}`;
+}
+
+/**
+ * The endpoint connection a product model id or provider id names, when it
+ * belongs to an organization OpenAI-compatible endpoint.
+ */
+export function organizationCompatibleConnectionIdOf(id: string | null | undefined): string | null {
+  return (id && ORGANIZATION_COMPATIBLE_ID.exec(id)?.[1]) || null;
+}
+
+/** One organization OpenAI-compatible endpoint, as the catalog and runtime overlay it. */
+export type OrganizationCompatibleEndpointOverlay = {
+  id: string;
+  baseUrl: string;
+  api: "chat" | "responses";
+  label?: string | null;
+  models: readonly { upstreamModelId: string; label?: string | null }[];
+  /** Present only at execution, after the worker decrypts the endpoint's key. */
+  apiKey?: string;
+};
+
+/**
+ * The organization's own OpenAI-compatible endpoints a workspace can use,
+ * replacing any earlier overlay of them. Like a workspace's own endpoint they
+ * carry text in and out with function calling over SSE, the capabilities
+ * every such API shares; the runtime DNS-pins their requests to public
+ * addresses. An endpoint without models adds nothing.
+ */
+export function withOrganizationCompatibleProviders(
+  settings: Settings,
+  endpoints: readonly OrganizationCompatibleEndpointOverlay[],
+): Settings {
+  const existing = parseModelProvidersJson(settings.modelProvidersJson);
+  const providers = existing.filter(
+    (provider) => !provider.id.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX),
+  );
+  if (providers.length === existing.length && endpoints.length === 0) return settings;
+  for (const endpoint of endpoints) {
+    const seen = new Set<string>();
+    const models: RegistryProvider["models"] = [];
+    for (const model of endpoint.models) {
+      if (seen.has(model.upstreamModelId)) continue;
+      seen.add(model.upstreamModelId);
+      models.push({
+        id: organizationCompatibleModelId(endpoint.id, model.upstreamModelId),
+        upstreamModelId: model.upstreamModelId,
+        aliases: [],
+        label: model.label?.trim() || model.upstreamModelId,
+        capabilities: openRouterCustomModelCapabilities(settings),
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      });
+    }
+    if (models.length === 0) continue;
+    let hostname: string;
+    try {
+      hostname = new URL(endpoint.baseUrl).hostname;
+    } catch {
+      continue;
+    }
+    providers.push({
+      kind: "direct-compatible-organization",
+      id: organizationCompatibleProviderId(endpoint.id),
+      label: endpoint.label?.trim() || hostname,
+      api: endpoint.api,
+      wireProfile: "openai",
+      baseUrl: endpoint.baseUrl,
+      ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+      models,
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** The deployment's own Microsoft Entra identity, from the standard Azure SDK variables. */
 export function deploymentAzureEntraCredential(
   settings: Pick<
@@ -8555,6 +8688,7 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "opper-organization":
     case "direct-openai-organization":
     case "direct-azure-organization":
+    case "direct-compatible-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -8593,6 +8727,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "opper-organization":
     case "direct-openai-organization":
     case "direct-azure-organization":
+    case "direct-compatible-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -8780,6 +8915,12 @@ export function registryModelResidency(
         "unknown",
         "unknown",
         "A workspace's own OpenAI-compatible endpoint; where it processes data is not recorded.",
+      );
+    case "direct-compatible-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "An organization's own OpenAI-compatible endpoint; where it processes data is not recorded.",
       );
     default: {
       const _exhaustive: never = provider.kind;
@@ -9600,8 +9741,10 @@ export function policyChargesCreditsForModel(settings: Settings, modelId: string
   const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
   if (
     NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
-    // A workspace's own direct model connections (`workspace-openai-<id>/…`).
-    isDirectModelProviderId(providerPrefix)
+    // A workspace's own direct model connections (`workspace-openai-<id>/…`)
+    // and an organization's own OpenAI-compatible endpoints.
+    isDirectModelProviderId(providerPrefix) ||
+    providerPrefix.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX)
   ) {
     return false;
   }
@@ -11967,7 +12110,9 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // App actions act as a person. The worker decides per call whether one
       // waits for the person's confirmation in the chat (a change without full
       // access) or runs at once (a read, or full access); the API enforces it.
-      requireApproval: ["admin_action_call"],
+      // A bot send follows the person's own Slack send permission in an
+      // interactive chat; the worker decides it per call the same way.
+      requireApproval: ["admin_action_call", "slack_bot_send_prepared_message"],
     },
     ...(hasFiles
       ? []
@@ -13058,6 +13203,7 @@ export function validateModelCatalogSettings(
       provider.kind === "direct-compatible-workspace" ||
       provider.kind === "direct-openai-organization" ||
       provider.kind === "direct-azure-organization" ||
+      provider.kind === "direct-compatible-organization" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "opper-workspace" ||

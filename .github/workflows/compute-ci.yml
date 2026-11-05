@@ -155,6 +155,8 @@ jobs:
           COMPUTE_TEST_POSTGRES: host=127.0.0.1 user=fleet password=fleet dbname=fleet_test
           COMPUTE_TEST_SHARED_EXTENTS_DIR: /mnt/xfs
           COMPUTE_TEST_REQUIRE: shared-extents
+          # Tests that need root (mknod) run again under sudo -n.
+          COMPUTE_GUEST_TEST_SUDO: "1"
         run: cargo test --locked --workspace
       - name: Smoke framework tests
         working-directory: compute/smoke

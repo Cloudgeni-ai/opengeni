@@ -10,6 +10,7 @@ import {
   getBillingBalance,
   listUsageEvents,
   renewSessionRealtimeInTransaction,
+  upsertOrganizationPlan,
   withBillingOriginOverride,
   withWorkspaceSessionActivityRls,
   type DbClient,
@@ -22,6 +23,7 @@ import { Hono } from "hono";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { insufficientCreditsHttpError } from "../src/http/api-error";
 
 const DELEGATION_SECRET = "realtime-voice-billing-secret-with-32-bytes";
 const AZURE_MODEL = "opengeni-azure/gpt-live-1";
@@ -31,6 +33,8 @@ const MINUTE = 52_500;
 const pricedSettings = testSettings({
   productAccessMode: "managed",
   billingMode: "stripe",
+  subscriptionPlansEnabled: true,
+  byokPlatformFeeBps: 0,
   delegationSecret: DELEGATION_SECRET,
   vercelAiGatewayApiKey: "gateway-test-key",
   azureLiveEndpoint: "https://voice.example.test",
@@ -86,6 +90,15 @@ function appFor(settings: Settings): Hono {
     },
   } as unknown as ApiRouteDeps;
   const app = new Hono();
+  app.onError((error, c) => {
+    const refusal = insufficientCreditsHttpError(error);
+    if (refusal)
+      return c.json(
+        { error: { code: refusal.code, message: refusal.message, details: refusal.details } },
+        refusal.status,
+      );
+    throw error;
+  });
   registerSessionRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
   return app;
@@ -184,7 +197,7 @@ async function costEvents(value: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
-  test("refuses unfunded starts with the voice-input code; workspace-funded voice is not gated", async () => {
+  test("refuses unfunded hosted starts and API subscription starts", async () => {
     const app = appFor(pricedSettings);
     const value = await fixture(0);
     const refused = await begin(app, value, AZURE_MODEL);
@@ -192,9 +205,12 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(await refused.response.json()).toMatchObject({ code: "insufficient_credits" });
     const gateway = await begin(app, value, "opengeni-gateway/openai/gpt-realtime-2.1");
     expect(gateway.response.status).toBe(402);
-    // A connected subscription is paid by the workspace: admission is not credit-gated.
+    // Connected subscriptions cannot fund an API-origin call, regardless of credits.
     const codex = await begin(app, value, "gpt-live-1-boulder-alpha");
-    expect(codex.response.status).toBe(201);
+    expect(codex.response.status).toBe(403);
+    expect(await codex.response.json()).toMatchObject({
+      error: { details: { code: "subscription_api_unavailable" } },
+    });
 
     const catalog = await app.request(
       `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
@@ -208,7 +224,52 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       available: false,
       unavailableCode: "insufficient_credits",
     });
+    for (const model of models.filter((entry) => String(entry.provider).startsWith("Connected "))) {
+      expect(model).toMatchObject({
+        available: false,
+        unavailableCode: "subscription_api_unavailable",
+      });
+    }
   });
+
+  test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+    "%s requires a paid app plan without charging credits",
+    async (model) => {
+      const app = appFor(pricedSettings);
+      for (const [key, status, allowed] of [
+        [null, "active", false],
+        ["free", "active", false],
+        ["pro", "past_due", false],
+        ["pro", "active", true],
+        ["max", "active", true],
+      ] as const) {
+        const value = await fixture(0);
+        if (key)
+          await upsertOrganizationPlan(client.db, {
+            accountId: value.accountId,
+            planKey: key,
+            status,
+            ...(key === "free" ? {} : { stripeSubscriptionId: `sub_${crypto.randomUUID()}` }),
+            currentPeriodStart: new Date(Date.now() - 1000),
+            currentPeriodEnd: new Date(Date.now() + 3_600_000),
+          });
+        const callsBefore = providerCalls;
+        const started = await withBillingOriginOverride("app", () => begin(app, value, model));
+        expect(started.response.status).toBe(allowed ? 201 : 402);
+        if (!allowed)
+          expect(await started.response.json()).toMatchObject({
+            error: {
+              details: { code: "subscription_plan_required", action: { type: "upgrade_plan" } },
+            },
+          });
+        expect(providerCalls).toBe(callsBefore);
+        expect(await costEvents(value)).toEqual([]);
+        expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
+        const api = await begin(app, value, model);
+        expect(api.response.status).toBe(403);
+      }
+    },
+  );
 
   test("promotional chat-only credits are named instead of reported as no credits", async () => {
     const app = appFor(pricedSettings);
@@ -246,6 +307,89 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       unavailableReason: "Promotional credits don't cover live voice. Add credits to use it.",
     });
   });
+
+  test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+    "%s rechecks API origin and plan before negotiating an already-started app call",
+    async (model) => {
+      const app = appFor(pricedSettings);
+      for (const origin of ["api", "app"] as const) {
+        const value = await fixture(0);
+        const plan = {
+          accountId: value.accountId,
+          planKey: "pro",
+          stripeSubscriptionId: `sub_${crypto.randomUUID()}`,
+          currentPeriodStart: new Date(Date.now() - 1000),
+          currentPeriodEnd: new Date(Date.now() + 3_600_000),
+        };
+        await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+        const started = await withBillingOriginOverride("app", () => begin(app, value, model));
+        expect(started.response.status).toBe(201);
+        const { mode } = (await started.response.json()) as {
+          mode: { id: string; version: number; connectionEpoch: number };
+        };
+        if (origin === "app")
+          await upsertOrganizationPlan(client.db, { ...plan, status: "past_due" });
+        const webrtc = model === "gpt-live-1-boulder-alpha";
+        const callsBefore = providerCalls;
+        const refused = await withBillingOriginOverride(origin, () =>
+          app.request(`${value.base}/${webrtc ? "webrtc" : "websocket"}`, {
+            method: "POST",
+            headers: value.headers,
+            body: JSON.stringify({
+              realtimeId: mode.id,
+              operationId: crypto.randomUUID(),
+              browserInstanceId: started.proof.browserInstanceId,
+              ownerKey: started.proof.ownerKey,
+              expectedVersion: mode.version,
+              expectedConnectionEpoch: mode.connectionEpoch,
+              rotate: false,
+              ...(webrtc ? { sdp: "v=0\r\na=offer:fixture\r\n", version: "v3" } : {}),
+            }),
+          }),
+        );
+        expect(refused.status).toBe(origin === "api" ? 403 : 402);
+        expect(await refused.json()).toMatchObject({
+          error: {
+            details: {
+              code:
+                origin === "api" ? "subscription_api_unavailable" : "subscription_plan_required",
+            },
+          },
+        });
+        expect(providerCalls).toBe(callsBefore);
+        const rows =
+          await shared.admin`select state from session_realtime_connections where realtime_id = ${mode.id}::uuid`;
+        expect(rows.map((row) => row.state)).toEqual(["failed"]);
+        await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+        const [current] =
+          await shared.admin`select version, connection_epoch from session_realtime_modes where id = ${mode.id}::uuid`;
+        const retry = await withBillingOriginOverride("app", () =>
+          app.request(`${value.base}/${webrtc ? "webrtc" : "websocket"}`, {
+            method: "POST",
+            headers: value.headers,
+            body: JSON.stringify({
+              realtimeId: mode.id,
+              operationId: crypto.randomUUID(),
+              browserInstanceId: started.proof.browserInstanceId,
+              ownerKey: started.proof.ownerKey,
+              expectedVersion: current!.version,
+              expectedConnectionEpoch: current!.connection_epoch,
+              rotate: true,
+              ...(webrtc ? { sdp: "v=0\r\na=offer:fixture\r\n", version: "v3" } : {}),
+            }),
+          }),
+        );
+        // This fixture has no provider connection. Its corrected retry must
+        // pass admission and claim a new operation, not remain wedged in the old one.
+        expect(await retry.text()).not.toContain("REALTIME_CONNECTION_ACTIVE");
+        expect(
+          (
+            await shared.admin`select id from session_realtime_connections where realtime_id = ${mode.id}::uuid`
+          ).length,
+        ).toBe(2);
+      }
+    },
+  );
 
   test("an API caller cannot spend signup credits on live voice", async () => {
     // The fixture's delegated token is a product on the SDK: API use, which

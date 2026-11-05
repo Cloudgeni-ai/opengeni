@@ -18,6 +18,10 @@ export async function constructWithOwnedConnection<Connection, Result>(
 export type WorkerRunTarget = {
   run(): Promise<void>;
   shutdown(): void;
+  /** Activities whose JavaScript is still executing on this target, when the
+   * target can observe them. Containment uses it to see when only stalled
+   * finalizers remain. */
+  inFlightActivities?(): number;
 };
 
 /** One process may poll several disjoint Temporal queues, but it still has one
@@ -95,6 +99,11 @@ export function createWorkerServiceLifecycle(input: {
   onReady?: () => void;
   onDrainStarted?: () => void;
   cleanupContainmentRequested?: () => boolean;
+  /** Resolves once every in-flight activity is a contained finalizer. The SDK
+   * cannot finish such a run: the native worker stays referenced by the
+   * activity poll until those activities complete, so its finalization would
+   * fail. The host stops here instead and owns the process exit. */
+  contained?: Promise<void>;
   now?: () => number;
 }): WorkerServiceLifecycle {
   const now = input.now ?? (() => performance.now());
@@ -141,9 +150,28 @@ export function createWorkerServiceLifecycle(input: {
         }
         input.onReady?.();
         try {
-          await input.worker.run();
+          const run = input.worker.run();
+          let outcome: "stopped" | "contained" = "stopped";
+          if (input.contained) {
+            outcome = await Promise.race([
+              run.then(() => "stopped" as const),
+              input.contained.then(() => "contained" as const),
+            ]);
+          } else {
+            await run;
+          }
           state = "stopped";
-          shutdownPhase("Opengeni worker stopped polling; in-flight activities settled", "stopped");
+          if (outcome === "contained") {
+            shutdownPhase(
+              "Opengeni worker stopped polling; peers settled, only contained finalizers remain",
+              "contained",
+            );
+          } else {
+            shutdownPhase(
+              "Opengeni worker stopped polling; in-flight activities settled",
+              "stopped",
+            );
+          }
         } catch (error) {
           state = "failed";
           const forceStopReason = input.cleanupContainmentRequested?.()
@@ -223,20 +251,83 @@ function safeLifecycleLog(log: () => void): void {
 
 /** A cleanup stall first drains peers through WORKER_SHUTDOWN. The standalone
  * process owns the final exit, because Temporal cannot kill JavaScript writers.
- * Embedded hosts may supply their own termination policy at this same edge. */
+ * Embedded hosts may supply their own termination policy at this same edge.
+ *
+ * Each request is a hold for one stalled finalizer and returns its release.
+ * Once every in-flight activity is held (all peers settled or checkpointed),
+ * `contained` resolves so the host can stop before the SDK force time: an SDK
+ * force stop with a stalled activity can never finalize its native worker. */
 export function createWorkerCleanupContainment(input: {
   drain: () => boolean;
   terminate?: () => void;
   observability: Observability;
   timeoutMs?: number;
+  /** Executing activities on the worker; enables the contained stop. */
+  inFlightActivities?: () => number | undefined;
+  /** How often, and for how long, the held-only state must be observed. */
+  checkIntervalMs?: number;
 }) {
   let requested = false;
   let finished = false;
+  let holds = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let check: ReturnType<typeof setInterval> | undefined;
+  let resolveContained!: () => void;
+  let isContained = false;
+  const contained = new Promise<void>((resolve) => {
+    resolveContained = resolve;
+  });
+  // Held-only must persist across two consecutive checks: an activity task
+  // returned by a poll that raced the drain is counted only once it starts.
+  let heldOnlyObservations = 0;
+  const stopChecking = () => {
+    clearInterval(check);
+    check = undefined;
+  };
+  const observe = () => {
+    if (isContained || finished) return stopChecking();
+    let inFlight: number | undefined;
+    try {
+      inFlight = input.inFlightActivities?.();
+    } catch {
+      inFlight = undefined;
+    }
+    if (holds > 0 && inFlight === holds) {
+      heldOnlyObservations += 1;
+    } else {
+      heldOnlyObservations = 0;
+    }
+    if (heldOnlyObservations < 2) return;
+    isContained = true;
+    stopChecking();
+    safeLifecycleLog(() =>
+      input.observability.warn("worker contained: peers settled, only stalled finalizers remain", {
+        surface: "worker_shutdown",
+        outcome: "contained",
+        reason: "cleanup_containment",
+        registered: holds,
+      }),
+    );
+    resolveContained();
+  };
   return {
     requested: () => requested,
-    request() {
-      if (requested || finished) return;
+    contained,
+    request(): () => void {
+      if (finished) return () => undefined;
+      holds += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        holds -= 1;
+        heldOnlyObservations = 0;
+      };
+      if (input.inFlightActivities && !check && !isContained) {
+        check = setInterval(observe, input.checkIntervalMs ?? 1_000);
+        check.unref?.();
+      }
+      if (requested) return release;
       requested = true;
       if (input.terminate) {
         timer = setTimeout(() => {
@@ -268,12 +359,14 @@ export function createWorkerCleanupContainment(input: {
             origin: "worker-lifecycle",
           }),
         );
+      return release;
     },
     finished() {
       // Call only after Worker.run resolves. ForceShutdownError does not prove
       // its activity promises stopped, so rejection must retain the backstop.
       finished = true;
       clearTimeout(timer);
+      stopChecking();
     },
   };
 }

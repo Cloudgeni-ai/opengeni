@@ -4,6 +4,8 @@ import {
   getSandboxForAttempt,
   readActiveSandbox,
   getLiveEnrollmentConnection,
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
   resolvePersonalMachineRouteForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
@@ -25,6 +27,7 @@ import {
   type SelfhostedSession,
   type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
@@ -91,7 +94,11 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
-import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
+import {
+  createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
+  recoverSandboxSetupFailure,
+} from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -160,11 +167,12 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
 
 export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   attachGitCredentialRenewal: (
     tokenSession: GitCredentialTokenWriterSession,
     initial: MintedRunGitCredentials | undefined,
@@ -1213,6 +1221,9 @@ export async function bindLazySandboxProvisioner(
                     environment: sandboxEnvironment,
                     recordLazyManifest: true,
                     measureSetup: measure,
+                    ...(materialization.value
+                      ? { priorSoftSetupFailures: [materialization.value] }
+                      : {}),
                     onRuntimeEvent: async (event) => {
                       await eventing.publish?.(
                         [{ type: event.type, payload: event.payload }],
@@ -1295,8 +1306,32 @@ export async function bindLazySandboxProvisioner(
           } catch (error) {
             // Nothing the model asked for has reached the box yet, and every
             // setup step above is idempotent, so an unanswered agent lets the
-            // same turn retry instead of failing it.
-            throw sandboxSetupFailure(setupReplayGuard, error);
+            // same turn retry instead of failing it, and a box that cannot
+            // start programs is restarted once per turn.
+            throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
+              session: provisioned.established.session,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              boxReplacement: modalSandboxBoxReplacer(db, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: sandboxState.sandboxGroupId,
+                box: provisioned,
+                session: provisioned.established.session,
+              }),
+              restartsThisTurn: async () =>
+                await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                }),
+              publish: async (events) => {
+                // The restart guard counts these events: an unrecorded
+                // restart could repeat, so no publisher means no restart.
+                if (!eventing.publish) throw new Error("no event publisher for this turn");
+                await eventing.publish(events, true);
+              },
+              operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+            });
           } finally {
             await measure.flush();
           }

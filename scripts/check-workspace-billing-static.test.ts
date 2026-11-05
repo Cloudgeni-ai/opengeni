@@ -54,6 +54,11 @@ describe("workspace provider import guard", () => {
   test.each([
     "apps/api/src/billing-stripe-customer.ts",
     "apps/api/src/billing-subscriptions.ts",
+    "apps/api/src/billing-auto-top-up.ts",
+    "apps/api/src/routes/billing-auto-top-up.ts",
+    "apps/api/test/billing-auto-top-up.test.ts",
+    "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+    "apps/api/test/billing-auto-top-up.stripe-proof.ts",
     "apps/api/test/billing-subscriptions.test.ts",
     "apps/api/test/billing-subscriptions-review-postgres.test.ts",
     "apps/api/test/scoped-credit-checkout.test.ts",

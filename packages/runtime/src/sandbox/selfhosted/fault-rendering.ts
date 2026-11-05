@@ -15,7 +15,13 @@
 // legible fault as their result instead of the misleading wrapper.
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
-import { drainingPresentation, SelfhostedControlError } from "./control-rpc";
+import {
+  COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
+  drainingPresentation,
+  SelfhostedControlError,
+  START_CONFIRMED_DETAIL_KEY,
+} from "./control-rpc";
+import { MISSING_SHELL_NOTE, processStartFailureMachineNote } from "./process-start-failure";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -29,6 +35,7 @@ export function selfhostedFaultClass(error: SelfhostedControlError): string {
     return "payload_too_large";
   if (error.reason === "agent_reconnecting") return "reconnecting";
   if (error.reason === "consent_required") return "consent";
+  if (error.processStartFailed) return "process_start";
   if (error.osNotFound || error.code === ErrorCode.ERROR_CODE_NOT_FOUND) return "not_found";
   if (error.fenced || error.code === ErrorCode.ERROR_CODE_FENCED) return "fenced";
   switch (error.code) {
@@ -55,6 +62,7 @@ export const SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES: ReadonlySet<string> = new 
   "draining",
   "payload_too_large",
   "reconnecting",
+  "process_start",
   "os",
   "stream",
   "protocol",
@@ -74,12 +82,46 @@ interface FaultFields {
   tryNext: string;
 }
 
+/** Where the faulted command ran, when the caller knows it. */
+export interface SelfhostedFaultContext {
+  /** The command ran on a Connected Machine (the person's own computer), not
+   *  a compute box. Only then can the copy point at the Opengeni app there. */
+  connectedMachine?: boolean;
+  /** The command ran on the chat's own workspace machine (a compute box), which
+   *  speaks the same agent protocol but restarts on its own. Its faults are
+   *  named for it instead of for a Connected Machine. */
+  workspaceMachine?: boolean;
+}
+
+/** The context of a routed backend kind: `selfhosted` is a Connected Machine,
+ *  `compute` is the chat's workspace machine; anything else (or unknown) is
+ *  neither and keeps the generic copy. */
+export function selfhostedFaultContext(kind: string | undefined): SelfhostedFaultContext {
+  return { connectedMachine: kind === "selfhosted", workspaceMachine: kind === "compute" };
+}
+
+const CONNECTED_MACHINE_PREFIX = "[connected machine] ";
+const WORKSPACE_MACHINE_PREFIX = "[workspace machine] ";
+
+/** What the person is told when their machine went offline mid-command. The
+ *  code cannot know what stopped the agent (a command, sleep, a lost
+ *  network), only that the machine stopped answering while the command ran,
+ *  so the copy says the command "may have" stopped it. */
+export const CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE =
+  "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
+  "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
+
+/** What the person is told when the agent came back on a new connection
+ *  mid-command: the machine is answering again, so it is not "offline". */
+export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
+  "The Opengeni agent on your machine reconnected during a command that may have stopped it. It's back now.";
+
 /** Assemble the four-field block. The typed wire code is folded into "what
  *  happened" so the model has both the plain language and the precise code. */
 function assemble(error: SelfhostedControlError, f: FaultFields): string {
   const code = errorCodeToJSON(error.code);
   return [
-    `[connected machine] ${f.headline}`,
+    `${CONNECTED_MACHINE_PREFIX}${f.headline}`,
     `${FAULT_FIELD_WHAT_HAPPENED} ${f.happened} (control code ${code}).`,
     `${FAULT_FIELD_WHICH_LAYER} ${f.layer}`,
     `${FAULT_FIELD_WHAT_PRESERVED} ${f.preserved}`,
@@ -106,7 +148,58 @@ function assemble(error: SelfhostedControlError, f: FaultFields): string {
  *  - FENCED → the active machine session changed (a swap); re-run.
  *  - default (OS/UNSUPPORTED/STREAM/PROTOCOL) → the command/op failed on the machine.
  */
-export function renderSelfhostedFault(error: SelfhostedControlError): string {
+export function renderSelfhostedFault(
+  error: SelfhostedControlError,
+  context: SelfhostedFaultContext = {},
+): string {
+  if (!context.workspaceMachine) return renderConnectedMachineFault(error, context);
+  if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
+    // The box did not come back while waking, before anything was sent.
+    const wakeSeconds = error.detail[COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY];
+    if (wakeSeconds) {
+      return onWorkspaceMachine(
+        assemble(error, {
+          headline: "this chat's workspace machine did not come back",
+          happened: `this chat's workspace machine did not answer within ${wakeSeconds}s of being woken`,
+          layer: "the workspace machine itself, not your command",
+          preserved: "nothing ran; the command was never sent.",
+          tryNext:
+            "retry once; if it still does not answer, stop and tell the person the workspace machine is not starting.",
+        }),
+      );
+    }
+    // A workspace machine that stops answering is most likely restarting (its
+    // agent or the whole box) and comes back on its own within seconds; it is
+    // not "offline" the way a person's own computer can be.
+    return onWorkspaceMachine(
+      assemble(error, {
+        headline: "this chat's workspace machine stopped answering; it is most likely restarting",
+        happened:
+          "this chat's workspace machine did not answer, most likely because it is restarting",
+        layer: "the workspace machine itself, not your command",
+        preserved: error.neverSent
+          ? "nothing ran; the command never reached the workspace machine."
+          : "unknown — the command was in flight when the workspace machine stopped answering, so it may not have run, or may have run fully or partly.",
+        tryNext: error.neverSent
+          ? "retry the command; the workspace machine is usually back within seconds."
+          : "once the workspace machine is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+      }),
+    );
+  }
+  return onWorkspaceMachine(renderConnectedMachineFault(error, {}));
+}
+
+/** The same four fields, named for the chat's workspace machine. */
+function onWorkspaceMachine(rendered: string): string {
+  return rendered.startsWith(CONNECTED_MACHINE_PREFIX)
+    ? `${WORKSPACE_MACHINE_PREFIX}${rendered.slice(CONNECTED_MACHINE_PREFIX.length)}`
+    : rendered;
+}
+
+function renderConnectedMachineFault(
+  error: SelfhostedControlError,
+  context: SelfhostedFaultContext,
+): string {
   const detail = error.detail;
 
   if (error.code === ErrorCode.ERROR_CODE_PROTOCOL && detail.outcome_unknown === "true") {
@@ -189,6 +282,9 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
   }
 
   if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
+    if (context.connectedMachine && !error.neverSent) {
+      return renderConnectedMachineOfflineDuringCommand(error);
+    }
     const preserved = error.neverSent
       ? "nothing ran; the command never reached the machine."
       : "unknown — the link dropped and the command may or may not have run.";
@@ -213,6 +309,22 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
       tryNext:
         "wait a moment and try again; if this was a state-changing command, check whether it " +
         "already took effect before re-running it.",
+    });
+  }
+
+  if (error.processStartFailed) {
+    const note = processStartFailureMachineNote(error.message);
+    return assemble(error, {
+      headline: "the machine could not start the program",
+      happened: `the machine could not start a process: ${error.message}`,
+      layer: "the machine's operating system — not your command",
+      preserved: "nothing ran; the command never started.",
+      tryNext:
+        note === MISSING_SHELL_NOTE
+          ? `${note}, so the machine cannot start programs, and a restart does not bring the shell back. Stop running commands and tell the person: a connected machine needs /bin/sh put back; for a workspace machine, a new chat gets a fresh one.`
+          : `${
+              note ? `${note}, so the machine` : "the machine likely"
+            } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it; for a workspace machine, retrying may restart it, and a new chat gets a fresh one.`,
     });
   }
 
@@ -243,5 +355,39 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
     layer: "the command / operating system on the machine",
     preserved: "not applicable; the command did not complete successfully.",
     tryNext: "read the message above and adjust the command; a blind retry is unlikely to help.",
+  });
+}
+
+/**
+ * A Connected Machine that stopped answering, or whose agent came back on a
+ * new connection, after the command may have reached it. A command can stop
+ * the agent (`pkill -f opengeni`, deleting its files), so the copy says so and
+ * hands the model the sentence to tell the person, instead of a bare
+ * "unreachable … not your command".
+ */
+function renderConnectedMachineOfflineDuringCommand(error: SelfhostedControlError): string {
+  const avoid =
+    "check whether the command took effect before re-running it, and don't re-run a command that stops or deletes the Opengeni agent";
+  if (error.connectionReplaced) {
+    const startUnconfirmed = error.detail[START_CONFIRMED_DETAIL_KEY] === "0";
+    return assemble(error, {
+      headline: startUnconfirmed
+        ? "the machine's Opengeni agent reconnected before this command's outcome was known"
+        : "the machine's Opengeni agent reconnected while running this command",
+      happened: error.message.replace(/\.$/, ""),
+      layer: "the Opengeni agent on the machine, or its connection",
+      preserved: startUnconfirmed
+        ? "unknown — the command may not have started, may still be running, may have finished, or may have stopped with the agent."
+        : "unknown — the command may still be running, may have finished, or may have stopped with the agent.",
+      tryNext: `the agent is connected again; ${avoid}. Tell the person: "${CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE}"`,
+    });
+  }
+  return assemble(error, {
+    headline: "the machine went offline while running this command",
+    happened:
+      "the machine stopped answering while this command was running; it may have gone to sleep or lost its network, or the command may have stopped the Opengeni agent",
+    layer: "the machine or its Opengeni agent",
+    preserved: "unknown — the command may have run partly, fully or not at all.",
+    tryNext: `once the machine is on and connected again, ${avoid}. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
   });
 }

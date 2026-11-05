@@ -15,6 +15,12 @@ Organization subscription plans (runtime catalog, period credit and seats):
 `billing-subscription-store.ts` composes the accounting seams in one org-fenced
 transaction. `/v1/billing/subscription/*` and webhook plan writes are default-off
 behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independent.
+Owner-opted automatic top-ups use a separate default-off, tax-inclusive capped
+PaymentIntent journal; see [automatic credit top-ups](automatic-credit-top-ups.md)
+for API, recovery, notification integration and receipt-versus-invoice boundaries.
+Database funding writes live in `packages/db/src/credit-ledger.ts` and provider
+customer reads in `billing-customer.ts`; the root preserves their exports while
+automatic top-ups import these focused modules without a root-barrel cycle.
 New Free monthly grants share signup credit's live model coverage and use explicit
 grant allocations, ahead of other promotions. Pro/Max and existing unrestricted
 periods remain general credit. Expiry removes only the monthly grant's own unused
@@ -1053,6 +1059,42 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 That budget bounds a drain attempt's wait, not its capture: a slower capture still
 publishes late, and a worker never runs two drain captures of one lease epoch at
 once (see `docs/run-lifecycle.md`).
+The provider's own hard snapshot timeout for a drain is the separate
+`OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, and at
+least twice the drain wait), so a snapshot slower than the wait can finish instead
+of being cut off by Modal at the wait. After a settled failure, the next full drain
+snapshot of the same lease epoch waits 30 s, doubling up to 10 minutes; a backoff
+never runs past the start of the mandatory pre-deadline save window, and there is
+none inside it. The count lives on the lease (`drain_capture_failures`, migration
+1253): failures of the current drain since the box's last successful save,
+reset by a published save, a re-arm to warm, or a new epoch.
+When Modal native drain snapshots of one lease epoch have failed three times over
+at least 15 minutes, or once inside the pre-deadline save window, the next drain
+saves a portable tar that leaves rebuildable folders out instead
+(`REBUILDABLE_WORKSPACE_DIRECTORY_NAMES` in
+`packages/runtime/src/sandbox/workspace-archive.ts`: dependency installs and
+tool caches such as `node_modules`, `.next`, `.venv` and `__pycache__`, plus
+`target` next to a `Cargo.toml`; never `.git`, `dist` or `build`). One bounded
+`find` lists them and sizes what is kept, capped at 256 MiB with object storage
+and 16 MiB inline; a walk with more than 2048 such folders, a name it cannot
+report safely (a newline), or an incomplete list means no reduced save. The tar
+and its fingerprint leave out exactly the same anchored, glob-escaped `./path`
+patterns, and the tar is bounded by the drain's provider timeout. The
+descriptor records `omittedPaths`; the timeline says which folders were left
+out, and the next turns' model input carries a workspace note until a full save
+replaces it. The drain stops the box deliberately (`captureAbandoned`) when a
+reduced save fails or cannot be stored inside the save window or after an hour
+of failures, when one is still running at the end of the wait inside the save
+window, or when no reduced save can be tried inside the save window. Outside the
+window a slow reduced save is left to finish under its own bound, and a box with
+nothing to leave out keeps retrying full snapshots. The cold commit that
+records the loss also appends its
+`sandbox.box.terminated` event (taking the group's session rows before the
+lease, in the canonical lock order), naming the last save's time
+(`unsavedSince`) for the timeline notice; the loss record keeps `unsavedSince`, so a later
+restore of exactly that save adds no second notice while a restore of any other
+save is announced. The model's restore discontinuity is unchanged.
+Only Modal qualifies; other backends keep their existing retry path.
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
@@ -1439,7 +1481,11 @@ The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
 (`session.control.steer_requested`, `session.queue.changed`,
 `system.update.pending`), re-reads the same predicate on each one, and rechecks
-every 10 seconds in case a live event is lost. When a Steer waits it does two
+every 10 seconds in case a live event is lost. Admission's own Steer read runs
+alongside its slower checks, so when the watch has already fired, a negative
+admission read is read again before the watch is re-armed as withdrawn, and a
+re-armed watch reads at once (events that arrived while it was tripped were
+not acted on). When a Steer waits it does two
 things. A model request that is still generating is cut short: its abort
 signal fires with `ModelPreemption`, and the transport ends the stream with a
 `response_done` (`providerData.opengeniPreempted`) that keeps only the
@@ -1853,6 +1899,27 @@ Canonical: [`knowledge.md`](knowledge.md),
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
 ### 5.7 Usage, limits, and billing
+
+Organization credit alerts use `packages/db/src/billing-credit-notifications.ts`
+for account-fenced crossing state and durable recipient receipts, and
+`packages/core/src/billing-credit-notifications.ts` for the existing managed-email
+transport. The control worker evaluates canonical general availability and
+settled spend; the API delivers email and projects organization notices through
+the existing inbox and billing-authorized routes. The standalone server owns the
+delivery pump's startup and draining shutdown; composing request routes alone
+does not start organization scans. Membership's invoker projection
+keeps recipients current. Billing events never enter workspace feeds merely
+because a recipient is a workspace administrator. See
+[credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
+API/SDK and the transaction-compatible top-up enqueue seam.
+
+Connected subscriptions serve app-origin work on qualifying paid plans, with
+no usage fee. API-origin work refuses them at admission and before model calls;
+omitted API models skip subscription defaults. Origin is inherited by children,
+goals and schedules, independently of the own-key fee configuration. A zero
+own-key fee disables both its debit and its paid-credit gate. Existing internal
+legacy funding terms remain unchanged. See [billing origin](billing-origin.md)
+for the canonical admission seams, refusal codes and configured-fee behavior.
 
 Model-scoped promotions retain offer identity and initial eligibility on each grant.
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
@@ -2836,8 +2903,11 @@ never rewrites durable home policy.
 
 Repository skill discovery skips definite path misses. A typed unreachable
 Connected Machine (offline or control timeout) degrades that run's repository
-index to an "unavailable" notice instead of blocking the model. Other failures
-reach turn settlement; rotation resumes through the durable lifecycle wake.
+index to an "unavailable" notice instead of blocking the model. A failure that
+shows the workspace answered but one search path or skill folder was unusable
+skips only that entry with a reason on every backend; box, route, fence,
+transport, cancellation and unrecognized failures reach turn settlement; rotation resumes through the
+durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement
@@ -3137,6 +3207,7 @@ Topics: [`README.md`](README.md).
 | Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
+| Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |

@@ -182,8 +182,9 @@ export function providerDataPolicyFamily(route: PrivacyFactsRoute): ProviderData
   if (kind.startsWith("opper-")) return "opper";
   if (kind.startsWith("direct-openai-")) return "openai_api";
   if (kind.startsWith("direct-azure-")) return azureFamily(route, false);
-  // A workspace's own OpenAI-compatible server is described by nothing here.
-  if (kind === "direct-compatible-workspace") return "unknown";
+  // A workspace's or organization's own OpenAI-compatible server is described by nothing here.
+  if (kind === "direct-compatible-workspace" || kind === "direct-compatible-organization")
+    return "unknown";
   const deploymentType = route.residency?.deploymentType;
   if (deploymentType?.startsWith("azure_")) return azureFamily(route, true);
   if (deploymentType?.startsWith("bedrock_")) return "amazon_bedrock";

@@ -175,6 +175,11 @@ interface's words and how to change them for the person safely.
 
 ## Cost questions
 
+Connected AI subscriptions are for paid-plan app use, not API or embedded
+requests. Own provider API keys are different: their fee follows deployment
+configuration, currently 0% on the hosted service. Read
+`references/models-and-subscriptions.md` before explaining plans or fees.
+
 Read the installed SDK's reply types and formatter, then the relevant accounting
 contract. Model-picker labels show a billing category, not per-request cost.
 The current chat facade and Vercel/OpenAI formatters do not define a first-class

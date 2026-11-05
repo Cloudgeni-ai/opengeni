@@ -138,6 +138,16 @@ describe("finished commands follow the next tool result", () => {
     expect(withoutAppendedCommandCompletions(withNotice, appended)).toBe("sed output");
     expect(appended.size).toBe(0);
     expect(withoutAppendedCommandCompletions("other", new Set([notice]))).toBe("other");
+    // A result can carry several appended texts in turn (a finished command,
+    // then a setup notice); the audit view strips each of them.
+    const both = new Set([notice, "[Opengeni setup notice] moved"]);
+    expect(
+      withoutAppendedCommandCompletions(
+        `sed output\n\n${notice}\n\n[Opengeni setup notice] moved`,
+        both,
+      ),
+    ).toBe("sed output");
+    expect(both.size).toBe(0);
   });
 
   test("a JSON result takes nothing, so its pending result stays for the next text result", async () => {

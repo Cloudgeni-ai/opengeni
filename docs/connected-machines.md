@@ -1009,6 +1009,22 @@ services, the desktop app and compute sandboxes already start the agent again an
 run it without a keeper; an in-place update keeps the agent's process, and so its
 keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
 runs the agent itself without a keeper, as before.
+
+The generated services start a stopped agent again however often it stops, for
+example when a command kills it. The systemd unit has no start limit
+(`StartLimitIntervalSec=0`); units from agent 0.1.150 and older allowed five
+starts a minute and then left the agent stopped until someone started it by hand.
+On systemd 254 and newer it restarts after 2 s, backing off to 30 s over five
+restarts (`RestartSteps=`, `RestartMaxDelaySec=`); systemd resets that count only
+when the service is started by hand, `systemctl reset-failed` runs or the machine
+boots, so after several stops the agent comes back within 30 s. Older systemd
+restarts after a fixed 5 s. The macOS LaunchAgent (`KeepAlive`) has no start limit
+either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
+task's one-minute repetition starts an exited agent within a minute, with no limit;
+a process that keeps the agent's hidden console host open after the agent exits
+delays that start until it ends, because the task skips a tick while its previous
+run is still going.
+
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
@@ -1016,9 +1032,13 @@ must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
 installer never resets them with runtime `set-property`. The agent never rewrites
-a unit on its own: at startup it only warns when the live unit is custom or systemd
-did not place it in the `supervisor` subgroup, and `service install --restart`
-adopts the generated unit. The default operation leaf has no
+a custom unit: at startup it warns when the live unit is custom or systemd did not
+place it in the `supervisor` subgroup, and `service install --restart` adopts the
+generated unit. The one rewrite it makes on its own is of an unchanged unit an
+earlier release generated (agent 0.1.150 and older, marker `v3` or
+`v3-compatible`): it replaces it with the current unit of the same cgroup shape and
+reloads systemd, which applies the new restart policy without restarting the
+agent. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1215,6 +1235,25 @@ rechecks authority, capability, and the pinned connection; it never falls back
 to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
 offline. See [Transactional file edits](#transactional-file-edits).
+
+### Machines whose shell or working directory was removed
+
+The agent starts every shell command, and each exec's containment anchor,
+through `/bin/sh`. When `/bin/sh` is missing or not executable (a command ran
+`mv /bin/sh …`), agent 0.1.153 and later start the first of `/bin/dash`,
+`/usr/bin/dash`, `/bin/bash` or `/usr/bin/bash` instead, and, running as root
+on Linux, point `/bin/sh` back at it with a symlink (only an empty path or a
+symlink is replaced, never a file or directory). With no shell at all, the start
+fails with the note "the shell /bin/sh is missing and no dash or bash was found",
+which Opengeni reports as a machine that cannot start programs. A missing
+workspace root or home directory used as a command's working directory is
+created again and the command runs. The workspace root gets mode 0755 and stays
+owned by the agent; a home gets mode 0700 inside an existing parent and belongs
+to its user. Placeholder homes such as `/nonexistent` and `/var/empty` are never
+created, and any other missing working directory is still a not-found error.
+When the agent uses a fallback shell, it passes the shell's path to commands as
+`OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
+`/bin/sh`.
 
 ### Streaming exec (op-stream)
 

@@ -76,6 +76,8 @@ import type {
 } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
+/** Folders a reduced-save notice lists by path; a longer list names kinds. */
+const SAVED_WITHOUT_FOLDERS_SHOWN = 20;
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
 /** Message identity only: queue placement needs the surrounding turn history. */
@@ -1354,6 +1356,74 @@ export function buildTimeline(
             text: payload.text,
             occurredAt: event.occurredAt,
           });
+        else if (payload.mode === "checkpoint" && typeof payload.capturedAt === "string") {
+          const capturedAt = new Date(payload.capturedAt);
+          if (!Number.isNaN(capturedAt.getTime()))
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              text: t("timeline.projection.restoredFromOlderSave", {
+                time: capturedAt.toLocaleString(t.locale, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                }),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
+        break;
+      }
+
+      case "sandbox.box.terminated": {
+        // Most shutdowns save the workspace and say nothing. Only a shutdown
+        // that could not save it, or saved it without rebuildable folders,
+        // is worth telling the person.
+        if (payload.captureAbandoned === true) {
+          const unsavedSince =
+            typeof payload.unsavedSince === "string" ? new Date(payload.unsavedSince) : null;
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text:
+              unsavedSince && !Number.isNaN(unsavedSince.getTime())
+                ? t("timeline.projection.filesChangedAfterCouldNotBeSaved", {
+                    time: unsavedSince.toLocaleString(t.locale, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }),
+                  })
+                : t("timeline.projection.filesCouldNotBeSaved"),
+            occurredAt: event.occurredAt,
+          });
+        } else if (
+          payload.persisted === true &&
+          Array.isArray(payload.omittedPaths) &&
+          payload.omittedPaths.length > 0
+        ) {
+          const paths = payload.omittedPaths.filter(
+            (path): path is string => typeof path === "string" && path.length > 0,
+          );
+          if (paths.length > 0)
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              // A long list would bury the notice: past a few folders, name
+              // each kind once (node_modules, .venv, ...), a short list by
+              // construction.
+              text: t("timeline.projection.savedWithoutRebuildableFolders", {
+                folders:
+                  paths.length > SAVED_WITHOUT_FOLDERS_SHOWN
+                    ? [...new Set(paths.map((path) => path.slice(path.lastIndexOf("/") + 1)))]
+                        .slice(0, SAVED_WITHOUT_FOLDERS_SHOWN)
+                        .join(", ")
+                    : paths.join(", "),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
         break;
       }
 
@@ -1639,6 +1709,15 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
+          // Its startup rows (including the expected "compact first" model
+          // preparation stop) are part of that same maintenance. Left behind,
+          // they would form a work row no turn-end ever settles.
+          if (turnId) {
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              const item = items[index]!;
+              if (item.kind === "startup-phase" && item.turnId === turnId) items.splice(index, 1);
+            }
+          }
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:

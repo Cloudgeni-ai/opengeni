@@ -60,6 +60,7 @@ export const MODEL_CONNECTION_CLASSES = [
   "elevenlabs",
   "openai",
   "azure_openai",
+  "openai_compatible",
 ] as const satisfies readonly ModelClass[];
 
 export type IntegrationClass = ConnectionClass | ModelClass;
@@ -149,6 +150,7 @@ export function modelConnectionClass(provider: string): ModelClass | null {
     case "opper":
     case "openai":
     case "azure_openai":
+    case "openai_compatible":
     case "anthropic":
     case "claude_subscription":
     case "elevenlabs":

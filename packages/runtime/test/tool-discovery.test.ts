@@ -162,6 +162,68 @@ describe("tool discovery ranking", () => {
     expect(index.rank("unmatched qqq", 8)).toEqual([]);
     expect(index.rank("hent faktura", 1)).toEqual([entry]);
   });
+  test("names that run words together, as lowercased operationIds do, rank by their words", () => {
+    // Microsoft Graph tools in the shape the OpenAPI compiler names them.
+    const draft = candidate(
+      "mcp_x__me_createmessages",
+      "Create a draft of a new message. POST /me/messages. Changes external state.",
+    );
+    const send = candidate(
+      "mcp_x__me_messages_message_send",
+      "Send an existing draft message. POST /me/messages/{message-id}/send.",
+    );
+    const lists = candidate(
+      "mcp_x__sites_listlists",
+      "Get the collection of lists for a site. GET /sites/{site-id}/lists. Read-only.",
+    );
+    const items = candidate(
+      "mcp_x__sites_lists_listitems",
+      "Get the items in a list. GET /sites/{site-id}/lists/{list-id}/items. Read-only.",
+    );
+    const byPath = candidate(
+      "mcp_x__sites_site_getbypath",
+      "Resolve a site from its server-relative path. Read-only.",
+    );
+    const pool = [send, draft, items, lists, byPath];
+    const index = new ToolSearchIndex(pool);
+    expect(index.rank("create a draft message", 1)).toEqual([draft]);
+    expect(index.rank("list the lists on a site", 1)).toEqual([lists]);
+    expect(index.rank("list items in a list", 1)).toEqual([items]);
+    expect(index.rank("get a site by path", 1)).toEqual([byPath]);
+    // The run-together name itself still finds its tool.
+    expect(index.rank("me_createmessages", 1)).toEqual([draft]);
+  });
+  test("run-together names win in a realistic catalog without moving ordinary names", () => {
+    const extra = [
+      candidate("mcp__crm__addresses_list", "List every postal address saved for a contact."),
+      candidate("mcp__db__postgres_query", "Run a read-only SQL query against the database."),
+      candidate("mcp__hooks__list_deliveries", "List recent webhook delivery attempts."),
+      candidate("mcp__hooks__repos_listwebhooks", "List the webhook configured for a repository."),
+    ];
+    const index = new ToolSearchIndex([...CONNECTED_TOOL_CATALOG.map(catalogTool), ...extra]);
+    const best = (query: string) => names(index.rank(query, 1))[0];
+    expect(best("list messages in a folder")).toBe("mcp__outlook__me_mailfolders_listmessages");
+    expect(best("send mail with outlook")).toBe("mcp__outlook__me_sendmail");
+    // Names whose words are not run together rank exactly as before.
+    expect(best("request a review on a pull request")).toBe(
+      "mcp__github__pull_request_request_review",
+    );
+    expect(best("list contact addresses")).toBe("mcp__crm__addresses_list");
+    expect(names(index.rank("post a message", 3))).not.toContain("mcp__db__postgres_query");
+    // A leading verb comes off only when the tool uses the rest of the word.
+    expect(best("list repository webhooks")).toBe("mcp__hooks__repos_listwebhooks");
+  });
+  test("a name word is split only with evidence from the tool's own words", () => {
+    const settings = candidate("mcp_x__list_settings", "Lists the mail filters and forwarding.");
+    const changeset = candidate("mcp_x__changeset_get", "Get one changeset by ID.");
+    const calendar = candidate("mcp_x__calendarview", "Get the calendarview of events.");
+    const index = new ToolSearchIndex([settings, changeset, calendar]);
+    // Ordinary words are not cut into a verb and a fragment.
+    expect(index.rank("tings", 3)).toEqual([]);
+    expect(names(index.rank("change something", 3))).not.toContain("mcp_x__changeset_get");
+    // A word the tool uses whole is never split.
+    expect(index.rank("calendar", 3)).toEqual([]);
+  });
   test("ranks a connected account's tools past their account line", () => {
     // With several accounts of one connector every description starts with
     // the same account line; it must not stand in for the capability sentence.

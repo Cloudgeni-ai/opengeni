@@ -256,6 +256,11 @@ disabled tools or grant execution outside the current catalog.
   legacy bonus switches must not disable this witness or re-enable money grants.
   Seat checks reuse the organization membership fence. Runtime catalog
   writes are migration-owner-only. See `docs/subscription-plans.md` for worker seams.
+- Connected subscriptions are app-origin only: API/SDK work never borrows one
+  merely because the account has a paid plan. Keep the origin check at edge,
+  scheduled/goal admission and between calls; children inherit it. Own API keys
+  are separate, and a zero configured fee means no fee debit or paid-credit
+  refusal. Preserve existing internal legacy funding terms. See `docs/billing-origin.md`.
 - Organization-key policy authority is defined in `packages/contracts/src/organization-access.ts`. Legacy keys retain their stored permissions and wildcard; explicit policies use literal permissions and live all/selected shared-workspace scope. Personal workspaces remain excluded from organization service authority.
 - Every organization API key belongs to a service account (`organization_service_accounts`, role `admin` or `member`, never owner; see `docs/organization-tenancy.md`). A member's keys never hold administrator permissions; the cap is stored in the key permissions.
 - **New work that names no model resolves its default server-side, once.** `packages/core/src/default-session-model.ts` owns the precedence: saved workspace default, then a usable connected subscription (the caller's own authority, or a scheduled task's frozen snapshot, never another member's), then a credits-billed model funded by the organization's current general or eligible promotional balance, then the deployment default. A funded credits-billed deployment default is preserved; otherwise prefer `OPENGENI_CREDITS_DEFAULT_MODEL`, then the first funded selectable model. A stale frozen SuperGrok snapshot means "SuperGrok not ready", never a failed occurrence. An explicit model (request, scheduled task, child inheritance, or a new-chat draft with `modelProvided: true`) never passes through it; the result is frozen like any explicit choice and changes no billing or credit admission. See `docs/model-providers.md` and `docs/scoped-promotional-credits.md`.

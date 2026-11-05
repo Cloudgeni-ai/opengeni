@@ -38,6 +38,7 @@ import {
   getSlackAgentForSession,
   getSlackBotPostOperation,
   availableSlackBotConnectionMetadata,
+  hasAvailableSlackBot,
   sharedOrganizationSlackBots,
   prepareBotMessage,
   readPreparedBotMessage,
@@ -527,6 +528,30 @@ export async function verifyOpenGeniSlackBotCredential(
       verifiedAt: now.toISOString(),
     },
   };
+}
+
+/**
+ * Whether this workspace has an active Opengeni Slack bot it can use: one
+ * installed here, or one an organization administrator shared with it. The
+ * first-party MCP lists the `slack_bot_*` tools only when it does, so a chat
+ * in a workspace without a bot is offered the Slack Connect card instead of
+ * tools that can only fail. The same installs the tools' own connection
+ * resolver selects, read in one statement on each tool listing; it never
+ * reads credentials. A failed read keeps the tools listed, as they were
+ * before this check existed.
+ */
+export async function slackBotToolsAvailable(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  try {
+    return await hasAvailableSlackBot(db, scope);
+  } catch (error) {
+    console.warn("[slack-bot] bot availability unavailable; listing bot tools", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
 }
 
 export async function resolveSlackBotConnectionForTool(input: {
@@ -1347,6 +1372,28 @@ export class OpenGeniSlackBotClient {
         }),
       );
       return { names: looked.filter((entry) => entry !== null) };
+    });
+  }
+
+  /**
+   * How a Slack account is named when someone confirms linking it to
+   * themselves: "@Kari (Kari Nordmann, kari.n) in Acme Slack". Display and
+   * real names are chosen by their owner, so the username, unique in this
+   * Slack workspace, is included too. Null when Slack doesn't return the user.
+   */
+  async userLinkLabel(userId: string) {
+    return await this.withAudit("users.list", async (headers) => {
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = projectUser(payload.user);
+      const primary = user?.id === userId && (user.displayName || user.realName || user.name);
+      if (!user || !primary) return { label: null };
+      const others = [...new Set([user.realName, user.name])].filter(
+        (name) => name && name !== primary,
+      );
+      const label = `@${primary}${others.length > 0 ? ` (${others.join(", ")})` : ""} in ${
+        this.metadata.slackTeamName
+      } Slack`;
+      return { label: label.slice(0, 256) };
     });
   }
 

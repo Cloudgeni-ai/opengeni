@@ -125,7 +125,11 @@ and members of the running batch are never regenerated.
    (3 minutes, `MERGE_BATCHER_WINDOW_SECONDS`), the batcher takes up to 12 ready
    PRs (`MERGE_BATCHER_MAX_BATCH`) in queue order. PRs that change `.github/`,
    `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone
-   (a Version PR first; see above).
+   (a Version PR first; see above). While a failed batch is being split and no
+   priority PR is waiting, the oldest of those CI and batcher changes outside
+   its halves takes turns with them, as a priority batch does, so it is not
+   held back until the whole bisection ends. It carries what the bisection
+   blamed, and what it fails in is not added to that.
 2. **Build.** It merges the PRs one by one onto the current `main` with
    GitHub's merge API on a scratch branch, and pushes the result with a
    manifest commit as `batch/<id>`. A PR that conflicts with an earlier one in
@@ -162,6 +166,9 @@ and members of the running batch are never regenerated.
    `blame` lists those jobs; a priority or Version PR built in between drops
    it. A single PR always gets its retry before it is ejected, so a flaky job
    in a half costs at most one more split, never an innocent PR's place.
+   A half with more PRs than fit in one batch tests the first `BATCHER_MAX_BATCH`
+   and keeps the others next in line as their own group, so none of them
+   drops out of the bisection.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

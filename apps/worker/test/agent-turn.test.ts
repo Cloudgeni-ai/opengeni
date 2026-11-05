@@ -3049,6 +3049,53 @@ describe("model call usage observability", () => {
       /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 1\b/,
     );
   });
+
+  test("a terminal response without a usage object counts as no_usage, not a missing cache field", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    observability.info = mock();
+    observability.warn = mock();
+    // The pinned Responses SDK turns a terminal response that carries no
+    // `usage` into all-zero counts with empty details (response_done).
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-no-usage",
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        inputTokensDetails: {},
+        outputTokensDetails: {},
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "codex-subscription",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      purpose: "main",
+      sourceKey: "resp-no-usage",
+      usage: responseUsage,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="no_usage"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toMatch(/opengeni_model_cache_read_telemetry_total\{[^}]*status="missing"/);
+  });
 });
 
 describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)", () => {
@@ -5974,6 +6021,26 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(true);
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
+  });
+
+  test("a statusless stream error that asks for a retry recovers the same turn", () => {
+    // An OpenAI-compatible server's error event mid-stream, after reasoning deltas.
+    const malformed = new Error("model returned malformed tool_call output; please retry");
+    expect(isTransientProviderError(malformed)).toBe(true);
+    expect(agentRunFailurePayload(malformed)).toEqual({
+      error: "model returned malformed tool_call output; please retry",
+      code: "provider_unavailable",
+      providerCondition: "unavailable",
+      retryable: true,
+    });
+    // The same words with a real 4xx status remain a request fault.
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Bad input; please retry"), { status: 400 }),
+      ),
+    ).toBe(false);
+    // Unrelated statusless text does not match.
+    expect(isTransientProviderError(new Error("retry_count must be positive"))).toBe(false);
   });
 
   test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {

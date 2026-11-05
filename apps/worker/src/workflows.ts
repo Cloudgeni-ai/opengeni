@@ -45,6 +45,8 @@ export {
   browserRecordingVideoWorkflowId,
   recordingDeletionWorkflow,
   recordingDeletionWorkflowId,
+  recordingSpeakerScanWorkflow,
+  recordingSpeakerScanWorkflowId,
   recordingTranscriptWorkflow,
   recordingTranscriptWorkflowId,
   type BrowserRecordingVideoWorkflowInput,
