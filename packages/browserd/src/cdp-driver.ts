@@ -780,6 +780,12 @@ type TargetState = {
   /** How the tab measured before this controller first emulated a size on
    * it, so a reset can check that it really returned there. */
   ownViewport?: MeasuredViewport | undefined;
+  /** Whether this controller turned on touch emulation for the tab (a mobile
+   * viewport). Turning it off makes Chrome report the machine's own pointer,
+   * and a headless browser has none (no hover, no pointer), so it is turned
+   * off only when it was on: a desktop size keeps the desktop mouse the
+   * browser launched with (see managedChromeArguments). */
+  touchEmulated?: boolean | undefined;
   /** Set while a viewport change is applied. Frame captures wait for it: a
    * clipped Page.captureScreenshot changes the page's emulation for the
    * capture and puts back what it saw when it began, which would undo a
@@ -4300,6 +4306,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               height: viewport.height,
               deviceScaleFactor: viewport.deviceScaleFactor,
             },
+            touchEmulated: viewport.mobile,
           }
         : {}),
     };
@@ -5012,11 +5019,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
       { sessionId },
     );
-    await connection.send(
-      "Emulation.setTouchEmulationEnabled",
-      { enabled: viewport.mobile, ...(viewport.mobile ? { maxTouchPoints: 1 } : {}) },
-      { sessionId },
-    );
+    // A tab is attached without touch emulation; a desktop size keeps it so
+    // (see TargetState.touchEmulated).
+    if (viewport.mobile) {
+      await connection.send(
+        "Emulation.setTouchEmulationEnabled",
+        { enabled: true, maxTouchPoints: 1 },
+        { sessionId },
+      );
+    }
   }
 
   /** Viewport emulation needs a browser this driver controls: Lightpanda has
@@ -7057,10 +7068,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 screenWidth: viewport.width,
                 screenHeight: viewport.height,
               });
-              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-                enabled: viewport.mobile,
-                ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
-              });
+              if (viewport.mobile || state.touchEmulated) {
+                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                  enabled: viewport.mobile,
+                  ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
+                });
+                state.touchEmulated = viewport.mobile;
+              }
               state.emulatedViewport = {
                 width: viewport.width,
                 height: viewport.height,
@@ -7091,9 +7105,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state,
             async () => {
               await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
-              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-                enabled: false,
-              });
+              if (state.touchEmulated) {
+                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                  enabled: false,
+                });
+                state.touchEmulated = false;
+              }
               await this.redrawTab(state);
               state.emulatedViewport = undefined;
               // Neither this tab, when attached again, nor tabs that open from
