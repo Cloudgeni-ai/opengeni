@@ -26,7 +26,6 @@ import {
   type VaultProviderRegistry,
   type VaultProviderAuthority,
 } from "@opengeni/vaults";
-import { rememberingAttemptSecretResolver } from "./secret-values";
 
 /**
  * Q-17: a frozen configuration without the key reads `from === "all"` (the
@@ -34,34 +33,6 @@ import { rememberingAttemptSecretResolver } from "./secret-values";
  */
 export function secretsCapabilityEnabled(agentConfig: ResolvedAgentConfig | null | undefined) {
   return agentConfig ? agentConfig.capabilities.secrets === true : true;
-}
-
-/**
- * First-party permissions that give a session's agent its task vault. Mirrors
- * the attempt principal's task mode in the database (`vault_principal_context`):
- * a session whose first-party permissions are narrowed to a list without any
- * of these has no task vault, so nothing can be saved into one.
- */
-const TASK_VAULT_PERMISSIONS: ReadonlySet<string> = new Set([
-  "secrets:use",
-  "variable-sets:use",
-  "variable-sets:attach",
-  "environments:use",
-]);
-
-/**
- * Whether secret-shaped values found in tool output are saved into the task
- * vault (and replaced by a reference) rather than only masked. Saving needs
- * the `secrets` capability and an agent allowed to use secrets; otherwise the
- * values keep their `[masked <kind>]` marker without a failing vault write.
- */
-export function taskVaultSecretCaptureEnabled(
-  agentConfig: ResolvedAgentConfig | null | undefined,
-  firstPartyMcpPermissions: readonly string[] | null | undefined,
-): boolean {
-  if (!secretsCapabilityEnabled(agentConfig)) return false;
-  if (!Array.isArray(firstPartyMcpPermissions)) return true;
-  return firstPartyMcpPermissions.some((permission) => TASK_VAULT_PERMISSIONS.has(permission));
 }
 
 /**
@@ -133,27 +104,23 @@ function attemptPrincipal(
 
 export function attemptSecretResolver(input: AttemptSecretInput): SecretResolver {
   const bus = input.bus;
-  // Every value this attempt resolves, on any surface, is masked afterwards
-  // in its tool results and stored text (docs/secrets.md, Masking).
-  return rememberingAttemptSecretResolver(
-    createSecretResolver(
-      {
-        db: input.db,
-        encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null,
-        ...(input.vaultAccess ? { providers: input.vaultAccess.providers } : {}),
-      },
-      attemptPrincipal(input),
-      {
-        capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
-        ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
-        ...(bus
-          ? {
-              publishEvents: (events) =>
-                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-            }
-          : {}),
-      },
-    ),
+  return createSecretResolver(
+    {
+      db: input.db,
+      encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null,
+      ...(input.vaultAccess ? { providers: input.vaultAccess.providers } : {}),
+    },
+    attemptPrincipal(input),
+    {
+      capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
+      ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
+      ...(bus
+        ? {
+            publishEvents: (events) =>
+              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+          }
+        : {}),
+    },
   );
 }
 

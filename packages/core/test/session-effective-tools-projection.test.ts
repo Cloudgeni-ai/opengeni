@@ -815,7 +815,9 @@ describe("server effectiveTools environment projection", () => {
   test("model-facing names and visibility match progressive disclosure", () => {
     const tools = projected().effectiveTools!.tools;
     const named = (name: string) => tools.find((tool) => tool.name === name);
-    expect(named("opengeni__goal_set")?.visibility).toBe("search");
+    // Harness control tools are in the first request on every path.
+    expect(named("opengeni__goal_set")?.visibility).toBe("upfront");
+    expect(named("opengeni__knowledge_search")?.visibility).toBe("search");
     expect(named("request_human_input")?.visibility).toBe("upfront");
     expect(named("skill_read")?.visibility).toBe("upfront");
     expect(named("skill_save")?.visibility).toBe("search");
@@ -864,6 +866,20 @@ describe("server effectiveTools environment projection", () => {
     ).toEqual([]);
   });
 
+  test("media on predicts the router before any media provider is attached, as the worker does", () => {
+    const row = session(
+      { from: "none", humanInput: false, skills: false, media: true },
+      { firstPartyMcpTools: [] },
+    );
+    const input = sessionEffectiveToolProjectionInput(
+      row,
+      [{ kind: "mcp", id: "opengeni", eager: true }],
+      context(),
+    );
+    expect(input.environment.hasDeferredTools).toBe(true);
+    expect(input.routerToolNames.length).toBeGreaterThan(0);
+  });
+
   test("configured recovery tools exist even with no first-party selection", () => {
     const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);
@@ -877,7 +893,8 @@ describe("server effectiveTools environment projection", () => {
     for (const capabilities of ["none", "all"] as const) {
       const detached = projected(session(capabilities, { sandboxBackend: "none" }));
       const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
-      expect(detachedNames).toContain("opengeni__wait_for_input");
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detachedNames.includes("opengeni__wait_for_input")).toBe(capabilities === "all");
       expect(detachedNames).not.toContain("opengeni__command_read");
       expect(detachedNames).not.toContain("opengeni__command_wait");
 

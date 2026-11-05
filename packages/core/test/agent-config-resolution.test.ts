@@ -219,7 +219,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     );
   });
 
-  test("human-input deployment limits explain defaults and reject an explicit family request", () => {
+  test("notification deployment limits explain defaults and reject an explicit family request", () => {
     const restricted = testSettings({ allowedFirstPartyMcpTools: ["session_create"] });
     const config = resolveSessionAgentConfigForCreate({
       ...base,
@@ -228,9 +228,11 @@ describe("resolveSessionAgentConfigForCreate", () => {
       request: { capabilities: "all" },
     }).config!;
     expect(config).toHaveProperty(
-      "unavailableReasons.humanInput",
+      "unavailableReasons.notifications",
       expect.stringContaining("its tools are not allowed on this server: notify_user"),
     );
+    // Asking questions has no first-party tool, so the limit leaves it on.
+    expect(config.unavailable).not.toContain("humanInput");
     const unrestricted = resolveSessionAgentConfigForCreate({
       ...base,
       settings,
@@ -245,7 +247,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
           ...base,
           settings: restricted,
           creator: "api",
-          request: { capabilities: { from: "none", humanInput: true } },
+          request: { capabilities: { from: "none", humanInput: true, notifications: true } },
         }),
       ),
     ).toEqual({ status: 422, code: "agent_capability_unavailable" });

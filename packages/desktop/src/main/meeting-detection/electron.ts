@@ -71,6 +71,14 @@ export interface CreateMeetingDetectionOptions {
    * to join and start recording. None by default.
    */
   calendar?: MeetingDetectionOptions["calendar"];
+  /** A recording didn't stop when the person chose Stop: show the account whose page records. */
+  revealPage?: MeetingDetectionOptions["revealPage"];
+  /** The account a recording page belongs to, for the stop card; null when there is only one. */
+  describePage?: MeetingDetectionOptions["describePage"];
+  /** A page started or stopped recording. */
+  recordingChanged?: MeetingDetectionOptions["recordingChanged"];
+  /** How long a recording page has to say it stopped. {@link STOP_CONFIRM_MS} by default. */
+  stopConfirmMs?: number;
   log?: (message: string, error?: unknown) => void;
 }
 
@@ -112,6 +120,10 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     ...(options.calendar ? { calendar: options.calendar } : {}),
+    ...(options.revealPage ? { revealPage: options.revealPage } : {}),
+    ...(options.describePage ? { describePage: options.describePage } : {}),
+    ...(options.recordingChanged ? { recordingChanged: options.recordingChanged } : {}),
+    ...(options.stopConfirmMs !== undefined ? { stopConfirmMs: options.stopConfirmMs } : {}),
     log,
   });
 }

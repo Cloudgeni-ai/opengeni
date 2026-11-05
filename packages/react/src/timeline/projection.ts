@@ -1354,6 +1354,22 @@ export function buildTimeline(
             text: payload.text,
             occurredAt: event.occurredAt,
           });
+        else if (payload.mode === "checkpoint" && typeof payload.capturedAt === "string") {
+          const capturedAt = new Date(payload.capturedAt);
+          if (!Number.isNaN(capturedAt.getTime()))
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              text: t("timeline.projection.restoredFromOlderSave", {
+                time: capturedAt.toLocaleString(t.locale, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                }),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
         break;
       }
 
@@ -1639,6 +1655,15 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
+          // Its startup rows (including the expected "compact first" model
+          // preparation stop) are part of that same maintenance. Left behind,
+          // they would form a work row no turn-end ever settles.
+          if (turnId) {
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              const item = items[index]!;
+              if (item.kind === "startup-phase" && item.turnId === turnId) items.splice(index, 1);
+            }
+          }
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:

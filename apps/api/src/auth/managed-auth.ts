@@ -876,7 +876,6 @@ export function createManagedAuth(
         create: {
           before: async (user, context) => {
             try {
-              requireSignupChallenge(settings);
               const admission = managedAuthUserCreateAdmission(
                 settings,
                 user,
@@ -891,6 +890,9 @@ export function createManagedAuth(
               if (!(await newSignupsGate.signupsOpen())) {
                 throw new ManagedAuthNewSignupsPausedError();
               }
+              // After the refusals a retry can't fix, so a social click that
+              // skipped the challenge while sign-ups are paused says so.
+              requireSignupChallenge(settings);
               return admission;
             } catch (error) {
               throw managedAuthOAuthCallbackRefusal(error, context?.path);

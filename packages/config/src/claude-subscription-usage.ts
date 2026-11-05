@@ -11,12 +11,19 @@ export type ClaudeUsageObservation = {
   source: "response_headers" | "provider";
   requestStatus?: ClaudeUsageRequestStatus | null;
   requestRestrictions?: ClaudeUsageRequestStatus[];
+  /**
+   * Windows the usage endpoint answered with an explicit `null`: the plan has
+   * no such limit now (a verified Ultra plan reports `five_hour: null`). An
+   * omitted key is not evidence of anything and is never listed here.
+   */
+  noLimitWindows?: ClaudeUsageWindow["id"][];
 };
 const prefixes: Record<string, string[]> = {
   five_hour: ["5h"],
   seven_day: ["7d"],
   seven_day_opus: ["7d-opus"],
   seven_day_sonnet: ["7d-sonnet"],
+  seven_day_fable: ["7d-fable"],
   seven_day_overage_included: ["7d_oi", "7d-overage-included"],
   overage: ["overage"],
 };
@@ -117,14 +124,51 @@ export function parseClaudeUsageHeaders(
     : null;
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * The weekly Fable limit from the endpoint's scoped `limits` list, when the
+ * body has no top-level `seven_day_fable`. Built on the publicly reported
+ * shape (`{ kind: "weekly_scoped", scope: { model: { id, display_name } },
+ * percent | utilization, resets_at }`, percentages 0-100) without a captured
+ * body, so any other shape is ignored and never breaks the reading.
+ */
+function scopedFableWindow(value: Record<string, unknown>): Record<string, unknown> | null {
+  try {
+    const limits = value.limits;
+    if (!Array.isArray(limits)) return null;
+    for (const entry of limits) {
+      const limit = record(entry);
+      if (!limit || limit.kind !== "weekly_scoped") continue;
+      const model = record(record(limit.scope)?.model);
+      const name = typeof model?.display_name === "string" ? model.display_name : "";
+      const id = typeof model?.id === "string" ? model.id : "";
+      if (name.trim().toLowerCase() !== "fable" && !id.startsWith("claude-fable")) continue;
+      return {
+        utilization: limit.utilization ?? limit.percent ?? null,
+        resets_at: limit.resets_at ?? null,
+      };
+    }
+  } catch {
+    // An unexpected shape is not a reading.
+  }
+  return null;
+}
+
 export function parseClaudeUsageResponse(
   value: unknown,
   now = new Date(),
 ): ClaudeUsageObservation | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const observedAt = now.toISOString();
+  const body = value as Record<string, unknown>;
   const windows = ClaudeUsageWindowId.options.flatMap((id) => {
-    const window = (value as Record<string, unknown>)[id];
+    const window =
+      id === "seven_day_fable" && body[id] === undefined ? scopedFableWindow(body) : body[id];
     if (!window || typeof window !== "object" || Array.isArray(window)) return [];
     const fields = window as Record<string, unknown>;
     const usedPercent = percent(fields.utilization, 1);
@@ -133,7 +177,17 @@ export function parseClaudeUsageResponse(
     if (usedPercent === null && resetsAt === null) return [];
     return [{ id, usedPercent, resetsAt, status: null, observedAt }];
   });
-  return windows.length ? { windows, observedAt, source: "provider" } : null;
+  const noLimitWindows = ClaudeUsageWindowId.options.filter(
+    (id) => Object.hasOwn(value, id) && (value as Record<string, unknown>)[id] === null,
+  );
+  return windows.length
+    ? {
+        windows,
+        observedAt,
+        source: "provider",
+        ...(noLimitWindows.length ? { noLimitWindows } : {}),
+      }
+    : null;
 }
 
 export function emptyClaudeUsage(credentialVersion: number | null): ClaudeSubscriptionUsage {

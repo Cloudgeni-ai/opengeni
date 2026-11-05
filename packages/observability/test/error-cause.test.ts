@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { InteractionError } from "@opengeni/contracts";
-import { createObservability, errorCauseAttributes, PUBLIC_INTERACTION_ERROR_CODES } from "../src";
+import {
+  createObservability,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  errorCauseAttributes,
+  errorCauseMessage,
+  PUBLIC_INTERACTION_ERROR_CODES,
+} from "../src";
 
 const settings = {
   serviceName: "opengeni",
@@ -277,5 +283,76 @@ describe("error cause classification", () => {
       causeDriverMessage: "browser observation unavailable",
     });
     expect(JSON.parse(lines[1]!)).not.toHaveProperty("causeDriverMessage");
+  });
+});
+
+class DrizzleQueryError extends Error {
+  readonly name = "DrizzleQueryError";
+  constructor(query: string, params: unknown[], cause: Error) {
+    super(`Failed query: ${query}\nparams: ${params.join(",")}`, { cause });
+  }
+}
+
+describe("unclassified internal error messages", () => {
+  test("are the first real cause's message, scrubbed and bounded", () => {
+    const cause = new Error("Insights quantity exceeds the exact non-negative wire range");
+    expect(errorCauseMessage(new HTTPException(500, { message: "wrapped", cause }))).toBe(
+      "Insights quantity exceeds the exact non-negative wire range",
+    );
+    expect(errorCauseMessage(new Error("refused token=SECRET_CANARY_VALUE at /v1/x?key=1"))).toBe(
+      "refused token=[redacted] at /v1/x?key=1",
+    );
+    expect(errorCauseMessage(new Error("  \n "))).toBeUndefined();
+    expect(errorCauseMessage({ message: 42 })).toBeUndefined();
+    expect(errorCauseMessage("not an error")).toBeUndefined();
+    const long = errorCauseMessage(new Error("é".repeat(5_000)))!;
+    expect(new TextEncoder().encode(long).byteLength).toBeLessThanOrEqual(
+      ERROR_CAUSE_MESSAGE_MAX_BYTES,
+    );
+  });
+
+  test("use a query error's database cause, never its SQL or parameters", () => {
+    const database = Object.assign(new Error('relation "missing" does not exist'), {
+      name: "PostgresError",
+    });
+    const error = new DrizzleQueryError("select $1", ["SECRET_PARAMETER"], database);
+    expect(errorCauseMessage(error)).toBe('relation "missing" does not exist');
+    expect(errorCauseMessage(new DrizzleQueryError("select 1", [], null as never))).toBeUndefined();
+  });
+
+  test("reach only an internal_error HTTP log line, as an exact projection", () => {
+    const base = {
+      errorClass: "HttpOperationError",
+      origin: "api",
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/insights/usage",
+    };
+    const lines = capture((obs) => {
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "internal_error",
+        causeMessage: "Insights quantity exceeds the exact non-negative wire range",
+      });
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "internal_error",
+        causeMessage: "password=SECRET_CANARY_VALUE",
+      });
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "service_unavailable",
+        causeMessage: "database is down",
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        errorCode: "internal_error",
+        causeMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeMessage: "Insights quantity exceeds the exact non-negative wire range",
+    });
+    expect(lines[1]).not.toContain("SECRET_CANARY_VALUE");
+    for (const line of lines.slice(1)) expect(JSON.parse(line)).not.toHaveProperty("causeMessage");
   });
 });

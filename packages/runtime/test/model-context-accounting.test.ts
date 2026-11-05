@@ -132,3 +132,115 @@ describe("observational model-context accounting", () => {
     expect(fallback.tools[0]!.schema).toEqual({ value: "😀" });
   });
 });
+
+describe("native Anthropic provider snapshots", () => {
+  const layers = [
+    {
+      id: "identity" as const,
+      title: "Identity",
+      content: "You are a fixture agent.",
+      joinBefore: "",
+    },
+    {
+      id: "operational_contract" as const,
+      title: "Operational contract",
+      content: "# Rules\n\nBe precise.",
+      joinBefore: "\n\n",
+    },
+  ];
+  const instructions = "You are a fixture agent.\n\n# Rules\n\nBe precise.";
+  const tools = [
+    {
+      name: "search_documents",
+      description: "Search the product's documents.",
+      input_schema: { type: "object", properties: { query: { type: "string" } } },
+      cache_control: { type: "ephemeral" },
+    },
+    { type: "web_search_20250305", name: "web_search", max_uses: 5 },
+  ];
+
+  test("system text becomes the instructions and layers, and tools are listed", () => {
+    for (const system of [
+      [{ type: "text", text: instructions }],
+      // The cache split: a stable prefix and its tail concatenate back exactly.
+      [
+        {
+          type: "text",
+          text: "You are a fixture agent.\n\n",
+          cache_control: { type: "ephemeral" },
+        },
+        { type: "text", text: "# Rules\n\nBe precise." },
+      ],
+    ]) {
+      const body = JSON.stringify({
+        model: "claude-fixture",
+        // A folded developer history item is context, not instructions.
+        system: [...system, { type: "text", text: "<opengeni_skill_catalog>…" }],
+        tools,
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      });
+      const snapshot = buildProviderRequestSnapshot({
+        provider: "anthropic",
+        body,
+        requestIndex: 1,
+        persistentLayers: layers,
+      });
+      expect(snapshot.instructions).toBe(instructions);
+      expect(snapshot.layers.map((layer) => layer.id)).toEqual([
+        "identity",
+        "operational_contract",
+      ]);
+      expect(snapshot.tokens.instructions).toBeGreaterThan(0);
+      expect(snapshot.tools.map((tool) => [tool.name, tool.type, tool.visibility])).toEqual([
+        ["search_documents", "function", "eager"],
+        ["web_search", "web_search_20250305", "eager"],
+      ]);
+      expect(snapshot.tools[0]!.description).toBe("Search the product's documents.");
+      expect(snapshot.tools[0]!.schema).toEqual(tools[0]!.input_schema);
+      expect(snapshot.tools[1]!.schema).toEqual({ max_uses: 5 });
+      expect(snapshot.providerRequest?.body).toBe(body);
+    }
+  });
+
+  test("without layers the cache split's tail still counts as instructions", () => {
+    const split = [
+      { type: "text", text: "You are a fixture agent.\n\n", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "# Rules\n\nBe precise." },
+    ];
+    const unsplit = [{ type: "text", text: instructions }];
+    for (const [system, folded] of [
+      [split, true],
+      [split, false],
+      [unsplit, true],
+    ] as const) {
+      const blocks = folded
+        ? [...system, { type: "text", text: "<opengeni_skill_catalog>…" }]
+        : system.map((block, index) =>
+            index === system.length - 1
+              ? { ...block, cache_control: { type: "ephemeral" } }
+              : block,
+          );
+      if (folded)
+        (blocks.at(-1) as { cache_control?: unknown }).cache_control = { type: "ephemeral" };
+      const snapshot = buildProviderRequestSnapshot({
+        provider: "anthropic",
+        body: JSON.stringify({ model: "claude-fixture", system: blocks, tools, messages: [] }),
+        requestIndex: 1,
+      });
+      expect(snapshot.instructions).toBe(instructions);
+    }
+  });
+
+  test("Responses bodies keep the body as the only copy of their contents", () => {
+    const body = JSON.stringify({ instructions, tools: [{ type: "function", name: "x" }] });
+    const snapshot = buildProviderRequestSnapshot({
+      provider: "openai",
+      body,
+      requestIndex: 1,
+      persistentLayers: layers,
+    });
+    expect(snapshot.instructions).toBe("");
+    expect(snapshot.tools).toEqual([]);
+    expect(snapshot.layers.map((layer) => layer.id)).toEqual(["identity", "operational_contract"]);
+  });
+});

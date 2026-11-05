@@ -190,6 +190,11 @@ export type TranscriptionSettlement = {
 };
 
 export class TranscriptionServiceError extends Error {
+  /** Stable subscription eligibility refusal, distinct from provider availability. */
+  readonly subscriptionCode:
+    | "subscription_api_unavailable"
+    | "subscription_plan_required"
+    | undefined;
   readonly code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
   readonly status: number;
   readonly retryable: boolean;
@@ -203,6 +208,7 @@ export class TranscriptionServiceError extends Error {
   readonly providerCode: RecordingTranscriptionErrorCode | undefined;
 
   constructor(input: {
+    subscriptionCode?: "subscription_api_unavailable" | "subscription_plan_required" | undefined;
     code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
     message: string;
     status?: number;
@@ -212,6 +218,7 @@ export class TranscriptionServiceError extends Error {
   }) {
     super(input.message);
     this.name = "TranscriptionServiceError";
+    this.subscriptionCode = input.subscriptionCode;
     this.code = input.code;
     this.status = input.status ?? statusForVoiceInputError(input.code);
     this.retryable = input.retryable ?? false;
@@ -272,7 +279,8 @@ export type TranscriptionService = {
   ): string | null | Promise<string | null>;
   /**
    * Credit admission for an exact provider before durable work is claimed.
-   * Resolves for subscription providers; throws TranscriptionBillingRefusedError
+   * Subscription eligibility is checked during selection and dispatch;
+   * this credit port throws TranscriptionBillingRefusedError
    * when a deployment-funded provider cannot be paid for.
    */
   admit?(input: {

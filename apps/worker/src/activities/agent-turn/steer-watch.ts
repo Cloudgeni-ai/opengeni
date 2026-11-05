@@ -128,6 +128,10 @@ export async function startSteerWatch(input: {
       controller = new AbortController();
       input.onPending(false);
       schedule();
+      // Live events were ignored while the watch was tripped, so a Steer
+      // committed in that window has no event left to wake it. Read now
+      // instead of leaving that Steer to the next safety recheck.
+      void check();
     },
     close: () => {
       if (closed) return;

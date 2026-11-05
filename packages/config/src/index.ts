@@ -354,7 +354,7 @@ export const McpOperationRecoverySchema = z
 
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
-  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f";
 
 /**
  * Whether this account keeps the billing terms from before the app/API split:
@@ -1994,6 +1994,20 @@ const SettingsSchema = z.object({
     .positive()
     .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
     .optional(),
+  // Hard provider-side timeout of a zero-holder drain snapshot. It is separate
+  // from the drain WAIT above: the wait only bounds how long one reaper attempt
+  // waits before retrying, while the snapshot itself keeps running and
+  // publishes late under its claim. When both were the same value, a
+  // workspace whose snapshot needed longer than the wait could never finish
+  // and the box stayed draining until the provider deadline. The effective
+  // value is never below the drain wait. Knob:
+  // OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS. Default 10min.
+  sandboxDrainProviderSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(600_000),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -2372,6 +2386,7 @@ const SettingsSchema = z.object({
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
+  billingAutoTopUpEnabled: EnvBoolean.default(false),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
   stripeCreditsProductId: z.string().optional(),
@@ -6342,6 +6357,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
+    sandboxDrainProviderSnapshotTimeoutMs: optional(
+      "OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS",
+    ),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
@@ -6565,6 +6583,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
+    billingAutoTopUpEnabled: optional("OPENGENI_BILLING_AUTO_TOP_UP_ENABLED"),
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
@@ -6878,6 +6897,22 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+/** Hard provider-side timeout for one zero-holder drain snapshot: the
+ * configured budget, and at least twice the drain wait, so the wait (not the
+ * provider) is what ends an attempt and a slow but finite snapshot keeps
+ * running and publishes late under its claim. Only a wait at the maximum
+ * snapshot timeout leaves the two equal. `drainWaitMs` is the wait the durable
+ * drain child froze. */
+export function effectiveSandboxDrainProviderSnapshotTimeoutMs(
+  settings: Pick<Settings, "sandboxDrainProviderSnapshotTimeoutMs">,
+  drainWaitMs: number,
+): number {
+  return Math.min(
+    SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS,
+    Math.max(settings.sandboxDrainProviderSnapshotTimeoutMs, 2 * drainWaitMs),
+  );
 }
 
 /**
@@ -11967,7 +12002,9 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // App actions act as a person. The worker decides per call whether one
       // waits for the person's confirmation in the chat (a change without full
       // access) or runs at once (a read, or full access); the API enforces it.
-      requireApproval: ["admin_action_call"],
+      // A bot send follows the person's own Slack send permission in an
+      // interactive chat; the worker decides it per call the same way.
+      requireApproval: ["admin_action_call", "slack_bot_send_prepared_message"],
     },
     ...(hasFiles
       ? []

@@ -15,7 +15,9 @@ import { cn } from "../lib/cn";
 /* ----------------------------------------------------------------------------
    UsageMeter (design brief 7.20) - remaining quota at a glance and in detail.
 
-   Labels are full words ("Weekly", "5-hour"), never "Wk" or "5h". Color is
+   Subscription windows use their short provider labels ("5h", "Week",
+   "Fable week"; lib/subscription-accounts); other meters say what they
+   measure ("Memory"). Never "Wk". Color is
    quiet until it matters: a status tone only below 10% left. Reset times are
    passed in already formatted ("Mon 28 Sep, 09:00"); the relative "Checked
    just now" line comes from the shared RelativeTime helper.
@@ -23,7 +25,7 @@ import { cn } from "../lib/cn";
    Three looks, same data:
    - "bar"   A. 4px bar, "22% left" and the reset time. In a row the bar
              drops away and it reads as text: bar in the sheet, text in the row.
-   - "text"  B. "Weekly 22% left", no bar. The quietest.
+   - "text"  B. "Week 22% left", no bar. The quietest.
    - "ring"  C. A small ring per window. Compact, harder to compare.
    Each has two densities: "full" (account sheet) and "compact" (a row).
    -------------------------------------------------------------------------- */
@@ -122,7 +124,7 @@ const LEVEL_VALUE_TEXT: Record<UsageLevel, string> = {
 };
 
 export interface UsageMeterProps {
-  /** "Weekly", "5-hour", "Memory". Never abbreviated. */
+  /** "5h", "Week", "Fable week", "Memory": the window's short label. */
   label: string;
   /** 0-100, or null when the provider hasn't reported a reading. */
   percent: number | null;
@@ -219,7 +221,7 @@ export function UsageMeter({
 /**
  * The usage readout at the end of an account row: "78% left this week" and a
  * 64px bar, right-aligned so it sits against the row's chevron, and under it
- * when the limits reset: "Resets Thu 09:00 · 5-hour 14:20". Without a reading
+ * when the limits reset: "Resets Thu 09:00 · 5h 14:20". Without a reading
  * it says why in words ("No usage yet"). Where the row folds its facts into
  * the meta line (narrow lists), only the words stay.
  */
@@ -325,7 +327,7 @@ export function UsageReadout({
         >
           {text}
         </span>
-        <Track
+        <UsageTrack
           level={level}
           fill={level === "exhausted" ? 0 : shown}
           className="w-16 shrink-0 @max-[639px]/list:hidden"
@@ -409,7 +411,8 @@ function ResetLine({ level, resetsLabel }: { level: UsageLevel; resetsLabel?: st
   );
 }
 
-function Track({
+/** The 4px bar every usage meter draws, filled to the share it shows. */
+export function UsageTrack({
   level,
   fill,
   className,
@@ -462,7 +465,7 @@ function BarFull({ label, value, level, fill, resetsLabel, loading }: Parts) {
           className="block h-1 rounded-full bg-surface-3 motion-safe:animate-pulse"
         />
       ) : (
-        <Track level={level} fill={fill} />
+        <UsageTrack level={level} fill={fill} />
       )}
       {loading ? (
         <span

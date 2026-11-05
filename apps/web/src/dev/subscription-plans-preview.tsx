@@ -139,7 +139,7 @@ export function SubscriptionPlansPreview() {
       balanceMicros: plan.creditRemainingMicros + 25_000_000,
       generalBalanceMicros: (plan.creditScoped ? 0 : plan.creditRemainingMicros) + 25_000_000,
       creditsMicros: 25_000_000,
-      byokPlatformFeeMonthMicros: 1_840_000,
+      byokPlatformFeeMonthMicros: search.get("fees") === "charged" ? 1_840_000 : 0,
       promotionalCredits: plan.creditScoped
         ? [
             {

@@ -23,3 +23,12 @@ test("recognizes only the complete Connected Machine uncertainty receipt", () =>
     expect(isConnectedMachineOutcomeUnknownOutput(other)).toBe(false);
   }
 });
+
+test("recognizes the same uncertainty receipt from the chat's cloud computer", () => {
+  const cloud = receipt.replace("[connected machine] ", "[cloud computer] ");
+  expect(isConnectedMachineOutcomeUnknownOutput(cloud)).toBe(true);
+  expect(
+    isConnectedMachineOutcomeUnknownOutput(cloud.replace("unknown — ", "nothing ran — ")),
+  ).toBe(false);
+  expect(isConnectedMachineOutcomeUnknownOutput(`[cloud] ${receipt.slice(20)}`)).toBe(false);
+});

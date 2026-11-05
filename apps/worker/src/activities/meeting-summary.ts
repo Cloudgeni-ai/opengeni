@@ -33,6 +33,7 @@ import {
   MEETING_SUMMARY_TOOLS,
   meetingSummaryCandidate,
   requireWorkspace,
+  chargeBillingOrigin,
 } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
@@ -149,12 +150,19 @@ export async function startMeetingSummary(
 
   const instructions =
     "Write the notes for exactly the meeting in the first message, as it asks, then stop.";
-  // Off everything but reading this workspace's meetings.
+  // Off everything but reading this workspace's meetings, plus privacy_facts:
+  // the owner can keep talking in this chat and may ask how it is processed.
   const agent = resolveSessionAgentConfigForCreate({
     settings,
     creator: "automation",
     request: {
-      capabilities: { from: "none", knowledge: true, humanInput: false, skills: false },
+      capabilities: {
+        from: "none",
+        knowledge: true,
+        humanInput: false,
+        skills: false,
+        privacyFacts: true,
+      },
     },
     instructions,
     workspaceSettings,
@@ -197,6 +205,7 @@ export async function startMeetingSummary(
       titleSource: recording.titleSource,
     }),
     surface: "system",
+    billingOrigin: chargeBillingOrigin(),
     metrics: service.observability,
     resources: [],
     tools: written.tools,

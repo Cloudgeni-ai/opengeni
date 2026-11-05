@@ -86,6 +86,36 @@ export async function availableSlackBotConnectionMetadata(
   return [...local, ...shared.filter((row) => row !== null)];
 }
 
+/**
+ * Whether the workspace has an Opengeni Slack bot to use, in one statement:
+ * an active install here verified at its current version, or one its
+ * organization shares with it (the share function applies the same checks
+ * to the bot in its home workspace). Metadata only; never reads credentials.
+ */
+export async function hasAvailableSlackBot(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  const rows = await withRlsContext(db, scope, async (tx) =>
+    rawRows<{ available: boolean }>(
+      tx,
+      sql`
+      select exists (
+        select 1 from connections c
+        where c.account_id = ${scope.accountId}::uuid
+          and c.workspace_id = ${scope.workspaceId}::uuid
+          and c.subject_id is null and c.kind = 'app_install' and c.provider_domain = 'slack.com'
+          and c.metadata->>'credentialRole' = 'opengeni_slack_bot' and c.status = 'active'
+          and c.verified_install_at is not null and c.verified_install_version = c.version
+      ) or exists (
+        select 1 from opengeni_private.list_organization_slack_bots(
+          ${scope.accountId}::uuid, ${scope.workspaceId}::uuid)
+      ) as available`,
+    ),
+  );
+  return rows[0]?.available === true;
+}
+
 /** Canonical organization-administrator authentication is supplied by a trusted
  * HTTP adapter. SQL separately rechecks live authority and exact bot identity. */
 export async function setOrganizationSlackBotAccess(

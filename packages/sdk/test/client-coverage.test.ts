@@ -944,6 +944,10 @@ describe("OpenGeniClient access + workspaces", () => {
       expectedVersion: 1,
       idempotencyKey: "request-1",
     });
+    await client.linkSlackUserAsOrganizationMember(WORKSPACE_ID, requestId, {
+      expectedVersion: 1,
+      idempotencyKey: "link-1",
+    });
     await client.cancelSlackUserLinkAccess(WORKSPACE_ID, requestId, {
       expectedVersion: 2,
       idempotencyKey: "cancel-1",
@@ -964,6 +968,7 @@ describe("OpenGeniClient access + workspaces", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}/request-access`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}/link`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}/cancel`,
         `GET /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack`,
         `POST /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack/${requestId}/approve`,

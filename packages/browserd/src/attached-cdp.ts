@@ -684,10 +684,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   /** Whether the tab is the one shown in its window. */
   async tabInFront(tabId: string): Promise<boolean> {
     if (this.stopped || this.failure) return false;
-    const listed = requireTabs(
-      (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
-    );
-    return listed.find((entry) => entry.id === tabId)?.active === true;
+    return (await this.tabShown(tabId)) === true;
   }
 
   /**
@@ -767,19 +764,18 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const attachment = this.tabAttachments.get(tabId);
         let response: { result: unknown };
         try {
-          response = await withinTimeout(
-            this.bridge.request<{ result: unknown }>(
-              {
-                type: "debugger.command",
-                tabId,
-                sessionId: nestedSessionId(options.sessionId),
-                ...(attachment === undefined ? {} : { attachment }),
-                method,
-                params,
-              },
-              options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
-            ),
-            options.timeoutMs,
+          // send() stops waiting at the command's own deadline; the bridge's
+          // pending request ends then too instead of at the connection's limit.
+          response = await this.bridge.request<{ result: unknown }>(
+            {
+              type: "debugger.command",
+              tabId,
+              sessionId: nestedSessionId(options.sessionId),
+              ...(attachment === undefined ? {} : { attachment }),
+              method,
+              params,
+            },
+            options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
           );
         } catch (error) {
           if (
@@ -899,11 +895,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     };
   }
 
-  /** Whether the tab is the active one in its window, as Chrome reports it.
-   * The extension has no single-tab lookup, so this lists the profile's tabs. */
+  /** Whether the tab is the active one in its window, as Chrome reports it;
+   * null for a tab Chrome does not list. The extension has no single-tab
+   * lookup, so this lists the profile's tabs. */
   async tabShown(targetId: string, options: { timeoutMs?: number } = {}): Promise<boolean | null> {
     const listed = await withinTimeout(
-      this.bridge.request<{ tabs: AttachedTab[] }>({ type: "tabs.list" }, options),
+      this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" }, options),
       options.timeoutMs,
     );
     return requireTabs(listed.tabs).find((tab) => tab.id === targetId)?.active ?? null;
