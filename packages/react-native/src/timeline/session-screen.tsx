@@ -173,8 +173,8 @@ export function NativeSessionScreen({
         send={controller.composer.send}
         scope={controller.sessionId}
         store={answerStore}
-        // Like the web: only a cancelled session can't take another message.
-        readOnly={status === "cancelled"}
+        // Like the web: a cancelled or archived chat can't take another message.
+        readOnly={status === "cancelled" || controller.archived}
       >
         <NativeTimelineMessagesProvider messages={timelineMessages}>
           <SessionScreenBoundary sessionId={controller.sessionId}>
@@ -537,7 +537,7 @@ function SessionScreenBody({
                   commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
                   onOpenSession={timelineProps.onOpenSession}
                   models={models}
-                  readOnly={status === "failed" || status === "cancelled"}
+                  readOnly={status === "failed" || status === "cancelled" || controller.archived}
                   renderCommands={() =>
                     client ? (
                       <NativeSessionCommands

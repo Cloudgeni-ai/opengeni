@@ -191,6 +191,7 @@ import {
 } from "../timeline/agent-identity";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
   noticeDisplayText,
   noticeIsResolvedApproval,
@@ -4964,13 +4965,14 @@ function SessionStatusRow({
   item: {
     status: SessionStatus;
     blocked?: true;
+    archived?: true;
     occurredAt: string;
     resolvedAt?: string;
   };
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const status = item.blocked ? "blocked" : item.status;
+  const status = sessionStatusItemDisplayStatus(item);
   const meta = SESSION_STATUS_META(t)[status];
   return (
     <div

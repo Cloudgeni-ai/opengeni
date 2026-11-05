@@ -3386,6 +3386,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -4839,6 +4840,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",

@@ -37,6 +37,7 @@ import {
   readableWorkShowsPreview,
   readableWorkStatus,
   SESSION_STATUS_PRESENTATION,
+  sessionStatusItemDisplayStatus,
   timelineGroupContainsPresentedImage,
   timelineGroupIndexAtSequence,
   type TurnSummaryFacetConfiguration,
@@ -1087,7 +1088,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
         />
       );
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[sessionStatusItemDisplayStatus(item)];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}

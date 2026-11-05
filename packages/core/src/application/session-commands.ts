@@ -17,6 +17,7 @@ import type {
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
+import { SESSION_ARCHIVE_STOP_REASON } from "@opengeni/contracts/session-history";
 import type { Settings } from "@opengeni/config";
 import { prepareDraftModel } from "./draft-model-preparation";
 import { HTTPException } from "hono/http-exception";
@@ -1156,7 +1157,8 @@ export async function stopArchivedSessionWork(
             actor: { type: "human", subjectId: input.subjectId },
             operationKey: `archive-stop:${input.sessionId}:${input.archivedAt}`,
             action: "cancel",
-            reason: "Archived",
+            // Clients read this cancellation as the archive, never as "cancelled".
+            reason: SESSION_ARCHIVE_STOP_REASON,
           }),
       },
     );

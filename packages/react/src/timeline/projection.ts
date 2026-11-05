@@ -23,6 +23,7 @@ import {
 import fleetDecisionItem from "./fleet-decision-projection";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
+import { sessionStatusChangeIsArchive } from "../session-status-model";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
 import {
@@ -1299,6 +1300,7 @@ export function buildTimeline(
           break;
         }
         const blocked = status === "requires_action" && payload.code === "admission_blocked";
+        const archived = sessionStatusChangeIsArchive(payload);
         if (!blocked && openAdmissionBlocks.length > 0) {
           for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
           openAdmissionBlocks = [];
@@ -1318,7 +1320,8 @@ export function buildTimeline(
         if (
           previous?.status === status &&
           !previous.resolvedAt &&
-          Boolean(previous.blocked) === blocked
+          Boolean(previous.blocked) === blocked &&
+          Boolean(previous.archived) === archived
         ) {
           break;
         }
@@ -1328,6 +1331,7 @@ export function buildTimeline(
           status,
           occurredAt: event.occurredAt,
           ...(blocked ? { blocked: true as const } : {}),
+          ...(archived ? { archived: true as const } : {}),
         };
         if (blocked) {
           openAdmissionBlocks.push(item);
