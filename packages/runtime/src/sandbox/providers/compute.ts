@@ -54,7 +54,10 @@ function computeControlFor(
 
 export type ComputeProviderBinding = { provider: "compute"; apiUrl: string; team: string };
 
-const computeBindings = new Map<string, Promise<{ key: string; binding: ComputeProviderBinding }>>();
+const computeBindings = new Map<
+  string,
+  Promise<{ key: string; binding: ComputeProviderBinding }>
+>();
 
 /** The compute team behind the configured key, at its control service: the
  * namespace templates live in. A prebuilt environment is used only while the

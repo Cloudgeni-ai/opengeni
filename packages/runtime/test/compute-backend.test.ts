@@ -89,7 +89,10 @@ class FakeControlService {
   /** Sandboxes whose delete always fails. */
   readonly failDeletes = new Set<string>();
   /** The team's templates, by id. */
-  readonly templates = new Map<string, { id: string; name?: string; image: string; source: string }>();
+  readonly templates = new Map<
+    string,
+    { id: string; name?: string; image: string; source: string }
+  >();
   private readonly stalls = new Set<() => void>();
   private readonly server: ReturnType<typeof Bun.serve>;
   /** Called when the control service wakes a sandbox. */
@@ -133,7 +136,10 @@ class FakeControlService {
         if (parts[1] === "templates" && parts[2]) {
           const template = this.template(parts[2]);
           if (!template) {
-            return Response.json({ code: "not_found", message: "no such template" }, { status: 404 });
+            return Response.json(
+              { code: "not_found", message: "no such template" },
+              { status: 404 },
+            );
           }
           if (request.method === "DELETE") {
             this.templates.delete(template.id);
@@ -1714,9 +1720,9 @@ describe("compute control service client", () => {
         maxAttempts: 1,
         sleep: async () => {},
       });
-      expect(
-        await client.captureTemplate("sbx", "env-slow", { timeoutMs: 2_000 }),
-      ).toMatchObject({ id: "tpl-slow" });
+      expect(await client.captureTemplate("sbx", "env-slow", { timeoutMs: 2_000 })).toMatchObject({
+        id: "tpl-slow",
+      });
       await expect(client.getTemplate("env-slow")).rejects.toBeInstanceOf(ComputeControlError);
     } finally {
       server.stop(true);
@@ -1734,7 +1740,12 @@ describe("compute environment templates", () => {
   test("a build captures its live sandbox under the build's own name", async () => {
     const captured: Array<{ sandboxId: string; name: string }> = [];
     const built = await buildComputeEnvironmentTemplate(
-      { settings, session: { state: { sandboxId: "sbx-build" } }, requestId: REQUEST, timeoutMs: 1 },
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
       {
         linkKeys: async () => ({ team: "team-build", keys: [] }),
         captureTemplate: async (sandboxId, name) => {
@@ -1755,9 +1766,7 @@ describe("compute environment templates", () => {
         },
       },
     );
-    expect(captured).toEqual([
-      { sandboxId: "sbx-build", name: `opengeni-environment-${REQUEST}` },
-    ]);
+    expect(captured).toEqual([{ sandboxId: "sbx-build", name: `opengeni-environment-${REQUEST}` }]);
     expect(built).toEqual({
       provider: "compute",
       backend: "compute",
@@ -1770,7 +1779,12 @@ describe("compute environment templates", () => {
 
   test("a retried build finds the template its earlier attempt captured", async () => {
     const built = await buildComputeEnvironmentTemplate(
-      { settings, session: { state: { sandboxId: "sbx-build" } }, requestId: REQUEST, timeoutMs: 1 },
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
       {
         linkKeys: async () => ({ team: "team-build", keys: [] }),
         captureTemplate: async () => {

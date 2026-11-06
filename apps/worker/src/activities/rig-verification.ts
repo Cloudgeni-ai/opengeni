@@ -1454,7 +1454,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, candidateVersion.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageContentSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(
+              runSettings,
+              runSettings.sandboxBackend,
+            ),
             definition: providerImageDefinition,
           });
           return await runWithOwnedRigVerificationSandbox(
@@ -1647,7 +1650,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageContentSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(
+              runSettings,
+              runSettings.sandboxBackend,
+            ),
             definition: version,
           });
           return await runWithOwnedRigVerificationSandbox(
