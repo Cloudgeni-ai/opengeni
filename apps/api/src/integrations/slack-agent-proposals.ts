@@ -48,14 +48,14 @@ export const SLACK_AGENT_PROPOSAL_CREATE_ACTION_ID = "opengeni.agent_proposal.cr
 export const SLACK_AGENT_PROPOSAL_CANCEL_ACTION_ID = "opengeni.agent_proposal.cancel";
 
 const SLACK_PROPOSAL_BOT_SUBJECT_ID = "service:slack-interaction";
-const CARD_INSTRUCTIONS_MAX_CHARS = 2_500;
+export const CARD_INSTRUCTIONS_MAX_CHARS = 2_500;
 
 /** What the chat is told about `slack_agent_propose`, including how to get an icon. */
 export const SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION = [
-  'Propose a new Slack agent when someone in Slack asks to create one: a named teammate people ask with "@Opengeni" and its name, working in one shared workspace with its own Memory.',
+  "Propose a new Slack agent (a named teammate with its own Memory in one shared workspace) when someone asks to create one.",
   "Posts a card in this thread; nothing is created until an admin of that workspace presses Create, so never say it was created.",
-  'name: what people call it, ideally two words like "Data team". description: one line. instructions: how it should work, written to the agent, at most 2500 characters. workspace: a shared workspace by name; omit for this chat\'s workspace.',
-  'avatar is required: when the agent works in this workspace and you have an image-generation tool, generate a flat icon filling the square (one bold symbol on a solid, strong colour; no frame, faces, fine detail or text), publish it and pass {kind:"image",artifactId}; otherwise ask which emoji to use and pass {kind:"emoji",emoji,hue} with hue 0-359.',
+  "name: what people call it. description: one line. instructions: how it should work, written to the agent. workspace: a shared workspace by name; omit for this chat's workspace.",
+  'avatar is required: when the agent works in this workspace and you can generate images, make one bold symbol on a solid colour, no text or fine detail, publish it and pass {kind:"image",artifactId}; otherwise ask which emoji to use and pass {kind:"emoji",emoji,hue}.',
   "Ask for anything missing before calling.",
 ].join(" ");
 

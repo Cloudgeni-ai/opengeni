@@ -335,7 +335,7 @@ export function slackOpenAgentMentionOnlyThreadText(agentName: string): string {
 /** What an open chat's agent is told, after its ordinary agent instructions. */
 export function slackOpenAgentSessionInstructions(workspaceName: string | null): string {
   const workspace = workspaceName ? `the ${workspaceName} workspace` : "this workspace";
-  return `Organization members outside ${workspace} can ask you here. You act as yourself, not as the asker: you can use what ${workspace} shares, never personal accounts, and nobody can approve actions or answer questions during this chat. For anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
+  return `Organization members outside ${workspace} can ask you here. You act as yourself, not as the asker, with only what ${workspace} shares. For anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. What people tell you here is visible to the workspace's members.`;
 }
 
 /** The whole agent part of an open chat's instructions. */

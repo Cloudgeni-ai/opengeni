@@ -13586,7 +13586,7 @@ describe("Open Slack agents", () => {
       expect(permission).not.toMatch(/:(write|manage|admin|publish)$/u);
     }
     expect(session.instructions).toContain("You are Front Desk");
-    expect(session.instructions).toContain("never personal accounts");
+    expect(session.instructions).toContain("You act as yourself, not as the asker");
 
     const [turn] = await turns(chat!.session_id!);
     expect(turn).toMatchObject({
