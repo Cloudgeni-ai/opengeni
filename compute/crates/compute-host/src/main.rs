@@ -632,12 +632,15 @@ async fn guard(config: GuardConfig, log: Option<&Lossy>) -> anyhow::Result<()> {
 }
 
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
-    // The guard must never wait on the journal (see `fleet::Lossy`).
-    let guard_log = match &cli.command {
+    // The guard and the agent must never wait on the journal (see
+    // `fleet::Lossy`): a guard waiting there resets the machine, and an
+    // agent's threads waiting there hold up its lease's renewals.
+    let log = match &cli.command {
         Command::Guard(_) => Some(Lossy::new(std::io::stderr())?),
+        Command::Serve(_) => Some(Lossy::with_room(std::io::stderr(), AGENT_LOG_ROOM)?),
         _ => None,
     };
-    let writer = match &guard_log {
+    let writer = match &log {
         Some(log) => BoxMakeWriter::new(log.clone()),
         None => BoxMakeWriter::new(std::io::stderr),
     };
@@ -649,7 +652,15 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         .init();
     let client = Client::new(&cli.socket);
     match cli.command {
-        Command::Serve(args) => Box::pin(run_serve(*args, cli.socket)).await,
+        Command::Serve(args) => {
+            let served = Box::pin(run_serve(*args, cli.socket)).await;
+            // What it said last, often why it stopped, unless the journal
+            // has stalled.
+            if let Some(log) = &log {
+                let _ = log.flush_within(FLUSH_WITHIN);
+            }
+            served
+        }
         Command::Create(args) => {
             let id = args.id;
             let config = args.config();
@@ -700,7 +711,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
-        Command::Guard(args) => guard(args.config(), guard_log.as_ref()).await,
+        Command::Guard(args) => guard(args.config(), log.as_ref()).await,
         Command::GuardStopped(args) => {
             let hook = args.hook();
             tokio::task::spawn_blocking(move || compute_host::fleet::guard_stopped(&hook)).await?
@@ -1064,8 +1075,14 @@ async fn run_agent<S: Store>(
     result
 }
 
-/// How long a stopping agent waits for its last events to be exported.
+/// How long a stopping agent waits for its last events to be exported,
+/// and its last log lines to be written.
 const FLUSH_WITHIN: Duration = Duration::from_secs(5);
+
+/// How many of the agent's log lines may wait for the journal before
+/// more are dropped: a busy agent says hundreds a second, and a journal
+/// stalls for seconds behind a busy disk.
+const AGENT_LOG_ROOM: usize = 16_384;
 
 #[cfg(test)]
 mod tests {

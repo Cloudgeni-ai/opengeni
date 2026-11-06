@@ -58,8 +58,11 @@ saying why the agent called, and the conversation lands in that chat.
 - One ringing call per person at a time.
 - At most 3 calls per chat per hour. After a decline, that chat cannot ring the
   same person again for 15 minutes.
-- Refusals tell the agent what to do instead (notify the person), never to
-  retry.
+- Results state facts only: what happened, what the person now sees (such as
+  the missed-call notice), and when a refused call can ring again. Whether to
+  call again or notify instead is the agent's judgment; the tool description
+  only reminds it that every call interrupts the person, so it weighs urgency
+  and whether they asked to be called.
 
 ## Storage
 

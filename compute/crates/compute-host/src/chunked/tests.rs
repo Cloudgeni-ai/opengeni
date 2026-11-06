@@ -1049,6 +1049,17 @@ struct Counted {
     inner: InMemory,
     reads: std::sync::atomic::AtomicUsize,
     writes: std::sync::atomic::AtomicUsize,
+    /// Done before the next pack is written, once.
+    before_pack: BeforePack,
+}
+
+#[derive(Default)]
+struct BeforePack(std::sync::Mutex<Option<futures::future::BoxFuture<'static, ()>>>);
+
+impl std::fmt::Debug for BeforePack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BeforePack")
+    }
 }
 
 impl Counted {
@@ -1056,6 +1067,12 @@ impl Counted {
     fn take(&self) -> (usize, usize) {
         use std::sync::atomic::Ordering::SeqCst;
         (self.reads.swap(0, SeqCst), self.writes.swap(0, SeqCst))
+    }
+
+    /// Does `work` before the next pack is written, as a sweep's taking
+    /// stock while an archive uploads would.
+    fn before_pack(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        *self.before_pack.0.lock().unwrap() = Some(Box::pin(work));
     }
 }
 
@@ -1081,6 +1098,12 @@ impl ObjectStore for Counted {
         if is_chunk(location) {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if location.as_ref().contains("/packs/") {
+            let work = self.before_pack.0.lock().unwrap().take();
+            if let Some(work) = work {
+                work.await;
+            }
         }
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1400,6 +1423,7 @@ async fn an_archive_holds_what_it_stores_until_it_publishes() {
         .archive_once(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
+        .expect("no sweep took stock")
         .stored()
         .unwrap();
     assert_eq!(held.len(), 2, "both chunks, not the zeros");

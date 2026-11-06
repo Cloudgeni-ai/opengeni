@@ -1,4 +1,5 @@
 import type { ConnectProvider } from "@opengeni/connect";
+import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "../../types";
 import type { IntegrationViewModel } from "./integration-view-model";
 
@@ -81,12 +82,13 @@ function restrictedStockFigma(item: CapabilityCatalogItem): boolean {
 }
 
 /** The provider refuses OAuth self-registration and this deployment has no
- * operator-registered client for it, so Connect would fail on the first click.
- * Server-projected from `data/catalog/oauth-client-requirements.json`. */
+ * operator-registered client for it (or the operator switched its setup off),
+ * so Connect would fail on the first click. The shared rule the agent's setup
+ * tools and the chat card also apply. */
 export function operatorOAuthClientMissing(
   item: Pick<CapabilityCatalogItem, "runtime" | "enabled">,
 ): boolean {
-  return item.runtime?.operatorOAuthClient?.configured === false && !item.enabled;
+  return deploymentCannotConnect(item);
 }
 
 export type NativeConnectionFacts = {

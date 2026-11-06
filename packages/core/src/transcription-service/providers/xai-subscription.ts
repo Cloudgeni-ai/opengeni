@@ -15,7 +15,7 @@ import {
 } from "@opengeni/db";
 import {
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
+  currentXaiClientVersion,
   XAI_PUBLIC_API_BASE_URL,
 } from "@opengeni/xai-subscription";
 import { workspaceXaiOperationAvailable } from "../../xai-operation-availability";
@@ -117,8 +117,8 @@ async function sendXaiTranscription(
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": `opengeni/${XAI_CLIENT_VERSION}`,
-      "x-grok-client-version": XAI_CLIENT_VERSION,
+      "User-Agent": `opengeni/${currentXaiClientVersion()}`,
+      "x-grok-client-version": currentXaiClientVersion(),
       "x-grok-client-identifier": "opengeni",
       "x-grok-client-mode": XAI_CLIENT_MODE,
       "x-grok-session-id": input.requestId,

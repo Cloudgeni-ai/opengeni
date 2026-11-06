@@ -17,11 +17,7 @@ import {
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
@@ -797,13 +793,6 @@ describe("rig route permission matrix", () => {
     // Only organization owners, who decide where each works.
     expect((await list(["rigs:use", "rigs:manage"])).status).toBe(403);
 
-    // Until the list is granted: the organization ones that work here.
-    const before = await list(owner);
-    expect(before.status).toBe(200);
-    expect(before.body.complete).toBe(false);
-    expect(ids(before.body)).toEqual([everywhere.id]);
-
-    await grantDeferredRuntimeAccess(shared!.admin);
     const after = await list(owner);
     expect(after.status).toBe(200);
     expect(after.body.complete).toBe(true);

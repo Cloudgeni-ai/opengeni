@@ -3856,6 +3856,7 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
+        autoConnect: { settings: unresolvedDeps.settings },
       }),
     );
   if (effectiveGoal) {
@@ -4873,6 +4874,7 @@ async function acceptSessionUserMessageInFileScope(
         source: connectionDelegationSource,
         targetSessionId: sessionId,
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+        autoConnect: { settings: deps.settings },
       });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
@@ -5240,12 +5242,17 @@ export async function setSessionUnattended(
   return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }
 
-/** Change future defaults without accepting a prompt or touching accepted work. */
+/**
+ * Change the chat's model for future turns. A turn that is waiting for
+ * subscription capacity moves onto the new model too and continues, because
+ * switching away from a model without capacity is how the wait ends sooner.
+ */
 export async function setSessionModel(
   deps: Pick<
     ApiRouteDeps,
     "db" | "bus" | "settings" | "catalogSourceSettings" | "sessionAuthorization"
-  >,
+  > &
+    Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
   request: SetSessionModelRequest,
@@ -5277,10 +5284,20 @@ export async function setSessionModel(
       : service
         ? { type: "service", subjectId: service.initiator.subjectId, context: service.context }
         : { type: "human", subjectId: grant.subjectId };
+  const capacityRelease = await capacityWaitReleaseForModelSwitch(deps, grant, settings, {
+    sessionId,
+    model,
+    requestedModel: input.model,
+    reasoningEffort: input.reasoningEffort,
+  });
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "session.model_settings",
-      eventTypes: ["session.model_settings.updated"],
+      eventTypes: [
+        "session.model_settings.updated",
+        "turn.recovery.requested",
+        "session.status.changed",
+      ],
       maxAttempts: 3,
     },
     async () => {
@@ -5293,6 +5310,7 @@ export async function setSessionModel(
           operationKey: input.idempotencyKey,
           model,
           reasoningEffort: input.reasoningEffort,
+          ...(capacityRelease ? { capacityRelease } : {}),
           validate: (session) => {
             try {
               // Validate fresh selection/provider and preserved latency exactly as
@@ -5324,9 +5342,98 @@ export async function setSessionModel(
           );
     },
   );
-  const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
-  if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
+  const events = (
+    await Promise.all(
+      [result.eventId, ...result.releaseEventIds].map((id) =>
+        getSessionEvent(deps.db, grant.workspaceId, id),
+      ),
+    )
+  ).filter((event): event is SessionEvent => event !== null);
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  if (result.releaseEventIds.length > 0) {
+    // The durable wake is committed; this only skips the dispatcher's tick.
+    void deps.workflowClient?.requestSessionWorkflowWakeDispatch?.()?.catch(() => {
+      console.warn("[sessions] capacity release wake dispatch failed; durable wake remains", {
+        errorCode: "session_capacity_release_wake_dispatch_failed",
+      });
+    });
+  }
   return { sessionId, ...result, effectiveFrom: "future_turns" as const };
+}
+
+/**
+ * The policy a capacity-waiting turn would run with on the new model, or null
+ * when there is no such turn, the model is unchanged, or the new model is not
+ * admissible for it now (then only future turns change).
+ */
+async function capacityWaitReleaseForModelSwitch(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  grant: AccessGrant,
+  settings: Settings,
+  input: {
+    sessionId: string;
+    model: string;
+    requestedModel: string;
+    reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+  },
+): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
+  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session.activeTurnId) return null;
+  const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
+  if (
+    !turn ||
+    turn.activeAttemptId !== null ||
+    (turn.status !== "waiting_capacity" && turn.status !== "recovering") ||
+    turn.model === input.model
+  ) {
+    return null;
+  }
+  try {
+    const executionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: input.model,
+        requestedModelId: input.requestedModel,
+        modelSource: "explicit",
+        reasoningEffort: input.reasoningEffort,
+        reasoningSource: "explicit",
+        latencyMode: turn.latencyMode,
+        latencyModeSource: "session",
+      }),
+      { grant, trustedMetadata: [session.metadata, turn.metadata] },
+    );
+    // Moving the turn is a new model request, billed as that turn was.
+    await requireLimit(
+      { ...deps, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance({
+          initiator: turn.initiator,
+          initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+            deps.db,
+            grant.workspaceId,
+            turn.id,
+          ),
+        }),
+        action: "agent_run:create",
+        quantity: 1,
+        model: input.model,
+        acceptedTurn: { sessionId: session.id, turnId: turn.id },
+        billingOrigin:
+          (await readTurnBillingOrigin(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            turnId: turn.id,
+          })) ?? "app",
+      },
+    );
+    return { turnId: turn.id, executionPolicy };
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
 }
 
 /**

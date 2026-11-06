@@ -7,7 +7,10 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   steer-waiting, steered, waiting, long, empty, error, and automation runs:
+   automation, automation-live, automation-quiet). `&legacy=1` delivers an
+   automation run the way Opengeni recorded it before runs had a plain
+   description. `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
    messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
@@ -71,8 +74,11 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
 
 const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
 const steering = scenario === "steer-waiting" || scenario === "steered";
+const RUN_TURN = "5a1c0000-0000-4000-8000-0000000000d1";
+const automationRun = scenario.startsWith("automation");
+const legacyRun = params.get("legacy") === "1";
 const selectedStatus =
-  scenario === "running" || scenario === "waiting" || steering
+  scenario === "running" || scenario === "waiting" || steering || scenario === "automation-live"
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -164,6 +170,95 @@ const finding = [
 ];
 
 const humanInputRequests: unknown[] = [];
+
+/**
+ * An event-triggered automation acting in this chat: a ticket was assigned to
+ * the person, and the agent looks it up and tells them about it.
+ */
+function automationRunEvents() {
+  const instructions =
+    "Continue this conversation when a ticket is assigned to the signed-in user. The recipient is the assignee (confirm through acme__list_my_tickets). Read the event, check that the ticket is still open, and tell the person what it is about and what to do first. If it is already closed, do nothing.";
+  push(
+    "system.update.delivered",
+    {
+      updateIds: ["5a1c0000-0000-4000-8000-0000000000e1"],
+      count: 1,
+      members: [
+        {
+          id: "5a1c0000-0000-4000-8000-0000000000e1",
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: "5a1c0000-0000-4000-8000-0000000000e2",
+          ...(legacyRun
+            ? { summary: instructions }
+            : {
+                summary: "Ticket assigned to you",
+                automation: {
+                  name: "Ticket assigned to you",
+                  eventSummaries: ["T-4907 Refund request from Contoso"],
+                  eventCount: 1,
+                },
+              }),
+        },
+      ],
+    },
+    2,
+    RUN_TURN,
+  );
+  push("turn.started", {}, 2, RUN_TURN);
+  push(
+    "agent.toolCall.created",
+    { id: "call-run-ticket", name: "acme__get_ticket", arguments: { ticketId: "T-4907" } },
+    2,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.output",
+    {
+      id: "call-run-ticket",
+      output: text({
+        id: "T-4907",
+        status: scenario === "automation-quiet" ? "closed" : "open",
+        customer: { name: "Contoso" },
+        subject: "Refund request for October invoice",
+      }),
+    },
+    1.8,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.created",
+    {
+      id: "call-run-history",
+      name: "acme__list_ticket_events",
+      arguments: { ticketId: "T-4907" },
+    },
+    1.6,
+    RUN_TURN,
+  );
+  if (scenario === "automation-live") return;
+  push(
+    "agent.toolCall.output",
+    { id: "call-run-history", output: text([{ type: "assigned" }, { type: "commented" }]) },
+    1.5,
+    RUN_TURN,
+  );
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text:
+        scenario === "automation-quiet"
+          ? legacyRun
+            ? "The ticket was already closed, so I didn't notify anyone."
+            : "NO_REPLY"
+          : "Contoso is asking for a refund of their October invoice ($1,250). The ticket is open and now yours. Start by checking whether the October payment went through twice.",
+    },
+    1.4,
+    RUN_TURN,
+  );
+  push("turn.completed", {}, 1.4, RUN_TURN);
+}
 
 if (scenario === "approval") {
   investigation();
@@ -288,6 +383,18 @@ if (scenario === "approval") {
       STEER_TURN,
     );
   }
+} else if (automationRun) {
+  investigation();
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text: [...finding, "", "I refunded the duplicate and noted it on the ticket."].join("\n"),
+    },
+    6,
+  );
+  push("turn.completed", {}, 6);
+  automationRunEvents();
 } else if (scenario === "long") {
   investigation();
   push(
@@ -355,7 +462,7 @@ const client = fakeClient({
     if (scenario === "error") throw new Error("Network request failed");
     return {
       ...(sessions.find((session) => session.id === id) ?? sessions[0]!),
-      activeTurnId: TURN,
+      activeTurnId: scenario === "automation-live" ? RUN_TURN : TURN,
       effectiveControl: control,
     } as never;
   },

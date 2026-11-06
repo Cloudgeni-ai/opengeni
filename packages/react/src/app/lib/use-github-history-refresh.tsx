@@ -23,8 +23,8 @@ export function useGitHubHistoryRefresh(
         void refreshGitHub(workspaceId);
       }, 2_000);
     };
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) {
+    const onPageShow = (event?: Partial<PageTransitionEvent>) => {
+      if (event?.persisted === true) {
         scheduleRefresh();
       }
     };

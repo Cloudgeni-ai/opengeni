@@ -190,6 +190,14 @@ turns sign in to it:
 - `each_person`: everyone connects their own account to the server's OAuth,
   as with a workspace connector enabled for personal accounts. Google's MCP
   servers only allow this.
+- `auto_connect`: everyone has their own account, but Opengeni connects them
+  the first time they use it, with no sign-in screen: the organization's
+  Opengeni issuer signs an ID-JAG for them and the app, which trusts that
+  issuer, issues their token. Only for MCP servers whose authorization server
+  accepts the JWT bearer grant, checked before adding
+  (`checkOrganizationConnectorAutoConnect`) and tested with
+  `testOrganizationConnectorAutoConnect`. See
+  [Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
 - `organization_key`: request headers held by the organization, probed and
   then stored encrypted exactly like
   [credential headers](#credential-headers). The API returns header names only.
@@ -1394,8 +1402,15 @@ OAuth start uses to find an operator client in
 `@opengeni/config`). When it is `false`, the web Connectors page (Featured,
 Popular, Browse) and the embedded `ConnectionDiscovery` do not offer the row.
 A row stays reachable when it is already enabled, the workspace has a
-connection for it, or the connection list could not be read. To offer such a
-connector, register an OAuth client with the provider using the redirect URI
+connection for it, or the connection list could not be read. The agent
+follows the same rule (`deploymentCannotConnect` in
+`@opengeni/contracts/personal-integration-setup`, also set by the Google
+connector setup gate): for a row that is not enabled, `capability_catalog_search`
+reports `setup.status: "unavailable"` with no `nextAction` and the catalog note,
+`capability_authorization_request` posts no card, tool search does not name it
+as connectable, and a card already in a chat says it can't be connected here.
+To offer such a connector, register an OAuth client with the provider using the
+redirect URI
 `<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback`, then add it to
 `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` under the listed issuer. No catalog
 change is needed. Gmail and the hosted Slack MCP are not listed because their

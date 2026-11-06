@@ -10,25 +10,118 @@ import {
 import type { NativeLinkAdapter, OpenGeniReactNativeAdapters } from "./adapters";
 import { sha256HexToArrayBuffer } from "./adapters";
 
+/**
+ * The event a shimmed `window` or `document` listener receives. Web listeners
+ * read fields such as `event.persisted` (pageshow), so every dispatch carries a
+ * real event object shaped like the browser's, never `undefined`.
+ */
+interface NativeEnvironmentEvent {
+  readonly type: string;
+  readonly target: object;
+  readonly currentTarget: object;
+  readonly srcElement: object;
+  readonly timeStamp: number;
+  readonly bubbles: false;
+  readonly cancelable: false;
+  readonly composed: false;
+  readonly isTrusted: false;
+  readonly eventPhase: number;
+  readonly defaultPrevented: false;
+  /** `pageshow` and `pagehide`: the page was never restored from a back/forward cache. */
+  readonly persisted?: boolean;
+  /** `focus` and `blur`: there is no other element focus moved from or to. */
+  readonly relatedTarget?: null;
+  preventDefault(): void;
+  stopPropagation(): void;
+  stopImmediatePropagation(): void;
+  composedPath(): object[];
+}
+
+type NativeEventListener =
+  | ((event: NativeEnvironmentEvent) => void)
+  | { handleEvent(event: NativeEnvironmentEvent): void };
+
+type NativeListenerOptions = boolean | { once?: boolean } | undefined;
+
 interface EventTargetLike {
-  addEventListener(type: string, listener: () => void): void;
-  removeEventListener(type: string, listener: () => void): void;
-  dispatch(type: string): void;
+  addEventListener(
+    type: string,
+    listener: NativeEventListener | null | undefined,
+    options?: NativeListenerOptions,
+  ): void;
+  removeEventListener(type: string, listener: NativeEventListener | null | undefined): void;
+  dispatch(type: string, target: object): void;
+}
+
+const AT_TARGET = 2;
+
+/** Build the browser-shaped event for `type`, with the fields web listeners read for it. */
+function createNativeEnvironmentEvent(
+  type: string,
+  target: object,
+  stopImmediate: () => void = () => {},
+): NativeEnvironmentEvent {
+  const event: NativeEnvironmentEvent = {
+    type,
+    target,
+    currentTarget: target,
+    srcElement: target,
+    timeStamp: typeof performance === "object" ? performance.now() : Date.now(),
+    bubbles: false,
+    cancelable: false,
+    composed: false,
+    isTrusted: false,
+    eventPhase: AT_TARGET,
+    defaultPrevented: false,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    stopImmediatePropagation: stopImmediate,
+    composedPath: () => [target],
+    ...(type === "pageshow" || type === "pagehide" ? { persisted: false } : {}),
+    ...(type === "focus" || type === "blur" ? { relatedTarget: null } : {}),
+  };
+  return event;
+}
+
+function reportListenerError(type: string, error: unknown): void {
+  // A browser reports a throwing listener and keeps dispatching; it never
+  // fails the code that fired the event. Here that code is the app-state
+  // subscription, where an uncaught throw would end the app.
+  console.error(`Opengeni: a "${type}" listener threw`, error);
 }
 
 function createEventTarget(): EventTargetLike {
-  const listeners = new Map<string, Set<() => void>>();
+  const listeners = new Map<string, Map<NativeEventListener, { once: boolean }>>();
   return {
-    addEventListener: (type, listener) => {
-      const existing = listeners.get(type) ?? new Set<() => void>();
-      existing.add(listener);
+    addEventListener: (type, listener, options) => {
+      if (!listener) return;
+      const existing = listeners.get(type) ?? new Map<NativeEventListener, { once: boolean }>();
+      if (existing.has(listener)) return;
+      existing.set(listener, { once: typeof options === "object" && options.once === true });
       listeners.set(type, existing);
     },
     removeEventListener: (type, listener) => {
-      listeners.get(type)?.delete(listener);
+      if (listener) listeners.get(type)?.delete(listener);
     },
-    dispatch: (type) => {
-      for (const listener of listeners.get(type) ?? []) listener();
+    dispatch: (type, target) => {
+      const registered = listeners.get(type);
+      if (!registered) return;
+      let stopped = false;
+      const event = createNativeEnvironmentEvent(type, target, () => {
+        stopped = true;
+      });
+      for (const [listener, { once }] of [...registered]) {
+        if (stopped) break;
+        // A listener removed by an earlier one during this dispatch is skipped, as in a browser.
+        if (!registered.has(listener)) continue;
+        if (once) registered.delete(listener);
+        try {
+          if (typeof listener === "function") listener(event);
+          else listener.handleEvent(event);
+        } catch (error) {
+          reportListenerError(type, error);
+        }
+      }
     },
   };
 }
@@ -92,13 +185,19 @@ export function installOpenGeniReactNativeEnvironment(
     Reflect.set(nativeWindow, "clearTimeout", globalThis.clearTimeout.bind(globalThis));
   }
   if (typeof Reflect.get(nativeWindow, "addEventListener") !== "function") {
-    Reflect.set(nativeWindow, "addEventListener", (type: string, listener: () => void) =>
-      windowTarget.addEventListener(type, listener),
+    Reflect.set(
+      nativeWindow,
+      "addEventListener",
+      (type: string, listener: NativeEventListener | null, options?: NativeListenerOptions) =>
+        windowTarget.addEventListener(type, listener, options),
     );
   }
   if (typeof Reflect.get(nativeWindow, "removeEventListener") !== "function") {
-    Reflect.set(nativeWindow, "removeEventListener", (type: string, listener: () => void) =>
-      windowTarget.removeEventListener(type, listener),
+    Reflect.set(
+      nativeWindow,
+      "removeEventListener",
+      (type: string, listener: NativeEventListener | null) =>
+        windowTarget.removeEventListener(type, listener),
     );
   }
   Reflect.set(globals, "window", nativeWindow);
@@ -108,9 +207,13 @@ export function installOpenGeniReactNativeEnvironment(
     get visibilityState() {
       return lifecycleState === "active" ? "visible" : "hidden";
     },
-    addEventListener: (type: string, listener: () => void) =>
-      documentTarget.addEventListener(type, listener),
-    removeEventListener: (type: string, listener: () => void) =>
+    hasFocus: () => lifecycleState === "active",
+    addEventListener: (
+      type: string,
+      listener: NativeEventListener | null,
+      options?: NativeListenerOptions,
+    ) => documentTarget.addEventListener(type, listener, options),
+    removeEventListener: (type: string, listener: NativeEventListener | null) =>
       documentTarget.removeEventListener(type, listener),
   };
   Reflect.set(globals, "document", nativeDocument);
@@ -119,8 +222,8 @@ export function installOpenGeniReactNativeEnvironment(
   const unsubscribe = adapters.lifecycle.subscribe((next) => {
     const wasActive = lifecycleState === "active";
     lifecycleState = next;
-    documentTarget.dispatch("visibilitychange");
-    if (!wasActive && next === "active") windowTarget.dispatch("pageshow");
+    documentTarget.dispatch("visibilitychange", nativeDocument);
+    if (!wasActive && next === "active") windowTarget.dispatch("pageshow", nativeWindow);
   });
 
   return {

@@ -378,6 +378,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/testing",
   ],
+  "test/e2e/archived-chat-status.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/slack-settings.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-access-link.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-installation-binding.browser.e2e.ts": [

@@ -37,7 +37,7 @@ describe("MCP OAuth contracts", () => {
         redirect_uris: ["https://client.example/callback"],
         grant_types: ["refresh_token"],
       }),
-    ).toThrow("authorization_code grant is required");
+    ).toThrow("authorization_code or jwt-bearer grant is required");
     expect(
       McpOAuthClientRegistrationRequest.parse({
         redirect_uris: ["https://client.example/callback"],

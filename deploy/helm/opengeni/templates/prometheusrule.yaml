@@ -291,8 +291,8 @@ spec:
             headline: 'Agent turns waiting too long to start'
             value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users wait longer than usual after sending a message before the agent starts working.'
-            next_step: 'Check worker capacity and the eligible backlog in Grafana Launch; it usually clears once autoscaling adds workers.'
-            description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+            next_step: 'Compare opengeni_turns_queued_oldest_age_seconds{hold="ready"} with the eligible turn backlog in Grafana Launch: an old ready prompt with no backlog waits before dispatch (control queue), a backlog means worker capacity.'
+            description: Durable turns are waiting too long before a worker starts them. A prompt first waits for its session's control activities, then on the turn queue; only the second shows in opengeni_turn_eligible_backlog. opengeni_turns_queued_oldest_age_seconds{hold="ready"} covers both. Inspect it, the eligible backlog, worker capacity and admission saturation before attributing this to sandbox or model latency.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # OUR controllable latency, accepted turn -> first provider dispatch.
         # Provider think time is excluded by construction; the warning yields

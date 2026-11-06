@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
+  discoverCompatibleModelReasoning,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -327,18 +328,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // A direct model key is always workspace-owned: refuse before calling the provider.
       requireWorkspaceIntegrationAdministration(grant);
       if (payload.verifyModelAccess) {
-        await verifyDirectModelAccess(
-          config.data,
-          payload.credential.apiKey as string,
+        const modelFetch =
           deps.directModelFetch ??
-            (config.data.provider === "openai_compatible"
-              ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
-                  pinnedFetch(input as string | URL | Request, init, settings, {
-                    label: "Model endpoint",
-                    requireHttpsOutsideLocalTest: true,
-                  })) as typeof fetch)
-              : undefined),
-        );
+          (config.data.provider === "openai_compatible"
+            ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+                pinnedFetch(input as string | URL | Request, init, settings, {
+                  label: "Model endpoint",
+                  requireHttpsOutsideLocalTest: true,
+                })) as typeof fetch)
+            : undefined);
+        await verifyDirectModelAccess(config.data, payload.credential.apiKey as string, modelFetch);
+        // An OpenAI-compatible model's reasoning levels, when the request
+        // doesn't set them, come from the endpoint's own model listing.
+        if (config.data.provider === "openai_compatible" && config.data.reasoning === undefined) {
+          const reasoning = await discoverCompatibleModelReasoning(
+            { baseUrl: directModelBaseUrl(config.data), model: config.data.model },
+            payload.credential.apiKey as string,
+            modelFetch,
+          );
+          if (reasoning)
+            payload.metadata = {
+              ...payload.metadata,
+              directModelProvider: { ...config.data, reasoning },
+            };
+        }
       }
     } else if (payload.verifyModelAccess) {
       throw new HTTPException(422, {
@@ -1624,7 +1637,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         client_name: "Opengeni",
         redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
         token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code", "refresh_token"],
+        // The JWT bearer grant redeems the ID-JAGs an organization's Opengeni
+        // issuer signs (auto-connect organization connectors).
+        grant_types: [
+          "authorization_code",
+          "refresh_token",
+          "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        ],
         response_types: ["code"],
       }),
     );

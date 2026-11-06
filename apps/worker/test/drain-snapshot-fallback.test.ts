@@ -13,6 +13,7 @@ import { Context } from "@temporalio/activity";
 import {
   acquireLease,
   bootstrapWorkspace,
+  confirmDrainCold,
   createDb,
   createSession,
   readLease,
@@ -77,15 +78,15 @@ const SETTINGS = testSettings({
   sandboxDrainProviderSnapshotTimeoutMs: 600_000,
 });
 
-function services(): () => Promise<ActivityServices> {
+function services(settings = SETTINGS): () => Promise<ActivityServices> {
   return async () => ({
-    settings: SETTINGS,
+    settings,
     db,
     bus: null as never,
     runtime: null as never,
     objectStorage: null,
     documentServices: null as never,
-    observability: createObservability(SETTINGS, { component: "worker-test" }),
+    observability: createObservability(settings, { component: "worker-test" }),
     wakeSessionWorkflow: null,
   });
 }
@@ -182,6 +183,8 @@ function nativeSnapshotsFailingClient(
   tar: "succeeds" | "fails",
   rebuildable: string = REBUILDABLE,
   tarDelayMs = 0,
+  tarGate?: Promise<void>,
+  onDelete?: () => void,
 ) {
   const captures: string[][] = [];
   const sessions: Array<{ state: { manifest: { ephemeralPersistencePaths(): Set<string> } } }> = [];
@@ -205,6 +208,7 @@ function nativeSnapshotsFailingClient(
         captures.push(excluded);
         if (excluded.length === 0) throw new Error("Modal snapshot_directory persistence failed.");
         if (tarDelayMs > 0) await Bun.sleep(tarDelayMs);
+        if (tarGate) await tarGate;
         if (tar === "fails") throw new Error("reduced tar failed");
         return new TextEncoder().encode("reduced workspace tar bytes");
       },
@@ -235,6 +239,7 @@ function nativeSnapshotsFailingClient(
       resumeExact: resume,
       async delete() {
         deletes += 1;
+        onDelete?.();
       },
     },
   };
@@ -564,5 +569,286 @@ describe("drain snapshot fallback", () => {
       saved = current?.version === 1 ? current.omittedPaths : null;
     }
     expect(saved).toEqual(["apps/web/.next", "node_modules"]);
+  }, 60_000);
+
+  // DC-G follow-up: a reduced save's hard bound ends only the wait. Its tar
+  // keeps reading inside the box, and the old code released the lease's
+  // capture slot at once, so the next retry started a second tar beside it.
+  const BOUNDED_SETTINGS = testSettings({
+    sandboxBackend: "modal",
+    webSearchEnabled: false,
+    sandboxOwnershipEnabled: true,
+    sandboxSnapshotTimeoutMs: WAIT_MS,
+    // The provider bound is then twice the wait: 10 s.
+    sandboxDrainProviderSnapshotTimeoutMs: 1_000,
+  });
+
+  async function boundExpiredReducedSave(
+    epoch: number,
+    instanceId: string,
+    failures: { count: number; failingForMinutes: number },
+  ) {
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      failures,
+      priorSave("2026-11-04T00:56:00.000Z"),
+    );
+    let openGate: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const provider = nativeSnapshotsFailingClient("succeeds", REBUILDABLE, 0, gate);
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(BOUNDED_SETTINGS), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    // The wait ends first; the capture's own bound expires later and counts
+    // as a failure, while its tar is still running.
+    await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow();
+    for (let poll = 0; poll < 80; poll++) {
+      const lease = await readLease(db, ids.workspaceId, ids.groupId);
+      if ((lease?.drainCaptureFailures?.count ?? 0) > failures.count && !lease?.archiveCapture)
+        break;
+      await Bun.sleep(250);
+    }
+    const afterBound = await readLease(db, ids.workspaceId, ids.groupId);
+    expect(afterBound?.drainCaptureFailures?.count).toBe(failures.count + 1);
+    expect(afterBound?.archiveCapture).toBeNull();
+    // The retry backoff has passed; only the running tar may hold the retry.
+    const skipBackoff = async () => {
+      await shared!.admin`
+        update sandbox_leases
+        set drain_capture_last_failed_at = now() - interval '1 hour'
+        where sandbox_group_id = ${ids.groupId}`;
+    };
+    await skipBackoff();
+    return { ids, provider, drainSandboxLease, openGate, skipBackoff };
+  }
+
+  test("a reduced save whose bound expired keeps the lease's only tar slot until it returns", async () => {
+    if (!available) return;
+    const epoch = 13;
+    const instanceId = "sb-bound-expired-reduced";
+    const { ids, provider, drainSandboxLease, openGate, skipBackoff } =
+      await boundExpiredReducedSave(epoch, instanceId, { count: 3, failingForMinutes: 20 });
+    try {
+      await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+        "still has a reduced workspace save running",
+      );
+      expect(provider.captures).toHaveLength(1);
+      expect(provider.deletes).toBe(0);
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    } finally {
+      openGate();
+    }
+    // Once its tar has returned, the next retry may save again.
+    await Bun.sleep(100);
+    await skipBackoff();
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    expect(provider.captures).toHaveLength(2);
+  }, 60_000);
+
+  test("past the hour of failures, a bound-expired reduced save stops the box instead of a second tar", async () => {
+    if (!available) return;
+    const epoch = 14;
+    const instanceId = "sb-bound-expired-abandon";
+    const { ids, provider, drainSandboxLease, openGate } = await boundExpiredReducedSave(
+      epoch,
+      instanceId,
+      { count: 4, failingForMinutes: 90 },
+    );
+    try {
+      expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+        status: "terminated",
+      });
+      expect(provider.captures).toHaveLength(1);
+      expect(provider.deletes).toBe(1);
+      expect(await terminatedEvents(ids.sessionId)).toEqual([
+        expect.objectContaining({ persisted: false, captureAbandoned: true }),
+      ]);
+    } finally {
+      openGate();
+    }
+  }, 60_000);
+
+  // DC-G follow-up: inside the save window a reduced save that outlives the
+  // wait stops the box. The stop ends the read, but a save whose store had
+  // already begun can still land a moment later. The old code checked once,
+  // right after the stop, and then recorded a loss and told the chat
+  // "files changed after X couldn't be saved" next to a fresh save.
+  test("a reduced save that lands right after the in-window stop is an ordinary saved teardown", async () => {
+    if (!available) return;
+    const epoch = 15;
+    const instanceId = "sb-late-save-at-stop";
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 1, failingForMinutes: 5 },
+      priorSave("2026-11-04T01:10:00.000Z"),
+    );
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    await shared!.admin`
+      update sandbox_leases
+      set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${Math.max(1_000, leadMs - 60_000)} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    const provider = nativeSnapshotsFailingClient("succeeds", REBUILDABLE, WAIT_MS + 1_000);
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    expect(provider.captures).toEqual([["apps/web/.next", "node_modules"]]);
+    expect(provider.deletes).toBe(1);
+    const lease = await readLease(db, ids.workspaceId, ids.groupId);
+    expect(lease?.liveness).toBe("cold");
+    expect(lease?.recovery.provider.status).not.toBe("missing");
+    const saved = lease?.recovery.archive.current;
+    expect(saved?.version === 1 ? saved.omittedPaths : null).toEqual([
+      "apps/web/.next",
+      "node_modules",
+    ]);
+    const [row] = await shared!.admin<{ loss: Record<string, unknown> | null }[]>`
+      select resume_state -> 'opengeniProviderLoss' as loss
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row?.loss ?? null).toBeNull();
+    const events = await terminatedEvents(ids.sessionId);
+    expect(events).toEqual([expect.objectContaining({ persisted: true })]);
+    expect(events[0]).not.toHaveProperty("captureAbandoned");
+    expect(events[0]).not.toHaveProperty("unsavedSince");
+  }, 60_000);
+
+  // Review of the follow-up: the stop ends a still-running reduced save's
+  // read, so its late failure lands during the stop. The old late path then
+  // released the claim (and counted a failure), the cold commit found the
+  // claim gone, and the stopped box stayed draining with no notice or loss.
+  test("a reduced save the in-window stop kills leaves the stop's claim to the cold commit", async () => {
+    if (!available) return;
+    const epoch = 17;
+    const instanceId = "sb-stop-kills-tar";
+    const prior = priorSave("2026-11-04T01:30:00.000Z");
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 1, failingForMinutes: 5 },
+      prior,
+    );
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    await shared!.admin`
+      update sandbox_leases
+      set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${Math.max(1_000, leadMs - 60_000)} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    let killTar: () => void = () => undefined;
+    const tarRunning = new Promise<void>((_, reject) => {
+      killTar = () => reject(new Error("tar killed: the box was stopped"));
+    });
+    tarRunning.catch(() => undefined);
+    const provider = nativeSnapshotsFailingClient("succeeds", REBUILDABLE, 0, tarRunning, () =>
+      killTar(),
+    );
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    expect(provider.captures).toEqual([["apps/web/.next", "node_modules"]]);
+    expect(provider.deletes).toBe(1);
+    const [row] = await shared!.admin<
+      {
+        liveness: string;
+        capture_id: string | null;
+        loss: Record<string, unknown> | null;
+      }[]
+    >`
+      select liveness, archive_capture_id::text as capture_id,
+        resume_state -> 'opengeniProviderLoss' as loss
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row?.liveness).toBe("cold");
+    expect(row?.capture_id).toBeNull();
+    expect(row?.loss).toMatchObject({
+      captureAbandoned: true,
+      unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+    });
+    expect(await terminatedEvents(ids.sessionId)).toEqual([
+      expect.objectContaining({
+        captureAbandoned: true,
+        unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+      }),
+    ]);
+  }, 60_000);
+
+  test("the cold commit of a stop after failed saves finds the claim's save published and records no loss", async () => {
+    if (!available) return;
+    const epoch = 16;
+    const instanceId = "sb-published-before-commit";
+    const prior = priorSave("2026-11-04T01:20:00.000Z");
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 4, failingForMinutes: 90 },
+      prior,
+    );
+    // The drain's claim, on which a slow save published (for one, a store
+    // that reported an error after it had committed).
+    const captureId = crypto.randomUUID();
+    await shared!.admin`
+      update sandbox_leases
+      set archive_capture_id = ${captureId}::uuid,
+          archive_capture_operation_id = ${crypto.randomUUID()}::uuid,
+          archive_capture_attempt = 1,
+          archive_capture_generation = workspace_generation,
+          archive_capture_started_at = now() - interval '1 minute',
+          archive_capture_deadline_at = now() + interval '10 minutes'
+      where sandbox_group_id = ${ids.groupId}`;
+    // A new claim starts unpublished; its save then publishes on it.
+    await shared!.admin`
+      update sandbox_leases set archive_capture_published_at = now()
+      where sandbox_group_id = ${ids.groupId}`;
+    const result = await confirmDrainCold(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: epoch,
+      expectedCaptureId: captureId,
+      providerMissingBeforeCapture: true,
+      providerStopped: true,
+      captureAbandoned: true,
+      captureAbandonedNotice: {
+        unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+        payload: {
+          actor: "reaper",
+          persisted: false,
+          captureAbandoned: true,
+          unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+        },
+      },
+    });
+    expect(result).toMatchObject({
+      wentCold: true,
+      capturePublishedBeforeStop: { archiveRevision: prior.workspaceArchiveMeta.revision },
+    });
+    const lease = await readLease(db, ids.workspaceId, ids.groupId);
+    expect(lease?.liveness).toBe("cold");
+    expect(lease?.recovery.provider.status).not.toBe("missing");
+    const [row] = await shared!.admin<{ loss: Record<string, unknown> | null }[]>`
+      select resume_state -> 'opengeniProviderLoss' as loss
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row?.loss ?? null).toBeNull();
+    expect(await terminatedEvents(ids.sessionId)).toEqual([]);
+    const audits = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from audit_events
+      where target_id = ${ids.groupId} and action = 'sandbox.provider_missing_before_capture'`;
+    expect(audits[0]!.n).toBe(0);
   }, 60_000);
 });

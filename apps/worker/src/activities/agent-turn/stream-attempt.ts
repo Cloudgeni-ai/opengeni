@@ -13,6 +13,7 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
   readSandboxReducedSave,
   getHumanInputResumeForEvent,
@@ -658,6 +659,25 @@ export async function runTurnStreamAttempt(
       // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
       // existing history stays byte-for-byte intact, including after retries;
       // the durable receipt restores the warning after compaction as well.
+      // A verified restore's "restored from an older save" notice whose write
+      // failed after the restore is delivered now, once. Never fails a turn.
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      }).catch((error: unknown) => {
+        // Still pending: a later turn or restore delivers it. The warning
+        // itself must never fail the turn either.
+        try {
+          observability.warn?.("pending restore notice delivery failed", {
+            ...safeErrorDiagnostic(error),
+            origin: "worker",
+          });
+        } catch {
+          // Diagnostics only.
+        }
+        return false;
+      });
       const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
         db,
         input.workspaceId,

@@ -16,6 +16,9 @@
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
 import {
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
   COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
   drainingPresentation,
   SelfhostedControlError,
@@ -111,6 +114,13 @@ export const CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE =
   "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
   "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
 
+/** What the person is told when their machine answered nothing for the op
+ *  stream's bound after a command may have reached it. Unlike the
+ *  offline-during-command notice, it has evidently not come back on its own. */
+export const CONNECTED_MACHINE_UNRESPONSIVE_NOTICE =
+  "Your machine stopped responding, and a command may have stopped the Opengeni agent. " +
+  "If it doesn't come back in a moment, open the Opengeni app on that machine (or reinstall).";
+
 /** What the person is told when the agent came back on a new connection
  *  mid-command: the machine is answering again, so it is not "offline". */
 export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
@@ -152,6 +162,16 @@ export function renderSelfhostedFault(
   error: SelfhostedControlError,
   context: SelfhostedFaultContext = {},
 ): string {
+  // A command's start left unanswered for the op stream's bound: the words
+  // say which machine stopped answering and what Opengeni did about it.
+  if (error.detail[AGENT_UNRESPONSIVE_DETAIL_KEY] !== undefined) {
+    // The session names the machine kind; the caller's context is the
+    // fallback should an error ever arrive without it.
+    const machine = error.detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY];
+    const compute = machine === "compute" || (machine === undefined && !!context.workspaceMachine);
+    const rendered = assemble(error, unresponsiveAgentFields(error, compute));
+    return compute ? onWorkspaceMachine(rendered) : rendered;
+  }
   if (!context.workspaceMachine) return renderConnectedMachineFault(error, context);
   if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
     // The box did not come back while waking, before anything was sent.
@@ -390,4 +410,115 @@ function renderConnectedMachineOfflineDuringCommand(error: SelfhostedControlErro
     preserved: "unknown — the command may have run partly, fully or not at all.",
     tryNext: `once the machine is on and connected again, ${avoid}. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
   });
+}
+
+/** The fields of a command whose machine's agent answered nothing for the op
+ *  stream's bound, by the kind of machine and what was done about it. */
+function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean): FaultFields {
+  const detail = error.detail;
+  const waitedMs = Number(detail[AGENT_UNRESPONSIVE_DETAIL_KEY]);
+  const minutes = Number.isFinite(waitedMs) ? Math.max(1, Math.round(waitedMs / 60_000)) : 3;
+  const waited = `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const command = error.neverSent
+    ? "This command never reached it."
+    : "This command may have reached it before it stopped answering.";
+  if (!compute) {
+    // A command may be what stopped the agent: this one, if it reached the
+    // machine, or an earlier one (a `pkill`), so the words say so without
+    // blaming this command, which is often an innocent one sent after.
+    return {
+      headline: "the person's machine stopped responding",
+      happened: error.neverSent
+        ? `the person's connected machine did not answer for ${waited}; it appears to be offline, asleep or disconnected`
+        : `the person's connected machine did not answer for ${waited}; it appears to be offline, asleep or disconnected, or this or an earlier command may have stopped the Opengeni agent`,
+      layer: error.neverSent
+        ? "the person's machine and its connection — not your command"
+        : "the person's machine, its connection or its Opengeni agent",
+      preserved: error.neverSent
+        ? "nothing ran; the command never reached the machine."
+        : "unknown — the command may have started before the machine stopped answering.",
+      tryNext: error.neverSent
+        ? "tell the person their machine is offline and ask them to check that it is on, awake and connected, then re-run the command. Retrying before it reconnects will not help."
+        : `ask the person to check that their machine is on, awake and connected; once it is, check whether the command took effect before re-running it, and don't re-run a command that stops or deletes the Opengeni agent. Retrying before it reconnects will not help. Tell the person: "${CONNECTED_MACHINE_UNRESPONSIVE_NOTICE}"`,
+    };
+  }
+  switch (detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]) {
+    case "restarted":
+      return {
+        headline:
+          "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+        happened: `the workspace machine did not answer for ${waited}, so Opengeni restarted it`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept; programs that were running stopped with the restart. ${command}${
+          error.neverSent ? "" : " If it had started, the restart stopped it."
+        }`,
+        tryNext: error.neverSent
+          ? "re-run the command."
+          : "re-run the command; if it changes state, first check whether it already took effect.",
+      };
+    case "restarting":
+      return {
+        headline:
+          "this chat's workspace machine stopped responding and didn't come back. Opengeni asked for a restart; re-run the command in a moment.",
+        happened: `the workspace machine did not answer for ${waited}, so Opengeni asked for a restart, which had not finished yet`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept; programs that were running stop with the restart. ${command}${
+          error.neverSent ? "" : " If it had started, the restart stops it."
+        }`,
+        tryNext: error.neverSent
+          ? "wait a moment, then re-run the command."
+          : "wait a moment, then re-run the command; if it changes state, first check whether it already took effect.",
+      };
+    case "answering":
+      return {
+        headline:
+          "this chat's workspace machine stopped responding for a while, and is answering again",
+        happened: `the workspace machine did not answer for ${waited}, then answered again, so Opengeni did not restart it`,
+        layer: "the workspace machine itself — not your command",
+        preserved: error.neverSent
+          ? `files are kept. ${command}`
+          : `files are kept. ${command} If it started, it may still be running, or Opengeni may be stopping it.`,
+        tryNext: error.neverSent
+          ? "re-run the command."
+          : "check whether the command already took effect, then re-run it if needed.",
+      };
+    case "already_restarted":
+      return {
+        headline:
+          "this chat's workspace machine stopped responding, and it was already restarted once this turn",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni restarts it at most once per turn, and a restart was already made or begun this turn, so it was not restarted again`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
+        tryNext:
+          "if the restart was only just made, wait a moment and re-run the command once; if it still does not respond, stop running commands and tell the person the workspace machine is not responding; a new chat gets a fresh workspace machine.",
+      };
+    case "restart_unavailable":
+      return {
+        headline:
+          "this chat's workspace machine stopped responding, and Opengeni could not restart it",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni could not arrange a restart, so none was made`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
+        tryNext:
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
+      };
+    case "restart_failed":
+      return {
+        headline: "this chat's workspace machine stopped responding, and restarting it failed",
+        happened: `the workspace machine did not answer for ${waited}; Opengeni tried to restart it, but the restart did not go through`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
+        tryNext:
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
+      };
+    default:
+      return {
+        headline: "this chat's workspace machine stopped responding",
+        happened: `the workspace machine did not answer for ${waited}`,
+        layer: "the workspace machine itself — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
+        tryNext:
+          "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
+      };
+  }
 }

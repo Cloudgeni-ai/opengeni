@@ -196,6 +196,21 @@ export function readableWorkDefaultOpen(group: ActivityGroup): true | undefined 
     : undefined;
 }
 
+/**
+ * A settled turn row with nothing under it. For a reader who never sees the
+ * agent's work (`agentSignals: false`) it says nothing, so it is not drawn.
+ */
+export function readableWorkIsEmpty(group: ActivityGroup): boolean {
+  return (
+    !!group.work?.endedAt &&
+    group.outcome !== "failed" &&
+    group.items.length === 0 &&
+    group.work.details.length === 0 &&
+    !group.work.steps &&
+    !group.work.cycles
+  );
+}
+
 /** Whether the live preview should show (images stay primary output instead). */
 export function readableWorkShowsPreview(group: ActivityGroup): boolean {
   return !timelineGroupContainsPresentedImage(group);

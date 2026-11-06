@@ -1,13 +1,17 @@
 import {
   CompatibleModelBaseUrl,
   CompatibleModelName,
+  REASONING_EFFORT_LEVELS,
   type CompatibleModelApi,
+  type CompatibleModelReasoning,
+  type ReasoningEffort,
 } from "@opengeni/contracts";
 import type {
   OrganizationCompatibleEndpoint as Endpoint,
-  OrganizationProviderCustomModel as CustomModel,
+  OrganizationCompatibleEndpointModel as CustomModel,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { BrainIcon, CheckIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -27,10 +31,15 @@ import {
   useSharedQuery,
 } from "@opengeni/react/app/lib/shared-query";
 import { ModelsFormPage, ProviderTile } from "@opengeni/react/app/components/models/models-ui";
+import { labelEffort } from "@opengeni/react/app/lib/session-tools";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { providerRefusalText } from "@/components/organization-model-provider-connection";
+import { Button } from "@opengeni/react/ui/button";
 import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    The organization's own OpenAI-compatible endpoints: a base URL, a key and
@@ -269,7 +278,11 @@ export function useCompatibleEndpointConnection({
       );
       writeEndpoint(client, organizationId, {
         ...endpoint,
-        models: [...endpoint.models.filter((model) => model.id !== saved.id), saved],
+        models: [
+          ...endpoint.models.filter((model) => model.id !== saved.id),
+          // The API returns the levels it read from the endpoint alongside the model.
+          { ...saved, reasoning: (saved as Partial<CustomModel>).reasoning ?? null },
+        ],
       });
       pendingModel.current = null;
       if (mounted.current) setSlug((current) => (current === submitted ? "" : current));
@@ -311,6 +324,40 @@ export function useCompatibleEndpointConnection({
     }
   }
 
+  /**
+   * Saves a model's reasoning levels (null: it has none), or with
+   * `undefined` reads them again from the endpoint's /models listing.
+   */
+  async function saveReasoning(
+    model: CustomModel,
+    reasoning: CompatibleModelReasoning | null | undefined,
+  ): Promise<boolean> {
+    if (!endpoint) return false;
+    try {
+      const saved = await once(() =>
+        client.setOrganizationCompatibleEndpointModelReasoning(
+          organizationId,
+          endpoint.id,
+          model.id,
+          {
+            expectedVersion: model.version,
+            ...(reasoning === undefined ? {} : { reasoning }),
+          },
+        ),
+      );
+      writeEndpoint(client, organizationId, {
+        ...endpoint,
+        models: endpoint.models.map((candidate) => (candidate.id === saved.id ? saved : candidate)),
+      });
+      toast.success(`Reasoning levels saved for ${model.upstreamModelId}`);
+      return true;
+    } catch (error) {
+      throw new Error(providerRefusalText(error), { cause: error });
+    }
+  }
+
+  const modelById = (id: string) => models.find((candidate) => candidate.id === id);
+
   return {
     config,
     scopeLabel: "Organization",
@@ -349,7 +396,162 @@ export function useCompatibleEndpointConnection({
     disconnect,
     addCustomModel,
     removeCustomModel,
+    customModelDetail: (row) => reasoningSummary(modelById(row.id)?.reasoning ?? null),
+    customModelAction: (row) => {
+      const model = modelById(row.id);
+      return model ? (
+        <ReasoningLevelsDialog
+          key={`${model.id}:${model.version}`}
+          model={model}
+          onSave={(reasoning) => saveReasoning(model, reasoning)}
+        />
+      ) : null;
+    },
   };
+}
+
+/** "Reasoning: Low, High · default High", or that the model has none. */
+export function reasoningSummary(reasoning: CompatibleModelReasoning | null): string {
+  if (!reasoning) return "No reasoning levels";
+  return `Reasoning: ${reasoning.efforts.map(labelEffort).join(", ")} · default ${labelEffort(reasoning.defaultEffort)}`;
+}
+
+/** The default a new selection keeps: the old one if still chosen, else the middle level. */
+function defaultFor(efforts: readonly ReasoningEffort[], current: ReasoningEffort | null) {
+  if (current && efforts.includes(current)) return current;
+  const thinking = efforts.filter((effort) => effort !== "none");
+  return thinking[Math.floor((thinking.length - 1) / 2)] ?? efforts[0] ?? null;
+}
+
+/**
+ * Which reasoning levels one model accepts and which it starts at. The model
+ * picker offers exactly these, and each request sends the chosen level as
+ * `reasoning_effort`.
+ */
+function ReasoningLevelsDialog({
+  model,
+  onSave,
+}: {
+  model: CustomModel;
+  onSave: (reasoning: CompatibleModelReasoning | null | undefined) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [efforts, setEfforts] = useState<ReasoningEffort[]>(model.reasoning?.efforts ?? []);
+  const [defaultEffort, setDefaultEffort] = useState<ReasoningEffort | null>(
+    model.reasoning?.defaultEffort ?? null,
+  );
+  const [detecting, setDetecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setEfforts(model.reasoning?.efforts ?? []);
+    setDefaultEffort(model.reasoning?.defaultEffort ?? null);
+    setError(null);
+  }, [open, model.reasoning]);
+  const chosenDefault = defaultFor(efforts, defaultEffort);
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={setOpen}
+      size="sm"
+      trigger={
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          className="rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
+          aria-label={`Reasoning levels for ${model.upstreamModelId}`}
+          title="Reasoning levels"
+        >
+          <BrainIcon aria-hidden="true" />
+        </Button>
+      }
+      title="Reasoning levels"
+      description={
+        <>
+          The levels <span className="break-all font-mono">{model.upstreamModelId}</span> accepts as{" "}
+          <span className="font-mono">reasoning_effort</span>. Model pickers offer exactly these.
+        </>
+      }
+      submitLabel="Save levels"
+      pendingLabel="Saving…"
+      error={error}
+      footerStart={
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={detecting}
+          onClick={async () => {
+            setDetecting(true);
+            setError(null);
+            try {
+              if (await onSave(undefined)) setOpen(false);
+            } catch (failure) {
+              setError(failure instanceof Error ? failure.message : String(failure));
+            } finally {
+              setDetecting(false);
+            }
+          }}
+        >
+          {detecting ? "Reading…" : "Read from endpoint"}
+        </Button>
+      }
+      onSubmit={async () =>
+        await onSave(
+          efforts.length > 0 && chosenDefault ? { efforts, defaultEffort: chosenDefault } : null,
+        )
+      }
+      onSubmitted={() => setOpen(false)}
+    >
+      <FieldStack>
+        <Field
+          label="Levels"
+          group
+          hint="Leave them all off if the model doesn’t reason or ignores the setting."
+        >
+          <div className="flex flex-wrap gap-1.5">
+            {REASONING_EFFORT_LEVELS.map((level) => {
+              const on = efforts.includes(level);
+              return (
+                <button
+                  key={level}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() =>
+                    setEfforts((current) =>
+                      REASONING_EFFORT_LEVELS.filter((each) =>
+                        each === level ? !on : current.includes(each),
+                      ),
+                    )
+                  }
+                  className={cn(
+                    "inline-flex h-8 items-center gap-1.5 rounded-[10px] border px-3 text-sm font-medium transition-colors duration-[120ms] pointer-coarse:h-11",
+                    on
+                      ? "border-fg/70 bg-surface-2 text-fg"
+                      : "border-border text-fg-muted hover:bg-surface-2 hover:text-fg",
+                  )}
+                >
+                  {on ? <CheckIcon aria-hidden="true" className="-ml-0.5 size-3.5" /> : null}
+                  {labelEffort(level)}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+        {efforts.length > 0 && chosenDefault ? (
+          <Field label="Default" hint="Where new chats start until someone picks another level.">
+            <SelectMenu
+              variant="native"
+              options={efforts.map((effort) => ({ value: effort, label: labelEffort(effort) }))}
+              value={chosenDefault}
+              onValueChange={setDefaultEffort}
+            />
+          </Field>
+        ) : null}
+      </FieldStack>
+    </FormDialog>
+  );
 }
 
 /** Renders `children` with one endpoint's view, for rows and pages built per endpoint. */

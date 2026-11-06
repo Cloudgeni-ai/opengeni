@@ -4923,6 +4923,9 @@ export const mcpOauthRefreshTokens = pgTable(
     connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Auto-connected: the trusted issuer that vouched for the person, and its subject. */
+    trustedIssuerId: uuid("trusted_issuer_id"),
+    assertionSubject: text("assertion_subject"),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -4935,6 +4938,11 @@ export const mcpOauthRefreshTokens = pgTable(
       table.generation,
     ),
     expires: index("mcp_oauth_refresh_tokens_expires_idx").on(table.expiresAt),
+    trustedIssuer: index("mcp_oauth_refresh_tokens_trusted_issuer_idx").on(
+      table.trustedIssuerId,
+      table.assertionSubject,
+      table.clientId,
+    ),
   }),
 );
 
@@ -5347,6 +5355,12 @@ export const sessions = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Who archived the chat; null when the idle archiver did. */
     archiveRequestedBy: text("archive_requested_by"),
+    /**
+     * When someone last asked to restore the chat's stored content (migration
+     * 1261). A stored chat with this set is waiting to be restored; once live
+     * again it marks the restore, which counts as activity for the idle period.
+     */
+    contentRestoreRequestedAt: timestamp("content_restore_requested_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     // Repositories a person removed from the session (migration 1140); see
     // SessionRemovedRepository. Read with parseSessionRemovedRepositories.
@@ -12179,6 +12193,20 @@ export const enrollments = pgTable(
     agentUpdateCompletedAt: timestamp("agent_update_completed_at", {
       withTimezone: true,
     }),
+    /** When the current run of unsuccessful updates first postponed the
+     * update for managed browsers in use; bounds that wait (migration 1270). */
+    agentUpdateBrowsersWaitSince: timestamp("agent_update_browsers_wait_since", {
+      withTimezone: true,
+    }),
+    /** Attempts of the current run for the current target that failed for a
+     * reason other than a busy machine, before the current operation.
+     * Automatic retries back off from it (migration 1270). */
+    agentUpdateFailedAttempts: integer("agent_update_failed_attempts").notNull().default(0),
+    /** The announced time at which an automatic update closes an older
+     * agent's managed browsers; kept through busy refusals (migration 1270). */
+    agentUpdateBrowsersCloseAt: timestamp("agent_update_browsers_close_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -14329,6 +14357,122 @@ export const organizationConnectors = pgTable(
   }),
 );
 
+// --- MCP auto-connect (1263) -------------------------------------------------
+// Inbound: issuers an organization trusts to vouch for its members (ID-JAG).
+export const organizationMcpTrustedIssuers = pgTable(
+  "organization_mcp_trusted_issuers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    provider: text("provider").$type<"claude" | "okta" | "other">().notNull(),
+    issuer: text("issuer").notNull(),
+    jwksUri: text("jwks_uri"),
+    allowedClientIds: jsonb("allowed_client_ids").$type<string[]>(),
+    organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>().notNull(),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    issuerKey: unique("organization_mcp_trusted_issuers_issuer_key").on(
+      table.accountId,
+      table.issuer,
+    ),
+    issuerLookup: index("organization_mcp_trusted_issuers_issuer_idx").on(table.issuer),
+  }),
+);
+
+export const organizationMcpTrustedIssuerSubjects = pgTable(
+  "organization_mcp_trusted_issuer_subjects",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    assertionSubject: text("assertion_subject").notNull(),
+    subjectId: text("subject_id").notNull(),
+    email: text("email"),
+    firstConnectedAt: timestamp("first_connected_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.assertionSubject] }),
+    account: index("organization_mcp_trusted_issuer_subjects_account_idx").on(
+      table.accountId,
+      table.trustedIssuerId,
+    ),
+  }),
+);
+
+export const organizationMcpTrustedIssuerEvents = pgTable(
+  "organization_mcp_trusted_issuer_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    outcome: text("outcome").$type<"connected" | "refused">().notNull(),
+    reason: text("reason"),
+    subjectId: text("subject_id"),
+    email: text("email"),
+    clientId: text("client_id"),
+    clientName: text("client_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    recent: index("organization_mcp_trusted_issuer_events_recent_idx").on(
+      table.trustedIssuerId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const organizationMcpAssertionReplays = pgTable(
+  "organization_mcp_assertion_replays",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    jtiHash: text("jti_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.jtiHash] }),
+    expires: index("organization_mcp_assertion_replays_expires_idx").on(
+      table.accountId,
+      table.expiresAt,
+    ),
+  }),
+);
+
+// Outbound: the organization's own ID-JAG signing key (Opengeni as the issuer).
+export const organizationIdentityIssuers = pgTable("organization_identity_issuers", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  keyId: text("key_id").notNull(),
+  algorithm: text("algorithm").$type<"RS256" | "ES256">().notNull(),
+  publicJwk: jsonb("public_jwk").$type<Record<string, unknown>>().notNull(),
+  privateKeyEncrypted: text("private_key_encrypted").notNull(),
+  createdBySubjectId: text("created_by_subject_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // --- Capabilities platform ---------------------------------------------------
 // Authoritative Plugin, immutable Version, Facet, installation, and ownership
 // state. The generic catalog/installations ledger is reserved for MCP.
@@ -15364,6 +15508,14 @@ export const organizationModelProviderCustomModels = pgTable(
     connectionId: uuid("connection_id"),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
+    /** OpenAI-compatible endpoint models only: accepted reasoning levels, lowest first. */
+    reasoningEfforts: text("reasoning_efforts")
+      .array()
+      .$type<("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[]>(),
+    /** OpenAI-compatible endpoint models only: the declared default level. */
+    defaultReasoningEffort: text("default_reasoning_effort").$type<
+      "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    >(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15397,6 +15549,10 @@ export const organizationModelProviderCustomModels = pgTable(
     connectionCheck: check(
       "organization_model_provider_custom_models_connection_chk",
       sql`(${table.providerKind} = 'openai_compatible') = (${table.connectionId} is not null)`,
+    ),
+    reasoningCheck: check(
+      "organization_model_provider_custom_models_reasoning_chk",
+      sql`(${table.reasoningEfforts} is null) = (${table.defaultReasoningEffort} is null) and (${table.reasoningEfforts} is null or (${table.providerKind} = 'openai_compatible' and cardinality(${table.reasoningEfforts}) between 1 and 7 and ${table.reasoningEfforts} <@ array['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']::text[] and ${table.defaultReasoningEffort} = any (${table.reasoningEfforts})))`,
     ),
     createOperation: uniqueIndex(
       "organization_model_provider_custom_models_create_operation_uq",

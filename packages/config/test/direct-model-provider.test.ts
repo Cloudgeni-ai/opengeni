@@ -10,6 +10,7 @@ import {
   isEuResidency,
 } from "@opengeni/contracts";
 import {
+  compatibleModelCapabilities,
   configuredModels,
   getSettings,
   policyChargesCreditsForModel,
@@ -304,4 +305,60 @@ test("an organization's compatible endpoints each become one organization-paid r
   const replaced = withOrganizationCompatibleProviders(catalog, [second]);
   expect(resolveModelProvider(replaced, fast)).toBeUndefined();
   expect(withOrganizationCompatibleProviders(base, [])).toBe(base);
+});
+
+test("a compatible model's declared reasoning levels make the picker offer exactly those", () => {
+  const base = getSettings({ OPENGENI_ENV: "test" });
+  const reasoning = {
+    efforts: ["none", "low", "high", "max"] as const,
+    defaultEffort: "high" as const,
+  };
+  const endpoint = {
+    id: "00000000-0000-4000-8000-0000000000d4",
+    baseUrl: "https://inference.example.com/v1",
+    api: "chat" as const,
+    models: [
+      {
+        upstreamModelId: "acme/thinker",
+        reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+      },
+      { upstreamModelId: "acme/plain", reasoning: null },
+    ],
+  };
+  const catalog = withOrganizationCompatibleProviders(base, [endpoint]);
+  const thinker = configuredModels(catalog).find(
+    (row) => row.id === organizationCompatibleModelId(endpoint.id, "acme/thinker"),
+  )!;
+  expect(thinker.capabilities.reasoning).toMatchObject({
+    runnable: true,
+    efforts: ["none", "low", "high", "max"],
+    defaultEffort: "high",
+  });
+  const plain = configuredModels(catalog).find(
+    (row) => row.id === organizationCompatibleModelId(endpoint.id, "acme/plain"),
+  )!;
+  expect(plain.capabilities.reasoning.runnable).toBe(false);
+  expect(plain.capabilities.reasoning.efforts).toEqual([]);
+
+  // A workspace connection carries the same levels in its metadata.
+  const workspace = withDirectModelProviders(base, [
+    {
+      ...compatible,
+      metadata: {
+        ...compatible.metadata,
+        directModelProvider: {
+          ...compatible.metadata.directModelProvider,
+          reasoning: { efforts: ["low", "high"], defaultEffort: "low" },
+        },
+      },
+    },
+  ]);
+  const spec = directModelConnectionSpec(compatible)!;
+  const direct = configuredModels(workspace).find((row) => row.id === spec.modelId)!;
+  expect(direct.capabilities.reasoning).toMatchObject({
+    runnable: true,
+    efforts: ["low", "high"],
+    defaultEffort: "low",
+  });
+  expect(compatibleModelCapabilities(base, null).reasoning.runnable).toBe(false);
 });

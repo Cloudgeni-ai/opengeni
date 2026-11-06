@@ -107,11 +107,13 @@ import {
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
+  classifyXaiSubscriptionClientOutdatedError,
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
+  XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import type {
@@ -1916,6 +1918,9 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
  */
 export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
+  // An outdated Opengeni client is a platform release fault, not the
+  // account's: it must never mark the account unauthorized or forbidden.
+  if (classifyXaiSubscriptionClientOutdatedError(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -2487,6 +2492,14 @@ function baseAgentRunFailurePayload(
       error:
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
+      retryable: false,
+    };
+  }
+  const xaiClientOutdated = classifyXaiSubscriptionClientOutdatedError(error);
+  if (xaiClientOutdated) {
+    return {
+      error: xaiClientOutdated.message,
+      code: XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
       retryable: false,
     };
   }

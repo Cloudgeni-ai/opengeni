@@ -51,6 +51,12 @@ export function parseAgentParam(value: unknown): string | undefined {
   return typeof value === "string" && UUID.test(value) ? value.toLowerCase() : undefined;
 }
 
+/** Connected agents' auto-connect: "new" (set up) or an issuer's id. */
+export function parseAutoConnectIssuerParam(value: unknown): string | undefined {
+  if (value === "new") return "new";
+  return typeof value === "string" && UUID.test(value) ? value.toLowerCase() : undefined;
+}
+
 export function parseServiceAccountParam(value: unknown): string | undefined {
   return typeof value === "string" && UUID.test(value) ? value.toLowerCase() : undefined;
 }
