@@ -176,9 +176,9 @@ export function sandboxEstablishPolicyDecision(input: {
 }
 
 /**
- * Repo-backed workspace skills bind into the first-request prompt-cache prefix
- * (`WorkspaceSkillsCapability.instructions()` listDirs the live box). Starting
- * the managed-box establish as soon as its inputs exist lets Modal create overlap
+ * A repository turn prepares its managed box in the background (see
+ * `shouldPrepareManagedSandboxInBackground`). Starting the managed-box
+ * establish as soon as its inputs exist lets the provider create overlap
  * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
  *
  * Do not flip those turns to eager: that serializes create BEFORE tools and
@@ -201,6 +201,30 @@ export function shouldPrefetchManagedSandbox(input: {
     return false;
   }
   return input.hasRepositoryResources || input.automaticRecoveryPending === true;
+}
+
+/**
+ * A repository turn on a lazily provisioned managed box prepares that box
+ * (create, environment setup, repository clone) in the background instead of
+ * in front of the first model request. Only repository skill indexing used to
+ * reach the box before the model ran; that index now waits only for a box that
+ * was already warm. The first sandbox tool call joins the same preparation.
+ */
+export function shouldPrepareManagedSandboxInBackground(input: {
+  establishPolicy: "eager" | "on-demand";
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+  hasRepositoryResources: boolean;
+}): boolean {
+  return (
+    input.hasRepositoryResources &&
+    shouldPrefetchManagedSandbox({
+      establishPolicy: input.establishPolicy,
+      machinePrimary: input.machinePrimary,
+      groupBoxBackend: input.groupBoxBackend,
+      hasRepositoryResources: true,
+    })
+  );
 }
 
 /**

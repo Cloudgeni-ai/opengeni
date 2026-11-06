@@ -907,6 +907,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        // Bound after construction; a turn without background preparation
+        // indexes its live workspace exactly as before.
+        repositorySkillIndexReady: async () =>
+          (await sandboxState.backgroundSandboxPreparation?.indexReady()) ?? true,
         // W1: `{{secret:…}}` references resolve at the exec boundary, and the
         // session's credential profile adds its variables to every command
         // through the same resolver.

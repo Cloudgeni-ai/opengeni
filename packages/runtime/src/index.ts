@@ -2762,6 +2762,13 @@ export type BuildAgentOptions = {
    */
   turnCancellationSignal?: AbortSignal;
   /**
+   * Decides, when the model's instructions are first built, whether repository
+   * skills are indexed from the live workspace (true) or left for the model to
+   * find (false) because the workspace is still being prepared in the
+   * background. Absent means the live workspace is always indexed.
+   */
+  repositorySkillIndexReady?: () => Promise<boolean>;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -3954,6 +3961,9 @@ export function buildOpenGeniAgent(
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
+      ...(options.repositorySkillIndexReady
+        ? { repositorySkillIndexReady: options.repositorySkillIndexReady }
+        : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -5466,6 +5476,7 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+    repositorySkillIndexReady?: () => Promise<boolean>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5562,6 +5573,9 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
+        options.repositorySkillIndexReady
+          ? { indexReady: options.repositorySkillIndexReady }
+          : {},
       ),
     );
   }

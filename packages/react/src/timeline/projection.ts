@@ -484,6 +484,7 @@ export function buildTimeline(
     disposition: "complete" | "failed" | "cancelled" = "complete",
     completedAt?: string,
   ): void => {
+    if (disposition === "complete") dropUnneededSandboxPreparation(turnId);
     for (const item of items) {
       if (
         turnId !== undefined &&
@@ -515,6 +516,30 @@ export function buildTimeline(
           item.durationMs = elapsedDurationMs(item.startedAt, completedAt);
         }
       }
+    }
+  };
+
+  /**
+   * A turn can answer while its box is still being prepared in the background
+   * (the model does not wait for a box no tool has asked for). When that turn
+   * completes, the preparation it never needed stops with it: drop its still
+   * running rows rather than calling them ready or leaving them spinning.
+   * Settled preparation rows stay.
+   */
+  const dropUnneededSandboxPreparation = (turnId?: string | null): void => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]!;
+      if (
+        item.kind !== "startup-phase" ||
+        item.status !== "running" ||
+        !BACKGROUND_SANDBOX_PREPARATION_PHASES.has(item.phase) ||
+        (turnId !== undefined && turnId && item.turnId && item.turnId !== turnId)
+      ) {
+        continue;
+      }
+      items.splice(index, 1);
+      const key = `${item.turnId}:${item.phase}`;
+      if (startupPhases.get(key)?.[0] === item) startupPhases.delete(key);
     }
   };
 
@@ -4480,6 +4505,13 @@ function startupLifecycleWaitReason(
     : undefined;
 }
 
+/** Box preparation that may still run behind a turn that has answered. */
+const BACKGROUND_SANDBOX_PREPARATION_PHASES = new Set<StartupPhase>([
+  "sandbox",
+  "rig",
+  "repository",
+  "files",
+]);
 const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {
   "sandbox.provision": "sandbox",
   "repository-clone": "repository",

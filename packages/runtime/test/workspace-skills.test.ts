@@ -217,6 +217,67 @@ describe("workspace repository skills", () => {
     expect(entries[0]?.description).toBe("Maintain Opengeni source code.");
   });
 
+  test("a workspace still being prepared is not touched before the model runs", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
+    });
+    let operations = 0;
+    const listDir = session.listDir!;
+    session.listDir = async (args) => {
+      operations++;
+      return listDir(args);
+    };
+    let decisions = 0;
+    const capability = workspaceSkills(
+      [
+        { path: ".agents/skills", source: "workspace .agents/skills" },
+        { path: "repos/app/.claude/skills", source: "repos/app/.claude/skills" },
+      ],
+      [],
+      [],
+      {
+        indexReady: async () => {
+          decisions++;
+          return false;
+        },
+      },
+    ).bind(session);
+
+    const instructions = await capability.instructions();
+    expect(operations).toBe(0);
+    expect(instructions).toContain("## Repository skills");
+    expect(instructions).toContain("still being prepared");
+    expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
+    expect(instructions).not.toContain("repository:");
+    // Frozen for the turn: a later run keeps the same instructions.
+    expect(await capability.instructions()).toBe(instructions);
+    expect(decisions).toBe(1);
+  });
+
+  test("a failing readiness check defers instead of failing instructions", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }], [], [], {
+      indexReady: async () => {
+        throw new Error("lease read failed");
+      },
+    }).bind(session);
+    expect(await capability.instructions()).toContain("still being prepared");
+  });
+
+  test("a ready workspace is indexed live", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
+    });
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }], [], [], {
+      indexReady: async () => true,
+    }).bind(session);
+    const instructions = await capability.instructions();
+    expect(instructions).toContain("repository:.agents/skills/opengeni/SKILL.md");
+    expect(instructions).not.toContain("still being prepared");
+  });
+
   test("advertised repository skills have an explicit live reader", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":

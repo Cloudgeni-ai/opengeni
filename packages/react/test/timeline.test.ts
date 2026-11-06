@@ -3261,6 +3261,44 @@ describe("buildTimeline", () => {
     expect(phase).toMatchObject({ phase: "files", status: "failed", durationMs: 1_000 });
   });
 
+  test("a turn that answered during background box preparation leaves no running setup row", () => {
+    reset();
+    const turn = { turnId: "turn-background" };
+    const events = [
+      event("turn.started", { triggerEventId: "prompt-1" }, turn),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 420 }, turn),
+      event("sandbox.operation.completed", { name: "sandbox.provision", origin: "created" }, turn),
+      event("rig.setup.started", {}, turn),
+      event("agent.message.completed", { text: "Hello" }, turn),
+      event("turn.completed", { output: "Hello" }, turn),
+    ];
+    const phases = buildTimeline(englishText, events).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(phases.map((phase) => [phase.phase, phase.status])).toEqual([
+      ["sandbox", "complete"],
+      ["model_preparation", "complete"],
+    ]);
+  });
+
+  test("a cancelled turn still marks its unfinished box preparation interrupted", () => {
+    reset();
+    const turn = { turnId: "turn-cancelled-setup" };
+    const events = [
+      event("turn.started", { triggerEventId: "prompt-1" }, turn),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, turn),
+      event("sandbox.operation.completed", { name: "sandbox.provision", origin: "created" }, turn),
+      event("rig.setup.started", {}, turn),
+      event("turn.cancelled", {}, turn),
+    ];
+    const rig = buildTimeline(englishText, events).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase" && item.phase === "rig",
+    );
+    expect(rig?.status).toBe("cancelled");
+  });
+
   test("reconstructs queue through provider first byte without conflating startup phases", () => {
     reset();
     const turn = { turnId: "turn-startup" };
