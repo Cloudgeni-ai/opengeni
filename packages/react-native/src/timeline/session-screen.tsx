@@ -119,6 +119,13 @@ export interface NativeSessionScreenProps extends Omit<
   humanInputMessages?: HumanInputCardProps["messages"];
   /** Translations for the approval strip. */
   approvalMessages?: ApprovalStripProps["messages"];
+  /**
+   * The review each pending approval shows, as the web `ApprovalSurface`'s
+   * `loadReview`: the server's (`client.getToolActionReview`) or the host's
+   * own plain title and consequence instead of the tool's raw arguments.
+   * See `ApprovalStrip`'s `loadReview`.
+   */
+  loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
   client?: OpenGeniClient | undefined;
   /**
@@ -167,6 +174,7 @@ export function NativeSessionScreen({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
@@ -202,6 +210,7 @@ export function NativeSessionScreen({
               feedback={feedback}
               humanInputMessages={humanInputMessages}
               approvalMessages={approvalMessages}
+              loadReview={loadReview}
               client={client}
               inChatConnect={inChatConnect}
               models={models}
@@ -270,6 +279,7 @@ function SessionScreenBody({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
@@ -582,6 +592,7 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
+                loadReview={loadReview}
                 onDecide={(id, decision, answer) =>
                   (decision === "approve"
                     ? control.approve(id, undefined, answer)
