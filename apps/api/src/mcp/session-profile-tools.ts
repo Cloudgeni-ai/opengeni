@@ -29,7 +29,7 @@ import { requireUsableSessionAvatar } from "../routes/session-avatar";
  */
 
 export const SESSION_PROFILE_TOOL_GUIDANCE =
-  'When a person or an agent chose the name, keep it unless the person asks for a new one. Every field is optional. description and avatar are shown to people next to the name and are not added to your context; set them when the person asks you to change your name or look, or when setup instructions say so. description: one line about what the chat does (an empty string clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue}, {kind:"letters",letters,hue} (one or two letters or digits), with hue 0-359, or {kind:"image",artifactId} for an image file, such as one you generated. Avatars are usually shown at about 16 pixels, so make an image a flat icon filling the whole square: one bold symbol for the chat\'s job on a solid, strong colour unlike other agents\' avatars, with no frame, faces, fine detail or text. If other people can open this chat, publish the image so they can open it too first.';
+  'When a person or an agent chose the name, keep it unless the person asks for a new one. All fields are optional. description and avatar are shown to people, not to you; set them when the person asks or setup instructions say so. description: one line ("" clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue} or {kind:"letters",letters,hue} (one or two characters) with hue 0-359, or {kind:"image",artifactId}. An image shows at about 16 pixels: one bold symbol on a solid colour, no text or fine detail.';
 
 export const AvatarInput = z4
   .object({
@@ -136,7 +136,7 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat, usually when the person asks to make this an agent or a template. An agent has a name, a one-line description, an optional avatar, Instructions every chat with it follows, and an optional First message put in the composer when someone starts a chat with it. Write the Instructions from what this chat established: the agent's job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Put one-time setup (installs, schedules, event triggers, first questions) in the First message, since Instructions apply on every turn. Leave out one-off tasks, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat: Only me from an Only me chat, otherwise with the workspace. avatar takes the same shapes as in set_session_title.",
+        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Put one-time setup (installs, schedules, event triggers, first questions) in the optional First message, which starts each new chat's composer. Leave out one-off tasks, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),

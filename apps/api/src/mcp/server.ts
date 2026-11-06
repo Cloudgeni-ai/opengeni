@@ -3000,7 +3000,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this agent's other recent shared chats, newest first, to recover context people did not repeat. Read one with session_events.",
+        "List this agent's other recent shared chats, newest first. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
