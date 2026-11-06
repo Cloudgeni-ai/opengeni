@@ -155,6 +155,17 @@ test("a linked person's 1:1 chat lands in their own Personal workspace; channels
       },
     },
   ]);
+  // The stored text still writes the URL out: a replica from before notice
+  // cards sends that text during a rolling deploy, so the session stays
+  // reachable from Teams.
+  const [started] =
+    await shared.admin`select o.payload from teams_bot_outbox o join teams_bot_routes r on r.route_id=o.route_id where r.session_id=${session!.id} and o.source_sequence=0`;
+  expect(started!.payload).toEqual({
+    text: `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`,
+    link: "session",
+    cardText:
+      "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+  });
   const [shared0] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(shared0!.n).toBe(0);

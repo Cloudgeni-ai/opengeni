@@ -1534,6 +1534,25 @@ type TeamsSender = (
 function sessionLink(deps: ApiRouteDeps, r: TeamsRoute): TeamsNoticeLink {
   return { title: "Open in Opengeni", url: sessionUrl(deps, r) };
 }
+/**
+ * Queues a notice about the chat's session. It is sent as a card with a
+ * button that opens the session. The stored text also writes the URL out
+ * after `lead`, which is what a replica from before notice cards sends
+ * during a rolling deploy, so the session stays reachable from Teams.
+ */
+async function enqueueSessionNotice(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  sequence: number,
+  notice: { card: string; lead: string; after?: string },
+): Promise<void> {
+  const legacy = `${notice.lead}: ${sessionUrl(deps, r)}${notice.after ? `\n\n${notice.after}` : ""}`;
+  await enqueueTeamsOutput(deps.db, i, r, sequence, [legacy], undefined, undefined, {
+    link: "session",
+    text: notice.after ? `${notice.card}\n\n${notice.after}` : notice.card,
+  });
+}
 function admissionNotice(
   deps: ApiRouteDeps,
   r: TeamsRoute,
@@ -1683,20 +1702,16 @@ async function drainRoute(
         turnId = accepted.turn.id;
       }
       if (!r.session_bound)
-        await enqueueTeamsOutput(
-          deps.db,
-          i,
-          r,
-          0,
-          [
-            r.personal
-              ? "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands."
-              : "Started. Follow progress or approve requests in Opengeni.",
-          ],
-          undefined,
-          undefined,
-          "session",
-        );
+        await enqueueSessionNotice(deps, i, r, 0, {
+          card: "Started. Follow progress or approve requests in Opengeni.",
+          lead: "Started. Follow progress or approve requests",
+          ...(r.personal
+            ? {
+                after:
+                  "Opengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+              }
+            : {}),
+        });
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
       // The chat has now seen this mention and its context: a later mention
@@ -1770,9 +1785,8 @@ async function drainRoute(
       );
       for (const event of page.events) {
         const payload = event.payload as Record<string, unknown>;
-        let text: string | null = null;
         if (event.type === "turn.completed") {
-          text =
+          const text =
             typeof payload.output === "string" && payload.output.trim()
               ? payload.output
               : turnCompletedReply(payload);
@@ -1788,24 +1802,22 @@ async function drainRoute(
           if (event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
           continue;
         }
-        if (
-          event.type === "session.requiresAction" ||
-          event.type === "session.humanInput.requested"
-        )
-          text = "Your task needs your input or approval in the secure Opengeni chat.";
-        else if (event.type === "turn.failed")
-          text = "The task could not finish. The details are in Opengeni.";
-        await enqueueTeamsOutput(
-          deps.db,
-          i,
-          r,
-          event.sequence,
-          text ? [text] : [],
-          undefined,
-          undefined,
-          text ? "session" : undefined,
-        );
-        if (text && event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
+        const notice =
+          event.type === "session.requiresAction" || event.type === "session.humanInput.requested"
+            ? {
+                card: "Your task needs your input or approval in the secure Opengeni chat.",
+                lead: "Your task needs your input or approval. Open the secure Opengeni chat",
+              }
+            : event.type === "turn.failed"
+              ? {
+                  card: "The task could not finish. The details are in Opengeni.",
+                  lead: "The task could not finish. Open Opengeni for details",
+                }
+              : null;
+        // Without a notice this still moves the route past the event.
+        if (notice) await enqueueSessionNotice(deps, i, r, event.sequence, notice);
+        else await enqueueTeamsOutput(deps.db, i, r, event.sequence, []);
+        if (notice && event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
       }
     }
     output = await claimTeamsOutput(deps.db, i, r);
@@ -1878,7 +1890,11 @@ async function drainRoute(
         threadId: r.thread_id,
         botId: r.bot_id,
       },
-      notice ? notice.text : output.payload.text,
+      notice
+        ? notice.text
+        : output.payload.link === "session"
+          ? (output.payload.cardText ?? output.payload.text)
+          : output.payload.text,
       notice
         ? { link: notice.link }
         : output.payload.link === "session"

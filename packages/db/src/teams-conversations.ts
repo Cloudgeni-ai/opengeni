@@ -58,9 +58,13 @@ export type TeamsOutbox = {
     turnId?: string;
     /**
      * A notice about the chat's session, shown with a button that opens it.
-     * The URL is built when the notice is sent, so it is not stored.
+     * The button's URL is built when the notice is sent. `text` keeps the
+     * notice with its URL written out, which is what replicas from before
+     * notice cards send during a rolling deploy.
      */
     link?: "session";
+    /** The notice as shown on the card, without its URL. */
+    cardText?: string;
   };
   route_id: string;
 };
@@ -598,7 +602,7 @@ export async function enqueueTeamsOutput(
   parts: string[],
   notice?: { eventId: string; kind: "admission" | "audience_changed" },
   reply?: { turnId: string | null },
-  link?: "session",
+  card?: { link: "session"; text: string },
 ) {
   await teamsScoped(db, i, async (tx) => {
     const owned = await rawRows(
@@ -608,7 +612,7 @@ export async function enqueueTeamsOutput(
     if (!owned.length) return;
     for (const [index, text] of parts.entries())
       await tx.execute(
-        sql`insert into teams_bot_outbox(account_id,workspace_id,operation_id,route_id,source_sequence,part_index,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${`${r.route_id}:${notice ? `notice:${notice.eventId}` : sequence}:${index}`},${r.route_id},${sequence},${index},${JSON.stringify({ text, ...(notice ? { notice: notice.kind } : {}), ...(reply ? { ai: true, ...(reply.turnId ? { turnId: reply.turnId } : {}) } : {}), ...(link ? { link } : {}) })}::jsonb) on conflict(operation_id) do nothing`,
+        sql`insert into teams_bot_outbox(account_id,workspace_id,operation_id,route_id,source_sequence,part_index,payload) values(${i.account_id}::uuid,${i.workspace_id}::uuid,${`${r.route_id}:${notice ? `notice:${notice.eventId}` : sequence}:${index}`},${r.route_id},${sequence},${index},${JSON.stringify({ text, ...(notice ? { notice: notice.kind } : {}), ...(reply ? { ai: true, ...(reply.turnId ? { turnId: reply.turnId } : {}) } : {}), ...(card ? { link: card.link, cardText: card.text } : {}) })}::jsonb) on conflict(operation_id) do nothing`,
       );
     await tx.execute(
       sql`update teams_bot_routes set delivered_sequence=greatest(delivered_sequence,${sequence}) where route_id=${r.route_id}`,

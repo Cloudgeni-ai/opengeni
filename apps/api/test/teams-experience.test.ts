@@ -252,6 +252,32 @@ describe("Teams Markdown", () => {
     );
     expect(teamsMarkdown("```\ncode\n```\n## After code")).toBe("```\ncode\n```\n## After code");
   });
+  test("bold lines in list items, under setext underlines and in a row keep their structure", () => {
+    // An indented bold line inside a list item stays in the item.
+    expect(teamsMarkdown("- Item one\n  **Note**\n  continued text")).toBe(
+      "- Item one\n  **Note**\n  continued text",
+    );
+    // A bold line underlined with = or - is a heading, not a stray underline.
+    expect(teamsMarkdown("**Title**\n===\nBody")).toBe("# **Title**\nBody");
+    expect(teamsMarkdown("Intro\n**Title**\n---\nBody")).toBe(
+      "Intro\n\n<br>\n\n## **Title**\nBody",
+    );
+    // Consecutive bold lines each stand on their own line.
+    expect(teamsMarkdown("Para\n**A**\n**B**\nText")).toBe(
+      "Para\n\n<br>\n\n**A**\n\n**B**\n\nText",
+    );
+  });
+  test("a part never ends on the gap before a heading that starts the next part", () => {
+    const text = teamsMarkdown(`${"Paragraph text.\n".repeat(60)}## Next\nMore`);
+    const gap = text.indexOf("\n\n<br>\n\n## Next");
+    expect(gap).toBeGreaterThan(0);
+    // Split exactly where the heading starts.
+    const parts = teamsMarkdownParts(text, gap + "\n\n<br>\n\n".length);
+    expect(parts.length).toBe(2);
+    expect(parts[0]!.endsWith("Paragraph text.\n")).toBe(true);
+    expect(parts[0]).not.toContain("<br>");
+    expect(parts[1]!.startsWith("## Next")).toBe(true);
+  });
   test("leaves code blocks, links, emphasis and lists as written", () => {
     const input = [
       "**Bold** and _italic_ with [a link](https://example.test).",

@@ -541,14 +541,23 @@ export function teamsMarkdown(input: string): string {
       out.push("");
       continue;
     }
-    if (boldHeading(line)) {
+    const underline = lines[index + 1];
+    if (
+      boldHeading(line) &&
+      // An indented bold line inside a list item stays part of the item.
+      !(inList && /^[ \t]/.test(line)) &&
+      // A bold line with = or - under it is a setext heading, handled below.
+      !(underline !== undefined && /^ {0,3}(?:=+|-+)[ \t]*$/.test(underline))
+    ) {
       // A heading line that continues a paragraph starts its own instead.
       if (out.length && out.at(-1)!.trim() && paragraphLine(out.at(-1)!)) out.push("");
       gapBeforeHeading(out);
       out.push(escapeTags(line.trim()));
-      // The next line would otherwise join it on the same line.
+      // The next line, text or another bold line, would otherwise join it on
+      // the same line.
       const next = lines[index + 1];
-      if (next !== undefined && next.trim() && paragraphLine(next)) out.push("");
+      if (next !== undefined && next.trim() && (paragraphLine(next) || boldHeading(next)))
+        out.push("");
       continue;
     }
     if (line.trim() && !/^ {0,3}(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^(?: {4}|\t)/.test(line))
@@ -602,6 +611,8 @@ export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): s
   const reopened = () => fence?.reopen ?? "";
   const flush = () => {
     if (!part || part === reopened()) return;
+    // The gap before a heading that starts the next part isn't needed here.
+    if (!fence) part = part.replace(/\n\n<br>\n\n?$/, "\n");
     if (fence?.reopen) part += part.endsWith("\n") ? fence.close : `\n${fence.close}`;
     parts.push(part);
     part = reopened();

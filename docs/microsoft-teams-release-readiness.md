@@ -576,7 +576,9 @@ conversation, organization connected or not, account linked or not).
   your input or approval, could not finish) and the refusal notices go out as
   an Adaptive Card with the notice text and a labelled button (Open in
   Opengeni, Open Opengeni, Continue in Opengeni), never a bare URL. The outbox
-  stores `link: "session"` and the URL is built when the notice is sent. In a
+  stores `link: "session"` and the card text; the button's URL is built when
+  the notice is sent. The stored `text` still writes the URL out, which is what
+  a replica from before notice cards sends during a rolling deploy. In a
   channel thread Teams starts a new message header after a card, so the
   agent's answer that follows has its own header with the AI label instead of
   being grouped under the notice. In 1:1 and group chats Teams groups
