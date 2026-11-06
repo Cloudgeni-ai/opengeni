@@ -11,6 +11,7 @@ import {
   readChunksInOrder,
   recordingAudioContainer,
   RecordingAudioError,
+  RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS,
   renderRecordingAudioPiece,
   soundBetweenSilences,
   startsAdtsFrame,
@@ -24,6 +25,7 @@ import {
   gatedOpusWebm,
   gappedOpusWebm,
   hasFfmpeg,
+  jumpedOpusWebm,
   opusWebm,
 } from "./recording-audio-fixtures";
 
@@ -421,6 +423,97 @@ describe("recording audio", () => {
       expect(Math.abs(seconds(piece.bytes) - 4)).toBeLessThan(0.1);
     },
   );
+
+  test.skipIf(!hasFfmpeg)(
+    "a hole too long to fill, or audio past its declared length, is refused before decoding",
+    async () => {
+      // A second of audio, a few kilobytes, whose timestamps claim far more:
+      // the timeline filter would hold every second of each hole in memory.
+      const overHole = (RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS + 60_000) / 1_000;
+      const prepare = (
+        bytes: readonly Uint8Array[],
+        chunks: ReadonlyArray<{ startMilliseconds: number; durationMilliseconds: number }>,
+      ) =>
+        prepareRecordingTrackAudio({
+          chunks: chunks.map((chunk, index) => ({
+            ...chunk,
+            chunkNumber: index,
+            objectKey: `k${index}`,
+          })),
+          mimeType: "audio/webm",
+          ffmpegPath,
+          readChunk: async (chunk) => bytes[chunk.chunkNumber]!,
+        });
+      const refused = async (attempt: Promise<unknown>, message: RegExp) => {
+        const error = await attempt.catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(RecordingAudioError);
+        expect((error as RecordingAudioError).code).toBe("invalid_audio");
+        expect((error as RecordingAudioError).message).toMatch(message);
+      };
+      // A hole between packets, however long the chunks claim to be.
+      const declaredLong = [{ startMilliseconds: 0, durationMilliseconds: 10 * 3_600_000 }];
+      await refused(prepare([jumpedOpusWebm(1, 25, overHole)], declaredLong), /gap/u);
+      // A first packet stamped long after time zero.
+      await refused(prepare([jumpedOpusWebm(1, 0, overHole)], declaredLong), /gap/u);
+      // A hole short enough to fill, but past what the chunks declared.
+      await refused(
+        prepare(
+          [jumpedOpusWebm(1, 25, 30)],
+          [{ startMilliseconds: 0, durationMilliseconds: 2_000 }],
+        ),
+        /declared length/u,
+      );
+      // Each run of a track is checked on its own.
+      await refused(
+        prepare(
+          [opusWebm(1), jumpedOpusWebm(1, 25, overHole)],
+          [
+            { startMilliseconds: 0, durationMilliseconds: 1_000 },
+            { startMilliseconds: 5_000, durationMilliseconds: 10 * 3_600_000 },
+          ],
+        ),
+        /gap/u,
+      );
+      // A hole within the limit, inside the declared length, is still filled.
+      const filled = await prepare(
+        [jumpedOpusWebm(1, 25, 3)],
+        [{ startMilliseconds: 0, durationMilliseconds: 4_000 }],
+      );
+      expect(Math.abs(filled.durationMilliseconds - 4_000)).toBeLessThan(150);
+    },
+  );
+
+  test("audio that comes out far longer than declared is not kept", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fake-ffmpeg-"));
+    try {
+      // Prints no packets for the timestamp check, then claims an hour of output.
+      const path = join(directory, "ffmpeg");
+      await writeFile(
+        path,
+        [
+          "#!/bin/sh",
+          "for last; do :; done",
+          '[ "$last" = "-" ] || printf x > "$last"',
+          "echo 'size=1kB time=01:00:00.00 bitrate=1kbits/s' >&2",
+        ].join("\n"),
+      );
+      await chmod(path, 0o755);
+      const header = new Uint8Array(64);
+      header.set([0x1a, 0x45, 0xdf, 0xa3]);
+      const error = await prepareRecordingTrackAudio({
+        chunks: [
+          { chunkNumber: 0, startMilliseconds: 0, durationMilliseconds: 1_000, objectKey: "k" },
+        ],
+        mimeType: "audio/webm",
+        ffmpegPath: path,
+        readChunk: async () => header,
+      }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(RecordingAudioError);
+      expect((error as RecordingAudioError).code).toBe("invalid_audio");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   test("a track that does not start with a header is invalid", async () => {
     await expect(
