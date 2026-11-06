@@ -69,6 +69,8 @@ function recordingSession(manifest: Manifest): { session: unknown; uses: string[
       get(target, property) {
         if (property === "state") return target.state;
         if (property === "createEditor") return () => editor;
+        // What the provider supports, answered without the box.
+        if (property === "supportsPty") return () => false;
         return operations[property];
       },
     },
