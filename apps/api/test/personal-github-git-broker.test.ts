@@ -697,7 +697,11 @@ describe("personal GitHub Git broker", () => {
           claims,
           repository,
           providerPrincipalId: "9876543210987654321",
-          identity: { claims, initiator: { kind: "human", subjectId: "user-1" }, unattended: false },
+          identity: {
+            claims,
+            initiator: { kind: "human", subjectId: "user-1" },
+            unattended: false,
+          },
         }),
         authorizeProviderRequest: async () => "Bearer provider-secret",
         inspectPush: async (authority, body, gzip) =>
@@ -744,7 +748,12 @@ describe("personal GitHub Git broker", () => {
               : match[2] === "git-upload-pack"
                 ? "upload_pack"
                 : "receive_pack";
-          return await handlePersonalGitHubGitBrokerRequest(request, match[1]!, operation, brokerServices);
+          return await handlePersonalGitHubGitBrokerRequest(
+            request,
+            match[1]!,
+            operation,
+            brokerServices,
+          );
         },
       });
       const brokerBase = `http://127.0.0.1:${server.port}/v1/git/personal/${routeId}`;
@@ -764,7 +773,10 @@ describe("personal GitHub Git broker", () => {
         "#!/bin/sh\n[ \"$1\" = get ] || exit 0\nprintf 'username=x\\npassword=broker-secret\\n'\n",
         { mode: 0o700 },
       );
-      await runGitCommand(["config", "--global", "credential.helper", join(root, "helper")], gitEnvironment);
+      await runGitCommand(
+        ["config", "--global", "credential.helper", join(root, "helper")],
+        gitEnvironment,
+      );
       await runGitCommand(["init", "--initial-branch=main", client], gitEnvironment);
       await runGitCommand(["-C", client, "remote", "add", "origin", brokerBase], gitEnvironment);
       const commit = async (text: string) => {
@@ -791,7 +803,10 @@ describe("personal GitHub Git broker", () => {
       expect((await push(["main"])).exitCode).toBe(0);
       expect(decisions).toEqual([]);
 
-      await runGitCommand(["-C", client, "commit", "--amend", "-m", "two rewritten"], gitEnvironment);
+      await runGitCommand(
+        ["-C", client, "commit", "--amend", "-m", "two rewritten"],
+        gitEnvironment,
+      );
       const forced = await push(["--force", "main"]);
       expect(forced.exitCode).not.toBe(0);
       expect(forced.stderr).toContain("waiting for your approval in Opengeni");

@@ -72,7 +72,10 @@ function pushBody(
   );
   const pack =
     packRevs.length > 0
-      ? git(["pack-objects", "--stdout", "--revs", "--thin", "-q"], Buffer.from(`${packRevs.join("\n")}\n`))
+      ? git(
+          ["pack-objects", "--stdout", "--revs", "--thin", "-q"],
+          Buffer.from(`${packRevs.join("\n")}\n`),
+        )
       : Buffer.alloc(0);
   return Buffer.concat([...lines, Buffer.from("0000"), pack]);
 }
@@ -148,7 +151,10 @@ describe("push approvals", () => {
   test("a new branch and a fast-forward push go through unchanged", async () => {
     const { calls, decide } = recordingDecider({ kind: "allow" });
     const created = await inspect(
-      pushBody([{ old: ZERO_OID, next: commits.feature!, ref: "refs/heads/new" }], [commits.feature!]),
+      pushBody(
+        [{ old: ZERO_OID, next: commits.feature!, ref: "refs/heads/new" }],
+        [commits.feature!],
+      ),
       decide,
     );
     expect(created.kind).toBe("forward");
@@ -182,7 +188,11 @@ describe("push approvals", () => {
       async (base, head) => base === commits.base && head === commits.base,
     );
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.action).toMatchObject({ kind: "write", alwaysAsk: true, tools: ["ref_create"] });
+    expect(calls[0]!.action).toMatchObject({
+      kind: "write",
+      alwaysAsk: true,
+      tools: ["ref_create"],
+    });
     expect(calls[0]!.title).toBe("Force-push main on acme/widgets");
     expect(result.kind).toBe("respond");
     if (result.kind !== "respond") return;
@@ -285,6 +295,8 @@ describe("request digests", () => {
     expect(requestDigest(["api", "POST", { a: 1, b: 2 }])).toBe(
       requestDigest(["api", "POST", { b: 2, a: 1 }]),
     );
-    expect(requestDigest(["api", "POST", { a: 1 }])).not.toBe(requestDigest(["api", "POST", { a: 2 }]));
+    expect(requestDigest(["api", "POST", { a: 1 }])).not.toBe(
+      requestDigest(["api", "POST", { a: 2 }]),
+    );
   });
 });

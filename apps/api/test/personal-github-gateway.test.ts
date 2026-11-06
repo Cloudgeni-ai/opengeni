@@ -8,7 +8,10 @@ import {
   type PersonalGitHubGatewayAuthority,
   type PersonalGitHubGatewayServices,
 } from "../src/routes/personal-github-gateway";
-import type { GatewayDecision, GatewayDecisionInput } from "../src/routes/personal-github-gateway-policy";
+import type {
+  GatewayDecision,
+  GatewayDecisionInput,
+} from "../src/routes/personal-github-gateway-policy";
 
 const claims = { connectionId: "connection-1" } as unknown as PersonalGitHubGitBrokerClaims;
 const permissions = { pull: true, triage: false, push: true, maintain: false, admin: false };
@@ -26,7 +29,9 @@ function selected(fullName: string, id: string, access: "read" | "write" = "writ
   };
 }
 
-function authority(overrides: Partial<PersonalGitHubGatewayAuthority> = {}): PersonalGitHubGatewayAuthority {
+function authority(
+  overrides: Partial<PersonalGitHubGatewayAuthority> = {},
+): PersonalGitHubGatewayAuthority {
   return {
     claims,
     identity: { claims, initiator: { kind: "human", subjectId: "person" }, unattended: false },
@@ -47,7 +52,9 @@ function authority(overrides: Partial<PersonalGitHubGatewayAuthority> = {}): Per
 type Upstream = { url: string; init: RequestInit & { duplex?: string } };
 
 function bodyText(init: RequestInit): string {
-  return typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as Uint8Array);
+  return typeof init.body === "string"
+    ? init.body
+    : new TextDecoder().decode(init.body as Uint8Array);
 }
 
 function harness(
@@ -121,11 +128,19 @@ describe("personal GitHub gateway", () => {
     const { send, upstream, decisions } = harness({
       respond: () =>
         new Response('{"full_name":"acme/widgets"}', {
-          headers: { "content-type": "application/json", "set-cookie": "a=b", "x-ratelimit-remaining": "4999" },
+          headers: {
+            "content-type": "application/json",
+            "set-cookie": "a=b",
+            "x-ratelimit-remaining": "4999",
+          },
         }),
     });
     const response = await send("/repos/acme/widgets?per_page=1", {
-      headers: { cookie: "session=1", "x-forwarded-for": "1.2.3.4", accept: "application/vnd.github+json" },
+      headers: {
+        cookie: "session=1",
+        "x-forwarded-for": "1.2.3.4",
+        accept: "application/vnd.github+json",
+      },
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ full_name: "acme/widgets" });
@@ -146,7 +161,10 @@ describe("personal GitHub gateway", () => {
   test("passes redirects back to gh instead of following them", async () => {
     const { send } = harness({
       respond: () =>
-        new Response(null, { status: 302, headers: { location: "https://results.example/logs.zip" } }),
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://results.example/logs.zip" },
+        }),
     });
     const response = await send("/repos/acme/widgets/actions/runs/1/logs");
     expect(response.status).toBe(302);
@@ -269,13 +287,20 @@ describe("personal GitHub gateway", () => {
       JSON.stringify({
         query:
           "mutation PullRequestCreate($input: CreatePullRequestInput!) { createPullRequest(input: $input) { pullRequest { url } } }",
-        variables: { input: { repositoryId: id, baseRefName: "main", headRefName: "f", title: "T" } },
+        variables: {
+          input: { repositoryId: id, baseRefName: "main", headRefName: "f", title: "T" },
+        },
       });
     const allowed = harness({ respond });
-    expect((await allowed.send("/graphql", { method: "POST", body: mutation("R_kgDOWidgets") })).status).toBe(200);
+    expect(
+      (await allowed.send("/graphql", { method: "POST", body: mutation("R_kgDOWidgets") })).status,
+    ).toBe(200);
     expect(allowed.decisions[0]!.title).toBe("Open pull request on acme/widgets");
     const denied = harness({ respond });
-    const response = await denied.send("/graphql", { method: "POST", body: mutation("PR_kwDOSecret1") });
+    const response = await denied.send("/graphql", {
+      method: "POST",
+      body: mutation("PR_kwDOSecret1"),
+    });
     expect(response.status).toBe(403);
     expect(denied.decisions).toEqual([]);
   });
@@ -287,8 +312,12 @@ describe("personal GitHub gateway", () => {
         query: "query($o: String!, $n: String!) { repository(owner: $o, name: $n) { id } }",
         variables: { o: owner, n: name },
       });
-    expect((await send("/graphql", { method: "POST", body: query("acme", "widgets") })).status).toBe(200);
-    expect((await send("/graphql", { method: "POST", body: query("other", "secret") })).status).toBe(403);
+    expect(
+      (await send("/graphql", { method: "POST", body: query("acme", "widgets") })).status,
+    ).toBe(200);
+    expect(
+      (await send("/graphql", { method: "POST", body: query("other", "secret") })).status,
+    ).toBe(403);
   });
 
   test("unresolvable node IDs make the mutation ask", async () => {
@@ -318,13 +347,17 @@ describe("personal GitHub gateway review fixes", () => {
   ];
 
   test("a removed repository addressed by ID is refused too", async () => {
-    const { send, upstream } = harness({ authority: authority({ removedRepositories: removedWidgets }) });
+    const { send, upstream } = harness({
+      authority: authority({ removedRepositories: removedWidgets }),
+    });
     const response = await send("/repositories/11/issues", {
       method: "POST",
       body: JSON.stringify({ title: "x" }),
     });
     expect(response.status).toBe(403);
-    expect(((await response.json()) as { message: string }).message).toContain("removed from this chat");
+    expect(((await response.json()) as { message: string }).message).toContain(
+      "removed from this chat",
+    );
     expect(upstream).toEqual([]);
   });
 
@@ -366,17 +399,25 @@ describe("personal GitHub gateway review fixes", () => {
           },
         },
       });
-    expect((await send("/graphql", { method: "POST", body: commit("other/secret") })).status).toBe(403);
-    expect((await send("/graphql", { method: "POST", body: commit("acme/docs") })).status).toBe(403);
+    expect((await send("/graphql", { method: "POST", body: commit("other/secret") })).status).toBe(
+      403,
+    );
+    expect((await send("/graphql", { method: "POST", body: commit("acme/docs") })).status).toBe(
+      403,
+    );
     expect(upstream).toEqual([]);
-    expect((await send("/graphql", { method: "POST", body: commit("acme/widgets") })).status).toBe(200);
+    expect((await send("/graphql", { method: "POST", body: commit("acme/widgets") })).status).toBe(
+      200,
+    );
   });
 
   test("a repository mutation whose repository can't be found asks", async () => {
     const { send, decisions } = harness();
     await send("/graphql", {
       method: "POST",
-      body: JSON.stringify({ query: "mutation { createIssue(input: {title: \"x\"}) { issue { id } } }" }),
+      body: JSON.stringify({
+        query: 'mutation { createIssue(input: {title: "x"}) { issue { id } } }',
+      }),
     });
     expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
   });
@@ -389,9 +430,13 @@ describe("personal GitHub gateway review fixes", () => {
       });
     expect((await send("/graphql", { method: "POST", body: query("other") })).status).toBe(403);
     const viewer = harness({
-      authority: authority({ metadata: { githubLogin: "acme" } as PersonalGitHubGatewayAuthority["metadata"] }),
+      authority: authority({
+        metadata: { githubLogin: "acme" } as PersonalGitHubGatewayAuthority["metadata"],
+      }),
     });
-    const own = JSON.stringify({ query: 'query { viewer { repository(name: "widgets") { id } } }' });
+    const own = JSON.stringify({
+      query: 'query { viewer { repository(name: "widgets") { id } } }',
+    });
     expect((await viewer.send("/graphql", { method: "POST", body: own })).status).toBe(200);
   });
 
@@ -399,7 +444,11 @@ describe("personal GitHub gateway review fixes", () => {
     const { send, upstream } = harness();
     expect((await send("/graphql")).status).toBe(405);
     await send("/user", {
-      headers: { "x-http-method-override": "DELETE", "x-real-ip": "1.2.3.4", "x-github-api-version": "2022-11-28" },
+      headers: {
+        "x-http-method-override": "DELETE",
+        "x-real-ip": "1.2.3.4",
+        "x-github-api-version": "2022-11-28",
+      },
     });
     const headers = new Headers(upstream[0]!.init.headers);
     expect(headers.get("x-http-method-override")).toBeNull();
@@ -423,12 +472,14 @@ describe("gateway repository allowlist", () => {
         allRepositoriesAccess: "read",
       } as PersonalGitHubGatewayAuthority["selection"],
     });
-    expect(gatewayRepositoryDecision(all, { kind: "name", owner: "x", name: "y" }, "read")).toEqual({
-      allowed: true,
-    });
-    expect(gatewayRepositoryDecision(all, { kind: "name", owner: "x", name: "y" }, "write").allowed).toBe(
-      false,
+    expect(gatewayRepositoryDecision(all, { kind: "name", owner: "x", name: "y" }, "read")).toEqual(
+      {
+        allowed: true,
+      },
     );
+    expect(
+      gatewayRepositoryDecision(all, { kind: "name", owner: "x", name: "y" }, "write").allowed,
+    ).toBe(false);
   });
 
   test("a repository removed from the chat is refused", () => {
@@ -445,7 +496,11 @@ describe("gateway repository allowlist", () => {
   });
 
   test("repositories are matched by ID too", () => {
-    expect(gatewayRepositoryDecision(authority(), { kind: "id", id: "11" }, "write").allowed).toBe(true);
-    expect(gatewayRepositoryDecision(authority(), { kind: "id", id: "99" }, "read").allowed).toBe(false);
+    expect(gatewayRepositoryDecision(authority(), { kind: "id", id: "11" }, "write").allowed).toBe(
+      true,
+    );
+    expect(gatewayRepositoryDecision(authority(), { kind: "id", id: "99" }, "read").allowed).toBe(
+      false,
+    );
   });
 });

@@ -149,7 +149,11 @@ function classifyRepositoryWrite(
     if (id === "jobs" && subId === "rerun" && method === "POST") {
       return routine("Rerun workflow job");
     }
-    if (id === "workflows" && sub && (subId === "dispatches" || subId === "enable" || subId === "disable")) {
+    if (
+      id === "workflows" &&
+      sub &&
+      (subId === "dispatches" || subId === "enable" || subId === "disable")
+    ) {
       return routine(subId === "dispatches" ? "Run workflow" : `${capitalize(subId)} workflow`);
     }
     if (id === "caches" || method === "DELETE") return sensitive("Delete GitHub Actions data");
@@ -165,17 +169,21 @@ function classifyRepositoryWrite(
   if (area === "merge-upstream") return routine("Sync fork with upstream");
   if (area === "git") {
     if (id === "refs") {
-      if (method === "POST" && sub === undefined) return write(["ref_create"], "Create branch or tag");
+      if (method === "POST" && sub === undefined)
+        return write(["ref_create"], "Create branch or tag");
       if (method === "DELETE") return sensitive("Delete branch or tag", ["ref_create"]);
       if (method === "PATCH") {
         const force =
-          body !== null && typeof body === "object" && (body as Record<string, unknown>).force === true;
-        return force
-          ? sensitive("Force-update branch", ["ref_create"])
-          : routine("Update branch");
+          body !== null &&
+          typeof body === "object" &&
+          (body as Record<string, unknown>).force === true;
+        return force ? sensitive("Force-update branch", ["ref_create"]) : routine("Update branch");
       }
     }
-    if (method === "POST" && (id === "blobs" || id === "trees" || id === "commits" || id === "tags")) {
+    if (
+      method === "POST" &&
+      (id === "blobs" || id === "trees" || id === "commits" || id === "tags")
+    ) {
       return routine("Create Git object");
     }
     return sensitive("Change Git data");
@@ -199,7 +207,14 @@ function classifyRepositoryWrite(
       if (sub === "comments" && method === "POST") {
         return write(["issue_comment", "pull_request_comment"], "Comment");
       }
-      if (sub === "labels" || sub === "assignees" || sub === "lock" || sub === "sub_issues" || sub === "sub_issue" || sub === "dependencies") {
+      if (
+        sub === "labels" ||
+        sub === "assignees" ||
+        sub === "lock" ||
+        sub === "sub_issues" ||
+        sub === "sub_issue" ||
+        sub === "dependencies"
+      ) {
         return write(["issue_update", "pull_request_update"], "Update issue or pull request");
       }
       if (sub === "reactions") {
@@ -217,20 +232,26 @@ function classifyRepositoryWrite(
       if (method === "PATCH") return write(["pull_request_comment"], "Edit review comment");
       if (method === "DELETE") return sensitive("Delete review comment", ["pull_request_comment"]);
     }
-    if (id === undefined && method === "POST") return write(["pull_request_create"], "Open pull request");
+    if (id === undefined && method === "POST")
+      return write(["pull_request_create"], "Open pull request");
     if (id && /^\d+$/u.test(id)) {
-      if (sub === undefined && method === "PATCH") return write(["pull_request_update"], "Update pull request");
-      if (sub === "update-branch") return write(["pull_request_update"], "Update pull request branch");
-      if (sub === "merge" && method === "PUT") return write(["pull_request_merge"], "Merge pull request");
+      if (sub === undefined && method === "PATCH")
+        return write(["pull_request_update"], "Update pull request");
+      if (sub === "update-branch")
+        return write(["pull_request_update"], "Update pull request branch");
+      if (sub === "merge" && method === "PUT")
+        return write(["pull_request_merge"], "Merge pull request");
       if (sub === "requested_reviewers") {
         return write(["pull_request_request_review"], "Request review");
       }
-      if (sub === "comments" && method === "POST") return write(["pull_request_comment"], "Comment on code");
+      if (sub === "comments" && method === "POST")
+        return write(["pull_request_comment"], "Comment on code");
       if (sub === "comments" && subId && leaf === "replies") {
         return write(["pull_request_comment"], "Reply to review comment");
       }
       if (sub === "reviews") {
-        if (subId && leaf === "dismissals") return sensitive("Dismiss review", ["pull_request_review_submit"]);
+        if (subId && leaf === "dismissals")
+          return sensitive("Dismiss review", ["pull_request_review_submit"]);
         if (method === "DELETE") return routine("Delete pending review");
         return write(["pull_request_review_submit"], "Submit review");
       }
@@ -239,12 +260,16 @@ function classifyRepositoryWrite(
     return sensitive("Change pull requests");
   }
   if (area === "releases") {
-    if (id === "generate-notes" && method === "POST") return { kind: "read", title: "Generate release notes" };
-    if (method === "DELETE") return sensitive(id === "assets" ? "Delete release asset" : "Delete release");
+    if (id === "generate-notes" && method === "POST")
+      return { kind: "read", title: "Generate release notes" };
+    if (method === "DELETE")
+      return sensitive(id === "assets" ? "Delete release asset" : "Delete release");
     return routine(id === undefined ? "Create release" : "Update release");
   }
   if (area === "labels" || area === "milestones") {
-    return method === "DELETE" ? sensitive(`Delete ${area.slice(0, -1)}`) : routine(`Change ${area}`);
+    return method === "DELETE"
+      ? sensitive(`Delete ${area.slice(0, -1)}`)
+      : routine(`Change ${area}`);
   }
   if (area === "comments" || area === "commits") {
     // Commit comments and their reactions.
@@ -305,7 +330,10 @@ export function classifyGitHubRestRequest(
 // ---------------------------------------------------------------------------
 
 /** GraphQL mutations mapped to policy actions. Anything not listed always asks. */
-const GRAPHQL_MUTATIONS: Record<string, { tools: readonly string[]; title: string; alwaysAsk?: true }> = {
+const GRAPHQL_MUTATIONS: Record<
+  string,
+  { tools: readonly string[]; title: string; alwaysAsk?: true }
+> = {
   createPullRequest: { tools: ["pull_request_create"], title: "Open pull request" },
   updatePullRequest: { tools: ["pull_request_update"], title: "Update pull request" },
   closePullRequest: { tools: ["pull_request_update"], title: "Close pull request" },
@@ -321,7 +349,10 @@ const GRAPHQL_MUTATIONS: Record<string, { tools: readonly string[]; title: strin
   dequeuePullRequest: { tools: ["pull_request_merge"], title: "Remove from merge queue" },
   addPullRequestReview: { tools: ["pull_request_review_submit"], title: "Submit review" },
   submitPullRequestReview: { tools: ["pull_request_review_submit"], title: "Submit review" },
-  deletePullRequestReview: { tools: ["pull_request_review_submit"], title: "Delete pending review" },
+  deletePullRequestReview: {
+    tools: ["pull_request_review_submit"],
+    title: "Delete pending review",
+  },
   dismissPullRequestReview: {
     tools: ["pull_request_review_submit"],
     title: "Dismiss review",
@@ -346,10 +377,19 @@ const GRAPHQL_MUTATIONS: Record<string, { tools: readonly string[]; title: strin
   addSubIssue: { tools: ["issue_update"], title: "Add sub-issue" },
   removeSubIssue: { tools: ["issue_update"], title: "Remove sub-issue" },
   addLabelsToLabelable: { tools: ["issue_update", "pull_request_update"], title: "Add labels" },
-  removeLabelsFromLabelable: { tools: ["issue_update", "pull_request_update"], title: "Remove labels" },
-  clearLabelsFromLabelable: { tools: ["issue_update", "pull_request_update"], title: "Clear labels" },
+  removeLabelsFromLabelable: {
+    tools: ["issue_update", "pull_request_update"],
+    title: "Remove labels",
+  },
+  clearLabelsFromLabelable: {
+    tools: ["issue_update", "pull_request_update"],
+    title: "Clear labels",
+  },
   addAssigneesToAssignable: { tools: ["issue_update", "pull_request_update"], title: "Assign" },
-  removeAssigneesFromAssignable: { tools: ["issue_update", "pull_request_update"], title: "Unassign" },
+  removeAssigneesFromAssignable: {
+    tools: ["issue_update", "pull_request_update"],
+    title: "Unassign",
+  },
   replaceActorsForAssignable: { tools: ["issue_update", "pull_request_update"], title: "Assign" },
   lockLockable: { tools: ["issue_update", "pull_request_update"], title: "Lock conversation" },
   unlockLockable: { tools: ["issue_update", "pull_request_update"], title: "Unlock conversation" },
@@ -559,8 +599,16 @@ class GraphqlParser {
     let depth = 1;
     while (depth > 0) {
       const token = this.next();
-      if (token.kind === "punct" && (token.value === "(" || token.value === "[" || token.value === "{")) depth += 1;
-      if (token.kind === "punct" && (token.value === ")" || token.value === "]" || token.value === "}")) depth -= 1;
+      if (
+        token.kind === "punct" &&
+        (token.value === "(" || token.value === "[" || token.value === "{")
+      )
+        depth += 1;
+      if (
+        token.kind === "punct" &&
+        (token.value === ")" || token.value === "]" || token.value === "}")
+      )
+        depth -= 1;
     }
   }
 
@@ -831,7 +879,11 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   // (null for viewer), so `repository(name:)` under it is scoped too. A
   // fragment is visited once per owner context.
   const visitedFragments = new Set<string>();
-  const visit = (selections: GraphqlSelection[], depth: number, owner: string | null | undefined) => {
+  const visit = (
+    selections: GraphqlSelection[],
+    depth: number,
+    owner: string | null | undefined,
+  ) => {
     if (depth > GRAPHQL_MAX_DEPTH) return;
     for (const selection of selections) {
       if (selection.kind === "spread") {
@@ -848,7 +900,9 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       const { field } = selection;
       let childOwner = owner;
       if (
-        (field.name === "organization" || field.name === "user" || field.name === "repositoryOwner") &&
+        (field.name === "organization" ||
+          field.name === "user" ||
+          field.name === "repositoryOwner") &&
         field.args.login
       ) {
         const login = resolveValue(field.args.login, variables);
@@ -857,7 +911,9 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
         childOwner = null;
       } else if (field.name === "repository" && field.args.name) {
         const name = resolveValue(field.args.name, variables);
-        const explicitOwner = field.args.owner ? resolveValue(field.args.owner, variables) : undefined;
+        const explicitOwner = field.args.owner
+          ? resolveValue(field.args.owner, variables)
+          : undefined;
         const repositoryOwner = typeof explicitOwner === "string" ? explicitOwner : owner;
         if (typeof name === "string" && repositoryOwner !== undefined) {
           repositories.push({ owner: repositoryOwner, name });

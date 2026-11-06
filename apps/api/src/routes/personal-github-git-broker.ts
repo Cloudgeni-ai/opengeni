@@ -151,7 +151,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
   operation: BrokerOperation,
   services: PersonalGitHubGitBrokerServices,
 ): Promise<Response> {
-  const validRouteKey = services.validRouteKey ?? ((key: string) => /^[A-Za-z0-9_-]{43}$/u.test(key));
+  const validRouteKey =
+    services.validRouteKey ?? ((key: string) => /^[A-Za-z0-9_-]{43}$/u.test(key));
   if (!validRouteKey(routeId) || !validGitRequestShape(request, operation)) {
     return brokerError(404, "Git repository route not found.");
   }
@@ -262,8 +263,7 @@ export async function handlePersonalGitHubGitBrokerRequest(
       deadline.clear();
       return inspection.response;
     }
-    body =
-      inspection.body instanceof Uint8Array ? bytesStream(inspection.body) : inspection.body;
+    body = inspection.body instanceof Uint8Array ? bytesStream(inspection.body) : inspection.body;
     pushRequestId = inspection.requestId;
   }
   const completePush = async (outcome: "completed" | "uncertain") => {
@@ -273,14 +273,15 @@ export async function handlePersonalGitHubGitBrokerRequest(
     await services.completePush(authority, requestId, outcome).catch(() => undefined);
   };
 
-  const streamedBody = body instanceof ReadableStream
-    ? streamWithActivity(
-        body,
-        deadline.activity,
-        () => undefined,
-        () => controller.abort(),
-      )
-    : undefined;
+  const streamedBody =
+    body instanceof ReadableStream
+      ? streamWithActivity(
+          body,
+          deadline.activity,
+          () => undefined,
+          () => controller.abort(),
+        )
+      : undefined;
   try {
     const headers = upstreamRequestHeaders(request, operation, providerToken);
     const init: RequestInit & { duplex?: "half" } = {

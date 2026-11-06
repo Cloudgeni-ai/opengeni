@@ -149,9 +149,13 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
       { env: gitEnv },
     );
     execFileSync("git", ["init", "-q", "-b", "main", repo], { env: gitEnv });
-    execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/acme/widgets"], {
-      env: gitEnv,
-    });
+    execFileSync(
+      "git",
+      ["-C", repo, "remote", "add", "origin", "https://github.com/acme/widgets"],
+      {
+        env: gitEnv,
+      },
+    );
 
     server = Bun.serve({
       port: 0,
@@ -259,11 +263,10 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
     ]);
     expect(refresh).not.toContain(PASS);
     expect(setup).not.toContain(PASS);
-    execFileSync(
-      "sh",
-      ["-c", `${refresh}\n${setup}`],
-      { env: isolatedGitEnvironment({ HOME: home }, { sandboxGitProvisioning: true }), stdio: "pipe" },
-    );
+    execFileSync("sh", ["-c", `${refresh}\n${setup}`], {
+      env: isolatedGitEnvironment({ HOME: home }, { sandboxGitProvisioning: true }),
+      stdio: "pipe",
+    });
   });
 
   afterAll(() => {
@@ -355,12 +358,15 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
     ]);
     expect(lsStatus).toBe(0);
     expect(lsOutput).toContain("refs/heads/main");
-    expect(recorded.slice(before).some((entry) => entry.path.includes("/gateway/git/acme/other"))).toBe(
-      true,
-    );
+    expect(
+      recorded.slice(before).some((entry) => entry.path.includes("/gateway/git/acme/other")),
+    ).toBe(true);
 
     // gh still sees github.com/acme/other as the repository of the clone.
-    const view = await gh(["api", "repos/{owner}/{repo}", "--jq", ".full_name"], join(root, "other"));
+    const view = await gh(
+      ["api", "repos/{owner}/{repo}", "--jq", ".full_name"],
+      join(root, "other"),
+    );
     expect(recorded.at(-1)?.path).toBe("/v1/github/personal/gateway/api/repos/acme/other");
     expect(view.status).not.toBe(0);
   });
@@ -371,8 +377,8 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
     for (const name of files) {
       expect(readFileSync(join(credentials, name), "utf8")).not.toContain("ambient-token");
     }
-    expect(readFileSync(join(home, ".opengeni", "bin", "gh-gateway-proxy.cjs"), "utf8")).not.toContain(
-      PASS,
-    );
+    expect(
+      readFileSync(join(home, ".opengeni", "bin", "gh-gateway-proxy.cjs"), "utf8"),
+    ).not.toContain(PASS);
   });
 });

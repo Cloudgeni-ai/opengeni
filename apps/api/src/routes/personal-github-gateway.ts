@@ -74,7 +74,9 @@ export type PersonalGitHubGatewayAuthority = {
 export type PersonalGitHubGatewayServices = {
   openClaims: (token: string) => PersonalGitHubGitBrokerClaims | null;
   /** The pass's turn, connection and session, all still current. Throws otherwise. */
-  resolveAuthority: (claims: PersonalGitHubGitBrokerClaims) => Promise<PersonalGitHubGatewayAuthority>;
+  resolveAuthority: (
+    claims: PersonalGitHubGitBrokerClaims,
+  ) => Promise<PersonalGitHubGatewayAuthority>;
   /**
    * The `Authorization` header for one physical GitHub request, after the
    * authority (and `repositories` at `access`) was checked again.
@@ -142,15 +144,18 @@ function gatewayError(
   message: string,
   extra: Record<string, string> = {},
 ): Response {
-  return new Response(JSON.stringify({ message, documentation_url: "https://docs.github.com/rest" }), {
-    status,
-    headers: {
-      "cache-control": "no-store",
-      "content-type": "application/json; charset=utf-8",
-      "x-content-type-options": "nosniff",
-      ...extra,
+  return new Response(
+    JSON.stringify({ message, documentation_url: "https://docs.github.com/rest" }),
+    {
+      status,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+        ...extra,
+      },
     },
-  });
+  );
 }
 
 class GatewayRepositoryDeniedError extends BrokerForbiddenError {}
@@ -170,14 +175,19 @@ function authorityError(error: unknown): Response {
 }
 
 export function gatewayBearer(authorization: string | null): string | null {
-  if (!authorization || Buffer.byteLength(authorization, "utf8") > GATEWAY_AUTHORIZATION_MAX_BYTES) {
+  if (
+    !authorization ||
+    Buffer.byteLength(authorization, "utf8") > GATEWAY_AUTHORIZATION_MAX_BYTES
+  ) {
     return null;
   }
   const match = /^(?:Bearer|token)\s+(\S+)$/iu.exec(authorization.trim());
   if (match) return match[1]!;
   if (!/^Basic\s+/iu.test(authorization)) return null;
   try {
-    const decoded = Buffer.from(authorization.replace(/^Basic\s+/iu, ""), "base64").toString("utf8");
+    const decoded = Buffer.from(authorization.replace(/^Basic\s+/iu, ""), "base64").toString(
+      "utf8",
+    );
     const separator = decoded.indexOf(":");
     return separator >= 0 && decoded.length > separator + 1 ? decoded.slice(separator + 1) : null;
   } catch {
@@ -189,8 +199,20 @@ export function gatewayBearer(authorization: string | null): string | null {
 // Repository allowlist
 // ---------------------------------------------------------------------------
 
-function canRead(permissions: { pull: boolean; triage: boolean; push: boolean; maintain: boolean; admin: boolean }) {
-  return permissions.pull || permissions.triage || permissions.push || permissions.maintain || permissions.admin;
+function canRead(permissions: {
+  pull: boolean;
+  triage: boolean;
+  push: boolean;
+  maintain: boolean;
+  admin: boolean;
+}) {
+  return (
+    permissions.pull ||
+    permissions.triage ||
+    permissions.push ||
+    permissions.maintain ||
+    permissions.admin
+  );
 }
 
 function canWrite(permissions: { push: boolean; maintain: boolean; admin: boolean }) {
@@ -231,11 +253,11 @@ export function gatewayRepositoryDecision(
           `https://github.com/${repository.owner}/${repository.name}`,
         )
       : selected
-        ? findSessionRemovedRepository(authority.removedRepositories, selected.canonicalUrl) ??
+        ? (findSessionRemovedRepository(authority.removedRepositories, selected.canonicalUrl) ??
           findSessionRemovedRepository(
             authority.removedRepositories,
             `https://github.com/${selected.fullName}`,
-          )
+          ))
         : null;
   if (removed) {
     return { allowed: false, message: `${label} was removed from this chat.` };
@@ -284,11 +306,10 @@ async function nameRepositoryIds(
     const selected = authority.selection.repositories.find(
       (candidate) => candidate.repositoryId === repository.id,
     );
-    const fullName = selected?.fullName ?? (await githubRepositoryName(services, authority, repository.id));
+    const fullName =
+      selected?.fullName ?? (await githubRepositoryName(services, authority, repository.id));
     const [owner, name] = fullName?.split("/", 2) ?? [];
-    named.push(
-      owner && name ? { ...check, repository: { kind: "name", owner, name } } : check,
-    );
+    named.push(owner && name ? { ...check, repository: { kind: "name", owner, name } } : check);
   }
   return named;
 }
@@ -360,11 +381,7 @@ const DROPPED_RESPONSE_HEADERS = new Set([
   "strict-transport-security",
 ]);
 
-function upstreamHeaders(
-  request: Request,
-  authorization: string,
-  streamed: boolean,
-): Headers {
+function upstreamHeaders(request: Request, authorization: string, streamed: boolean): Headers {
   const headers = new Headers();
   for (const [name, value] of request.headers) {
     if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
@@ -622,7 +639,8 @@ export async function handlePersonalGitHubGatewayRequest(
   let requestId: string | null = null;
   if (action.kind === "write") {
     const repositoryNames = checks.map((check) => repositoryLabel(check.repository));
-    const where = repositoryNames.length > 0 ? ` on ${[...new Set(repositoryNames)].join(", ")}` : "";
+    const where =
+      repositoryNames.length > 0 ? ` on ${[...new Set(repositoryNames)].join(", ")}` : "";
     const title = `${action.title}${where}`.slice(0, 240);
     const contentLength = request.headers.get("content-length");
     const decision = await services
@@ -643,7 +661,10 @@ export async function handlePersonalGitHubGatewayRequest(
       })
       .catch(() => null);
     if (decision === null) {
-      return gatewayError(502, "Opengeni could not check your GitHub permission settings. Try again.");
+      return gatewayError(
+        502,
+        "Opengeni could not check your GitHub permission settings. Try again.",
+      );
     }
     if (decision.kind === "refuse") {
       return gatewayError(decision.status, decision.message, {
@@ -746,7 +767,11 @@ function gatewayGitServices(
   fetchImpl: typeof fetch,
 ): PersonalGitHubGitBrokerServices {
   const authorities = new WeakMap<BrokerAuthority, PersonalGitHubGatewayAuthority>();
-  const authorize = async (authority: BrokerAuthority, destinationUrl: string, toolName: string) => {
+  const authorize = async (
+    authority: BrokerAuthority,
+    destinationUrl: string,
+    toolName: string,
+  ) => {
     const gatewayAuthority = authorities.get(authority);
     if (!gatewayAuthority) throw new Error("personal GitHub gateway authority is unavailable");
     const [owner, name] = authority.repository.fullName.split("/", 2) as [string, string];
@@ -767,7 +792,9 @@ function gatewayGitServices(
   return {
     openClaims: gateway.openClaims,
     validRouteKey: (key) =>
-      /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/u.test(key) && !key.endsWith("/.") && !key.endsWith("/.."),
+      /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/u.test(key) &&
+      !key.endsWith("/.") &&
+      !key.endsWith("/.."),
     resolveAuthority: async (claims, routeKey) => {
       const current = await gateway.resolveAuthority(claims);
       const [owner, name] = routeKey.split("/", 2) as [string, string];
@@ -814,7 +841,9 @@ function gatewayGitServices(
           typeof payload.html_url !== "string" ||
           payload.id === undefined
         ) {
-          throw new GatewayRepositoryDeniedError(`GitHub has no repository ${routeKey} you can use.`);
+          throw new GatewayRepositoryDeniedError(
+            `GitHub has no repository ${routeKey} you can use.`,
+          );
         }
         repository = {
           repositoryId: String(payload.id),

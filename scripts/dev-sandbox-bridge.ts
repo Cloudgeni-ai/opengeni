@@ -185,7 +185,8 @@ export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: 
     }
     if (!sandboxBridgeRouteAllowed(url.pathname)) {
       writeJson(outgoing, 404, {
-        error: "the Docker sandbox route serves only Codemode, first-party MCP, the Git broker and the GitHub gateway",
+        error:
+          "the Docker sandbox route serves only Codemode, first-party MCP, the Git broker and the GitHub gateway",
       });
       return;
     }

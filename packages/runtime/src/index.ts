@@ -14438,7 +14438,11 @@ function personalGitHubGatewayDescriptor(
   const route = github[0];
   if (!route || hashes.size !== 1) return null;
   const base = route.brokerUri.slice(0, route.brokerUri.indexOf(PERSONAL_GIT_BROKER_PATH));
-  if (github.some((candidate) => !candidate.brokerUri.startsWith(`${base}${PERSONAL_GIT_BROKER_PATH}`))) {
+  if (
+    github.some(
+      (candidate) => !candidate.brokerUri.startsWith(`${base}${PERSONAL_GIT_BROKER_PATH}`),
+    )
+  ) {
     return null;
   }
   const basePath = new URL(base).pathname.replace(/^\/+|\/+$/g, "");
@@ -14857,7 +14861,7 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    fi",
   "  fi",
   "fi",
-    // Under `gh` as the person: gh reads `git remote -v` to find the GitHub
+  // Under `gh` as the person: gh reads `git remote -v` to find the GitHub
   // repository, so it sees the configured github.com URLs rather than the
   // Opengeni Git routes they are rewritten to; a clone keeps the rewrite.
   'if [ -n "${OPENGENI_GH_GATEWAY_GIT:-}" ]; then',
@@ -14866,7 +14870,7 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   '      remote_name="${remote_key#remote.}"',
   '      remote_name="${remote_name%.url}"',
   '      remote_push="$("$real_git" config --get "remote.$remote_name.pushurl" 2>/dev/null || printf \'%s\' "$remote_url")"',
-  "      printf '%s\\t%s (fetch)\\n%s\\t%s (push)\\n' \"$remote_name\" \"$remote_url\" \"$remote_name\" \"$remote_push\"",
+  '      printf \'%s\\t%s (fetch)\\n%s\\t%s (push)\\n\' "$remote_name" "$remote_url" "$remote_name" "$remote_push"',
   "    done",
   "    exit 0",
   "  fi",
@@ -14877,7 +14881,7 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   '    case "$arg" in',
   "      -c|-C|--git-dir|--work-tree|--namespace|--config-env) gateway_expect=1 ;;",
   "      -*) ;;",
-  '      clone) gateway_clone=1; break ;;',
+  "      clone) gateway_clone=1; break ;;",
   "      *) break ;;",
   "    esac",
   "  done",
@@ -15122,10 +15126,10 @@ const GH_GATEWAY_WRAPPER_LINES = [
   '  gw_pass="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$gh_gateway_binding-token"',
   '  gw_dir="$(mktemp -d "${TMPDIR:-/tmp}/opengeni-gh.XXXXXX")"',
   '  gw_sock="$gw_dir/gateway.sock"',
-  "  printf 'git_protocol: https\\nprompt: disabled\\nhttp_unix_socket: %s\\n' \"$gw_sock\" > \"$gw_dir/config.yml\"",
+  '  printf \'git_protocol: https\\nprompt: disabled\\nhttp_unix_socket: %s\\n\' "$gw_sock" > "$gw_dir/config.yml"',
   '  "$gw_js" "$gw_proxy" "$gw_sock" "$gh_gateway_base" "$gw_pass" </dev/null >/dev/null 2>"$gw_dir/proxy.log" &',
   "  gw_pid=$!",
-  "  trap 'kill \"$gw_pid\" 2>/dev/null || true; rm -rf \"$gw_dir\"' EXIT",
+  '  trap \'kill "$gw_pid" 2>/dev/null || true; rm -rf "$gw_dir"\' EXIT',
   "  trap 'exit 130' INT",
   "  trap 'exit 143' TERM",
   "  gw_wait=0",

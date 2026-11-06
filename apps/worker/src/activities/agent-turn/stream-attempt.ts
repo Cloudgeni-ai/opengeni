@@ -130,10 +130,7 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
-import {
-  githubGatewayApproval,
-  githubGatewayContinuationNote,
-} from "../github-gateway-approvals";
+import { githubGatewayApproval, githubGatewayContinuationNote } from "../github-gateway-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import type { WorkspaceMutationOptions } from "./sandbox-runtime";
@@ -2769,7 +2766,10 @@ export async function runTurnStreamAttempt(
     turnId: activeTurnId,
   });
   codemodeContinuationNote =
-    [programmaticContinuationNote(codemodeOperations), githubGatewayContinuationNote(gatewayRequests)]
+    [
+      programmaticContinuationNote(codemodeOperations),
+      githubGatewayContinuationNote(gatewayRequests),
+    ]
       .filter((note): note is string => Boolean(note))
       .join("\n\n") || undefined;
   const triggerApprovalId =
@@ -2784,9 +2784,7 @@ export async function runTurnStreamAttempt(
     ...codemodeOperations
       .filter((operation) => operation.state === "waiting_for_approval")
       .map(programmaticApproval),
-    ...gatewayRequests
-      .filter((request) => request.status === "pending")
-      .map(githubGatewayApproval),
+    ...gatewayRequests.filter((request) => request.status === "pending").map(githubGatewayApproval),
   ];
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
     additionalApprovals: pendingProgrammaticApprovals,

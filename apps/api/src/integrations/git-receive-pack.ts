@@ -117,7 +117,9 @@ export function receivePackRejection(
     parts.push(pktLine(Buffer.concat([Buffer.from([2]), Buffer.from(`${message}\n`, "utf8")])));
   }
   for (let start = 0; start < report.length; start += chunkSize) {
-    parts.push(pktLine(Buffer.concat([Buffer.from([1]), report.subarray(start, start + chunkSize)])));
+    parts.push(
+      pktLine(Buffer.concat([Buffer.from([1]), report.subarray(start, start + chunkSize)])),
+    );
   }
   parts.push(Buffer.from("0000", "latin1"));
   return Buffer.concat(parts);
@@ -208,9 +210,7 @@ export function readPackCommits(
     } else if (entry.type === 6 || entry.type === 7) {
       if (entry.type === 6 && resolvedType(entry) !== 1) continue;
       const base =
-        entry.type === 6
-          ? commitContent.get(entry.baseOffset!)
-          : commitByOid.get(entry.baseOid!);
+        entry.type === 6 ? commitContent.get(entry.baseOffset!) : commitByOid.get(entry.baseOid!);
       if (!base) {
         // A thin pack's base lives on the server (usually a tree or blob).
         // A commit hidden this way just ends the walk at the boundary.

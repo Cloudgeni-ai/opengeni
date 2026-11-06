@@ -115,7 +115,12 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
       title: input.title.slice(0, 256),
     };
     if (identity.unattended) {
-      return { kind: "refuse", status: 403, waiting: false, message: UNATTENDED_APPROVAL_REFUSAL_TEXT };
+      return {
+        kind: "refuse",
+        status: 403,
+        waiting: false,
+        message: UNATTENDED_APPROVAL_REFUSAL_TEXT,
+      };
     }
     const begun = await beginConnectorActionExecution(db, ledgerIdentity, {
       approvalId,
@@ -182,7 +187,9 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value)
     .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+    .map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,
+    )
     .join(",")}}`;
 }
 
@@ -354,7 +361,11 @@ export async function inspectPersonalGitHubPush(input: {
     reviewArguments: {
       repository: input.repositoryFullName,
       updates: [
-        ...deletions.map((command) => ({ ref: command.ref, change: "delete", from: command.oldOid })),
+        ...deletions.map((command) => ({
+          ref: command.ref,
+          change: "delete",
+          from: command.oldOid,
+        })),
         ...forced.map((command) => ({
           ref: command.ref,
           change: "force-push",

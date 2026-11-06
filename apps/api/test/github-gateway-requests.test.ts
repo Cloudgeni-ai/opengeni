@@ -17,7 +17,10 @@ describe("GitHub gateway REST classification", () => {
     });
     expect(rest("GET", "/user").action.kind).toBe("read");
     expect(rest("GET", "/orgs/acme/repos").repository).toBeNull();
-    expect(rest("GET", "/repositories/42/actions/runs").repository).toEqual({ kind: "id", id: "42" });
+    expect(rest("GET", "/repositories/42/actions/runs").repository).toEqual({
+      kind: "id",
+      id: "42",
+    });
     expect(rest("GET", "/api/v3/repos/acme/widgets").repository).toEqual({
       kind: "name",
       owner: "acme",
@@ -85,7 +88,8 @@ describe("GitHub gateway REST classification", () => {
 
   test("a non-forced ref update is routine", () => {
     expect(
-      rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: false }).action,
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: false })
+        .action,
     ).toMatchObject({ alwaysAsk: false });
   });
 });
@@ -121,7 +125,8 @@ describe("GitHub gateway GraphQL classification", () => {
   test("merges follow the merge policy; deletions and unknown mutations always ask", () => {
     expect(
       classifyGitHubGraphqlRequest({
-        query: 'mutation { mergePullRequest(input: {pullRequestId: "PR_kwDOAbCdEf"}) { clientMutationId } }',
+        query:
+          'mutation { mergePullRequest(input: {pullRequestId: "PR_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
     ).toMatchObject({ tools: ["pull_request_merge"], alwaysAsk: false });
     expect(
@@ -131,13 +136,19 @@ describe("GitHub gateway GraphQL classification", () => {
     ).toMatchObject({ alwaysAsk: true });
     expect(
       classifyGitHubGraphqlRequest({
-        query: 'mutation { updateRepository(input: {repositoryId: "R_kgDOAbCdEf", hasWikiEnabled: false}) { clientMutationId } }',
+        query:
+          'mutation { updateRepository(input: {repositoryId: "R_kgDOAbCdEf", hasWikiEnabled: false}) { clientMutationId } }',
       }).action,
     ).toMatchObject({ alwaysAsk: true });
     expect(
       classifyGitHubGraphqlRequest({
         query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
-        variables: { i: { repositoryId: "R_kgDOAbCdEf", refUpdates: [{ name: "refs/heads/x", afterOid: "a", force: true }] } },
+        variables: {
+          i: {
+            repositoryId: "R_kgDOAbCdEf",
+            refUpdates: [{ name: "refs/heads/x", afterOid: "a", force: true }],
+          },
+        },
       }).action,
     ).toMatchObject({ alwaysAsk: true });
   });
@@ -147,13 +158,16 @@ describe("GitHub gateway GraphQL classification", () => {
       alwaysAsk: true,
     });
     expect(
-      classifyGitHubGraphqlRequest({ query: "query A { viewer { login } } mutation B { addStar(input: {starrableId: \"R_kgDOAbCdEf\"}) { clientMutationId } }" })
-        .action,
+      classifyGitHubGraphqlRequest({
+        query:
+          'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
+      }).action,
     ).toMatchObject({ alwaysAsk: true });
     // The operation is chosen by name.
     expect(
       classifyGitHubGraphqlRequest({
-        query: "query A { viewer { login } } mutation B { addStar(input: {starrableId: \"R_kgDOAbCdEf\"}) { clientMutationId } }",
+        query:
+          'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
         operationName: "B",
       }).action,
     ).toMatchObject({ kind: "write", alwaysAsk: false });
@@ -163,7 +177,9 @@ describe("GitHub gateway GraphQL classification", () => {
 
 describe("GitHub gateway review fixes", () => {
   test("only reruns and cancels are routine on a workflow run", () => {
-    expect(rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action).toMatchObject({
+    expect(
+      rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action,
+    ).toMatchObject({
       alwaysAsk: false,
     });
     expect(rest("POST", "/repos/acme/widgets/actions/runs/9/cancel").action).toMatchObject({
@@ -179,7 +195,8 @@ describe("GitHub gateway review fixes", () => {
   test("updateRefs with a zero afterOid deletes, so it asks", () => {
     const classify = (afterOid: string) =>
       classifyGitHubGraphqlRequest({
-        query: "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
+        query:
+          "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
         variables: {
           input: {
             repositoryId: "R_kgDOWidgets",
@@ -187,7 +204,10 @@ describe("GitHub gateway review fixes", () => {
           },
         },
       }).action;
-    expect(classify("0".repeat(40))).toMatchObject({ title: "Delete branch or tag", alwaysAsk: true });
+    expect(classify("0".repeat(40))).toMatchObject({
+      title: "Delete branch or tag",
+      alwaysAsk: true,
+    });
     expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", alwaysAsk: false });
   });
 
@@ -209,7 +229,8 @@ describe("GitHub gateway review fixes", () => {
 
   test("links in free text are not repository targets", () => {
     const result = classifyGitHubGraphqlRequest({
-      query: "mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }",
+      query:
+        "mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }",
       variables: {
         input: {
           subjectId: "PR_kwDOAbcdefgh",
