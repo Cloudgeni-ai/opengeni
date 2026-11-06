@@ -317,6 +317,20 @@ test("1:1 help mentions group chats and channels only when the organization has 
   f.deps.settings.teamsBotAllowedGroupChatIds = [`${f.tenant}:19:group@thread.v2`];
   await f.handle(f.message("help"));
   expect(f.calls[2]!.activity.text).toContain(tip);
+  // An admitted organization that isn't connected yet gets no tip: its group
+  // chats can't answer until it connects.
+  const other = crypto.randomUUID();
+  f.deps.settings.teamsBotAllowedTenantIds = [f.tenant, other];
+  f.deps.settings.teamsBotAllowedGroupChatIds = [`${other}:19:group@thread.v2`];
+  const person = crypto.randomUUID();
+  await f.handle(
+    f.message("help", person, {
+      conversation: { id: `a:${person}`, conversationType: "personal", tenantId: other },
+      channelData: { tenant: { id: other } },
+    }),
+  );
+  expect(f.calls[3]!.activity.text).toContain("**Opengeni help**");
+  expect(f.calls[3]!.activity.text).not.toContain(tip);
 });
 
 test("unlink asks for confirmation, then removes the person's Teams link", async () => {

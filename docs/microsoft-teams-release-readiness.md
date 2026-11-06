@@ -315,7 +315,7 @@ other than `help` and `unlink`, and a 1:1 message from a tenant that isn't
 admitted gets the not-available notice. Today these cases still get no reply or
 no way forward:
 
-- In a tenant that isn't connected, `help` and `unlink` reply without a way
+- In an admitted tenant that isn't connected, `help` and `unlink` reply without a way
   forward: help says the organization must connect Opengeni but carries no
   Connect your organization card, and unlink says the account isn't linked.
 - The not-available notice tells the admin to contact the Opengeni team but
