@@ -9,7 +9,26 @@ use compute_protocol::fleet::{Capacity, Envelope, Registered};
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::json;
 
-use super::support::{Act, FakeHost, Fleet, OPERATOR_KEY, counted, given_up, id, roomy, until};
+use super::support::{
+    Act, FakeHost, Fleet, OPERATOR_KEY, counted, declare_gone, given_up, id, roomy, until,
+};
+
+/// Waits until the replica sees `sandbox`'s host given up on, so the
+/// sandbox waits for it, and answers the sandbox's view.
+async fn waiting(fleet: &Fleet, sandbox: &str) -> serde_json::Value {
+    let path = format!("/v1/sandboxes/{sandbox}");
+    let mut view = serde_json::Value::Null;
+    until(
+        Duration::from_secs(5),
+        "the sandbox waits for its host",
+        async || {
+            view = fleet.get(&path).await.1;
+            view["waiting_for"] != serde_json::Value::Null
+        },
+    )
+    .await;
+    view
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopped() {
@@ -26,17 +45,24 @@ async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopp
         "given up on {:?} after its last renewal",
         gone - stopped
     );
-    let (_, after) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    // Its sandbox waits for it: the host may hold changes newer than the
+    // sandbox's stored copy.
+    let after = waiting(&fleet, &sandbox).await;
     assert_eq!(after["host"], serde_json::Value::Null, "{after}");
-    assert!(
-        after["owner_epoch"].as_u64() > before["owner_epoch"].as_u64(),
-        "its epoch is raised past the lost owner's: {before} {after}"
-    );
+    assert_eq!(after["waiting_for"], json!("host-a.example"), "{after}");
+    assert_eq!(after["owner_epoch"], before["owner_epoch"], "{after}");
 }
 
+/// A host that stops answering for a few minutes, as one that hangs and
+/// is power-cycled does, is given up on; a wake meanwhile waits for it,
+/// saying why, and nothing takes its sandboxes elsewhere from their older
+/// archives. Back, it keeps every one, newer writes and all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sandbox_of_a_host_given_up_on_wakes_elsewhere_from_its_archive() {
-    let fleet = Fleet::start().await;
+async fn a_host_back_from_an_outage_keeps_its_sandboxes_which_waited_for_it() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.wake_within = Duration::from_secs(2);
+    })
+    .await;
     let a = fleet.host("host-a.example").await;
     let archived = fleet.create(json!({})).await;
     let unarchived = fleet.create(json!({})).await;
@@ -44,6 +70,78 @@ async fn a_sandbox_of_a_host_given_up_on_wakes_elsewhere_from_its_archive() {
     let b = fleet.host("host-b.example").await;
     a.renewing(false);
     given_up(&fleet, &a).await;
+    waiting(&fleet, &archived).await;
+
+    let (status, refused) = fleet
+        .post(&format!("/v1/sandboxes/{archived}/wake"), json!({}))
+        .await;
+    assert_eq!(status, 503, "{refused}");
+    let message = refused["message"].as_str().unwrap();
+    assert!(
+        message.contains("host-a.example stopped answering")
+            && message.contains("waits for that host"),
+        "{message}"
+    );
+    assert!(!b.ops().contains(&"adopt"), "{:?}", b.ops());
+    assert_eq!(b.holds(id(&archived)), None);
+    // A move or resize waits for it as well.
+    let (status, _) = fleet
+        .post(
+            &format!("/v1/sandboxes/{archived}/move"),
+            json!({ "to": "host-b.example" }),
+        )
+        .await;
+    assert_eq!(status, 503);
+
+    let Registered::Registered { rulings, .. } = a.register().await else {
+        panic!("a host given up on registers afresh");
+    };
+    assert_eq!(rulings.len(), 2, "{rulings:?}");
+    for sandbox in [&archived, &unarchived] {
+        assert_eq!(a.holds(id(sandbox)), Some(1), "kept under its own epoch");
+    }
+    fleet.sees(&a).await;
+    let (status, woken) = fleet
+        .post(&format!("/v1/sandboxes/{archived}/wake"), json!({}))
+        .await;
+    assert_eq!((status, &woken["host"]), (200, &json!("host-a.example")));
+    assert_eq!(woken.get("restored"), None, "nothing went back: {woken}");
+}
+
+/// A host declared gone sends its sandboxes back to their archives, and
+/// whoever wakes one is told what point in time it went back to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_of_a_host_declared_gone_wakes_elsewhere_from_its_archive() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let archived = fleet.create(json!({})).await;
+    let unarchived = fleet.create(json!({})).await;
+    a.archive(id(&archived), 1).await;
+    let b = fleet.host("host-b.example").await;
+    // Only a host given up on can be declared gone.
+    let (status, _) = fleet
+        .call(
+            reqwest::Method::POST,
+            "/v1/hosts/host-b.example/gone",
+            Some(OPERATOR_KEY),
+            None,
+        )
+        .await;
+    assert_eq!(status, 400);
+    a.renewing(false);
+    given_up(&fleet, &a).await;
+    let declared = declare_gone(&fleet, &a).await;
+    let sandboxes = declared["sandboxes"].as_array().unwrap();
+    assert_eq!(sandboxes.len(), 2, "{declared}");
+    let saved = |sandbox: &str| {
+        sandboxes
+            .iter()
+            .find(|forsaken| forsaken["id"] == json!(sandbox))
+            .map(|forsaken| forsaken["saved_ms"].clone())
+            .unwrap()
+    };
+    assert!(saved(&archived).is_u64(), "{declared}");
+    assert_eq!(saved(&unarchived), serde_json::Value::Null);
 
     let (status, woken) = fleet
         .post(&format!("/v1/sandboxes/{archived}/wake"), json!({}))
@@ -53,6 +151,16 @@ async fn a_sandbox_of_a_host_given_up_on_wakes_elsewhere_from_its_archive() {
     // Its lost owner may have run it on past the archive, so it is taken
     // up from the archive's files alone.
     assert_eq!(b.adopts(id(&archived)), [true]);
+    // Whoever woke it is told, in plain words, what it went back to.
+    let restored = &woken["restored"];
+    assert_eq!(restored["host"], json!("host-a.example"), "{woken}");
+    assert_eq!(restored["why"], json!("declared"));
+    assert_eq!(restored["saved_ms"], saved(&archived));
+    let notice = restored["notice"].as_str().unwrap();
+    assert!(
+        notice.contains("host-a.example was declared gone") && notice.contains("saved at"),
+        "{notice}"
+    );
     // With no archive, nothing of it exists anywhere but on the lost host.
     let (status, refused) = fleet
         .post(&format!("/v1/sandboxes/{unarchived}/wake"), json!({}))
@@ -96,6 +204,7 @@ async fn a_lost_owners_copy_stays_unvouched_through_a_host_that_refused_it() {
     b.behave(refuse_adopts);
     a.renewing(false);
     given_up(&fleet, &a).await;
+    declare_gone(&fleet, &a).await;
     let (status, refused) = fleet
         .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
         .await;
@@ -117,10 +226,12 @@ async fn a_lost_owners_copy_stays_unvouched_through_a_host_that_refused_it() {
     assert_eq!(c.adopts(id(&sandbox)), [true]);
 }
 
-/// A host given up on that comes back lists what it holds: what went
-/// elsewhere meanwhile it drops, and what nobody took it gets back.
+/// A host declared gone that comes back after all lists what it holds:
+/// what went on elsewhere from an older archive meanwhile it sets aside,
+/// never dropping a copy that may be the newer one, and what nobody took
+/// it gets back, with nothing lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_returning_host_drops_what_moved_and_keeps_what_did_not() {
+async fn a_host_declared_gone_that_comes_back_sets_aside_what_went_on_without_it() {
     let fleet = Fleet::start().await;
     let a = fleet.host("host-a.example").await;
     let moved = fleet.create(json!({})).await;
@@ -129,6 +240,7 @@ async fn a_returning_host_drops_what_moved_and_keeps_what_did_not() {
     let b = fleet.host("host-b.example").await;
     a.renewing(false);
     given_up(&fleet, &a).await;
+    declare_gone(&fleet, &a).await;
     let (status, _) = fleet
         .post(&format!("/v1/sandboxes/{moved}/wake"), json!({}))
         .await;
@@ -141,6 +253,16 @@ async fn a_returning_host_drops_what_moved_and_keeps_what_did_not() {
     };
     assert!(epoch > old);
     assert_eq!(a.holds(id(&moved)), None, "taken by another host meanwhile");
+    assert_eq!(a.set_aside(), [id(&moved)], "set aside, not dropped");
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{moved}")).await;
+    assert!(row["restored"]["set_aside_ms"].is_u64(), "{row}");
+    assert!(
+        row["restored"]["notice"]
+            .as_str()
+            .unwrap()
+            .contains("set its own copy aside"),
+        "{row}"
+    );
     let reclaimed = a.holds(id(&kept)).expect("nobody took it");
     assert!(reclaimed > 1, "under a raised epoch");
     fleet.sees(&a).await;
@@ -149,6 +271,7 @@ async fn a_returning_host_drops_what_moved_and_keeps_what_did_not() {
         (&row["host"], row["owner_epoch"].as_u64()),
         (&json!("host-a.example"), Some(reclaimed))
     );
+    assert_eq!(row.get("restored"), None, "nothing went back: {row}");
 }
 
 /// A host that renews a registration the service gave up on is told so,
@@ -263,12 +386,15 @@ async fn a_host_given_up_on_is_forgotten_in_time_and_its_name_is_a_new_host() {
     })
     .await;
 
-    // Kept a while: nothing older than a day goes.
+    // Kept a while: nothing older than a day goes, nor one a sandbox
+    // still waits for.
     let keep_a_day = 24 * 60 * 60 * 1000;
     assert_eq!(
         fleet.running.service.prune_hosts(keep_a_day).await.unwrap(),
         0
     );
+    assert_eq!(fleet.running.service.prune_hosts(0).await.unwrap(), 0);
+    declare_gone(&fleet, &a).await;
     assert_eq!(fleet.running.service.prune_hosts(0).await.unwrap(), 1);
     until(
         Duration::from_secs(15),

@@ -26,6 +26,13 @@ pub(crate) struct Retry {
     pub not_before: At,
 }
 
+/// A restart under way (see [`crate::Input::Restart`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Restart {
+    /// Whether its VM was asked to end since the restart was last asked.
+    pub ending: bool,
+}
+
 /// An outstanding request to be awake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Wake {
@@ -120,6 +127,9 @@ pub(crate) struct Sandbox {
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
     pub retry: Option<Retry>,
+    /// A restart under way: its programs end and its memory image is
+    /// forgotten before it runs again.
+    pub restart: Option<Restart>,
     pub queued: Option<(Step, QueueKey)>,
     pub timer: Option<At>,
     pub dirty: bool,
@@ -198,6 +208,7 @@ impl Sandbox {
             running_since: last_activity,
             process_lost: false,
             retry: None,
+            restart: None,
             queued: None,
             timer: None,
             dirty: false,
@@ -423,6 +434,16 @@ impl Sandbox {
         }
         if self.backing_off(now) {
             return None;
+        }
+        if self.restart.is_some() {
+            // Its VM ends first, then its memory image goes, before any
+            // wake: the wake then boots it from its files.
+            if self.state.level.has_process() {
+                return None;
+            }
+            if self.state.memory_saved {
+                return Some(Step::Forget);
+            }
         }
         if self.wants_awake() {
             if self.room == WakeRoom::Refused {

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use compute_link::core::{CONNECTION_NAME, ConnId, Core, Effect, Input, LinkId, Settings};
 use compute_link::nats::{ClientOp, Connect, Publish, ServerOp};
 use compute_protocol::link::{
-    AgentLink, GatewayFrame, HostFrame, NO_WAKE_HEADER, Relay, Running, UNANSWERED_HEADER,
+    AgentLink, Busy, GatewayFrame, HostFrame, NO_WAKE_HEADER, Relay, Running, UNANSWERED_HEADER,
 };
 
 const SANDBOX: &str = "sb";
@@ -881,6 +881,59 @@ fn a_sandbox_that_falls_asleep_has_its_session_kept_again() {
         .expect("with its session");
     assert_eq!(saved.instance, INSTANCE);
     assert_eq!(saved.subs.len(), 1);
+}
+
+/// The states a gateway is told, in order.
+fn states(effects: &[Effect]) -> Vec<(Running, Option<Busy>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Frame {
+                frame: HostFrame::State { state, busy, .. },
+                ..
+            } => Some((*state, *busy)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A host busy with a sandbox, as one handing it off, says so to its
+/// gateway, beside whether it runs, and says so again once it no longer
+/// is, so the gateway never takes a refused wake for its agent failing.
+/// A session that opens meanwhile is told at once.
+#[test]
+fn a_gateway_is_told_while_the_host_is_busy_with_its_sandbox() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    open(&mut core, 0);
+    core.take();
+    let busy = |busy| Input::Busy {
+        sandbox: SANDBOX.into(),
+        busy,
+    };
+    // Whether it runs is not known yet: nothing to tell.
+    core.on(0, busy(Some(Busy::HandingOff)));
+    assert_eq!(states(&core.take()), []);
+    core.on(
+        0,
+        Input::Running {
+            sandbox: SANDBOX.into(),
+            running: Running::Asleep,
+        },
+    );
+    assert_eq!(
+        states(&core.take()),
+        [(Running::Asleep, Some(Busy::HandingOff))]
+    );
+    core.on(0, busy(Some(Busy::HandingOff)));
+    assert_eq!(states(&core.take()), [], "nothing changed");
+    core.on(0, busy(None));
+    assert_eq!(states(&core.take()), [(Running::Asleep, None)]);
+    core.on(0, busy(Some(Busy::HandingOff)));
+    assert_eq!(
+        states(&core.take()),
+        [(Running::Asleep, Some(Busy::HandingOff))]
+    );
 }
 
 /// The gateway sends a no-wake request ([`NO_WAKE_HEADER`]) for the host's

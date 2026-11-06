@@ -1,8 +1,10 @@
 import {
   authorizeAutomaticSandboxCheckpointRecovery,
+  computeHostHandingOff,
   getEnrollment,
   getSandboxForAttempt,
   readActiveSandbox,
+  readLease,
   getLiveEnrollmentConnection,
   countSessionTurnSandboxProcessStartRestarts,
   SANDBOX_PROCESS_START_RESTART_OPERATION,
@@ -490,6 +492,12 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   await eventing.publish(events, true);
                 },
                 operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+                hostBusy: async () =>
+                  computeHostHandingOff(
+                    session.sandboxGroupId
+                      ? await readLease(db, input.workspaceId, session.sandboxGroupId)
+                      : null,
+                  ),
               }),
           }
         : undefined;

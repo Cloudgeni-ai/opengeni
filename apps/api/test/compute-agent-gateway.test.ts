@@ -311,9 +311,13 @@ class FakeStore implements ComputeAgentLinkStore {
   powerGate: Promise<void> = Promise.resolve();
   powerThrows = false;
   powerAccepted = true;
-  async power(input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean }) {
+  async power(
+    input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean; handingOff: boolean },
+  ) {
     await this.powerGate;
-    this.calls.push(`power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}`);
+    this.calls.push(
+      `power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}${input.handingOff ? ":handing_off" : ""}`,
+    );
     if (this.powerThrows) throw new Error("db down");
     return { accepted: this.powerAccepted };
   }
@@ -570,6 +574,40 @@ describe("agent gateway sessions", () => {
     send({ t: "state", s: 1, state: "awake" });
     await settle();
     expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep", "power:sbx-1:awake"]);
+  });
+
+  test("a host handing the sandbox off is recorded as such, and cleared once it says it no longer is", async () => {
+    const { send, settle, store } = await gatewayWithLink();
+    const powerCalls = () => store.calls.filter((call) => call.startsWith("power:"));
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep", busy: "handing_off" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep", busy: "handing_off" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    expect(powerCalls()).toEqual([
+      "power:sbx-1:asleep",
+      "power:sbx-1:asleep:handing_off",
+      "power:sbx-1:asleep",
+    ]);
+  });
+
+  test("a state frame's busy field is read when known and ignored when not", () => {
+    const decode = (text: string) => decodeHostFrame(new TextEncoder().encode(text));
+    expect(decode('{"t":"state","s":1,"state":"asleep","busy":"handing_off"}\n')).toEqual({
+      t: "state",
+      s: 1,
+      state: "asleep",
+      busy: "handing_off",
+    });
+    expect(decode('{"t":"state","s":1,"state":"asleep","busy":"later_kind"}\n')).toEqual({
+      t: "state",
+      s: 1,
+      state: "asleep",
+    });
   });
 
   test("a request to a sleeping sandbox is logged as its waker; a plain message or a no-wake request is not", async () => {

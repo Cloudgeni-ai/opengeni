@@ -1,6 +1,6 @@
 //! The store a fleet runs on: Postgres, through a pool of connections.
 //!
-//! Registrations and giving up on a host are transactions; everything else
+//! Registrations and declaring a host gone are transactions; everything else
 //! is one conditional statement. Host rows carry a change number from a
 //! sequence, which replicas read changes by.
 
@@ -9,7 +9,9 @@ use std::str::FromStr as _;
 use std::time::Duration;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
-use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
+use compute_protocol::fleet::{
+    Capacity, HostInfo, Register, Renew, Report, Ruling, Verdict as Wire,
+};
 use compute_protocol::host::{Id, ImageId};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde_json::Value;
@@ -17,14 +19,15 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, Collector, Counted, Found, HostRow, Import, Imported, Inserted,
-    LifecycleRow, Linked, PointerRow, RequestRow, Result, SandboxRow, Spec, Store, StoreError,
-    TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
+    Admission, Admits, AgentRef, Collector, Counted, Forsaken, Found, Gone, HostRow, Import,
+    Imported, Inserted, LifecycleRow, Linked, LostCopy, PointerRow, RequestRow, Result, SandboxRow,
+    Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
 };
 
 mod connect;
 mod images;
 mod lifecycles;
+mod lost;
 mod pointers;
 mod renewals;
 mod schema;
@@ -38,6 +41,11 @@ const LEADER_LOCK: i64 = 7_231_402;
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch";
+
+/// [`SANDBOX_COLUMNS`] and the loss only the store writes, as rows are read.
+const SANDBOX_READ: &str = "id, team, spec, metadata, owner, epoch, taken, \
+     unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
+     class, created_ms, version, whole_epoch, lost";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
@@ -224,8 +232,15 @@ fn sandbox_row(row: &Row) -> Result<SandboxRow> {
         sends: sends_of(row)?,
         class: row.try_get("class").map_err(corrupt)?,
         created_ms: small(row.try_get("created_ms").map_err(corrupt)?)?,
+        lost: lost_of(row)?,
         version: small(row.try_get("version").map_err(corrupt)?)?,
     })
+}
+
+/// The loss a sandbox row notes, if any.
+fn lost_of(row: &Row) -> Result<Option<LostCopy>> {
+    let lost: Option<Json<LostCopy>> = row.try_get("lost").map_err(corrupt)?;
+    Ok(lost.map(|Json(lost)| lost))
 }
 
 /// A sandbox row's fields as statement parameters, in
@@ -453,9 +468,9 @@ impl PostgresStore {
         let mut rows = BTreeMap::new();
         for row in tx
             .query(
-                "select id, owner, epoch, taken, whole_epoch from compute_sandboxes \
-                 where id = any($1) order by id for update",
-                &[&ids],
+                "select id, owner, epoch, taken, whole_epoch, lost from compute_sandboxes \
+                 where id = any($1) or owner = $2 order by id for update",
+                &[&ids, &id],
             )
             .await
             .map_err(database)?
@@ -467,28 +482,37 @@ impl PostgresStore {
                 taken: OwnerEpoch(small(row.get("taken"))?),
                 whole: optional(&row, "whole_epoch")?.map(OwnerEpoch),
             };
-            rows.insert(id, ownership);
+            rows.insert(id, (ownership, lost_of(&row)?));
         }
+        let sets_aside = register.capacity.sets_aside;
         let mut rulings: Vec<Ruling> = Vec::with_capacity(register.held.len());
         for (held, name) in register.held.iter().zip(&ids) {
-            let (ruling, change) = rule(host, *held, rows.get(name).copied());
-            if let Some(change) = change {
-                let owner = change.set.owner.map(|host| big(host.0)).transpose()?;
-                tx.execute(
-                    "update compute_sandboxes set owner = $2, epoch = $3, taken = $4, \
-                     whole_epoch = $5, version = version + 1 where id = $1",
-                    &[
-                        name,
-                        &owner,
-                        &big(change.set.epoch.0)?,
-                        &big(change.set.taken.0)?,
-                        &change.set.whole.map(|epoch| big(epoch.0)).transpose()?,
-                    ],
-                )
-                .await
-                .map_err(database)?;
+            let row = rows.remove(name);
+            let ruled = row
+                .as_ref()
+                .map(|(ownership, lost)| (*ownership, lost.as_ref()));
+            let (ruling, change) = rule(host, *held, ruled, sets_aside);
+            match (change, row, ruling.verdict) {
+                // A reclaim: nobody took it since, so nothing was lost.
+                (Some(change), _, _) => lost::write(tx, name, change.set, None).await?,
+                (None, Some((ownership, Some(mut lost))), Wire::SetAside) => {
+                    lost.set_aside_ms.get_or_insert(crate::service::now_ms());
+                    lost::write(tx, name, ownership, Some(&lost)).await?;
+                }
+                // Kept as it waited, under the same epoch: raised all the
+                // same, so a write read before this registration is refused.
+                (None, Some((ownership, lost)), _) if ownership.owner == Some(host) => {
+                    lost::write(tx, name, ownership, lost.as_ref()).await?;
+                }
+                _ => {}
             }
             rulings.push(ruling);
+        }
+        // What waited for it that it no longer has goes on from the store.
+        for (name, (ownership, lost)) in &rows {
+            if ownership.owner == Some(host) {
+                lost::write(tx, name, ownership.lose().set, lost.as_ref()).await?;
+            }
         }
         tx.execute(
             "insert into compute_hosts \
@@ -612,40 +636,23 @@ impl Store for PostgresStore {
     }
 
     async fn give_up(&self, host: HostId, renewals: u64, at_ms: u64) -> Result<Option<usize>> {
-        let mut client = self.client().await?;
-        let tx = client.transaction().await.map_err(database)?;
-        let id = big(host.0)?;
-        let lost = tx
-            .execute(
-                "update compute_hosts set state = 'lost', gone_ms = $3, \
-                 changed = nextval('compute_changes') \
-                 where id = $1 and renewals = $2 and state <> 'lost'",
-                &[&id, &big(renewals)?, &big(at_ms)?],
-            )
-            .await
-            .map_err(database)?;
-        if lost != 1 {
-            return Ok(None);
-        }
-        let cleared = tx
-            .execute(
-                "update compute_sandboxes set owner = null, epoch = epoch + 1, \
-                 version = version + 1 where owner = $1",
-                &[&id],
-            )
-            .await
-            .map_err(database)?;
-        tx.commit().await.map_err(database)?;
-        Ok(Some(usize::try_from(cleared).map_err(corrupt)?))
+        self.give_up_now(host, renewals, at_ms).await
+    }
+
+    async fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> Result<Option<Vec<Forsaken>>> {
+        self.declare_gone_now(host, why, at_ms).await
     }
 
     async fn prune_hosts(&self, before_ms: u64) -> Result<u64> {
         // A host given up on with no date (before the column, or by an
         // older build during a rollout) is dated now, by the database's
-        // clock, and forgotten a whole retention later. Giving up cleared
-        // every owner naming it, and no write names a host given up on, so
-        // none should still name it; one that did would be kept rather than
-        // stop the others from being forgotten.
+        // clock, and forgotten a whole retention later. One a sandbox still
+        // waits for is kept until it comes back or is declared gone.
         self.client()
             .await?
             .execute(
@@ -709,7 +716,7 @@ impl Store for PostgresStore {
         self.client()
             .await?
             .query_opt(
-                &format!("select {SANDBOX_COLUMNS} from compute_sandboxes where id = $1"),
+                &format!("select {SANDBOX_READ} from compute_sandboxes where id = $1"),
                 &[&id.to_string()],
             )
             .await
@@ -854,7 +861,7 @@ impl Store for PostgresStore {
             .await?
             .query(
                 &format!(
-                    "select {SANDBOX_COLUMNS} from compute_sandboxes \
+                    "select {SANDBOX_READ} from compute_sandboxes \
                      where team = $1 and metadata @> $2 order by created_ms, id"
                 ),
                 &[&team, &Json(filter)],
@@ -869,7 +876,7 @@ impl Store for PostgresStore {
             .client()
             .await?
             .query(
-                &format!("select {SANDBOX_COLUMNS} from compute_sandboxes where owner = $1"),
+                &format!("select {SANDBOX_READ} from compute_sandboxes where owner = $1"),
                 &[&big(host.0)?],
             )
             .await

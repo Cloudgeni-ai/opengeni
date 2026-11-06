@@ -84,6 +84,12 @@ pub struct HostConfig {
     /// browser tab or terminal then lets its sandbox sleep; the next byte
     /// either way wakes it again.
     pub stream_idle: Duration,
+    /// How long a hand-off refuses wakes of its sandbox. A hand-off is
+    /// meant to take seconds; a wake that comes later, as while a slow
+    /// store still takes the sandbox's copy, cancels it, and the sandbox
+    /// runs again here from its local copy, its newest. The control
+    /// service waits longer than this for a hand-off.
+    pub hand_off_unwakeable: Duration,
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
@@ -128,6 +134,8 @@ impl HostConfig {
     pub const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
     /// The default for [`HostConfig::stream_idle`].
     pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
+    /// The default for [`HostConfig::hand_off_unwakeable`].
+    pub const HAND_OFF_UNWAKEABLE: Duration = Duration::from_secs(120);
     /// The default for [`HostConfig::summary_every`].
     pub const SUMMARY_EVERY: Duration = Duration::from_secs(3600);
     /// The default for [`HostConfig::recovery_retry`].

@@ -342,12 +342,18 @@ export async function settleModelUsage(
     : hasCompleteCoreTokenTelemetry
       ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
       : null;
+  // The credit price a debit would use, else the reviewed list price's
+  // equivalent-credit comparison: a model priced only by a reviewed list rate
+  // (for example a newer Codex catalog model) still reports what it would
+  // have cost, without that rate ever becoming debit authority.
   const equivalentCreditCostMicros =
     pricingBreakdown && !unpinnedWorkspaceGatewayModel
       ? gatewayBilling || hasCompleteCoreTokenTelemetry
         ? pricingBreakdown.creditCostMicros
         : null
-      : null;
+      : !gatewayBilling && listSnapshot && estimatedProviderCostMicros !== null
+        ? listSnapshot.creditCostMicros
+        : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
     : estimatedProviderCostMicros !== null
