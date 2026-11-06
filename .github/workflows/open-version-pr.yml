@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out main
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 1
@@ -101,7 +101,7 @@ jobs:
       - name: Create or update Version PR
         id: changesets
         if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v1
         with:
           version: bun run changeset:version
           commit: "chore: version packages"
