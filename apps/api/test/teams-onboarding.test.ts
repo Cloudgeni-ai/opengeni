@@ -159,7 +159,7 @@ describe("Teams onboarding message delivery", () => {
   // Teams answers a card it accepted with an empty 202 and no message id
   // (seen on staging for the install welcome). That card was delivered, so it
   // must not fail the activity and make Teams redeliver it.
-  test.each([{}, "", undefined])(
+  test.each([{}, "", null])(
     "a card Teams accepts without a message id (%p) counts as delivered",
     async (receipt) => {
       const { app, calls } = transport(receipt);
