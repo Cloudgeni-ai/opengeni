@@ -952,10 +952,9 @@ const SettingsSchema = z.object({
   // call the public API with bearer credentials, but never receive credentialed
   // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
-  // Local development only (`local` access mode in the `local` environment):
-  // extra exact browser origins, comma-separated, that may call the
-  // unauthenticated API besides this stack's own web origin. The local browser
-  // boundary ignores `corsAllowOriginRegex`.
+  // `local` access mode only: extra exact browser origins, comma-separated,
+  // that may call the unauthenticated API besides this stack's own web and
+  // public origins. Local access mode ignores `corsAllowOriginRegex`.
   localAllowedOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
