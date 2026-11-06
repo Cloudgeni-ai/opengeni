@@ -6258,14 +6258,15 @@ export const GITHUB_REMOVED_REPOSITORY_HOLD_MS = 5 * 60_000;
 
 /**
  * Repositories GitHub reported removed from this binding too recently for a
- * list read at `observedAt` to add back. Markers past the window are dropped.
+ * list read at `observedAt` to add back, with their removal times. Markers
+ * past the window are dropped.
  */
 async function recentGitHubRepositoryRemovals(
   scopedDb: Database,
   workspaceId: string,
   installationId: number,
   observedAt: Date,
-): Promise<Set<number>> {
+): Promise<Map<number, Date>> {
   const binding = and(
     eq(schema.githubInstallationRepositoryRemovals.workspaceId, workspaceId),
     eq(schema.githubInstallationRepositoryRemovals.installationId, installationId),
@@ -6275,10 +6276,13 @@ async function recentGitHubRepositoryRemovals(
     .delete(schema.githubInstallationRepositoryRemovals)
     .where(and(binding, lte(schema.githubInstallationRepositoryRemovals.removedAt, holdStart)));
   const rows = await scopedDb
-    .select({ repositoryId: schema.githubInstallationRepositoryRemovals.repositoryId })
+    .select({
+      repositoryId: schema.githubInstallationRepositoryRemovals.repositoryId,
+      removedAt: schema.githubInstallationRepositoryRemovals.removedAt,
+    })
     .from(schema.githubInstallationRepositoryRemovals)
     .where(binding);
-  return new Set(rows.map((row) => row.repositoryId));
+  return new Map(rows.map((row) => [row.repositoryId, row.removedAt]));
 }
 
 /**
@@ -6302,6 +6306,11 @@ export type GitHubInstallationRepositoryObservation =
 export type GitHubInstallationRepositoryObservationResult = {
   /** False when a mirror was older than the binding and left it unchanged. */
   applied: boolean;
+  /**
+   * Set when a list named repositories a recent removal still holds out:
+   * when the first of those holds ends, a list read again can add it.
+   */
+  heldUntil?: Date;
   changed: boolean;
   added: number[];
   removed: number[];
@@ -6383,6 +6392,7 @@ export async function applyGitHubInstallationRepositoryObservation(
         };
       }
       let target: Set<number>;
+      let heldUntilMs: number | null = null;
       if (observation.kind === "mirror") {
         // GitHub's list can lag its own webhook: a repository it reported
         // removed is not added back by a list read within the hold window.
@@ -6393,6 +6403,12 @@ export async function applyGitHubInstallationRepositoryObservation(
           observation.observedAt,
         );
         target = new Set(observation.repositoryIds.filter((id) => validId(id) && !held.has(id)));
+        for (const id of observation.repositoryIds) {
+          const removedAt = held.get(id);
+          if (!removedAt) continue;
+          const until = removedAt.getTime() + GITHUB_REMOVED_REPOSITORY_HOLD_MS;
+          if (heldUntilMs === null || until < heldUntilMs) heldUntilMs = until;
+        }
       } else if (observation.repositoryIds === "all") {
         target = new Set();
       } else {
@@ -6474,6 +6490,7 @@ export async function applyGitHubInstallationRepositoryObservation(
         added: added.sort((left, right) => left - right),
         removed: removed.sort((left, right) => left - right),
         repositoryIds: [...target].sort((left, right) => left - right),
+        ...(heldUntilMs === null ? {} : { heldUntil: new Date(heldUntilMs) }),
       };
     },
   );

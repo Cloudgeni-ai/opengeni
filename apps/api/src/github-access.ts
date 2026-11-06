@@ -33,7 +33,10 @@ import {
   createGitHubRepositoryCatalog,
   type GitHubRepositoryCatalog,
 } from "./github-repository-catalog";
-import { requestGitHubInstallationRepositorySync } from "./github-installation-sync";
+import {
+  requestGitHubInstallationRepositorySync,
+  scheduleGitHubInstallationRepositoryResync,
+} from "./github-installation-sync";
 
 /** How often a passive read may ask GitHub about one installation by itself. */
 const GITHUB_BACKGROUND_SYNC_INTERVAL_MS = 60_000;
@@ -397,6 +400,9 @@ async function followGitHubRepositoryLists(
       });
       if (result) allowed.set(binding.installationId, new Set(result.repositoryIds));
       else allowed.delete(binding.installationId);
+      if (result?.heldUntil) {
+        scheduleGitHubInstallationRepositoryResync(deps, binding.installationId, result.heldUntil);
+      }
     } catch (error) {
       console.warn(
         JSON.stringify({

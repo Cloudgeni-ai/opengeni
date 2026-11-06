@@ -7,6 +7,7 @@ import {
   bindAuthorizedGitHubInstallationRepositories,
   bindGitHubInstallationRepositories,
   createDb,
+  GITHUB_REMOVED_REPOSITORY_HOLD_MS,
   GitHubInstallationAuthorityCommitError,
   hasAuditableGitHubInstallationAuthority,
   hasGitHubInstallationOwnerAuthority,
@@ -444,7 +445,13 @@ describe("GitHub installation allowlists follow GitHub", () => {
     // removed repository does not add it back within the hold window.
     expect(
       await apply({ kind: "mirror", repositoryIds: [1, 2, 3], observedAt: at(3_500) }),
-    ).toMatchObject({ applied: true, changed: false, repositoryIds: [1, 3] });
+    ).toMatchObject({
+      applied: true,
+      changed: false,
+      repositoryIds: [1, 3],
+      // When the hold ends, a list read again may add it.
+      heldUntil: at(3_000 + GITHUB_REMOVED_REPOSITORY_HOLD_MS),
+    });
     expect(await allowed([2])).toBe(false);
     // A late removal still removes, without moving the fence back.
     await apply({ kind: "mirror", repositoryIds: [1, 3, 4], observedAt: at(5_000) });

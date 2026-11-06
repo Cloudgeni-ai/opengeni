@@ -141,8 +141,11 @@ GitHub reports changes in two ways, and either repairs the other:
    sources. Removals in the delivery apply before Opengeni answers. Each
    binding stores a removal marker in the database, so a list read within
    five minutes of the removal, on any API replica, does not add the
-   repository back (GitHub's list can lag its webhook); a repository shared
-   again shows up after that window. Additions are never taken from the body:
+   repository back (GitHub's list can lag its webhook). When a list still
+   names such a repository, the API replica that read it reads the
+   installation again once the window ends (best effort), so a repository
+   shared again shows up then; otherwise the next listing or webhook adds it.
+   Additions are never taken from the body:
    Opengeni reads the installation's complete list from GitHub, one read per
    installation and API replica at a time. A new binding, or a re-bind, also
    reads it once committed; a re-bind keeps out repositories removed since

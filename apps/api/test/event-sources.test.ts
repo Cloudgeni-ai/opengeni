@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -23,7 +23,6 @@ import {
   markRecordingChunksUploaded,
   reserveRecordingChunks,
   createOrganizationApiKey,
-  applyGitHubInstallationRepositoryObservation,
   createWorkspace,
   deleteGitHubInstallationBinding,
   encryptEnvironmentValue,
@@ -48,7 +47,10 @@ import {
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
-import { settleGitHubInstallationRepositorySyncs } from "../src/github-installation-sync";
+import {
+  runPendingGitHubInstallationRepositoryResyncs,
+  settleGitHubInstallationRepositorySyncs,
+} from "../src/github-installation-sync";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import {
   addMcpEventSource,
@@ -2484,19 +2486,18 @@ describe("GitHub event sources", () => {
     });
     expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601]);
 
-    // A list read after the window adds it back.
-    const result = await applyGitHubInstallationRepositoryObservation(db.db, {
-      accountId: f.workspace.accountId,
-      workspaceId: f.workspace.id,
-      installationId,
-      observation: {
-        kind: "mirror",
-        repositoryIds: [601, 602],
-        observedAt: new Date(Date.now() + GITHUB_REMOVED_REPOSITORY_HOLD_MS + 1_000),
-      },
-    });
-    expect(result?.added).toEqual([602]);
-    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601, 602]);
+    // GitHub's list still names it, so the installation is read again when
+    // the hold ends, and it shows up without another webhook.
+    setSystemTime(new Date(Date.now() + GITHUB_REMOVED_REPOSITORY_HOLD_MS + 2_000));
+    try {
+      expect(runPendingGitHubInstallationRepositoryResyncs()).toBeGreaterThanOrEqual(1);
+      await settleGitHubInstallationRepositorySyncs();
+      expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601, 602]);
+      // Nothing is held any more: no further read is scheduled for it.
+      expect(runPendingGitHubInstallationRepositoryResyncs()).toBe(0);
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("an empty list GitHub cannot confirm leaves the workspace's repositories alone", async () => {

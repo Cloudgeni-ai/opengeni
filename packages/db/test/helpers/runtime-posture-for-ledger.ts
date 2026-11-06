@@ -34,9 +34,11 @@ export async function assertRuntimeDatabasePostureForLedger(
   const notYetCreated = new Set<string>();
   for (const name of readdirSync(migrationsDirectory)) {
     if (!name.endsWith(".sql") || applied.has(name)) continue;
-    for (const match of readFileSync(join(migrationsDirectory, name), "utf8").matchAll(
-      createTable,
-    )) {
+    // Comments may mention tables a migration never creates.
+    const statements = readFileSync(join(migrationsDirectory, name), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/--[^\n]*/g, " ");
+    for (const match of statements.matchAll(createTable)) {
       notYetCreated.add(match[1]!.toLowerCase());
     }
   }

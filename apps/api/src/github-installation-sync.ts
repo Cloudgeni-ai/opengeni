@@ -29,9 +29,11 @@ import {
  * Removals reported by GitHub apply immediately. Each binding stores a
  * short-lived removal marker in the database, so a list read soon after (on
  * any API replica) never adds the repository back while GitHub's list still
- * lags its webhook; a repository shared again shows up once the hold ends. Additions are never taken from a webhook body: the
- * installation's complete list is read from GitHub, once per installation at
- * a time, and applied with an ordering fence.
+ * lags its webhook. When a list names a repository a marker still holds out,
+ * the installation is read again once the hold ends, so a repository shared
+ * again shows up then without another webhook. Additions are never taken
+ * from a webhook body: the installation's complete list is read from GitHub,
+ * once per installation at a time, and applied with an ordering fence.
  */
 
 type InstallationRepositorySource = {
@@ -88,15 +90,78 @@ async function applyToBoundWorkspaces(
     workspaces ?? (await listGitHubInstallationBindingWorkspaces(deps.db, installationId));
   for (const target of targets) {
     try {
-      await applyGitHubInstallationRepositoryObservation(deps.db, {
+      const result = await applyGitHubInstallationRepositoryObservation(deps.db, {
         ...target,
         installationId,
         observation,
       });
+      if (result?.heldUntil) {
+        scheduleGitHubInstallationRepositoryResync(deps, installationId, result.heldUntil);
+      }
     } catch (error) {
       warn("GitHub repository allowlist update failed", installationId, error);
     }
   }
+}
+
+/** Delay past a removal hold before the installation is read again. */
+const HELD_RESYNC_MARGIN_MS = 1_000;
+type HeldResync = { dueAt: number; timer: ReturnType<typeof setTimeout>; run: () => void };
+/** At most one pending follow-up read per GitHub App source and installation. */
+const heldResyncs = new WeakMap<object, Map<number, HeldResync>>();
+const allHeldResyncs = new Set<HeldResync>();
+
+/**
+ * A list named a repository a recent removal still holds out until
+ * `heldUntil`. Read the installation again once that hold ends, so a
+ * repository GitHub shares again shows up without waiting for another
+ * webhook or listing. Best effort: one pending read per installation, which
+ * never keeps the process alive; a failed read is logged like any sync.
+ */
+export function scheduleGitHubInstallationRepositoryResync(
+  deps: ApiRouteDeps,
+  installationId: number,
+  heldUntil: Date,
+): void {
+  const sourceKey = githubAppSourceKey(deps);
+  let byInstallation = heldResyncs.get(sourceKey);
+  if (!byInstallation) {
+    byInstallation = new Map();
+    heldResyncs.set(sourceKey, byInstallation);
+  }
+  const dueAt = heldUntil.getTime() + HELD_RESYNC_MARGIN_MS;
+  const pending = byInstallation.get(installationId);
+  // The earlier read reschedules itself if a hold remains after it.
+  if (pending && pending.dueAt <= dueAt) return;
+  if (pending) {
+    clearTimeout(pending.timer);
+    allHeldResyncs.delete(pending);
+  }
+  const map = byInstallation;
+  const entry: HeldResync = {
+    dueAt,
+    timer: undefined as unknown as ReturnType<typeof setTimeout>,
+    run: () => {
+      clearTimeout(entry.timer);
+      allHeldResyncs.delete(entry);
+      if (map.get(installationId) === entry) map.delete(installationId);
+      void requestGitHubInstallationRepositorySync(deps, installationId);
+    },
+  };
+  entry.timer = setTimeout(entry.run, Math.max(0, dueAt - Date.now()));
+  (entry.timer as { unref?: () => void }).unref?.();
+  map.set(installationId, entry);
+  allHeldResyncs.add(entry);
+}
+
+/**
+ * Run every pending follow-up read now, as if its hold had ended (tests).
+ * Returns how many were pending.
+ */
+export function runPendingGitHubInstallationRepositoryResyncs(): number {
+  const pending = [...allHeldResyncs];
+  for (const entry of pending) entry.run();
+  return pending.length;
 }
 
 /** Read the installation's complete repository list from GitHub and apply it. */
