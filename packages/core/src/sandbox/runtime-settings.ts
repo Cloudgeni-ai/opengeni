@@ -133,28 +133,44 @@ export function rigProviderImageSourceImage(
  * The base image a prebuilt Sandbox Environment is defined over, for its
  * content identity. It equals the lease's logical image except on compute,
  * whose lease keeps no image: there a template is captured over the image new
- * sandboxes boot, so a change of that image makes the template stale.
+ * sandboxes boot, and keeps that image's guest when the image moves on, so a
+ * change of that image must make the template stale. A digest-pinned image
+ * names its content. A plain image name (such as one the control service
+ * points at each release's sandbox image) does not, so it is identified with
+ * the deployment revision that chose it: each release rebuilds over its own
+ * image. Without either, compute has no content identity and cannot prebuild.
  */
 export function rigProviderImageContentSourceImage(
   settings: Settings,
   backend: SandboxBackend,
 ): string | null {
-  if (backend === "compute") return computeSourceImage(settings);
+  if (backend === "compute") return computeImageContentIdentity(settings);
   return rigProviderImageSourceImage(settings, backend);
+}
+
+const IMMUTABLE_IMAGE_REFERENCE = /@sha256:[0-9a-f]{64}$/u;
+
+function computeImageContentIdentity(settings: Settings): string | null {
+  const image = computeSourceImage(settings);
+  if (!image) return null;
+  if (IMMUTABLE_IMAGE_REFERENCE.test(image)) return image;
+  const revision = settings.deploymentRevision?.trim();
+  if (!revision || revision === "dev") return null;
+  return `${image} release ${revision}`;
 }
 
 /**
  * Whether this deployment can prebuild a verified Sandbox Environment for
  * `backend`. A compute template keeps the guest it was captured on and does
- * not follow the control service's default image, so compute needs an
- * explicitly configured image whose change is noticed and rebuilt over.
+ * not follow image releases, so compute needs an explicitly configured image
+ * with a content identity whose change is noticed and rebuilt over.
  */
 export function rigProviderImageBuildSupported(
   settings: Settings,
   backend: SandboxBackend,
 ): boolean {
   if (backend === "modal") return true;
-  if (backend === "compute") return computeSourceImage(settings) !== null;
+  if (backend === "compute") return computeImageContentIdentity(settings) !== null;
   return false;
 }
 

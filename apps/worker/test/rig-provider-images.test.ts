@@ -15,6 +15,8 @@ import { rigSetupScriptCommand } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   resolveRigProviderImageSelection,
+  rigProviderImageBuildSupported,
+  rigProviderImageContentSourceImage,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
 } from "@opengeni/core";
@@ -416,5 +418,196 @@ describe("build-once rig provider image runtime", () => {
 
     const rigOverride = settingsForRigVerification(deployment, "rig:pinned");
     expect(rigOverride).toBe(deployment);
+  });
+});
+
+describe("compute environment templates", () => {
+  const COMPUTE_BINDING_KEY = "compute:https://compute.test:team-a";
+
+  function computeSettings(overrides: Partial<Settings> = {}): Settings {
+    return testSettings({
+      sandboxBackend: "compute",
+      computeImage: "opengeni",
+      deploymentRevision: "release-1",
+      ...overrides,
+    });
+  }
+
+  function readyTemplate(settings: Settings, definition: RigVersion): RigProviderImage {
+    const sourceImage = rigProviderImageContentSourceImage(settings, "compute");
+    const contentHash = rigProviderImageContentHash({
+      backend: "compute",
+      sourceImage,
+      definition,
+    });
+    return {
+      backend: "compute",
+      provider: "compute",
+      status: "ready",
+      contentHash,
+      setupHash: rigProviderImageSetupHash(definition),
+      sourceImage,
+      buildRequestId: rigProviderImageBuildRequestId({
+        targetId: definition.id,
+        backend: "compute",
+        contentHash,
+      }),
+      imageId: "tpl-env",
+      imageDigest: "captured-env",
+      artifactId: null,
+      providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(COMPUTE_BINDING_KEY),
+      coldBootValidation: { version: 1, checkedAt: "2026-08-10T00:00:00.500Z" },
+      provenance: { kind: "rig_verification", targetKind: "version", targetId: definition.id },
+      startedAt: "2026-08-10T00:00:00.000Z",
+      finishedAt: "2026-08-10T00:00:01.000Z",
+      error: null,
+    };
+  }
+
+  test("a verified template boots fresh compute sandboxes with the environment already set up", async () => {
+    const settings = computeSettings();
+    const base = version();
+    const template = readyTemplate(settings, base);
+    const selection = await resolveRigProviderImageForRun(
+      settings,
+      { ...base, providerImages: { compute: template } },
+      "compute",
+      async (_settings, backend) => {
+        expect(backend).toBe("compute");
+        return { key: COMPUTE_BINDING_KEY };
+      },
+    );
+    expect(selection.reason).toBe("selected");
+    expect(selection.imageId).toBe("tpl-env");
+    expect(selection.settings.computeTemplate).toBe("tpl-env");
+    expect(selection.settings.modalImageId).toBeUndefined();
+    // The logical image stays the deployment's: only fresh creates change.
+    expect(selection.settings.computeImage).toBe("opengeni");
+  });
+
+  test("a template captured for an earlier release is stale once the image name moves on", () => {
+    const base = version();
+    const template = readyTemplate(computeSettings(), base);
+    const nextRelease = computeSettings({ deploymentRevision: "release-2" });
+    const selection = resolveRigProviderImageSelection(
+      nextRelease,
+      { ...base, providerImages: { compute: template } },
+      "compute",
+      template.providerBindingKeyHash,
+    );
+    expect(selection.reason).toBe("content_mismatch");
+    expect(selection.settings.computeTemplate).toBeUndefined();
+    expect(selection.contentHash).not.toBe(template.contentHash);
+
+    // A digest-pinned image is its own content identity, whatever the release.
+    const pinned = `registry.test/sandbox@sha256:${"d".repeat(64)}`;
+    expect(
+      rigProviderImageContentSourceImage(computeSettings({ computeImage: pinned }), "compute"),
+    ).toBe(pinned);
+    expect(
+      rigProviderImageContentSourceImage(
+        computeSettings({ computeImage: pinned, deploymentRevision: "release-2" }),
+        "compute",
+      ),
+    ).toBe(pinned);
+  });
+
+  test("compute without an identifiable image keeps the setup path", () => {
+    for (const settings of [
+      computeSettings({ computeImage: undefined }),
+      computeSettings({ deploymentRevision: "dev" }),
+    ]) {
+      expect(rigProviderImageBuildSupported(settings, "compute")).toBe(false);
+      const selection = resolveRigProviderImageSelection(settings, version(), "compute", null);
+      expect(selection).toEqual({
+        settings,
+        reason: "provider_unsupported",
+        contentHash: null,
+        imageId: null,
+      });
+    }
+    expect(rigProviderImageBuildSupported(computeSettings(), "compute")).toBe(true);
+  });
+
+  test("a version with setup that was never built for the backend is unbuilt", () => {
+    const settings = computeSettings();
+    const never = resolveRigProviderImageSelection(settings, version(), "compute", null);
+    expect(never.reason).toBe("unbuilt");
+    expect(never.contentHash).toBe(
+      rigProviderImageContentHash({
+        backend: "compute",
+        sourceImage: rigProviderImageContentSourceImage(settings, "compute"),
+        definition: version(),
+      }),
+    );
+    expect(never.settings).toBe(settings);
+
+    const recordedUnsupported = resolveRigProviderImageSelection(
+      settings,
+      version({
+        providerImages: {
+          compute: { ...readyTemplate(settings, version()), status: "unsupported", imageId: null },
+        },
+      }),
+      "compute",
+      null,
+    );
+    expect(recordedUnsupported.reason).toBe("unbuilt");
+
+    // Nothing to skip: no build is worth asking for.
+    const noSetup = resolveRigProviderImageSelection(
+      settings,
+      version({ setupScript: "  " }),
+      "compute",
+      null,
+    );
+    expect(noSetup.reason).toBe("missing");
+    expect(noSetup.contentHash).toBeNull();
+  });
+
+  test("a template's cold-boot proof boots the template, with no Modal settings", async () => {
+    let seen: Settings | null = null;
+    const runOwnedSandbox: RigProviderImageColdBootDependencies["runOwnedSandbox"] = async <T>(
+      input,
+      run,
+    ): Promise<T> => {
+      seen = input.settings;
+      return await run(
+        { backendId: "compute", client: {}, instanceId: "sbx-cold", session: {}, sessionState: {} },
+        {
+          signal: new AbortController().signal,
+          commandRunner: async () => ({ exitCode: 0, output: "ok" }),
+          ownership: {
+            leaseId: "lease-cold-boot",
+            leaseEpoch: 1,
+            workspaceGeneration: 0,
+            instanceId: "sbx-cold",
+          },
+        },
+      );
+    };
+    await verifyRigProviderImageColdBoot(
+      {
+        settings: computeSettings(),
+        db: {} as never,
+        observability: {} as never,
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        rigVersionId: VERSION_ID,
+        sessionIdPrefix: "rig-provider-image-test",
+        imageId: "tpl-env",
+        contentHash: `sha256:${"a".repeat(64)}`,
+        checks: [],
+        lifecycle: {
+          signal: new AbortController().signal,
+          cleanupDeadlineAtMs: null,
+          dispose: () => undefined,
+        },
+      },
+      { runOwnedSandbox, now: () => new Date("2026-08-10T00:00:00.500Z") },
+    );
+    expect(seen!.computeTemplate).toBe("tpl-env");
+    expect(seen!.modalImageId).toBeUndefined();
+    expect(seen!.modalWorkspacePersistence).toBe(computeSettings().modalWorkspacePersistence);
   });
 });

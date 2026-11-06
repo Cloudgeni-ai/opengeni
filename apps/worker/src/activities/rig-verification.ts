@@ -1164,7 +1164,7 @@ export async function buildVerifiedRigProviderImage(input: {
         code: "provider_image_build_unsupported",
         message:
           backend === "compute"
-            ? "compute builds need an explicitly configured compute image to build over"
+            ? "compute builds need a compute image pinned by digest, or a deployment revision that identifies it"
             : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
