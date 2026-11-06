@@ -1,0 +1,7 @@
+---
+"@opengeni/core": patch
+"@opengeni/runtime": patch
+"@opengeni/worker-bundle": patch
+---
+
+A connector configured for a chat that runs a turn without its tools now tells the agent which connector it is and why, so the agent can tell the person accurately instead of guessing. Before, a connector whose account was not accepted with the turn (for example a person's own sign-in that was not yet usable in the workspace after a membership change) was dropped without a word: its tools were missing from tool search and tool lists and nothing said so. A workspace default or a scheduled run's connector missing from the turn's registry vanished the same way. The turn's own input now carries one notice that names each such connector with a plain reason (not available in this workspace, no signed-in account for this turn, account setup changed, or an unsupported sign-in) and what the person can do. Tool search and tool listing report the same connectors in `unavailableSources`, and a connector whose setup was refused a credential at run time now says why (for example an expired sign-in, or a personal sign-in not usable in this workspace) instead of a bare HTTP 401. The notice replaces the earlier id-only "disconnected or no longer registered" text, is part of the current turn's input and never changes text an earlier request sent. Connectors the agent configuration excludes are not reported.
