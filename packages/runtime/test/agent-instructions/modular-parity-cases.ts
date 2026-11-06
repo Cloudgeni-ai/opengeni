@@ -87,12 +87,14 @@ function cases(): Record<string, BuildAgentOptions> {
   });
   for (const id of GATE_NEUTRAL_REMOVALS)
     add(`all-without-${id}`, capabilities("all", { [id]: false }));
-  // The smallest configurations that still have every gated feature.
+  // The smallest configurations that still have every gated feature
+  // (workspace connectors bring a setup card).
   const minimal = {
     webSearch: true,
     goals: true,
     knowledge: true,
     artifacts: true,
+    workspaceConnectors: true,
   };
   out["none-with-features/docker"] = {
     agentConfig: configured(capabilities("none", minimal)),

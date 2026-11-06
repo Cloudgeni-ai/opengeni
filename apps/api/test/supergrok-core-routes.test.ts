@@ -461,10 +461,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
   }
 
   test("the workspace routes answer from core connections", async () => {
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'xai', true)
-      on conflict (account_id, provider) do update set enabled = true`;
     expect(await listed()).toMatchObject({ accounts: [], activeAccountId: null });
 
     // The core leaves the primary unset on a first connect (as for Codex): the
@@ -668,10 +664,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
   );
 
   test("organization routes answer from core connections", async () => {
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'xai', true)
-      on conflict (account_id, provider) do update set enabled = true`;
     const first = await connectOrganizationAccount("xai-core-org-first");
     const second = await connectOrganizationAccount("xai-core-org-second");
     expect(first).not.toBe(second);

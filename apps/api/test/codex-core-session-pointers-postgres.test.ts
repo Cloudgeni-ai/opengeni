@@ -27,8 +27,6 @@ const settings = testSettings({
   codexSubscriptionEnabled: true,
 });
 const SUBJECT = `user:codex-pointers-${crypto.randomUUID()}`;
-const LEGACY_PINNED = crypto.randomUUID();
-const LEGACY_LAST = crypto.randomUUID();
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -178,18 +176,6 @@ function expectEverywhere(
   }
 }
 
-async function setCutover(enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("codex-core-session-pointers");
@@ -248,13 +234,10 @@ beforeAll(async () => {
     permissions: organizationReadApiKeyPermissions,
     credentialKind: "organization",
   });
-  // Fixture rows written directly: the legacy pointer columns as legacy wrote
-  // them, a child link, and a core binding for the parent only.
+  // Fixture rows written directly: a child link and a core binding for the
+  // parent only.
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
-    await tx`update sessions set codex_pinned_credential_id = ${LEGACY_PINNED}::uuid,
-        codex_last_credential_id = ${LEGACY_LAST}::uuid
-      where id in (${parentId}::uuid, ${childId}::uuid)`;
     await tx`update sessions set parent_session_id = ${parentId}::uuid,
         root_session_id = ${parentId}::uuid, nested_agent_depth = 1
       where id = ${childId}::uuid`;
@@ -275,16 +258,14 @@ afterAll(async () => {
 const restores: Array<{ mockRestore(): void }> = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!.mockRestore();
-  if (realDb) await setCutover(null);
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
   test("every Session response projects the core binding", async () => {
-    await setCutover(true);
     expectEverywhere(
       await everySessionResponse(),
       { codexPinnedCredentialId: connectionId, codexLastCredentialId: connectionId },
-      // No core binding: nulls, never the legacy ids.
+      // No core binding: nulls.
       { codexPinnedCredentialId: null, codexLastCredentialId: null },
     );
   });

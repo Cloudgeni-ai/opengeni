@@ -852,7 +852,7 @@ describe("ephemeral controller callback replay fence", () => {
     const route = readFileSync(resolve(here, "..", "src", "routes", "browser-sessions.ts"), "utf8");
     const active = route.slice(
       route.indexOf("async function withActiveBrowserController"),
-      route.indexOf("async function throwBrowserSourcePlacementChanged"),
+      route.indexOf("async function browserControllerGone"),
     );
     const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
     expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');

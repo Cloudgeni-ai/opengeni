@@ -1,7 +1,7 @@
 /**
  * M4 X2b: SuperGrok (`xai`) on the shared core's writers, as the restricted
- * application role, with SuperGrok registered and its cutover receipt
- * recorded by the migrations and this file writing the account's switch row.
+ * application role, with SuperGrok registered and its protocol receipt
+ * recorded by the migrations.
  * Connect writes SuperGrok's credential format through the neutral
  * writers; a personal connection exists only in the person's own Personal
  * workspace; acceptance writes the xai v2 entry next to Codex's for the
@@ -67,24 +67,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: workspace!.id,
   };
-}
-
-/** The SuperGrok switch row, as X3 writes it after the receipt. */
-async function enableXai(org: Org) {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${org.accountId}::uuid, 'xai', true)
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
-/** Legacy SuperGrok state that makes the legacy shared pool `organization`. */
-async function legacyOrganizationPool(org: Org) {
-  await shared!.admin.begin(async (tx) => {
-    await tx`set local session_replication_role = replica`;
-    await tx`insert into xai_rotation_settings (account_id, workspace_id, authority_scope,
-        active_credential_id)
-      values (${org.accountId}::uuid, null, 'organization', gen_random_uuid())`;
-  });
 }
 
 function connectXai(
@@ -185,8 +167,8 @@ async function generation(org: Org, provider: string): Promise<number> {
 }
 
 let org: Org | null = null;
-/** The owner's acceptance before the switch row, next to a live legacy organization pool. */
-let beforeSwitch: { v2: unknown; xai: unknown } | null = null;
+/** The owner's acceptance of a turn in their Personal workspace. */
+let ownerAcceptance: { v2: unknown; xai: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -194,10 +176,8 @@ beforeAll(async () => {
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
-  await legacyOrganizationPool(org);
   const own = await session(org, org.personalWorkspaceId, "user_private");
-  beforeSwitch = await accept(org, org.personalWorkspaceId, own.id, "owner");
-  await enableXai(org);
+  ownerAcceptance = await accept(org, org.personalWorkspaceId, own.id, "owner");
 }, 180_000);
 
 afterAll(async () => {
@@ -220,10 +200,9 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
     expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["claude", "codex", "xai"]);
   });
 
-  test("even before the switch row, acceptance writes xai's v1 default, never live state", () => {
-    // The legacy runtime that derived it from the live organization pool is
-    // deleted (M4 X4); the carrier keeps only its column default.
-    expect(beforeSwitch!.xai).toEqual({ version: 1, scope: "workspace" });
+  test("acceptance writes xai's v1 carrier default, never live state", () => {
+    // The carrier keeps only its column default (M4 X4).
+    expect(ownerAcceptance!.xai).toEqual({ version: 1, scope: "workspace" });
   });
 
   test("a personal connection exists only in the person's own Personal workspace", async () => {

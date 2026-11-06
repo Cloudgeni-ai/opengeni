@@ -61,7 +61,6 @@ import {
   readLease,
   recordLeaseControllerDataPlaneUrl,
   readActiveSandbox,
-  terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
   type EnrollmentRecord,
@@ -1488,9 +1487,8 @@ export function registerComputerSessionRoutes(
                   message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
                 });
               }
-              return await throwComputerSourcePlacementChanged(
-                grant,
-                sourceSession.id,
+              throw sourcePlacementElsewhereApiError(
+                "computer_session",
                 expectedPlacement.sandboxId,
               );
             }
@@ -1782,9 +1780,8 @@ export function registerComputerSessionRoutes(
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
         if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
-          return await throwComputerSourcePlacementChanged(
-            grant,
-            record.sourceSessionId,
+          throw sourcePlacementElsewhereApiError(
+            "computer_session",
             record.session.placement.sandboxId,
           );
         }
@@ -1895,33 +1892,6 @@ export function registerComputerSessionRoutes(
     } catch (error) {
       throw computerRouteError(error, interactionControlRequestFor(channelOperation));
     }
-  }
-
-  async function throwComputerSourcePlacementChanged(
-    grant: AccessGrant,
-    sourceSessionId: string,
-    connectedSandboxId: string,
-  ): Promise<never> {
-    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sourceSessionId,
-      connectedSandboxId,
-    });
-    if (reconciliation.sourcePlacementChanged) {
-      // End what the move left running on its former machines without making
-      // this request wait for it. Earlier failed retirements of this task's
-      // resources are retried too; a failure leaves the binding for later.
-      void retireSourceFormerPlacements(channelServices, {
-        grant,
-        sourceSessionId,
-        origin: null,
-      });
-      throw sourcePlacementChangedApiError("computer_session");
-    }
-    throw new ComputerSessionStateError(
-      "ComputerSession source placement changed during the request; retry",
-    );
   }
 
   async function ensureInteractionHolder(
@@ -2112,17 +2082,19 @@ export function registerComputerSessionRoutes(
   }
 }
 
-function sourcePlacementChangedApiError(interactionResource: "computer_session"): ApiHttpError {
+function sourcePlacementElsewhereApiError(
+  interactionResource: "computer_session",
+  connectedSandboxId: string,
+): ApiHttpError {
   return new ApiHttpError(409, {
     code: "conflict",
-    message:
-      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+    message: `This Desktop runs on Connected Machine ${connectedSandboxId}, and this task now runs on another machine. It is kept running there: move this task back to that machine to use it, or open a Desktop here.`,
     retryable: false,
     outcomeUnknown: false,
     details: {
       interactionResource,
-      interactionFailureCode: "source_placement_changed",
-      interactionLifecycle: "lost",
+      interactionFailureCode: "source_placement_elsewhere",
+      connectedSandboxId,
     },
   });
 }

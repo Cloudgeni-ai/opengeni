@@ -200,13 +200,13 @@ Rules:
 | `privacyFacts` | `privacy_facts` and its prompt rule | off |
 | `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | off |
 | `skills` | `"read"`: `skill_read` (with a nonempty catalog); `"manage"`: all seven Skill tools | `"read"` |
-| `goals` | `goal_*` | off |
+| `goals` | `goal_*` (`goal_resume` once the session has a goal) | off |
 | `subagents` | `session_*`, `sessions_list`, `set_other_session_title`, `list_models` | off |
 | `knowledge` | `knowledge_*`, `memory_*`, `task_note_*`, instruction-policy, preference and company-profile tools, docs server | off |
 | `schedules` | `scheduled_tasks_*`, `scheduled_task_runs_list` | off |
 | `artifacts` | `artifacts_*`, `editable_artifact_*`, `sandbox_file_publish`; Sites and visuals guidance | off |
 | `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
-| `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
+| `media` | `generate_image`, `generate_video`, hosted `image_generation`; their guidance only when one is attached | off |
 | `workspaceFiles` | files server | off |
 | `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
 | `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |

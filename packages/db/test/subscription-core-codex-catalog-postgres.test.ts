@@ -91,10 +91,6 @@ async function organization(): Promise<Org> {
   await shared!.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${sharedWorkspace!.id}::uuid, ${accountId}::uuid)`;
-  const [cutover] = await shared!.admin<{ enabled: boolean }[]>`
-    select enabled from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  expect(cutover?.enabled).toBe(true);
   return {
     accountId,
     ownerSubjectId,

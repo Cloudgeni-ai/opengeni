@@ -198,7 +198,8 @@ export type PostAgentCompactionOutcome =
 /**
  * System instructions for the standalone (chat-provider) compaction request.
  * A session with an agent configuration uses the same modular composer and
- * module selection as its turns; a legacy session keeps the historical
+ * capability-based module selection as its turns (without a tool surface, so
+ * the media guidance stays); a legacy session keeps the historical
  * persona + CORE + session + memory string byte-for-byte. Like a turn, it
  * carries no workspace governance: governance is a durable history item the
  * summarized history already contains.

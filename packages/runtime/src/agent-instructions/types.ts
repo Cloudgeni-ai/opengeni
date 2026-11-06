@@ -77,6 +77,12 @@ export type AgentPromptResources = {
    * there is no Skill to read. Omitted keeps Skill guidance unchanged.
    */
   skillsReadable?: boolean | undefined;
+  /**
+   * `false` when the attempt attaches no image or video tool although the
+   * media capability is on (no provider adapter, hosted tool or video
+   * boundary). Gates the media module; omitted keeps it.
+   */
+  mediaTools?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
   /**

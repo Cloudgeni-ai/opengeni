@@ -90,10 +90,6 @@ async function organization(): Promise<Org> {
   await shared!.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}::uuid, ${accountId}::uuid)`;
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'claude', true)
-    on conflict (account_id, provider) do update set enabled = true`;
   return { accountId, ownerSubjectId, workspaceId: workspace!.id };
 }
 

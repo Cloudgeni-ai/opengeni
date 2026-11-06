@@ -75,6 +75,7 @@ import { formatBytes } from "../lib/format";
 import {
   isInteractionControlUnavailable,
   isSourcePlacementChangedError,
+  isSourcePlacementElsewhereError,
 } from "../lib/interaction-errors";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import {
@@ -2765,6 +2766,7 @@ function SemanticBrowserFallback(props: {
 }) {
   const t = useOpenGeniText();
   const controlFailure = interactionControlFailureFromError(props.error);
+  const elsewhere = isSourcePlacementElsewhereError(props.error, "browser_session");
   const { controlUnavailable } = props;
   const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
@@ -2798,7 +2800,10 @@ function SemanticBrowserFallback(props: {
         </div>
         {props.error || props.reconnectMessage ? (
           <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
-            {props.reconnectMessage ?? controlFailure?.message ?? props.error?.message}
+            {props.reconnectMessage ??
+              (elsewhere
+                ? t("browserViewer.chatIsOnAnotherComputer")
+                : (controlFailure?.message ?? props.error?.message))}
           </p>
         ) : null}
         {interactive.length > 0 && !controlUnavailable ? (

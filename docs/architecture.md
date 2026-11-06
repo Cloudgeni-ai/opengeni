@@ -9,6 +9,8 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Internal grants reuse the private ops ledger operator:
+[internal credit operations](internal-credit-operations.md).
 Organization subscription plans (runtime catalog, period credit and seats):
 [foundation contract](subscription-plans.md). No plan row preserves existing behavior.
 `apps/api/src/billing-subscriptions.ts` owns Stripe subscription synchronization;
@@ -237,7 +239,11 @@ lists. Web and desktop share the dirty-scope renderer, so unchanged roots, pins,
 expanded branches and project windows no longer poll. Missing listener support,
 transaction-only database handles, finite HTTP/1 batches and external host ACLs
 retain polling. The source is `packages/db/src/session-list-notifications.ts`; the
-authorized batch is `apps/api/src/http/session-list-hints.ts`.
+authorized batch is `apps/api/src/http/session-list-hints.ts`. Each subscriber
+keeps one authorization/write in flight and one coalesced dirty set. A timer tick
+blocked by I/O flushes when it settles; fast reads keep the normal cadence.
+More than 512 dirty IDs becomes the existing
+content-free reconcile-all hint; reconnect generations still discard stale reads.
 
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
@@ -1152,9 +1158,14 @@ readers. A major release or deprecation period never permits a break; an
 incompatible design ships as a new version beside the old one, with
 version-specific adapters over shared application logic. `bun run
 check:public-api` and the major-changeset guard enforce it in CI.
+The [published SDK integration lane](api-compatibility-testing.md) runs current
+source and pinned npm builds against the current API and worker. The static
+guard also prevents silently removing tested versions from this bounded matrix;
+the matrix is not a limit on the compatibility promise.
 
 Official builds expose `serverVersion` in health and client config; nothing
-negotiates at runtime.
+negotiates at runtime. `x-opengeni-sdk-version` is optional, content-free
+request/trace metadata, never an admission gate or metric label.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
 ([details](product-integration.md#api-contract-revision)).

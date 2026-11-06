@@ -1,3 +1,4 @@
+import { observedSdkVersion } from "./http/sdk-version";
 import {
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
@@ -892,6 +893,7 @@ export function createAppComposition(deps: AppDependencies): {
       "Range",
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Sdk-Version",
       "X-OpenGeni-Actor-Epoch",
       // Resumable voice-input chunk integrity/timing (cross-origin embeds).
       "X-OpenGeni-Chunk-Duration-Milliseconds",
@@ -1028,11 +1030,13 @@ export function createAppComposition(deps: AppDependencies): {
     const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
     const correlationId = correlationIds.get(c) ?? crypto.randomUUID();
     const start = performance.now();
+    const sdkVersion = observedSdkVersion(c.req.header("x-opengeni-sdk-version"));
     const span = observability.startSpan(
       `HTTP ${c.req.method} ${route}`,
       {
         "http.request.method": c.req.method,
         "opengeni.route": route,
+        ...(sdkVersion ? { "opengeni.sdk.version": sdkVersion } : {}),
       },
       {
         ...requestSpanTraceParent(
@@ -1103,6 +1107,7 @@ export function createAppComposition(deps: AppDependencies): {
             traceId: span.traceId,
             spanId: span.spanId,
             correlationId,
+            ...(sdkVersion ? { sdkVersion } : {}),
             ...(rejection ? rejectionLogAttributes(rejection) : {}),
           });
         } catch (error) {

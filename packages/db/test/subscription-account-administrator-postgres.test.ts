@@ -88,11 +88,6 @@ async function organization(): Promise<Org> {
         values (${accountId}::uuid, ${workspace!.id}::uuid, ${subjectId}, 'owner')`;
     workspaceIds.push(workspace!.id);
   }
-  for (const provider of subscriptionCoreProviderIds())
-    await shared.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, ${provider}, true)
-      on conflict (account_id, provider) do update set enabled = excluded.enabled`;
   return {
     accountId,
     ownerSubjectId,
