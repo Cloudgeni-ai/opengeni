@@ -22,6 +22,14 @@ export type TeamsExperienceState = {
    * for Opengeni. Only then does help in a 1:1 chat mention them.
    */
   sharedConversations?: boolean;
+  /**
+   * How an organization that isn't connected can connect: "connect" when its
+   * Microsoft 365 or Teams admin can connect it from Teams, "work_account"
+   * when the person uses a personal Microsoft account, which can't.
+   */
+  setup?: "connect" | "work_account";
+  /** The operator's support address, when there is no other way forward. */
+  supportEmail?: string;
 };
 
 /** One deterministic reply: Teams Markdown text and an optional card button. */
@@ -59,22 +67,62 @@ const LIMITS = [
   "Approvals and requests for private information open Opengeni in your web browser.",
 ];
 
+/** How an organization that isn't connected yet connects. Plain text. */
+export const TEAMS_CONNECT_TEXT =
+  "Your organization hasn't connected Opengeni yet. A Microsoft 365 Global Administrator or Teams Administrator connects it once for everyone. If that's you, select Connect your organization. Otherwise, ask your admin to message Opengeni in Teams and connect it.";
+/** For a person signed in to Teams with a personal Microsoft account. Plain text. */
+export const TEAMS_WORK_ACCOUNT_TEXT =
+  "Opengeni needs a Microsoft 365 work or school account. You're using Teams with a personal Microsoft account, which can't connect to Opengeni. Sign in to Teams with your work or school account to use Opengeni.";
+/** A short reminder once the Connect your organization cards are used up. */
+export const TEAMS_CONNECT_REMINDER_TEXT =
+  "Your organization hasn't connected Opengeni yet. Send **help** to see how to connect it.";
+/** For a group chat or channel in an organization that isn't connected. */
+export const TEAMS_SHARED_CONNECT_TEXT =
+  "Your organization hasn't connected Opengeni yet. Send me a direct message to see how to connect it.";
+/** For a mention in a group chat or channel Opengeni isn't turned on in. */
+export const TEAMS_CONVERSATION_OFF_TEXT =
+  "Opengeni isn't turned on in this conversation. Send me a direct message to give me a task instead.";
+/** For a linked person whose account can't start chats in the connected workspace. */
+export const TEAMS_CANNOT_START_TEXT =
+  "Your Opengeni account can't start chats in the workspace your organization connected to Microsoft Teams. Ask an admin of that workspace to give you access to start chats, then message me again.";
+
+type NextStep = { text: string; action?: TeamsExperienceReply["action"] };
+
 /**
  * The person's next step. A help reply links straight to account linking; a
  * welcome, which may be read long after it was sent, offers a button that
- * asks for a fresh link instead.
+ * asks for a fresh link instead. In an organization that isn't connected,
+ * the step is how to connect it.
  */
-function nextStep(
-  state: TeamsExperienceState,
-  reply: "welcome" | "help",
-): TeamsExperienceReply["action"] | string | null {
-  if (state.installation !== "active") return null;
-  if (state.linked) return state.personal ? "Send a message to start a task." : null;
+function nextStep(state: TeamsExperienceState, reply: "welcome" | "help"): NextStep | null {
+  if (state.installation !== "active") {
+    if (!state.personal) return { text: TEAMS_SHARED_CONNECT_TEXT };
+    if (state.setup === "connect")
+      return reply === "welcome"
+        ? { text: TEAMS_CONNECT_REMINDER_TEXT }
+        : {
+            text: TEAMS_CONNECT_TEXT,
+            action: { kind: "link", title: "Connect your organization" },
+          };
+    if (state.setup === "work_account") return { text: TEAMS_WORK_ACCOUNT_TEXT };
+    return state.supportEmail
+      ? {
+          text: `To get Opengeni for your organization, your Microsoft 365 or Teams admin can contact ${state.supportEmail}.`,
+        }
+      : null;
+  }
+  if (state.linked) return state.personal ? { text: "Send a message to start a task." } : null;
   if (!state.personal)
-    return "Send me a direct message to link your Opengeni account, then mention me here again.";
-  return reply === "welcome"
-    ? { kind: "command", title: "Link account", command: "link" }
-    : { kind: "link", title: "Link account" };
+    return {
+      text: "Send me a direct message to link your Opengeni account, then mention me here again.",
+    };
+  return {
+    text: "Link your Opengeni account to start.",
+    action:
+      reply === "welcome"
+        ? { kind: "command", title: "Link account", command: "link" }
+        : { kind: "link", title: "Link account" },
+  };
 }
 
 function withNextStep(
@@ -84,8 +132,7 @@ function withNextStep(
 ): TeamsExperienceReply {
   const step = nextStep(state, reply);
   if (!step) return { text };
-  if (typeof step === "string") return { text: `${text}\n\n${step}` };
-  return { text: `${text}\n\nLink your Opengeni account to start.`, action: step };
+  return { text: `${text}\n\n${step.text}`, ...(step.action ? { action: step.action } : {}) };
 }
 
 /** Sent once when someone adds the bot for themselves. */
@@ -163,6 +210,14 @@ export function teamsAccountReply(
         text: "Send **link** or **unlink** to me in a direct message to manage your account.",
       };
   }
+}
+
+/**
+ * The reply to unlink from someone who isn't linked: that, and how to link
+ * the account, or to connect the organization first.
+ */
+export function teamsNotLinkedReply(state: TeamsExperienceState): TeamsExperienceReply {
+  return withNextStep(teamsAccountReply("not_linked").text, { ...state, linked: false }, "help");
 }
 
 /** The schema.org message entity that shows Teams' "AI generated" label. */

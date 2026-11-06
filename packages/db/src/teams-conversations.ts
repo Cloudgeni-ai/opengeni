@@ -169,6 +169,131 @@ export async function pruneTeamsWelcomes(
   );
   return rows.length;
 }
+/**
+ * One limit on Teams onboarding replies: at most `max` replies per `spanMs`
+ * window for `key` (such as a budget and a person, a tenant or the whole
+ * deployment), and none within `cooldownMs` of the last. Keys are hashed
+ * before they are stored.
+ */
+export type TeamsOnboardingWindow = {
+  key: string;
+  spanMs: number;
+  max: number;
+  cooldownMs?: number;
+};
+type OnboardingLimitRow = {
+  scope_hash: string;
+  started_ms: number | string;
+  count: number | string;
+  last_ms: number | string | null;
+  now_ms: number | string;
+};
+function onboardingHash(key: string): string {
+  return createHash("sha256").update(key).digest("hex");
+}
+function onboardingWindowsByHash(windows: TeamsOnboardingWindow[]) {
+  const byHash = new Map<string, TeamsOnboardingWindow>();
+  for (const window of windows) byHash.set(onboardingHash(window.key), window);
+  // One order for every caller, so concurrent reservations lock rows alike.
+  return new Map([...byHash].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+const ONBOARDING_ROW = sql.raw(
+  "(extract(epoch from window_start)*1000)::float8 started_ms,count,(extract(epoch from last_at)*1000)::float8 last_ms,(extract(epoch from now())*1000)::float8 now_ms",
+);
+/**
+ * Reserves one onboarding reply when every window allows it, across every API
+ * replica; otherwise reserves nothing. Windows use the database clock, so
+ * replicas whose clocks differ count alike.
+ */
+export async function reserveTeamsOnboardingReply(
+  db: Database,
+  windows: TeamsOnboardingWindow[],
+): Promise<boolean> {
+  const keyed = onboardingWindowsByHash(windows);
+  if (!keyed.size) return true;
+  return await db.transaction(async (tx) => {
+    // Creates missing rows and locks every row, in one order.
+    const rows = await rawRows<OnboardingLimitRow>(
+      tx,
+      sql`insert into teams_bot_onboarding_limits as l(scope_hash) values ${sql.join(
+        [...keyed.keys()].map((hash) => sql`(${hash})`),
+        sql`,`,
+      )} on conflict(scope_hash) do update set count=l.count returning scope_hash,${ONBOARDING_ROW}`,
+    );
+    const updates = [];
+    for (const row of rows) {
+      const window = keyed.get(row.scope_hash);
+      if (!window) continue;
+      const now = Number(row.now_ms);
+      const fresh = now - Number(row.started_ms) >= window.spanMs;
+      const count = fresh ? 0 : Number(row.count);
+      const last = row.last_ms === null ? null : Number(row.last_ms);
+      if (count >= window.max) return false;
+      if (count > 0 && last !== null && now - last < (window.cooldownMs ?? 0)) return false;
+      updates.push(sql`(${row.scope_hash},${fresh}::boolean)`);
+    }
+    await tx.execute(
+      sql`update teams_bot_onboarding_limits l set window_start=case when v.fresh then now() else l.window_start end,count=case when v.fresh then 1 else l.count+1 end,last_at=now() from (values ${sql.join(updates, sql`,`)}) v(scope_hash,fresh) where l.scope_hash=v.scope_hash`,
+    );
+    return true;
+  });
+}
+/**
+ * Gives back one reservation whose reply Teams clearly never received. Only
+ * a reservation `owner` (the person's own window) still holds can be given
+ * back; windows that have since ended are left alone.
+ */
+export async function releaseTeamsOnboardingReply(
+  db: Database,
+  owner: TeamsOnboardingWindow,
+  windows: TeamsOnboardingWindow[],
+): Promise<void> {
+  const keyed = onboardingWindowsByHash([owner, ...windows]);
+  const ownerHash = onboardingHash(owner.key);
+  await db.transaction(async (tx) => {
+    const rows = await rawRows<OnboardingLimitRow>(
+      tx,
+      sql`select scope_hash,${ONBOARDING_ROW} from teams_bot_onboarding_limits where scope_hash in (${sql.join(
+        [...keyed.keys()].map((hash) => sql`${hash}`),
+        sql`,`,
+      )}) order by scope_hash for update`,
+    );
+    const live = rows.filter((row) => {
+      const window = keyed.get(row.scope_hash);
+      return (
+        window &&
+        Number(row.count) > 0 &&
+        Number(row.now_ms) - Number(row.started_ms) < window.spanMs
+      );
+    });
+    if (!live.some((row) => row.scope_hash === ownerHash)) return;
+    await tx.execute(
+      // Without a reply in the window, there is no cooldown to wait out.
+      sql`update teams_bot_onboarding_limits set count=count-1,last_at=case when count=1 then null else last_at end where scope_hash in (${sql.join(
+        live.map((row) => sql`${row.scope_hash}`),
+        sql`,`,
+      )}) and count>0`,
+    );
+  });
+}
+/** How long an onboarding limit row is kept after its window began and its last reply. */
+export const TEAMS_ONBOARDING_LIMIT_RETENTION_MS = 2 * 24 * 60 * 60_000;
+/**
+ * Removes up to `limit` onboarding limit rows whose windows and cooldowns
+ * ended long ago. Returns how many it removed.
+ */
+export async function pruneTeamsOnboardingLimits(
+  db: Database,
+  limit = 100,
+  retentionMs: number = TEAMS_ONBOARDING_LIMIT_RETENTION_MS,
+): Promise<number> {
+  const cutoff = sql`now()-(${Math.max(0, Math.trunc(retentionMs))}*interval '1 millisecond')`;
+  const rows = await rawRows<{ scope_hash: string }>(
+    db,
+    sql`delete from teams_bot_onboarding_limits where scope_hash in (select scope_hash from teams_bot_onboarding_limits where window_start<${cutoff} and (last_at is null or last_at<${cutoff}) limit ${Math.max(1, Math.trunc(limit))} for update skip locked) returning scope_hash`,
+  );
+  return rows.length;
+}
 export async function installTeamsBot(
   db: Database,
   input: {

@@ -4,17 +4,24 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   TEAMS_SETUP_CONFIRMED_TEXT,
-  TEAMS_TENANT_UNAVAILABLE_TEXT,
   confirmTeamsSetup,
   replyToUnconnectedTeamsTenant,
   sendTeamsOnboarding,
   teamsSelfServeSetupAvailable,
+  teamsTenantUnavailableText,
 } from "../src/integrations/teams-bot";
 import {
+  DurableTeamsOnboardingBudget,
+  TEAMS_ONBOARDING_REMINDER_LIMITS,
   TeamsOnboardingLimiter,
   createTeamsOnboardingBudgets,
   type TeamsOnboardingBudgets,
 } from "../src/integrations/teams-onboarding-limit";
+import {
+  TEAMS_CONNECT_REMINDER_TEXT,
+  TEAMS_SHARED_CONNECT_TEXT,
+  TEAMS_WORK_ACCOUNT_TEXT,
+} from "../src/integrations/teams-experience";
 import {
   mintTeamsProof,
   normalizeTeamsMessage,
@@ -39,9 +46,16 @@ const message = normalizeTeamsMessage({
   text: "Hello",
 })!;
 
-/** Fresh budgets whose connect budget is `connect`. */
-function budgetsOf(connect = new TeamsOnboardingLimiter()): TeamsOnboardingBudgets {
-  return { ...createTeamsOnboardingBudgets(), connect };
+/** A reminder budget that never allows a reminder. */
+function noReminders(): TeamsOnboardingLimiter {
+  return new TeamsOnboardingLimiter({ ...TEAMS_ONBOARDING_REMINDER_LIMITS, actorDailyMax: 0 });
+}
+/** Fresh budgets whose connect budget is `connect` and reminder budget is `reminder`. */
+function budgetsOf(
+  connect = new TeamsOnboardingLimiter(),
+  reminder = new TeamsOnboardingLimiter(TEAMS_ONBOARDING_REMINDER_LIMITS),
+): TeamsOnboardingBudgets {
+  return { ...createTeamsOnboardingBudgets(), connect, reminder };
 }
 
 function transport(receipt: unknown = { id: "sent-1" }) {
@@ -264,37 +278,105 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(activity.text).not.toContain(url.hash.slice(1));
   });
 
-  test("repeat replies are bounded per person and per tenant", async () => {
+  test("repeat cards are bounded per person and per tenant, then reminders answer", async () => {
     const { app, calls } = transport();
     const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });
     const limiter = new TeamsOnboardingLimiter({
       actorCooldownMs: 60_000,
       actorDailyMax: 2,
       tenantDailyMax: 3,
-      processHourlyMax: 100,
+      overallHourlyMax: 100,
       maxTrackedKeys: 100,
     });
-    expect(
-      await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgetsOf(limiter)),
-    ).toBe("connect_link_sent");
-    expect(
-      await replyToUnconnectedTeamsTenant(deps, app, message, "message", budgetsOf(limiter)),
-    ).toBe("onboarding_reply_limited");
-    expect(calls).toHaveLength(1);
-    const others = ["3", "4", "5"].map((n) => ({
+    const reminders = new TeamsOnboardingLimiter({
+      actorCooldownMs: 60_000,
+      actorDailyMax: 5,
+      tenantDailyMax: 2,
+      overallHourlyMax: 100,
+      maxTrackedKeys: 100,
+    });
+    const reply = (m: typeof message) =>
+      replyToUnconnectedTeamsTenant(deps, app, m, "message", budgetsOf(limiter, reminders));
+    expect(await reply(message)).toBe("connect_link_sent");
+    // Within the card's cooldown a short reminder answers instead of silence.
+    expect(await reply(message)).toBe("connect_reminder_sent");
+    // The reminder has its own cooldown.
+    expect(await reply(message)).toBe("onboarding_reply_limited");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.activity).toEqual({
+      type: "message",
+      text: TEAMS_CONNECT_REMINDER_TEXT,
+      textFormat: "markdown",
+    });
+    const others = ["3", "4", "5", "6"].map((n) => ({
       ...message,
       actorId: `10000000-0000-4000-8000-00000000010${n}`,
     }));
+    expect(await reply(others[0]!)).toBe("connect_link_sent");
+    expect(await reply(others[1]!)).toBe("connect_link_sent");
+    // The tenant's cards are used up; its reminders are bounded too.
+    expect(await reply(others[2]!)).toBe("connect_reminder_sent");
+    expect(await reply(others[3]!)).toBe("onboarding_reply_limited");
+    expect(calls).toHaveLength(5);
+    for (const call of calls.filter((c) => !(c.activity as { attachments?: unknown }).attachments))
+      expect(JSON.stringify(call.activity)).not.toContain("teams_setup");
+  });
+
+  test("a reinstall within a day gets a short welcome once its card is used up", async () => {
+    const { app, calls } = transport();
+    const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });
+    const budgets = budgetsOf();
+    expect(await replyToUnconnectedTeamsTenant(deps, app, message, "install", budgets)).toBe(
+      "connect_link_sent",
+    );
+    expect(await replyToUnconnectedTeamsTenant(deps, app, message, "install", budgets)).toBe(
+      "connect_reminder_sent",
+    );
+    expect((calls[1]!.activity as { text: string }).text).toBe(
+      `Welcome to Opengeni. ${TEAMS_CONNECT_REMINDER_TEXT}`,
+    );
+  });
+
+  test("a personal Microsoft account gets a bounded work or school account notice", async () => {
+    const { app, calls } = transport();
+    const consumer = "9188040d-6c67-4c5b-b112-36a304b66dad";
+    const deps = onboardingDeps({
+      teamsBotSelfServeSetupEnabled: true,
+      teamsBotAllowedTenantIds: [consumer],
+    });
+    const m = { ...message, tenantId: consumer };
+    const once = new TeamsOnboardingLimiter({
+      actorCooldownMs: 60_000,
+      actorDailyMax: 1,
+      tenantDailyMax: 100,
+      overallHourlyMax: 100,
+      maxTrackedKeys: 100,
+    });
+    const budgets = { ...budgetsOf(once, once), installWelcome: once };
+    expect(await replyToUnconnectedTeamsTenant(deps, app, m, "install", budgets)).toBe(
+      "work_account_notice_sent",
+    );
+    expect(await replyToUnconnectedTeamsTenant(deps, app, m, "message", budgetsOf())).toBe(
+      "work_account_notice_sent",
+    );
+    expect(calls.map((call) => call.activity)).toEqual([
+      { type: "message", text: TEAMS_WORK_ACCOUNT_TEXT, textFormat: "markdown" },
+      { type: "message", text: TEAMS_WORK_ACCOUNT_TEXT, textFormat: "markdown" },
+    ]);
+    expect(await replyToUnconnectedTeamsTenant(deps, app, m, "message", budgets)).toBe(
+      "onboarding_reply_limited",
+    );
+    // Without self-serve, nothing changes for that tenant.
     expect(
-      await replyToUnconnectedTeamsTenant(deps, app, others[0]!, "message", budgetsOf(limiter)),
-    ).toBe("connect_link_sent");
-    expect(
-      await replyToUnconnectedTeamsTenant(deps, app, others[1]!, "message", budgetsOf(limiter)),
-    ).toBe("connect_link_sent");
-    expect(
-      await replyToUnconnectedTeamsTenant(deps, app, others[2]!, "message", budgetsOf(limiter)),
-    ).toBe("onboarding_reply_limited");
-    expect(calls).toHaveLength(3);
+      await replyToUnconnectedTeamsTenant(
+        onboardingDeps({ teamsBotAllowedTenantIds: [consumer] }),
+        app,
+        m,
+        "message",
+        budgetsOf(),
+      ),
+    ).toBe("setup_not_permitted");
+    expect(calls).toHaveLength(2);
   });
 
   test("install welcomes and not-available notices have their own budgets", async () => {
@@ -304,13 +386,14 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       actorCooldownMs: 60_000,
       actorDailyMax: 1,
       tenantDailyMax: 2,
-      processHourlyMax: 100,
+      overallHourlyMax: 100,
       maxTrackedKeys: 100,
     };
     const budgets: TeamsOnboardingBudgets = {
       connect: new TeamsOnboardingLimiter({ ...limits, actorDailyMax: 6, tenantDailyMax: 100 }),
       installWelcome: new TeamsOnboardingLimiter(limits),
-      unavailableNotice: new TeamsOnboardingLimiter({ ...limits, processHourlyMax: 1 }),
+      unavailableNotice: new TeamsOnboardingLimiter({ ...limits, overallHourlyMax: 1 }),
+      reminder: noReminders(),
     };
     const people = ["1", "2", "3"].map((n) => ({
       ...message,
@@ -335,20 +418,37 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(calls).toHaveLength(5);
   });
 
-  test("group chats and channels never get onboarding replies", async () => {
+  test("group chats and channels get a bounded reminder to message the bot, never a card", async () => {
     const { app, calls } = transport();
     const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });
-    for (const groupChat of [false, true])
-      expect(
-        await replyToUnconnectedTeamsTenant(
-          deps,
-          app,
-          { ...message, personal: false, groupChat } as typeof message,
-          "message",
-          budgetsOf(),
-        ),
-      ).toBe("setup_not_permitted");
-    expect(calls).toEqual([]);
+    const budgets = budgetsOf();
+    const shared = (groupChat: boolean) =>
+      ({ ...message, personal: false, groupChat, threadId: "thread-1" }) as typeof message;
+    expect(await replyToUnconnectedTeamsTenant(deps, app, shared(true), "message", budgets)).toBe(
+      "shared_connect_reminder_sent",
+    );
+    // The reminder has a cooldown per person.
+    expect(await replyToUnconnectedTeamsTenant(deps, app, shared(false), "message", budgets)).toBe(
+      "setup_not_permitted",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.activity).toEqual({
+      type: "message",
+      text: TEAMS_SHARED_CONNECT_TEXT,
+      textFormat: "markdown",
+      replyToId: "thread-1",
+    });
+    // Without self-serve there is nothing to point to.
+    expect(
+      await replyToUnconnectedTeamsTenant(
+        onboardingDeps(),
+        app,
+        shared(true),
+        "message",
+        budgetsOf(),
+      ),
+    ).toBe("setup_not_permitted");
+    expect(calls).toHaveLength(1);
   });
 
   test("a tenant that isn't admitted gets a bounded notice and no setup link", async () => {
@@ -372,9 +472,16 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(calls).toHaveLength(1);
     expect(calls[0]!.activity).toEqual({
       type: "message",
-      text: TEAMS_TENANT_UNAVAILABLE_TEXT,
+      text: teamsTenantUnavailableText(deps.settings),
       textFormat: "markdown",
     });
+  });
+
+  test("the not-available notice names the operator's support address", () => {
+    expect(teamsTenantUnavailableText({ supportEmail: "support@example.test" })).toBe(
+      "Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can request access at support@example.test.",
+    );
+    expect(teamsTenantUnavailableText({})).toContain("contact the Opengeni team");
   });
 
   test("self-serve needs an admitted work or school tenant", () => {
@@ -473,12 +580,41 @@ describe("Teams personal install events", () => {
 });
 
 describe("Teams onboarding limiter", () => {
+  test("a database failure falls back to counting in memory", async () => {
+    const errors: unknown[] = [];
+    const failing = {
+      transaction: async () => {
+        throw new Error("database unavailable");
+      },
+      execute: async () => {
+        throw new Error("database unavailable");
+      },
+    } as unknown as ConstructorParameters<typeof DurableTeamsOnboardingBudget>[0];
+    const budget = new DurableTeamsOnboardingBudget(
+      failing,
+      "connect",
+      {
+        actorCooldownMs: 60_000,
+        actorDailyMax: 1,
+        tenantDailyMax: 10,
+        overallHourlyMax: 10,
+        maxTrackedKeys: 10,
+      },
+      (error) => errors.push(error),
+    );
+    expect(await budget.tryReserve("T", "A")).toBe(true);
+    expect(await budget.tryReserve("T", "A")).toBe(false);
+    await budget.release("T", "A");
+    expect(await budget.tryReserve("T", "A")).toBe(true);
+    expect(errors).toHaveLength(4);
+  });
+
   test("cooldown, daily caps and the process cap", () => {
     const limiter = new TeamsOnboardingLimiter({
       actorCooldownMs: 1_000,
       actorDailyMax: 3,
       tenantDailyMax: 100,
-      processHourlyMax: 5,
+      overallHourlyMax: 5,
       maxTrackedKeys: 100,
     });
     expect(limiter.tryReserve("T", "A", 0)).toBe(true);
@@ -493,7 +629,7 @@ describe("Teams onboarding limiter", () => {
       actorCooldownMs: 1_000,
       actorDailyMax: 3,
       tenantDailyMax: 100,
-      processHourlyMax: 2,
+      overallHourlyMax: 2,
       maxTrackedKeys: 100,
     });
     expect(fresh.tryReserve("T1", "A", 0)).toBe(true);
@@ -507,7 +643,7 @@ describe("Teams onboarding limiter", () => {
       actorCooldownMs: 10_000,
       actorDailyMax: 1,
       tenantDailyMax: 1,
-      processHourlyMax: 1,
+      overallHourlyMax: 1,
       maxTrackedKeys: 100,
     });
     expect(limiter.tryReserve("T", "A", 0)).toBe(true);
@@ -526,7 +662,7 @@ describe("Teams onboarding limiter", () => {
       actorCooldownMs: 1_000,
       actorDailyMax: 3,
       tenantDailyMax: 100,
-      processHourlyMax: 1_000,
+      overallHourlyMax: 1_000,
       maxTrackedKeys: 10,
     });
     for (let n = 0; n < 50; n += 1) expect(limiter.tryReserve(`T${n}`, "A", 0)).toBe(true);

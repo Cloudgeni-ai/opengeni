@@ -228,23 +228,33 @@ that account instead. A refused account link from the plugins page
 (`link_opengeni_account_linked`) tells the person to unlink in the Teams
 integration and get a new link.
 
-Replies to tenants that have not connected are bounded on each API replica, in
-separate budgets so one kind can't use up another:
+Replies to tenants that have not connected are bounded across every API
+replica, in separate budgets so one kind can't use up another:
 
 - Connect cards for people who message the bot: one per person per ten minutes,
   six per person and 200 per tenant per day, 2,000 per hour overall.
 - Welcomes when someone installs the app: one per person and 25 per tenant per
   day, 500 per hour overall. A tenant that pre-installs the app for everyone
-  gets only a few.
+  gets only a few cards.
+- Short text reminders, once a person's or tenant's cards are used up: one per
+  person per minute, 30 per person and 1,000 per tenant per day, 5,000 per hour
+  overall. They carry no card or identity proof and point to `help`, which
+  always answers with the Connect your organization card. The work or school
+  account notice for personal Microsoft accounts uses the card budget, then
+  this one.
 - With self-serve on, people in a tenant that isn't admitted get a short
   not-available notice when they message the bot: one per person and 20 per
   tenant per day, 200 per hour overall, never for installs. With it off, such
   messages are ignored as before.
 
-The counters are in memory, so the limits apply per replica and reset on
-restart. A reply Teams clearly never received (refused, throttled or
-unreachable) doesn't count. Across replicas, an install's welcome is claimed
-once in the database (see [In-Teams experience](#in-teams-experience)).
+The counts are kept in the database (`teams_bot_onboarding_limits`, migration
+`1296_teams_bot_onboarding_limits.sql`): content-free rows keyed by a hash of
+the budget and the person, tenant or deployment, using the database clock, and
+removed two days after their window. A replica that can't reach the database
+counts in its own memory until it can, so replies stay bounded and still go
+out. A reply Teams clearly never received (refused, throttled or unreachable)
+doesn't count. An install's welcome is also claimed once in the database (see
+[In-Teams experience](#in-teams-experience)).
 
 ### Entra app configuration
 
@@ -341,38 +351,48 @@ prompt starters are ordinary messages to the agent.
 
 Store submission gate: don't submit until every listed command and prompt
 starter gets a reply with a way forward in every tenant and account state.
-With self-serve setup on (`OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED`), a
-person in an admitted work or school tenant that isn't connected gets the
-Connect your organization card when installing the app and for 1:1 messages
-other than `help` and `unlink`, and a 1:1 message from a tenant that isn't
-admitted gets the not-available notice. Today these cases still get no reply or
-no way forward:
+The Store configuration is `OPENGENI_TEAMS_BOT_ENABLED=true` (every tenant is
+admitted), self-serve setup on (`OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED`)
+and the personal-only package. In it:
 
-- In an admitted tenant that isn't connected, `help` and `unlink` reply without a way
-  forward: help says the organization must connect Opengeni but carries no
-  Connect your organization card, and unlink says the account isn't linked.
-- The not-available notice tells the admin to contact the Opengeni team but
-  gives no contact route.
-- With self-serve setup off, a tenant that isn't admitted gets no reply at all,
-  and an admitted tenant that isn't connected answers only `help` and `unlink`:
-  `link` and prompt starters from anyone other than a setup administrator get
-  no reply, and the welcome gives no way to sign up or get access.
-- Installing the app in a tenant that isn't admitted sends no welcome; the
-  not-available notice only answers a message.
-- Onboarding replies are limited per person, per tenant and per process; once
-  a limit is spent, further messages from a tenant that isn't connected get no
-  reply.
-- A Microsoft personal (consumer) account's tenant can't be connected through
-  self-serve setup, so `link` and prompt starters get no reply and the welcome
-  gives no way forward.
-- In a tenant that isn't connected, `link` and prompts sent in a group chat get
-  no reply.
-- A linked person whose workspace access doesn't allow starting chats gets no
-  reply to prompt starters.
-- A group chat that isn't on the allowlist answers nothing, including `help`.
+- A person in a work or school tenant that isn't connected gets the Connect
+  your organization card when installing the app and for 1:1 messages. `help`
+  and `unlink` carry the same card (`help` with the usual help text first).
+  Non-admins are told to ask their admin to message Opengeni in Teams and
+  connect it.
+- Once a person's or tenant's cards are used up, a short text reminder answers
+  instead: "Your organization hasn't connected Opengeni yet. Send **help** to
+  see how to connect it." (after "Welcome to Opengeni." for an install).
+  `help` is never limited, so it always answers with the card.
+- A personal Microsoft account (the consumer tenant) is told on install, for
+  messages, and in `help` and `unlink`, that Opengeni needs a work or school
+  account and to sign in to Teams with one.
+- A linked person whose workspace access doesn't allow starting chats is told
+  so and asked to get access from an admin of the connected workspace.
+- Onboarding replies are limited per person, per tenant and across the
+  deployment, counted in the database (`teams_bot_onboarding_limits`) so every
+  API replica shares them; a replica that can't reach the database counts in
+  its own memory instead. Connect cards: one per person per 10 minutes, 6 a
+  day, 200 per tenant a day, 2,000 an hour overall. Install cards: 1 per person
+  a day, 25 per tenant a day, 500 an hour. Reminders: one per person a minute,
+  30 a day, 1,000 per tenant a day, 5,000 an hour. A person who exceeds both
+  their card and reminder budgets gets no reply until the next window.
 
-Keep the package personal-only (the default) until conversations that aren't
-enabled get a reply.
+Outside the Store configuration, these cases still have gaps:
+
+- A tenant that isn't admitted (`OPENGENI_TEAMS_BOT_ENABLED` off and not on
+  the tenant allowlist) gets the not-available notice for a 1:1 message, once
+  a day per person. It names `OPENGENI_SUPPORT_EMAIL` as the contact when that
+  is set; installing the app there sends no welcome.
+- With self-serve setup off, an admitted tenant that isn't connected answers
+  only `help` and `unlink` (and the welcome), which name
+  `OPENGENI_SUPPORT_EMAIL` when set; `link` and prompt starters from anyone
+  other than a setup administrator get no reply.
+- In shared conversations (not in the personal-only package): a mention in a
+  group chat or channel that isn't on the allowlist gets "Opengeni isn't turned
+  on in this conversation", and with self-serve setup on, a mention in a tenant
+  that isn't connected gets a reminder to message the bot directly. Both come
+  from the reminder budget.
 
 The output directory must not exist. The generator writes `manifest.json`,
 `color.png` (192 × 192), and `outline.png` (32 × 32, white on transparent),

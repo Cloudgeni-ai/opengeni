@@ -1,19 +1,30 @@
+import {
+  pruneTeamsOnboardingLimits,
+  releaseTeamsOnboardingReply,
+  reserveTeamsOnboardingReply,
+  type Database,
+  type TeamsOnboardingWindow,
+} from "@opengeni/db";
+
 /**
  * Bounds the replies the bot sends to people in Teams organizations that have
  * not connected Opengeni (or are not admitted yet). Any Microsoft tenant can
  * message a Store app, so these replies must not answer every message forever.
  *
  * Per person: one reply per cooldown and a daily cap. Per tenant: a daily cap.
- * Per process: an hourly cap, so many tenants together stay bounded. Each kind
- * of reply has its own budget (`createTeamsOnboardingBudgets`). The
- * tables are size-bounded; this is abuse protection for one API replica, not a
- * billing meter, and resets on restart.
+ * Overall: an hourly cap, so many tenants together stay bounded. Each kind of
+ * reply has its own budget (`createTeamsOnboardingBudgets`). Budgets are
+ * counted in the database across every API replica; when the database can't
+ * be reached, each replica falls back to counting in its own memory. This is
+ * abuse protection, not a billing meter.
  */
 export type TeamsOnboardingLimits = {
   actorCooldownMs: number;
   actorDailyMax: number;
   tenantDailyMax: number;
-  processHourlyMax: number;
+  /** Across the deployment; per process when counted in memory. */
+  overallHourlyMax: number;
+  /** How many people and tenants a process tracks when counting in memory. */
   maxTrackedKeys: number;
 };
 
@@ -21,7 +32,7 @@ export const DEFAULT_TEAMS_ONBOARDING_LIMITS: TeamsOnboardingLimits = {
   actorCooldownMs: 10 * 60_000,
   actorDailyMax: 6,
   tenantDailyMax: 200,
-  processHourlyMax: 2_000,
+  overallHourlyMax: 2_000,
   maxTrackedKeys: 20_000,
 };
 /** Welcome cards sent because someone installed the app, not because they wrote. */
@@ -30,7 +41,7 @@ export const TEAMS_INSTALL_WELCOME_LIMITS: TeamsOnboardingLimits = {
   actorDailyMax: 1,
   // A tenant can pre-install the app for every user; only a few get a welcome.
   tenantDailyMax: 25,
-  processHourlyMax: 500,
+  overallHourlyMax: 500,
   maxTrackedKeys: 20_000,
 };
 /** Not-available notices for tenants that aren't admitted yet. */
@@ -38,7 +49,19 @@ export const TEAMS_UNAVAILABLE_NOTICE_LIMITS: TeamsOnboardingLimits = {
   actorCooldownMs: 24 * 60 * 60_000,
   actorDailyMax: 1,
   tenantDailyMax: 20,
-  processHourlyMax: 200,
+  overallHourlyMax: 200,
+  maxTrackedKeys: 20_000,
+};
+/**
+ * Short text reminders with no card, sent instead of silence once a person's
+ * or tenant's cards are used up. They point to help, which always answers
+ * with the way forward, so they are cheap and can be more generous.
+ */
+export const TEAMS_ONBOARDING_REMINDER_LIMITS: TeamsOnboardingLimits = {
+  actorCooldownMs: 60_000,
+  actorDailyMax: 30,
+  tenantDailyMax: 1_000,
+  overallHourlyMax: 5_000,
   maxTrackedKeys: 20_000,
 };
 
@@ -47,7 +70,16 @@ const HOUR_MS = 60 * 60_000;
 
 type Window = { start: number; count: number; last: number };
 
-export class TeamsOnboardingLimiter {
+/** One kind of onboarding reply's budget. */
+export interface TeamsOnboardingBudget {
+  /** Reserves one reply when every limit allows it; otherwise reserves nothing. */
+  tryReserve(tenantId: string, actorId: string): boolean | Promise<boolean>;
+  /** Gives back a reservation whose reply Teams clearly never received. */
+  release(tenantId: string, actorId: string): void | Promise<void>;
+}
+
+/** Counts one process's replies in memory. */
+export class TeamsOnboardingLimiter implements TeamsOnboardingBudget {
   private readonly actors = new Map<string, Window>();
   private readonly tenants = new Map<string, Window>();
   private process: Window = { start: 0, count: 0, last: 0 };
@@ -65,7 +97,7 @@ export class TeamsOnboardingLimiter {
       (actor.count > 0 && now - actor.last < this.limits.actorCooldownMs) ||
       actor.count >= this.limits.actorDailyMax ||
       tenant.count >= this.limits.tenantDailyMax ||
-      this.process.count >= this.limits.processHourlyMax
+      this.process.count >= this.limits.overallHourlyMax
     )
       return false;
     for (const window of [actor, tenant, this.process]) {
@@ -113,6 +145,67 @@ export class TeamsOnboardingLimiter {
     }
   }
 }
+
+/**
+ * Counts replies in the database, so every API replica shares one budget.
+ * When the database fails, the reply is counted in this process's memory
+ * instead: abuse protection stays in place and the person still gets an
+ * answer.
+ */
+export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
+  private readonly fallback: TeamsOnboardingLimiter;
+
+  constructor(
+    private readonly db: Database,
+    private readonly name: string,
+    private readonly limits: TeamsOnboardingLimits,
+    private readonly onError: (error: unknown) => void = () => {},
+  ) {
+    this.fallback = new TeamsOnboardingLimiter(limits);
+  }
+
+  async tryReserve(tenantId: string, actorId: string): Promise<boolean> {
+    const windows = this.windows(tenantId, actorId);
+    let reserved: boolean;
+    try {
+      reserved = await reserveTeamsOnboardingReply(this.db, windows);
+    } catch (error) {
+      this.onError(error);
+      return this.fallback.tryReserve(tenantId, actorId);
+    }
+    if (reserved)
+      void pruneTeamsOnboardingLimits(this.db).catch(() => {
+        // Pruning is housekeeping; the next reply tries again.
+      });
+    return reserved;
+  }
+
+  async release(tenantId: string, actorId: string): Promise<void> {
+    const [actor, ...rest] = this.windows(tenantId, actorId);
+    try {
+      await releaseTeamsOnboardingReply(this.db, actor!, rest);
+    } catch (error) {
+      this.onError(error);
+      this.fallback.release(tenantId, actorId);
+    }
+  }
+
+  /** The person's window first, then the tenant's and the deployment's. */
+  private windows(tenantId: string, actorId: string): TeamsOnboardingWindow[] {
+    const tenant = tenantId.toLowerCase();
+    const prefix = `teams-onboarding\n${this.name}`;
+    return [
+      {
+        key: `${prefix}\nactor\n${tenant}\n${actorId.toLowerCase()}`,
+        spanMs: DAY_MS,
+        max: this.limits.actorDailyMax,
+        cooldownMs: this.limits.actorCooldownMs,
+      },
+      { key: `${prefix}\ntenant\n${tenant}`, spanMs: DAY_MS, max: this.limits.tenantDailyMax },
+      { key: `${prefix}\noverall`, spanMs: HOUR_MS, max: this.limits.overallHourlyMax },
+    ];
+  }
+}
 /**
  * Separate budgets, so notices for tenants that aren't admitted and welcomes
  * triggered by installs can never use up the replies to people in admitted
@@ -120,16 +213,36 @@ export class TeamsOnboardingLimiter {
  */
 export type TeamsOnboardingBudgets = {
   /** Connect cards for people who message the bot. */
-  connect: TeamsOnboardingLimiter;
+  connect: TeamsOnboardingBudget;
   /** Connect cards for people who just installed the app. */
-  installWelcome: TeamsOnboardingLimiter;
+  installWelcome: TeamsOnboardingBudget;
   /** Not-available notices; never sent for installs. */
-  unavailableNotice: TeamsOnboardingLimiter;
+  unavailableNotice: TeamsOnboardingBudget;
+  /** Short reminders once a person's or tenant's cards are used up. */
+  reminder: TeamsOnboardingBudget;
 };
-export function createTeamsOnboardingBudgets(): TeamsOnboardingBudgets {
+const BUDGET_LIMITS = {
+  connect: DEFAULT_TEAMS_ONBOARDING_LIMITS,
+  installWelcome: TEAMS_INSTALL_WELCOME_LIMITS,
+  unavailableNotice: TEAMS_UNAVAILABLE_NOTICE_LIMITS,
+  reminder: TEAMS_ONBOARDING_REMINDER_LIMITS,
+} as const satisfies Record<keyof TeamsOnboardingBudgets, TeamsOnboardingLimits>;
+/**
+ * The budgets, counted in `db` across replicas, or in this process's memory
+ * without one.
+ */
+export function createTeamsOnboardingBudgets(
+  db?: Database,
+  onError?: (error: unknown) => void,
+): TeamsOnboardingBudgets {
+  const budget = (name: keyof TeamsOnboardingBudgets) =>
+    db
+      ? new DurableTeamsOnboardingBudget(db, name, BUDGET_LIMITS[name], onError)
+      : new TeamsOnboardingLimiter(BUDGET_LIMITS[name]);
   return {
-    connect: new TeamsOnboardingLimiter(DEFAULT_TEAMS_ONBOARDING_LIMITS),
-    installWelcome: new TeamsOnboardingLimiter(TEAMS_INSTALL_WELCOME_LIMITS),
-    unavailableNotice: new TeamsOnboardingLimiter(TEAMS_UNAVAILABLE_NOTICE_LIMITS),
+    connect: budget("connect"),
+    installWelcome: budget("installWelcome"),
+    unavailableNotice: budget("unavailableNotice"),
+    reminder: budget("reminder"),
   };
 }

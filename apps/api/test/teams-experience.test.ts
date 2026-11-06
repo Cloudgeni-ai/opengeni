@@ -9,7 +9,12 @@ import {
   teamsMarkdownParts,
   teamsNoticeCard,
   teamsAccountReply,
+  teamsNotLinkedReply,
   teamsWelcome,
+  TEAMS_CONNECT_REMINDER_TEXT,
+  TEAMS_CONNECT_TEXT,
+  TEAMS_SHARED_CONNECT_TEXT,
+  TEAMS_WORK_ACCOUNT_TEXT,
   type TeamsExperienceState,
 } from "../src/integrations/teams-experience";
 import { normalizeTeamsFeedback, teamsPersonalInstall } from "../src/integrations/teams-protocol";
@@ -100,6 +105,38 @@ describe("Teams welcome and help", () => {
       command: "unlink confirm",
     });
     expect(teamsCommand("unlink confirm")).toBe("unlink_confirm");
+  });
+  test("in an organization that isn't connected, help and unlink carry the way to connect it", () => {
+    const unconnected = { personal: true, installation: "unavailable", linked: false } as const;
+    const connect = { ...unconnected, setup: "connect" } as const;
+    expect(teamsHelp(connect).text).toContain(TEAMS_CONNECT_TEXT);
+    expect(teamsHelp(connect).action).toEqual({ kind: "link", title: "Connect your organization" });
+    expect(teamsNotLinkedReply(connect)).toEqual({
+      text: `Your Teams account isn't linked to Opengeni.\n\n${TEAMS_CONNECT_TEXT}`,
+      action: { kind: "link", title: "Connect your organization" },
+    });
+    // A welcome may be read much later, so it points to help for a fresh link.
+    expect(teamsWelcome(connect).text).toContain(TEAMS_CONNECT_REMINDER_TEXT);
+    expect(teamsWelcome(connect).action).toBeUndefined();
+    const personalAccount = { ...unconnected, setup: "work_account" } as const;
+    expect(teamsHelp(personalAccount).text).toContain(TEAMS_WORK_ACCOUNT_TEXT);
+    expect(teamsNotLinkedReply(personalAccount).text).toContain(TEAMS_WORK_ACCOUNT_TEXT);
+    expect(teamsHelp(personalAccount).action).toBeUndefined();
+    // Without self-serve setup, the operator's support address is the way forward.
+    expect(teamsHelp({ ...unconnected, supportEmail: "support@example.test" }).text).toContain(
+      "your Microsoft 365 or Teams admin can contact support@example.test",
+    );
+    expect(teamsHelp(unconnected).action).toBeUndefined();
+    // A group chat never gets the button, only where to go.
+    const shared = { ...connect, personal: false };
+    expect(teamsHelp(shared).text).toContain(TEAMS_SHARED_CONNECT_TEXT);
+    expect(teamsHelp(shared).action).toBeUndefined();
+  });
+  test("unlink from someone not linked in a connected organization offers linking", () => {
+    expect(teamsNotLinkedReply({ personal: true, installation: "active", linked: true })).toEqual({
+      text: "Your Teams account isn't linked to Opengeni.\n\nLink your Opengeni account to start.",
+      action: { kind: "link", title: "Link account" },
+    });
   });
   test("help's section headings are spaced from the paragraph above them", () => {
     const { text } = teamsHelp({ personal: true, installation: "active", linked: true });
