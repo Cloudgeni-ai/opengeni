@@ -1929,6 +1929,15 @@ because a recipient is a workspace administrator. See
 [credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
 API/SDK and the transaction-compatible top-up enqueue seam.
 
+Opt-in automatic credit top-ups use the API's
+`apps/api/src/billing-auto-top-up-maintenance.ts` keyset discovery loop and the
+tagged billing webhook handlers. Both construct the same durable payment service
+with `packages/db/src/billing-auto-top-up-notifications.ts` as the shared outbox
+adapter. Fresh-charge activation is independent of recovery: reserved payments
+and undelivered terminal notifications continue reconciling while the feature is
+off. See [automatic credit top-ups](automatic-credit-top-ups.md) for consent,
+canonical PaymentIntent recovery, tax-inclusive caps and the invoice boundary.
+
 Connected subscriptions serve app-origin work on qualifying paid plans, with
 no usage fee. API-origin work refuses them at admission and before model calls;
 omitted API models skip subscription defaults. Origin is inherited by children,
