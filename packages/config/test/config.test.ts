@@ -1898,6 +1898,34 @@ describe("sandbox preparation profiles", () => {
     expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
   });
 
+  test("never uses the built-in local delegation secret behind the shared-key perimeter", async () => {
+    const { resolveFirstPartyDelegationSecret } = await import("../src/index");
+    const builtIn = resolveFirstPartyDelegationSecret(withEnv({}, () => getSettings()));
+    for (const environment of ["local", "test"]) {
+      const perimeter = withEnv(
+        {
+          OPENGENI_ENVIRONMENT: environment,
+          OPENGENI_AUTH_REQUIRED: "true",
+          OPENGENI_ACCESS_KEY: "local-shared-key",
+        },
+        () => getSettings(),
+      );
+      expect(perimeter.productAccessMode).toBe("local");
+      expect(resolveFirstPartyDelegationSecret(perimeter)).toBe("local-shared-key");
+      expect(resolveFirstPartyDelegationSecret(perimeter)).not.toBe(builtIn);
+      const explicit = withEnv(
+        {
+          OPENGENI_ENVIRONMENT: environment,
+          OPENGENI_AUTH_REQUIRED: "true",
+          OPENGENI_ACCESS_KEY: "local-shared-key",
+          OPENGENI_DELEGATION_SECRET: "operator-secret",
+        },
+        () => getSettings(),
+      );
+      expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+    }
+  });
+
   test("parses deployment first-party tool defaults and allowed ceiling", async () => {
     const { resolveFirstPartyMcpToolPolicy } = await import("../src/index");
     const settings = withEnv(

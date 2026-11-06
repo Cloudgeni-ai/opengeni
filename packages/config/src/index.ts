@@ -6615,15 +6615,18 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegati
 /**
  * First-party session tools need a shared HMAC identity even in the unauthenticated
  * local product mode. A fixed local-only value is no broader than that mode's
- * existing access boundary, while configured and managed deployments continue to
+ * existing access boundary, so it is used only when there is no shared-key
+ * perimeter: once `authRequired` is on, a delegated bearer passes that perimeter,
+ * so its signing secret must be one the deployment keeps private (an explicit
+ * secret, otherwise the deployment access key). Managed deployments continue to
  * require an operator-provided secret.
  */
 export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
-  const configuredAccessKey = settings.accessKey?.trim();
-  if (settings.productAccessMode === "configured" && settings.authRequired && configuredAccessKey) {
-    return configuredAccessKey;
+  if (settings.authRequired) {
+    const accessKey = settings.accessKey?.trim();
+    return settings.productAccessMode !== "managed" && accessKey ? accessKey : undefined;
   }
   return settings.productAccessMode === "local" &&
     (settings.environment === "local" || settings.environment === "test")
