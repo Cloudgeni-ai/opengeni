@@ -30,6 +30,7 @@ import {
   eventOccurrenceProducerKey,
   getScheduledTask,
   githubInstallationRouteKey,
+  listGitHubInstallationAccessForWorkspace,
   markEventOccurrenceStarted,
   withBillingOriginOverride,
   type DbClient,
@@ -45,6 +46,7 @@ import {
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
+import { settleGitHubInstallationRepositorySyncs } from "../src/github-installation-sync";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import {
   addMcpEventSource,
@@ -2016,13 +2018,14 @@ describe("GitHub event sources", () => {
   }
 
   async function githubFixture(
-    app: ReturnType<typeof fakeGitHubApp>,
-    options: { webhookBaseUrl?: string } = {},
+    app: { api: AppDependencies["githubAppApi"] },
+    options: { webhookBaseUrl?: string; enabled?: boolean } = {},
   ) {
+    const { enabled = true, ...rest } = options;
     const f = await fixture({
-      enabled: true,
+      enabled,
       github: { webhookSecret, appSlug: "opengeni-agent", api: app.api },
-      ...options,
+      ...rest,
     });
     const bind = async (installationId: number, repositoryIds: number[]) => {
       const checkedAt = new Date();
@@ -2270,6 +2273,139 @@ describe("GitHub event sources", () => {
     expect(await deliver(second, 801)).toEqual({ deliveries: 0 });
     expect((await f.addSource()).status).toBe(201);
     expect(await deliver(second, 801)).toEqual({ deliveries: 1 });
+  });
+
+  test("installation webhooks keep the workspace's repositories in line with GitHub", async () => {
+    const installationId = installation();
+    const github = { repositoryIds: [601, 602], suspended: false, listCalls: 0 };
+    const repository = (id: number) => ({
+      id,
+      installationId,
+      fullName: `acme/repo-${id}`,
+      name: `repo-${id}`,
+      private: true,
+      htmlUrl: `https://github.com/acme/repo-${id}`,
+      cloneUrl: `https://github.com/acme/repo-${id}.git`,
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    });
+    // Event triggers are off: the App's installation events still apply.
+    const f = await githubFixture(
+      {
+        api: {
+          ...fakeGitHubApp([]).api,
+          getInstallation: async ({ installationId: requested }) =>
+            requested === installationId
+              ? {
+                  installationId,
+                  accountId: 9001,
+                  accountLogin: "acme",
+                  accountType: "Organization",
+                  suspended: github.suspended,
+                }
+              : null,
+          listRepositories: async () => {
+            github.listCalls += 1;
+            return github.repositoryIds.map(repository);
+          },
+        },
+      },
+      { enabled: false },
+    );
+    await f.bind(installationId, [601, 602]);
+    const allowed = async () =>
+      (await listGitHubInstallationAccessForWorkspace(db.db, f.workspace.id))
+        .find((binding) => binding.installationId === installationId)!
+        .repositoryIds.sort((left, right) => left - right);
+    const deliver = async (event: string, payload: Record<string, unknown>, secret?: string) => {
+      const response = await f.app.request(
+        "/v1/webhooks/github",
+        signed(
+          JSON.stringify({ installation: { id: installationId }, ...payload }),
+          event,
+          crypto.randomUUID(),
+          secret,
+        ),
+      );
+      await settleGitHubInstallationRepositorySyncs();
+      return response;
+    };
+
+    // A removal applies before GitHub is answered.
+    github.repositoryIds = [601];
+    const removed = await f.app.request(
+      "/v1/webhooks/github",
+      signed(
+        JSON.stringify({
+          action: "removed",
+          installation: { id: installationId },
+          repository_selection: "selected",
+          repositories_added: [],
+          repositories_removed: [{ id: 602 }],
+        }),
+        "installation_repositories",
+      ),
+    );
+    expect(removed.status).toBe(200);
+    expect(await allowed()).toEqual([601]);
+    await settleGitHubInstallationRepositorySyncs();
+
+    // An addition is read from GitHub, never taken from the delivery.
+    github.repositoryIds = [601, 603];
+    expect(
+      (
+        await deliver("installation_repositories", {
+          action: "added",
+          repository_selection: "selected",
+          repositories_added: [{ id: 603 }, { id: 999 }],
+          repositories_removed: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect(await allowed()).toEqual([601, 603]);
+
+    // A forged delivery changes nothing.
+    github.repositoryIds = [601];
+    expect(
+      (
+        await deliver(
+          "installation_repositories",
+          { action: "removed", repositories_removed: [{ id: 603 }] },
+          "not-the-secret",
+        )
+      ).status,
+    ).toBe(401);
+    expect(await allowed()).toEqual([601, 603]);
+
+    // "All repositories" now: every repository, including one created later.
+    github.repositoryIds = [601, 603, 604, 605];
+    await deliver("installation_repositories", {
+      action: "added",
+      repository_selection: "all",
+      repositories_added: [{ id: 604 }],
+      repositories_removed: [],
+    });
+    expect(await allowed()).toEqual([601, 603, 604, 605]);
+    github.repositoryIds = [601, 603, 604, 605, 606];
+    await deliver("repository", { action: "created", repository: { id: 606 } });
+    expect(await allowed()).toEqual([601, 603, 604, 605, 606]);
+    github.repositoryIds = [601, 603, 604, 606];
+    await deliver("repository", { action: "deleted", repository: { id: 605 } });
+    expect(await allowed()).toEqual([601, 603, 604, 606]);
+
+    // Suspension leaves the list for when the installation returns; the
+    // binding is unusable through its live lifecycle check meanwhile.
+    github.suspended = true;
+    const callsBeforeSuspend = github.listCalls;
+    await deliver("installation", { action: "unsuspend" });
+    expect(github.listCalls).toBe(callsBeforeSuspend);
+    expect(await allowed()).toEqual([601, 603, 604, 606]);
+    github.suspended = false;
+
+    // An uninstalled App removes everything at once.
+    await deliver("installation", { action: "deleted" });
+    expect(await allowed()).toEqual([]);
   });
 
   test("an App that sends its webhooks elsewhere is left alone", async () => {

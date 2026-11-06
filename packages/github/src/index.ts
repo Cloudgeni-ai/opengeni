@@ -362,6 +362,9 @@ export function buildGitHubAppManifest(input: {
     "pull_request_review_comment",
     "push",
     "release",
+    // New repositories of an "All repositories" installation, which no
+    // installation event reports: workspace allowlists follow them.
+    "repository",
   ];
   if (input.includeCiPermissions) {
     permissions.actions = "read";

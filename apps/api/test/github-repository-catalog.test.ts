@@ -249,6 +249,67 @@ describe("GitHub repository catalog", () => {
       }),
     ).rejects.toThrow("GitHub 502");
   });
+
+  test("a slow GitHub answers a bounded read with the last good list and hands over its answer", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({ freshMs: 60_000, now: time.now });
+    await catalog.readObserved([1], async () => [repo(1)]);
+    time.advance(60_000);
+    const slow = deferred<GitHubRepository[]>();
+    const answered = await catalog.readObserved([1], () => slow.promise, { waitMs: 5 });
+    expect(answered).toMatchObject({ repositories: [repo(1)], stale: true });
+    slow.resolve([repo(1), repo(2)]);
+    expect(await answered.pending).toEqual({
+      repositories: [repo(1), repo(2)],
+      fetchedAt: time.now(),
+    });
+    // The answer is remembered for the next read.
+    expect(await catalog.read([1], async () => [repo(9)])).toEqual([repo(1), repo(2)]);
+
+    // A failure after the wait resolves the hand-over to null, never rejects.
+    time.advance(60_000);
+    const failing = deferred<GitHubRepository[]>();
+    const later = await catalog.readObserved([1], () => failing.promise, { waitMs: 5 });
+    failing.reject(new Error("GitHub 502"));
+    expect(await later.pending).toBeNull();
+
+    // With nothing to answer with, a read waits for GitHub.
+    const first = deferred<GitHubRepository[]>();
+    const waiting = catalog.readObserved([2], () => first.promise, { waitMs: 5 });
+    await Bun.sleep(20);
+    first.resolve([repo(3, 2)]);
+    expect(await waiting).toMatchObject({ repositories: [repo(3, 2)], stale: false });
+  });
+
+  test("an observed read says when GitHub produced the list and marks a fallback stale", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({ freshMs: 60_000, now: time.now });
+    const fetchedAt = time.now();
+    expect(await catalog.readObserved([1], async () => [repo(1)])).toEqual({
+      repositories: [repo(1)],
+      fetchedAt,
+      stale: false,
+    });
+    time.advance(10_000);
+    // A cached answer keeps the time of the GitHub request that produced it.
+    expect(await catalog.readObserved([1], async () => [repo(2)])).toEqual({
+      repositories: [repo(1)],
+      fetchedAt,
+      stale: false,
+    });
+    time.advance(60_000);
+    expect(
+      await catalog.readObserved([1], async () => {
+        throw new Error("GitHub 502");
+      }),
+    ).toEqual({ repositories: [repo(1)], fetchedAt, stale: true });
+    const syncedAt = time.now();
+    expect(await catalog.readObserved([1], async () => [repo(3)], { fresh: true })).toEqual({
+      repositories: [repo(3)],
+      fetchedAt: syncedAt,
+      stale: false,
+    });
+  });
 });
 
 describe("GitHub repository list failures served from the last good list", () => {

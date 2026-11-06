@@ -5620,6 +5620,21 @@ const githubInstallationAuthorityMaxAgeMs = 10 * 60_000;
 export function hasAuditableGitHubInstallationAuthority(
   installation: GitHubInstallationAccess,
 ): boolean {
+  return (
+    installation.repositoryIds.length > 0 &&
+    installation.repositoryIds.every((id) => Number.isSafeInteger(id) && id > 0) &&
+    hasGitHubInstallationOwnerAuthority(installation)
+  );
+}
+
+/**
+ * The owner-authority proof of a binding, whatever its repository allowlist
+ * currently holds. A binding with this proof follows GitHub's repository
+ * selection for the installation (applyGitHubInstallationRepositoryObservation);
+ * one that GitHub has left with no repositories is unusable until GitHub
+ * shares some again, without needing a new proof.
+ */
+export function hasGitHubInstallationOwnerAuthority(installation: GitHubInstallation): boolean {
   const checkedAt = installation.authorityCheckedAt
     ? Date.parse(installation.authorityCheckedAt)
     : Number.NaN;
@@ -5628,8 +5643,6 @@ export function hasAuditableGitHubInstallationAuthority(
     : Number.NaN;
   const common =
     installation.repositoryScope === "selected" &&
-    installation.repositoryIds.length > 0 &&
-    installation.repositoryIds.every((id) => Number.isSafeInteger(id) && id > 0) &&
     installation.githubAccountId !== null &&
     Number.isSafeInteger(installation.githubAccountId) &&
     installation.githubAccountId > 0 &&
@@ -6130,6 +6143,189 @@ export async function deleteGitHubInstallationBinding(
         });
       }
       return rows.length > 0;
+    },
+  );
+}
+
+/**
+ * Every workspace bound to one GitHub App installation, across accounts (the
+ * installation lane of migration 1281: only that installation's binding rows
+ * are visible). Used to apply a verified GitHub webhook to each workspace;
+ * the writes then run in each workspace's own RLS scope.
+ */
+export async function listGitHubInstallationBindingWorkspaces(
+  db: Database,
+  installationId: number,
+): Promise<Array<{ accountId: string; workspaceId: string }>> {
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) return [];
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await tx.execute(
+      sql`select set_config('opengeni.github_installation_id', ${String(installationId)}, true)`,
+    );
+    return await tx
+      .select({
+        accountId: schema.githubInstallations.accountId,
+        workspaceId: schema.githubInstallations.workspaceId,
+      })
+      .from(schema.githubInstallations)
+      .where(eq(schema.githubInstallations.installationId, installationId))
+      .orderBy(schema.githubInstallations.workspaceId);
+  });
+}
+
+/**
+ * What Opengeni learned from GitHub about one installation's repositories.
+ *
+ * - `mirror`: the complete list GitHub returned for the installation, read at
+ *   `observedAt` (taken before the request was sent). It replaces the
+ *   workspace's allowlist, adding repositories GitHub now shares (for an
+ *   "All repositories" installation, every new repository) and dropping the
+ *   rest. A list read before the binding last changed is ignored, so a slow
+ *   or cached read never undoes a newer bind, removal or list.
+ * - `remove`: repositories GitHub reported as no longer shared (or "all", for
+ *   a deleted installation). Removals apply at once, whatever their order,
+ *   and fence out any list read before them.
+ */
+export type GitHubInstallationRepositoryObservation =
+  | { kind: "mirror"; repositoryIds: readonly number[]; observedAt: Date }
+  | { kind: "remove"; repositoryIds: readonly number[] | "all"; observedAt: Date };
+
+export type GitHubInstallationRepositoryObservationResult = {
+  /** False when a mirror was older than the binding and left it unchanged. */
+  applied: boolean;
+  changed: boolean;
+  added: number[];
+  removed: number[];
+  repositoryIds: number[];
+};
+
+/**
+ * Bring one workspace's allowlist for an installation in line with GitHub.
+ *
+ * Only a binding made with an owner-authority proof follows GitHub: the
+ * owner who bound the installation delegated "the repositories this
+ * installation shares", and GitHub's later selection is that delegation. The
+ * proof, its audit fields and the binding's lifecycle checks are untouched;
+ * legacy rows without a proof are left as they are. A workspace never gains a
+ * repository GitHub does not list for the installation. Returns null when the
+ * workspace has no such binding.
+ */
+export async function applyGitHubInstallationRepositoryObservation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    observation: GitHubInstallationRepositoryObservation;
+  },
+): Promise<GitHubInstallationRepositoryObservationResult | null> {
+  const { observation } = input;
+  const observedAtMs = observation.observedAt.getTime();
+  if (!Number.isFinite(observedAtMs)) {
+    throw new Error("GitHub repository observation time is invalid");
+  }
+  const validId = (id: number) => Number.isSafeInteger(id) && id > 0;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.githubInstallations)
+        .where(
+          and(
+            eq(schema.githubInstallations.workspaceId, input.workspaceId),
+            eq(schema.githubInstallations.installationId, input.installationId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!row || !hasGitHubInstallationOwnerAuthority(mapGitHubInstallation(row))) {
+        return null;
+      }
+      const current = (
+        await scopedDb
+          .select({ repositoryId: schema.githubInstallationRepositories.repositoryId })
+          .from(schema.githubInstallationRepositories)
+          .where(
+            and(
+              eq(schema.githubInstallationRepositories.workspaceId, input.workspaceId),
+              eq(schema.githubInstallationRepositories.installationId, input.installationId),
+            ),
+          )
+      ).map((repository) => repository.repositoryId);
+      const currentSet = new Set(current);
+      // GitHub sends a webhook after its change, and a bind's proof read its list
+      // before the bind: a list read at or after the fence is at least as new.
+      if (observation.kind === "mirror" && observedAtMs < row.updatedAt.getTime()) {
+        return {
+          applied: false,
+          changed: false,
+          added: [],
+          removed: [],
+          repositoryIds: [...current].sort((left, right) => left - right),
+        };
+      }
+      let target: Set<number>;
+      if (observation.kind === "mirror") {
+        target = new Set(observation.repositoryIds.filter(validId));
+      } else if (observation.repositoryIds === "all") {
+        target = new Set();
+      } else {
+        const removed = new Set(observation.repositoryIds);
+        target = new Set(current.filter((id) => !removed.has(id)));
+      }
+      const removed = current.filter((id) => !target.has(id));
+      const added = [...target].filter((id) => !currentSet.has(id));
+      for (let offset = 0; offset < removed.length; offset += 1_000) {
+        await scopedDb
+          .delete(schema.githubInstallationRepositories)
+          .where(
+            and(
+              eq(schema.githubInstallationRepositories.workspaceId, input.workspaceId),
+              eq(schema.githubInstallationRepositories.installationId, input.installationId),
+              inArray(
+                schema.githubInstallationRepositories.repositoryId,
+                removed.slice(offset, offset + 1_000),
+              ),
+            ),
+          );
+      }
+      for (let offset = 0; offset < added.length; offset += 1_000) {
+        await scopedDb
+          .insert(schema.githubInstallationRepositories)
+          .values(
+            added.slice(offset, offset + 1_000).map((repositoryId) => ({
+              accountId: row.accountId,
+              workspaceId: input.workspaceId,
+              installationId: input.installationId,
+              repositoryId,
+            })),
+          )
+          .onConflictDoNothing();
+      }
+      const changed = removed.length > 0 || added.length > 0;
+      // `updated_at` is the binding's ordering fence: a mirror read before it
+      // is ignored, and repository lists cached before it are re-read from
+      // GitHub on every API replica. A removal always advances it, so a list
+      // read before the removal can never restore the repository. The fence
+      // moves just past the removal: a list read in the same millisecond may
+      // predate it, so the removal wins the tie.
+      const fenceAtMs = observation.kind === "remove" ? observedAtMs + 1 : observedAtMs;
+      if ((changed || observation.kind === "remove") && fenceAtMs > row.updatedAt.getTime()) {
+        await scopedDb
+          .update(schema.githubInstallations)
+          .set({ updatedAt: new Date(fenceAtMs) })
+          .where(eq(schema.githubInstallations.id, row.id));
+      }
+      return {
+        applied: true,
+        changed,
+        added: added.sort((left, right) => left - right),
+        removed: removed.sort((left, right) => left - right),
+        repositoryIds: [...target].sort((left, right) => left - right),
+      };
     },
   );
 }

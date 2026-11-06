@@ -25,6 +25,25 @@ export type GitHubRepositoryCatalog = {
     load: () => Promise<GitHubRepository[]>,
     options?: GitHubRepositoryCatalogReadOptions,
   ): Promise<GitHubRepository[]>;
+  /** `read`, with when GitHub produced the list and whether it is a stale fallback. */
+  readObserved(
+    installationIds: readonly number[],
+    load: () => Promise<GitHubRepository[]>,
+    options?: GitHubRepositoryCatalogReadOptions,
+  ): Promise<GitHubRepositoryCatalogObservation>;
+};
+
+export type GitHubRepositoryCatalogObservation = {
+  repositories: GitHubRepository[];
+  /** Epoch ms when the GitHub request that produced the list was sent. */
+  fetchedAt: number;
+  /** The last good list, served because GitHub failed or is slow just now. */
+  stale: boolean;
+  /**
+   * GitHub's answer still on its way when a slow read was served the last
+   * good list (`waitMs`). Never rejects; resolves to null on failure.
+   */
+  pending?: Promise<{ repositories: GitHubRepository[]; fetchedAt: number } | null>;
 };
 
 export type GitHubRepositoryCatalogReadOptions = {
@@ -32,6 +51,11 @@ export type GitHubRepositoryCatalogReadOptions = {
   fresh?: boolean;
   /** Epoch ms: lists fetched before this are out of date for this read. */
   notBefore?: number;
+  /**
+   * A passive read with a last good list waits at most this long for GitHub,
+   * then answers with that list and leaves GitHub's answer in `pending`.
+   */
+  waitMs?: number;
 };
 
 export type GitHubRepositoryCatalogOptions = {
@@ -55,7 +79,7 @@ export const GITHUB_REPOSITORY_CATALOG_STALE_IF_ERROR_MS = 30 * 60_000;
 const GITHUB_REPOSITORY_CATALOG_MAX_ENTRIES = 500;
 
 type Entry = { repositories: GitHubRepository[]; fetchedAt: number };
-type Pending = { request: Promise<GitHubRepository[]>; startedAt: number };
+type Pending = { request: Promise<Entry>; startedAt: number };
 
 export function createGitHubRepositoryCatalog(
   options: GitHubRepositoryCatalogOptions = {},
@@ -99,12 +123,12 @@ export function createGitHubRepositoryCatalog(
     key: string,
     load: () => Promise<GitHubRepository[]>,
     startedAt: number,
-  ): Promise<GitHubRepository[]> {
+  ): Promise<Entry> {
     const repositories = await load();
     // A slower, older fetch never replaces a newer list.
     const current = entries.get(key);
     if (!current || current.fetchedAt <= startedAt) remember(key, repositories, startedAt);
-    return repositories;
+    return { repositories, fetchedAt: startedAt };
   }
 
   /**
@@ -115,7 +139,7 @@ export function createGitHubRepositoryCatalog(
     key: string,
     load: () => Promise<GitHubRepository[]>,
     notBefore: number,
-  ): Promise<GitHubRepository[]> {
+  ): Promise<Entry> {
     const pending = inFlight.get(key);
     if (pending && pending.startedAt >= notBefore) return pending.request;
     const startedAt = now();
@@ -126,23 +150,53 @@ export function createGitHubRepositoryCatalog(
     return request;
   }
 
+  async function readObserved(
+    installationIds: readonly number[],
+    load: () => Promise<GitHubRepository[]>,
+    readOptions: GitHubRepositoryCatalogReadOptions = {},
+  ): Promise<GitHubRepositoryCatalogObservation> {
+    const key = [...new Set(installationIds)].sort((left, right) => left - right).join(",");
+    // A sync asks GitHub itself, never a fetch that began before it.
+    if (readOptions.fresh) return { ...(await fetchAndRemember(key, load, now())), stale: false };
+    const notBefore = readOptions.notBefore ?? Number.NEGATIVE_INFINITY;
+    const cached = usable(key);
+    if (cached && cached.fetchedAt >= notBefore && now() - cached.fetchedAt < freshMs) {
+      return { ...cached, stale: false };
+    }
+    try {
+      const request = fetchShared(key, load, notBefore);
+      const waitMs = readOptions.waitMs;
+      // A slow GitHub is an outage-like answer: the last good list stands in.
+      if (cached && waitMs !== undefined) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const slow = new Promise<"slow">((resolve) => {
+          timer = setTimeout(() => resolve("slow"), Math.max(0, waitMs));
+        });
+        const first = await Promise.race([request, slow]).finally(() => clearTimeout(timer));
+        if (first === "slow") {
+          return {
+            ...cached,
+            stale: true,
+            pending: request.then(
+              (entry) => entry,
+              () => null,
+            ),
+          };
+        }
+        return { ...first, stale: false };
+      }
+      return { ...(await request), stale: false };
+    } catch (error) {
+      const fallback = usable(key);
+      if (fallback && serveStaleOn(error)) return { ...fallback, stale: true };
+      throw error;
+    }
+  }
+
   return {
-    async read(installationIds, load, readOptions = {}) {
-      const key = [...new Set(installationIds)].sort((left, right) => left - right).join(",");
-      // A sync asks GitHub itself, never a fetch that began before it.
-      if (readOptions.fresh) return await fetchAndRemember(key, load, now());
-      const notBefore = readOptions.notBefore ?? Number.NEGATIVE_INFINITY;
-      const cached = usable(key);
-      if (cached && cached.fetchedAt >= notBefore && now() - cached.fetchedAt < freshMs) {
-        return cached.repositories;
-      }
-      try {
-        return await fetchShared(key, load, notBefore);
-      } catch (error) {
-        const fallback = usable(key);
-        if (fallback && serveStaleOn(error)) return fallback.repositories;
-        throw error;
-      }
+    readObserved,
+    async read(installationIds, load, readOptions) {
+      return (await readObserved(installationIds, load, readOptions)).repositories;
     },
   };
 }

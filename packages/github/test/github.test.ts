@@ -66,6 +66,7 @@ describe("GitHub app manifest helpers", () => {
       "pull_request_review_comment",
       "push",
       "release",
+      "repository",
       "check_run",
       "check_suite",
       "workflow_run",

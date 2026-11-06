@@ -5966,7 +5966,9 @@ describe("API component integration", () => {
               suspended: false,
             }
           : null,
-      listRepositories: async () => [adminRepository, readOnlyRepository],
+      // The installation shares only the admin repository; the workspace
+      // allowlists follow GitHub's list, so the read-only one is never usable.
+      listRepositories: async () => [adminRepository],
     };
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
