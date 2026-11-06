@@ -46,32 +46,70 @@ export async function connectMcpStreamableHttpClient(
 }
 
 /**
- * Run `use` against a connected client, then close it. A server can answer the
- * 2026-07-28 `server/discover` probe yet send 2025-era results without the
- * required `resultType`, so every result fails validation. Such a server is a
- * 2025-era server in practice: reconnect it over the 2025 handshake and run
- * `use` once more instead of losing its results.
+ * A connected client that can be used many times before it is closed. A
+ * server can answer the 2026-07-28 `server/discover` probe yet send 2025-era
+ * results without the required `resultType`, so every result fails
+ * validation. Such a server is a 2025-era server in practice: the session
+ * reconnects it over the 2025 handshake once and runs `use` again instead of
+ * losing its results; later uses go straight to the 2025-era client.
  */
+export type McpStreamableHttpSession = {
+  use<T>(use: (client: McpStreamableHttpClient) => Promise<T>): Promise<T>;
+  /**
+   * Close the client. `terminate` first ends the server-side session with an
+   * HTTP DELETE, as a client that no longer needs a session should.
+   */
+  close(options?: { terminate?: boolean }): Promise<void>;
+};
+
+export async function openMcpStreamableHttpSession(
+  input: McpStreamableHttpConnectInput,
+): Promise<McpStreamableHttpSession> {
+  let client = await connectMcpStreamableHttpClient(input);
+  let legacy: Promise<McpStreamableHttpClient> | null = null;
+  const toLegacy = (modern: McpStreamableHttpClient) => {
+    legacy ??= (async () => {
+      await modern.close().catch(() => undefined);
+      try {
+        client = await connectOnce(input, "legacy");
+        return client;
+      } catch (error) {
+        throw legacyMcpClientError(error);
+      }
+    })();
+    return legacy;
+  };
+  return {
+    async use(use) {
+      const used = client;
+      try {
+        return await use(used);
+      } catch (error) {
+        if (!isModernEraResultMismatch(used, error)) throw error;
+      }
+      return await use(await toLegacy(used));
+    },
+    async close(options = {}) {
+      const closing = client;
+      if (options.terminate) {
+        const transport = closing.transport as StreamableHTTPClientTransport | undefined;
+        await transport?.terminateSession?.().catch(() => undefined);
+      }
+      await closing.close().catch(() => undefined);
+    },
+  };
+}
+
+/** Run `use` against a connected client, then close it. */
 export async function withMcpStreamableHttpClient<T>(
   input: McpStreamableHttpConnectInput,
   use: (client: McpStreamableHttpClient) => Promise<T>,
 ): Promise<T> {
-  let client = await connectMcpStreamableHttpClient(input);
+  const session = await openMcpStreamableHttpSession(input);
   try {
-    try {
-      return await use(client);
-    } catch (error) {
-      if (!isModernEraResultMismatch(client, error)) throw error;
-    }
-    await client.close().catch(() => undefined);
-    try {
-      client = await connectOnce(input, "legacy");
-    } catch (error) {
-      throw legacyMcpClientError(error);
-    }
-    return await use(client);
+    return await session.use(use);
   } finally {
-    await client.close().catch(() => undefined);
+    await session.close();
   }
 }
 
