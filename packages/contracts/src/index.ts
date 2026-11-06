@@ -7348,6 +7348,18 @@ export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
   "opengeni_attachment_image_max_dimension" as const;
 /** Bound stamped on newly accepted user messages with attachments. */
 export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
+/**
+ * Private durable field on user history items: image formats that model
+ * providers cannot read but whose attachments this message shows the model as
+ * a converted JPEG ("heif": HEIC/HEIF photos). Stamped when the message is
+ * accepted, so supporting a format later never adds an image to a message an
+ * earlier request already sent. Items without it show such files by reference
+ * only.
+ */
+export const MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD =
+  "opengeni_attachment_converted_image_formats" as const;
+/** Converted formats stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS: readonly string[] = ["heif"];
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
