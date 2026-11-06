@@ -25,7 +25,11 @@ import type { NativeVoiceInput } from "../voice-input";
 import type { NativePickedFile } from "../adapters";
 import { useNativeTimelineMessages, type NativeTimelineMessages } from "./messages";
 import { useComposerImagePaste } from "./paste";
-import { composerAlternateSend, composerTrailingMode } from "./composer-state";
+import {
+  composerAlternateSend,
+  composerTrailingMode,
+  textFieldSelectionColors,
+} from "./composer-state";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -268,7 +272,7 @@ export function SessionComposer(props: SessionComposerProps) {
       placeholderTextColor={c["fg-subtle"]}
       multiline
       autoFocus={props.autoFocus}
-      selectionColor={c.accent}
+      {...textFieldSelectionColors(c, Platform.OS)}
       onContentSizeChange={(event) =>
         setHeight(Math.min(150, Math.max(line, event.nativeEvent.contentSize.height)))
       }

@@ -47,7 +47,18 @@ export type NumericBudget = {
   direction: "maximum" | "minimum";
   limit: number;
   unit: "ms" | "fps" | "score" | "bytes";
+  /** Fewest samples a release bundle may report for this budget. */
+  minimumSamples: number;
 };
+
+/**
+ * Real Steer cancellations per release acceptance run. Every Steer costs two
+ * real model turns in one growing session, so the count drives the run's
+ * model-subscription usage; 100 used up a whole weekly Codex quota. Twenty
+ * Steers plus the hostile Pause still exercise the worst-case bound on every
+ * candidate, and failures recur across releases.
+ */
+export const MINIMUM_STEER_REPETITIONS = 20;
 
 export const NUMERIC_PERFORMANCE_BUDGETS: Readonly<Record<string, NumericBudget>> = {
   "performance.capture-api-response": {
@@ -55,17 +66,21 @@ export const NUMERIC_PERFORMANCE_BUDGETS: Readonly<Record<string, NumericBudget>
     direction: "maximum",
     limit: 400,
     unit: "ms",
+    minimumSamples: 100,
   },
   "performance.capture-usable-workbench": {
     statistic: "p95",
     direction: "maximum",
     limit: 10_000,
     unit: "ms",
+    minimumSamples: 100,
   },
   "performance.control-cancellation": {
     statistic: "worst",
     direction: "maximum",
     limit: 4_000,
     unit: "ms",
+    // Every Steer plus the final Pause.
+    minimumSamples: MINIMUM_STEER_REPETITIONS + 1,
   },
 };

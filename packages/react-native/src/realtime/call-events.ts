@@ -1,4 +1,9 @@
-import type { NativeCallAudioRoute, NativeCallEvent, NativeIncomingCall } from "./native-call";
+import type {
+  NativeCallAudioRoute,
+  NativeCallEvent,
+  NativeCallRouteChangeReason,
+  NativeIncomingCall,
+} from "./native-call";
 
 /** A call event as the native module sends it. */
 export type RawNativeCallEvent = {
@@ -46,6 +51,16 @@ const ROUTES = new Set<NativeCallAudioRoute>([
   "other",
 ]);
 
+const ROUTE_REASONS = new Set<NativeCallRouteChangeReason>([
+  "activated",
+  "categoryChange",
+  "override",
+  "newDevice",
+  "oldDeviceUnavailable",
+  "configurationChange",
+  "other",
+]);
+
 /** Map a raw native event onto the typed call event, dropping anything unknown. */
 export function parseNativeCallEvent(raw: RawNativeCallEvent): NativeCallEvent | null {
   switch (raw.type) {
@@ -57,7 +72,15 @@ export function parseNativeCallEvent(raw: RawNativeCallEvent): NativeCallEvent |
         : null;
     case "routeChanged": {
       const route = raw.route as NativeCallAudioRoute;
-      return { type: "routeChanged", route: ROUTES.has(route) ? route : "other" };
+      const reason = raw.reason as NativeCallRouteChangeReason | undefined;
+      return {
+        type: "routeChanged",
+        route: ROUTES.has(route) ? route : "other",
+        // Builds before reasons send none; their route changes are taken as they come.
+        ...(reason === undefined
+          ? {}
+          : { reason: ROUTE_REASONS.has(reason) ? reason : ("other" as const) }),
+      };
     }
     case "audioSessionActivated":
     case "audioSessionDeactivated":

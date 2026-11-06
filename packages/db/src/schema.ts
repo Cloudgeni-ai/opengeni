@@ -83,6 +83,7 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./agents-schema";
 export * from "./automation-templates-schema";
 export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
@@ -4922,6 +4923,9 @@ export const mcpOauthRefreshTokens = pgTable(
     connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Auto-connected: the trusted issuer that vouched for the person, and its subject. */
+    trustedIssuerId: uuid("trusted_issuer_id"),
+    assertionSubject: text("assertion_subject"),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -4934,6 +4938,11 @@ export const mcpOauthRefreshTokens = pgTable(
       table.generation,
     ),
     expires: index("mcp_oauth_refresh_tokens_expires_idx").on(table.expiresAt),
+    trustedIssuer: index("mcp_oauth_refresh_tokens_trusted_issuer_idx").on(
+      table.trustedIssuerId,
+      table.assertionSubject,
+      table.clientId,
+    ),
   }),
 );
 
@@ -5346,6 +5355,12 @@ export const sessions = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Who archived the chat; null when the idle archiver did. */
     archiveRequestedBy: text("archive_requested_by"),
+    /**
+     * When someone last asked to restore the chat's stored content (migration
+     * 1261). A stored chat with this set is waiting to be restored; once live
+     * again it marks the restore, which counts as activity for the idle period.
+     */
+    contentRestoreRequestedAt: timestamp("content_restore_requested_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     // Repositories a person removed from the session (migration 1140); see
     // SessionRemovedRepository. Read with parseSessionRemovedRepositories.
@@ -5589,6 +5604,15 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
+    // Migration 1244: the agent (agents.id) this chat was started for. No
+    // foreign key; recheck the agent on use. Set once from NULL, never
+    // changed (sessions_agent_id_immutable); forks copy it, child workers
+    // never set it. Unrelated to agentConfig and agentAccess.
+    agentId: uuid("agent_id"),
+    // The agent revision whose Instructions are in this chat's system prompt.
+    // NULL is a legacy chat (instructions already in `instructions`): never
+    // add the agent layer to it.
+    agentPromptRevision: integer("agent_prompt_revision"),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
@@ -5739,6 +5763,16 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+    // Migration 1245 (concurrent): an agent's chats, newest first.
+    agent: index("sessions_agent_idx")
+      .on(table.workspaceId, table.agentId, table.createdAt.desc())
+      .where(sql`${table.agentId} is not null`),
+    // Migration 1244 (NOT VALID; enforced for new and changed rows).
+    agentPromptRevisionValid: check(
+      "sessions_agent_prompt_revision_check",
+      sql`${table.agentPromptRevision} is null
+        or (${table.agentPromptRevision} > 0 and ${table.agentId} is not null)`,
     ),
     initialModelContextValid: check(
       "sessions_initial_model_context_check",
@@ -12159,6 +12193,20 @@ export const enrollments = pgTable(
     agentUpdateCompletedAt: timestamp("agent_update_completed_at", {
       withTimezone: true,
     }),
+    /** When the current run of unsuccessful updates first postponed the
+     * update for managed browsers in use; bounds that wait (migration 1270). */
+    agentUpdateBrowsersWaitSince: timestamp("agent_update_browsers_wait_since", {
+      withTimezone: true,
+    }),
+    /** Attempts of the current run for the current target that failed for a
+     * reason other than a busy machine, before the current operation.
+     * Automatic retries back off from it (migration 1270). */
+    agentUpdateFailedAttempts: integer("agent_update_failed_attempts").notNull().default(0),
+    /** The announced time at which an automatic update closes an older
+     * agent's managed browsers; kept through busy refusals (migration 1270). */
+    agentUpdateBrowsersCloseAt: timestamp("agent_update_browsers_close_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -14309,6 +14357,122 @@ export const organizationConnectors = pgTable(
   }),
 );
 
+// --- MCP auto-connect (1263) -------------------------------------------------
+// Inbound: issuers an organization trusts to vouch for its members (ID-JAG).
+export const organizationMcpTrustedIssuers = pgTable(
+  "organization_mcp_trusted_issuers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    provider: text("provider").$type<"claude" | "okta" | "other">().notNull(),
+    issuer: text("issuer").notNull(),
+    jwksUri: text("jwks_uri"),
+    allowedClientIds: jsonb("allowed_client_ids").$type<string[]>(),
+    organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>().notNull(),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    issuerKey: unique("organization_mcp_trusted_issuers_issuer_key").on(
+      table.accountId,
+      table.issuer,
+    ),
+    issuerLookup: index("organization_mcp_trusted_issuers_issuer_idx").on(table.issuer),
+  }),
+);
+
+export const organizationMcpTrustedIssuerSubjects = pgTable(
+  "organization_mcp_trusted_issuer_subjects",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    assertionSubject: text("assertion_subject").notNull(),
+    subjectId: text("subject_id").notNull(),
+    email: text("email"),
+    firstConnectedAt: timestamp("first_connected_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.assertionSubject] }),
+    account: index("organization_mcp_trusted_issuer_subjects_account_idx").on(
+      table.accountId,
+      table.trustedIssuerId,
+    ),
+  }),
+);
+
+export const organizationMcpTrustedIssuerEvents = pgTable(
+  "organization_mcp_trusted_issuer_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    outcome: text("outcome").$type<"connected" | "refused">().notNull(),
+    reason: text("reason"),
+    subjectId: text("subject_id"),
+    email: text("email"),
+    clientId: text("client_id"),
+    clientName: text("client_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    recent: index("organization_mcp_trusted_issuer_events_recent_idx").on(
+      table.trustedIssuerId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const organizationMcpAssertionReplays = pgTable(
+  "organization_mcp_assertion_replays",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    jtiHash: text("jti_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.jtiHash] }),
+    expires: index("organization_mcp_assertion_replays_expires_idx").on(
+      table.accountId,
+      table.expiresAt,
+    ),
+  }),
+);
+
+// Outbound: the organization's own ID-JAG signing key (Opengeni as the issuer).
+export const organizationIdentityIssuers = pgTable("organization_identity_issuers", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  keyId: text("key_id").notNull(),
+  algorithm: text("algorithm").$type<"RS256" | "ES256">().notNull(),
+  publicJwk: jsonb("public_jwk").$type<Record<string, unknown>>().notNull(),
+  privateKeyEncrypted: text("private_key_encrypted").notNull(),
+  createdBySubjectId: text("created_by_subject_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // --- Capabilities platform ---------------------------------------------------
 // Authoritative Plugin, immutable Version, Facet, installation, and ownership
 // state. The generic catalog/installations ledger is reserved for MCP.
@@ -15167,12 +15331,20 @@ export const organizationModelProviderConnections = pgTable(
         | "elevenlabs"
         | "openai"
         | "azure_openai"
+        | "openai_compatible"
       >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
-    /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
+    /**
+     * Non-secret base URL: Azure OpenAI's `https://<resource>.openai.azure.com/openai/v1`,
+     * or an OpenAI-compatible endpoint's public HTTPS base URL; null for every other kind.
+     */
     endpoint: text("endpoint"),
+    /** OpenAI-compatible endpoints only: the API format they follow. */
+    compatibleApi: text("compatible_api").$type<"chat" | "responses">(),
+    /** OpenAI-compatible endpoints only: an optional display name. */
+    label: text("label"),
     /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
     authMethod: text("auth_method")
       .$type<OrganizationModelProviderAuthMethod>()
@@ -15186,9 +15358,13 @@ export const organizationModelProviderConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    accountProvider: uniqueIndex("organization_model_provider_connections_account_provider_uq").on(
+    // One connection per kind, except OpenAI-compatible endpoints (several each).
+    accountProvider: uniqueIndex("organization_model_provider_connections_account_provider_uq")
+      .on(table.accountId, table.providerKind)
+      .where(sql`${table.providerKind} <> 'openai_compatible'`),
+    idAccount: unique("organization_model_provider_connections_id_account_key").on(
+      table.id,
       table.accountId,
-      table.providerKind,
     ),
     operation: uniqueIndex("organization_model_provider_connections_operation_uq").on(
       table.accountId,
@@ -15197,7 +15373,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai', 'openai_compatible')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15217,7 +15393,15 @@ export const organizationModelProviderConnections = pgTable(
     ),
     endpointCheck: check(
       "organization_model_provider_connections_endpoint_chk",
-      sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+      sql`(${table.providerKind} in ('azure_openai', 'openai_compatible')) = (${table.endpoint} is not null) and (${table.endpoint} is null or (${table.providerKind} = 'azure_openai' and ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$') or (${table.providerKind} = 'openai_compatible' and octet_length(${table.endpoint}) between 9 and 2048 and ${table.endpoint} ~ '^https://[!-~]+$'))`,
+    ),
+    compatibleApiCheck: check(
+      "organization_model_provider_connections_compatible_api_chk",
+      sql`(${table.providerKind} = 'openai_compatible') = (${table.compatibleApi} is not null) and (${table.compatibleApi} is null or ${table.compatibleApi} in ('chat', 'responses'))`,
+    ),
+    labelCheck: check(
+      "organization_model_provider_connections_label_chk",
+      sql`${table.label} is null or (${table.providerKind} = 'openai_compatible' and octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
     ),
     authMethodCheck: check(
       "organization_model_provider_connections_auth_method_chk",
@@ -15317,10 +15501,21 @@ export const organizationModelProviderCustomModels = pgTable(
         | "opper"
         | "openai"
         | "azure_openai"
+        | "openai_compatible"
       >()
       .notNull(),
+    /** OpenAI-compatible endpoints only: the endpoint connection serving this model. */
+    connectionId: uuid("connection_id"),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
+    /** OpenAI-compatible endpoint models only: accepted reasoning levels, lowest first. */
+    reasoningEfforts: text("reasoning_efforts")
+      .array()
+      .$type<("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[]>(),
+    /** OpenAI-compatible endpoint models only: the declared default level. */
+    defaultReasoningEffort: text("default_reasoning_effort").$type<
+      "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    >(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15333,8 +15528,32 @@ export const organizationModelProviderCustomModels = pgTable(
   },
   (table) => ({
     accountUpstream: uniqueIndex("organization_model_provider_custom_models_active_uq")
-      .on(table.accountId, table.providerKind, table.upstreamModelId)
+      .on(
+        table.accountId,
+        table.providerKind,
+        sql`coalesce(${table.connectionId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        table.upstreamModelId,
+      )
       .where(sql`${table.retiredAt} is null`),
+    connection: index("organization_model_provider_custom_models_connection_idx")
+      .on(table.connectionId)
+      .where(sql`${table.connectionId} is not null`),
+    connectionReference: foreignKey({
+      name: "organization_model_provider_custom_models_connection_fk",
+      columns: [table.connectionId, table.accountId],
+      foreignColumns: [
+        organizationModelProviderConnections.id,
+        organizationModelProviderConnections.accountId,
+      ],
+    }).onDelete("cascade"),
+    connectionCheck: check(
+      "organization_model_provider_custom_models_connection_chk",
+      sql`(${table.providerKind} = 'openai_compatible') = (${table.connectionId} is not null)`,
+    ),
+    reasoningCheck: check(
+      "organization_model_provider_custom_models_reasoning_chk",
+      sql`(${table.reasoningEfforts} is null) = (${table.defaultReasoningEffort} is null) and (${table.reasoningEfforts} is null or (${table.providerKind} = 'openai_compatible' and cardinality(${table.reasoningEfforts}) between 1 and 7 and ${table.reasoningEfforts} <@ array['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']::text[] and ${table.defaultReasoningEffort} = any (${table.reasoningEfforts})))`,
+    ),
     createOperation: uniqueIndex(
       "organization_model_provider_custom_models_create_operation_uq",
     ).on(table.accountId, table.providerKind, table.createOperationId),
@@ -15343,7 +15562,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai', 'openai_compatible')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",
@@ -15385,7 +15604,6 @@ export * from "./work-claims-schema";
 export * from "./company-brain-context-selection-schema";
 export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";
-export * from "./knowledge-source-sync-schema";
 export * from "./recordings-schema";
 export * from "./interaction-schema";
 export * from "./site-data-schema";

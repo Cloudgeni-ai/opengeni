@@ -197,7 +197,7 @@ describe("reviewed operation corrections", () => {
     const revision = compile(MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION);
     const draft = revision.tools.find((t) => t.operationKey === "me.CreateMessages")!;
     expect(draft.name).toBe("Create draft message");
-    expect(draft.description).toContain("Create a draft message");
+    expect(draft.description).toContain("Create a draft in");
     expect(draft.description).not.toContain("open extension");
     expect(revision.tools.find((t) => t.operationKey === "me.ListMessages")!.name).toBe(
       "List messages",

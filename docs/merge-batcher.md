@@ -166,6 +166,9 @@ and members of the running batch are never regenerated.
    `blame` lists those jobs; a priority or Version PR built in between drops
    it. A single PR always gets its retry before it is ejected, so a flaky job
    in a half costs at most one more split, never an innocent PR's place.
+   A half with more PRs than fit in one batch tests the first `BATCHER_MAX_BATCH`
+   and keeps the others next in line as their own group, so none of them
+   drops out of the bisection.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

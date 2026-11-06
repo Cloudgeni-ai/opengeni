@@ -79,6 +79,8 @@ impl NativePlatform {
     /// [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
+        #[cfg(unix)]
+        crate::null_device::prime();
         let home_dir = user_home_dir();
         let workspace_root = resolve_workspace_root(
             std::env::current_dir().ok(),
@@ -99,6 +101,8 @@ impl NativePlatform {
     /// the user overrides the workspace root).
     #[must_use]
     pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
+        #[cfg(unix)]
+        crate::null_device::prime();
         Self {
             workspace_root: workspace_root.into(),
             home_dir: user_home_dir(),
@@ -182,6 +186,12 @@ impl NativePlatform {
     /// Resolves and validates a process working directory before spawn. Tokio's
     /// spawn error otherwise reports `ENOENT` against the executable even when
     /// the missing object is actually `current_dir`, which is actively misleading.
+    ///
+    /// A missing workspace root or home directory (the agent's, or the
+    /// requested user's) is created again and the command runs: something on
+    /// the machine moved or deleted it, and every command that starts there
+    /// would otherwise fail. Any other missing directory stays a not-found
+    /// error.
     fn resolve_process_cwd(
         &self,
         cwd: &str,
@@ -189,28 +199,33 @@ impl NativePlatform {
         identity: Option<&RunAsIdentity>,
     ) -> PlatformResult<PathBuf> {
         let path = self.resolve_path(cwd, identity)?;
-        // Checked as the requested user, so a directory only the agent can
-        // reach is reported the same way the user's own chdir would fail.
-        let metadata = match identity {
-            Some(identity) => {
-                let checked = path.clone();
-                let operation = operation.to_string();
-                crate::run_as::on_identity_thread(identity, move || {
-                    std::fs::metadata(&checked).map_err(|error| {
-                        PlatformError::from_io(
-                            &format!("{operation} working directory {}", checked.display()),
-                            &error,
-                        )
-                    })
-                })?
+        let mut metadata = Self::cwd_metadata(&path, identity)?;
+        let missing = metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if let Some(kind) = self.recreatable_cwd(&path, identity).filter(|_| missing) {
+            match recreate_directory(&path, kind) {
+                Ok(()) => tracing::warn!(
+                    path = %path.display(),
+                    "the working directory was missing; the agent created it again"
+                ),
+                // Another command (or setup) created it meanwhile.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the working directory is missing and could not be created again"
+                ),
             }
-            None => std::fs::metadata(&path).map_err(|error| {
-                PlatformError::from_io(
-                    &format!("{operation} working directory {}", path.display()),
-                    &error,
-                )
-            })?,
-        };
+            // Whatever happened, the directory as it is now decides.
+            metadata = Self::cwd_metadata(&path, identity)?;
+        }
+        let metadata = metadata.map_err(|error| {
+            PlatformError::from_io(
+                &format!("{operation} working directory {}", path.display()),
+                &error,
+            )
+        })?;
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
             detail.insert("path".to_string(), path.to_string_lossy().into_owned());
@@ -224,6 +239,89 @@ impl NativePlatform {
         }
         Ok(path)
     }
+
+    /// Reads `path`'s metadata, as the requested user when there is one, so a
+    /// directory only the agent can reach is reported the same way the user's
+    /// own chdir would fail. The outer error is a failed switch to that user.
+    fn cwd_metadata(
+        path: &Path,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<std::io::Result<std::fs::Metadata>> {
+        match identity {
+            Some(identity) => {
+                let checked = path.to_path_buf();
+                crate::run_as::on_identity_thread(identity, move || Ok(std::fs::metadata(&checked)))
+            }
+            None => Ok(std::fs::metadata(path)),
+        }
+    }
+
+    /// Which directory the agent puts back when `path` is missing: the
+    /// workspace root, the agent's home, or the requested user's home. A
+    /// placeholder home such as `/nonexistent` is never created.
+    fn recreatable_cwd<'a>(
+        &self,
+        path: &Path,
+        identity: Option<&'a RunAsIdentity>,
+    ) -> Option<RecreatedCwd<'a>> {
+        if path == self.workspace_root {
+            Some(RecreatedCwd::WorkspaceRoot)
+        } else if is_placeholder_home(path) {
+            None
+        } else if self.home_dir.as_deref() == Some(path) {
+            Some(RecreatedCwd::AgentHome)
+        } else {
+            identity
+                .filter(|identity| identity.home == path)
+                .map(RecreatedCwd::UserHome)
+        }
+    }
+}
+
+/// A missing working directory the agent creates again.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))] // only Unix hands a home to its user
+enum RecreatedCwd<'a> {
+    /// The workspace root, created with any missing parent, mode 0755 and
+    /// owned by the agent so every user the agent runs commands as can enter
+    /// it.
+    WorkspaceRoot,
+    /// The agent's home: mode 0700, owned by the agent, parent must exist.
+    AgentHome,
+    /// The requested user's home: mode 0700, handed to that user, parent must
+    /// exist.
+    UserHome(&'a RunAsIdentity),
+}
+
+/// Home directories that exist only as a placeholder for system accounts
+/// (Debian's `nobody` uses `/nonexistent`, BSD and macOS daemons use
+/// `/var/empty`). They must stay absent or empty, so they are never created.
+fn is_placeholder_home(path: &Path) -> bool {
+    path.parent().is_none()
+        || ["/nonexistent", "/var/empty", "/dev/null"]
+            .iter()
+            .any(|placeholder| path == Path::new(placeholder))
+}
+
+/// Creates the missing working directory `path` as `kind` describes. The mode
+/// is set explicitly afterwards, so the agent's umask does not narrow it.
+fn recreate_directory(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(matches!(kind, RecreatedCwd::WorkspaceRoot));
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = match kind {
+            RecreatedCwd::WorkspaceRoot => 0o755,
+            RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+        };
+        if let RecreatedCwd::UserHome(identity) = kind {
+            std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))?;
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
 }
 
 fn user_home_dir() -> Option<PathBuf> {
@@ -328,11 +426,13 @@ fn requested_policy(
 /// anchor's stdin writer open; a runner crash closes it in the kernel, causing
 /// the anchor to kill the operation cgroup when present or its own process group
 /// otherwise. Keeping this private child unreaped also fences numeric PGID reuse.
+/// Its stderr is already the agent's kept null device, so the script never
+/// names `/dev/null`: a removed one would otherwise skip every kill below.
 #[cfg(unix)]
 const UNIX_EXEC_ANCHOR: &str = "\
 while IFS= read -r _; do :; done; \
-if [ -n \"$1\" ] && printf '1' > \"$1\" 2>/dev/null; then exit 0; fi; \
-kill -KILL -- \"-$$\" 2>/dev/null || kill -KILL \"-$$\" 2>/dev/null || true";
+if [ -n \"$1\" ] && printf '1' > \"$1\"; then exit 0; fi; \
+kill -KILL -- \"-$$\" || kill -KILL \"-$$\" || true";
 
 struct ExecOutput {
     exit_code: i32,
@@ -378,6 +478,8 @@ struct ExecProcessGroup {
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
     op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
+    /// Counts this command as running until its process tree is cleaned up.
+    running_command: Option<crate::command_activity::RunningCommand>,
 }
 
 #[cfg(unix)]
@@ -406,7 +508,9 @@ impl ExecProcessGroup {
             None
         };
 
-        let mut anchor_command = tokio::process::Command::new("/bin/sh");
+        // `/bin/sh`, or dash or bash when it was moved away, so a machine
+        // without `/bin/sh` still starts programs.
+        let mut anchor_command = tokio::process::Command::new(crate::system_shell::system_shell());
         #[cfg(target_os = "linux")]
         let cgroup_kill_path = prepared_op
             .as_ref()
@@ -421,8 +525,10 @@ impl ExecProcessGroup {
             .process_group(0)
             .kill_on_drop(true)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // The retained null device, never `/dev/null` by path: a machine
+            // whose `/dev/null` was removed must still start programs.
+            .stdout(crate::null_device::null_stdio())
+            .stderr(crate::null_device::null_stdio());
         #[cfg(target_os = "linux")]
         let _ = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
         #[cfg(target_os = "linux")]
@@ -445,6 +551,7 @@ impl ExecProcessGroup {
             background_children_stopped: false,
             termination_requested: false,
             op_cgroup: None,
+            running_command: Some(crate::command_activity::RunningCommand::start()),
         };
         let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
             unreachable!("new anchor is owned");
@@ -624,6 +731,7 @@ impl Drop for ExecProcessGroup {
             background_children_stopped: self.background_children_stopped,
             termination_requested: true,
             op_cgroup: self.op_cgroup.take(),
+            running_command: self.running_command.take(),
         };
         self.running = false;
         let witness = crate::work_scope::CleanupWitness::new(
@@ -744,6 +852,7 @@ impl ExecProcessGroup {
                 background_children_stopped: handover.background_children_stopped,
                 termination_requested: handover.termination_requested,
                 op_cgroup,
+                running_command: Some(crate::command_activity::RunningCommand::start()),
             },
             (stdin, stdout, stderr),
         ))
@@ -792,15 +901,23 @@ struct ExecProcessGroup {
     reservation: Option<crate::WorkReservation>,
     background_children_stopped: bool,
     termination_requested: bool,
+    /// Counts this command as running for as long as this owner lives.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+        /// A console of its own, without a window: a command that sends a
+        /// console control event to "every process on my console"
+        /// (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`, the Windows `kill 0`)
+        /// reaches only itself and its children, never the agent and other
+        /// commands sharing the agent's console. Nothing flashes on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
         // As before, no user code runs until the suspended child joins its job.
         let mut child = command
-            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED)
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED | CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()?;
         if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
@@ -835,6 +952,7 @@ impl ExecProcessGroup {
             reservation: crate::current_work_reservation(),
             background_children_stopped: false,
             termination_requested: false,
+            _running_command: crate::command_activity::RunningCommand::start(),
         })
     }
 
@@ -1120,6 +1238,31 @@ fn spawn_contained_with_policy(
     })
 }
 
+/// The longest program name a spawn error repeats.
+const PROGRAM_NAME_LIMIT: usize = 160;
+
+/// A program name for an error message: one line, bounded, so an error can
+/// never carry a whole script.
+fn describe_program(program: &std::ffi::OsStr) -> String {
+    let text = program.to_string_lossy();
+    let line: String = text
+        .chars()
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            // The message quotes the name, so it never holds a `"` itself.
+            '"' => '\'',
+            c => c,
+        })
+        .collect();
+    let line = line.trim();
+    if line.chars().count() > PROGRAM_NAME_LIMIT {
+        let head: String = line.chars().take(PROGRAM_NAME_LIMIT).collect();
+        format!("{head}…")
+    } else {
+        line.to_string()
+    }
+}
+
 #[async_trait]
 impl Platform for NativePlatform {
     fn host_identity(&self) -> HostIdentity {
@@ -1206,7 +1349,17 @@ impl Platform for NativePlatform {
         let mut cmd = if req.shell {
             crate::shell_command(&req.command)
         } else {
-            let mut command = tokio::process::Command::new(&req.command[0]);
+            // An explicitly requested `/bin/sh` starts a fallback shell when
+            // it is gone, like the default shell does.
+            #[cfg(unix)]
+            let program = crate::system_shell::substitute(std::ffi::OsStr::new(&req.command[0]))
+                .map_or_else(
+                    || std::ffi::OsString::from(&req.command[0]),
+                    PathBuf::into_os_string,
+                );
+            #[cfg(not(unix))]
+            let program = std::ffi::OsString::from(&req.command[0]);
+            let mut command = tokio::process::Command::new(program);
             command.args(&req.command[1..]);
             command
         };
@@ -1221,6 +1374,12 @@ impl Platform for NativePlatform {
             cmd.envs(run_as.identity.login_env());
         } else {
             cmd.current_dir(cwd);
+        }
+        // Scripts that start `/bin/sh` by path (Opengeni's own command
+        // wrappers among them) read the fallback from here while it is gone.
+        #[cfg(unix)]
+        if let Some(shell) = crate::system_shell::fallback_in_use() {
+            cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
         }
         for (k, v) in &req.env {
             cmd.env(k, v);
@@ -1241,6 +1400,9 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
+        // Name the program actually started (the shell in shell mode), never the
+        // command text: a shell command can be a whole script.
+        let program = describe_program(cmd.as_std().get_program());
         spawn_contained_with_policy(
             cmd,
             self.cgroups.as_deref(),
@@ -1248,13 +1410,17 @@ impl Platform for NativePlatform {
             run_as.as_ref(),
         )
         .map_err(|e| {
-            PlatformError::from_io(
-                &format!(
-                    "spawn or apply execution containment for {}",
-                    req.command[0]
-                ),
-                &e,
-            )
+            // Quoted, so the runtime can tell a program name (which may hold
+            // spaces or backslashes) from an older agent's command text.
+            let context = format!("spawn or apply execution containment for program \"{program}\"");
+            #[cfg(unix)]
+            let context = match crate::null_device::spawn_failure_note(&e)
+                .or_else(|| crate::system_shell::spawn_failure_note(&e))
+            {
+                Some(note) => format!("{context} ({note})"),
+                None => context,
+            };
+            PlatformError::from_io(&context, &e)
         })
     }
 
@@ -1866,6 +2032,545 @@ mod tests {
 
     const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
 
+    /// Names how the re-executed child hides `/dev` (`rw` or `ro` tmpfs).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_MODE";
+    /// The parent's mount namespace, so the child can prove it is in another one
+    /// before it mounts anything over `/dev`.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_PARENT_NS_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_PARENT_NS";
+
+    /// The `unshare` arguments that give a child a private mount namespace it
+    /// may mount in: a plain mount namespace when the tests run as root, else a
+    /// rootless user namespace. `None` where neither is permitted.
+    #[cfg(target_os = "linux")]
+    fn private_mount_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
+        const ROOT: &[&str] = &["--mount", "--propagation", "private"];
+        let works = |args: &[&str]| {
+            std::process::Command::new("unshare")
+                .args(args)
+                .arg("true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        // Real root tries its own form first: in a rootless user namespace it
+        // would no longer be real root, so the repair would never be checked.
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
+            Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
+        } else {
+            None
+        }
+    }
+
+    /// Regression: a chat's command ran `rm -rf /dev/null` as root on a compute
+    /// box, and every later process start failed with "not found: spawn or apply
+    /// execution containment" until the box was rebooted. The agent must keep
+    /// starting programs once `/dev/null` is gone, whether or not it can put the
+    /// device back (`rw`: repair allowed as real root; `ro`: never repairable).
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_starts_programs_after_dev_null_is_removed() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_null_device_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_NULL_DEVICE_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /dev child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_starts_programs_after_dev_null_is_removed`]: hides `/dev` behind an
+    /// empty tmpfs in this private mount namespace, then starts a program.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_starts_programs_after_dev_null_is_removed"]
+    async fn hidden_null_device_child() {
+        let Ok(mode) = std::env::var(HIDDEN_NULL_DEVICE_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /dev outside a private mount namespace"
+        );
+        // The agent is up (platform built) before the device disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", &mode, "none", "/dev"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty /dev");
+        assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
+
+        // `Command::output` opens /dev/null by path for stdin, so the agent's
+        // other program starts (self-update check, metrics, service probes,
+        // app launch) hand it the retained device instead.
+        let bare = std::process::Command::new("true").output();
+        assert!(
+            bare.as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "{bare:?}"
+        );
+        let probed = std::process::Command::new("true")
+            .stdin(crate::discarded_stdio())
+            .output()
+            .expect("a program starts with the retained null device");
+        assert!(probed.status.success());
+
+        let response = platform
+            .exec(&echo_request("still-starts"))
+            .await
+            .expect("a program starts after /dev/null was removed");
+        assert!(
+            String::from_utf8_lossy(&response.stdout).contains("still-starts"),
+            "stdout: {:?}",
+            response.stdout
+        );
+        let state = crate::null_device::inspect(Path::new("/dev/null"));
+        if mode == "ro" {
+            assert_eq!(state, crate::null_device::NullDeviceState::Missing);
+        } else if nix::unistd::geteuid().is_root() && in_initial_user_namespace() {
+            // Real root may mknod, so the agent puts the device back.
+            assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
+        }
+        eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+    }
+
+    /// Whether this process's root is the machine's root, not a user
+    /// namespace's (which may not create device nodes).
+    #[cfg(target_os = "linux")]
+    fn in_initial_user_namespace() -> bool {
+        std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|map| map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"])
+    }
+
+    /// Names how the re-executed child hides `/bin/sh`: `rw` (a fallback
+    /// shell remains and `/bin/sh` may be restored), `ro` (a fallback remains,
+    /// nothing may be restored) or `none` (no shell remains).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_SHELL_MODE";
+
+    /// Regression: a chat's command ran `mv /bin/sh …` as root on a compute
+    /// box, and every later command failed with "not found: spawn or apply
+    /// execution containment …" (the shell and the exec anchor are both
+    /// `/bin/sh`), across restarts, because the root disk keeps the damage.
+    /// The agent must keep running commands with dash or bash, put `/bin/sh`
+    /// back where it may, and name the missing shell when none is left.
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_runs_commands_after_bin_sh_is_moved_away() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro", "none"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_shell_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_SHELL_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /bin/sh child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_runs_commands_after_bin_sh_is_moved_away`]: in this private
+    /// mount namespace, hides the directory holding `/bin/sh` (and, on a
+    /// merged-`/usr` system, every shell in it) behind a tmpfs that holds at
+    /// most one fallback shell, then runs commands.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_runs_commands_after_bin_sh_is_moved_away"]
+    #[allow(clippy::too_many_lines)] // one ordered scenario per mode
+    async fn hidden_shell_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(mode) = std::env::var(HIDDEN_SHELL_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /bin outside a private mount namespace"
+        );
+        let system = Path::new("/bin/sh");
+        let bin = std::fs::canonicalize(system.parent().expect("/bin")).expect("canonical /bin");
+        // The first fallback that exists now, kept to be put back under the
+        // tmpfs at the same name.
+        let fallback = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell))
+            .expect("the test machine has dash or bash");
+        let fallback_bytes =
+            std::fs::read(std::fs::canonicalize(fallback).expect("fallback")).expect("read it");
+        let fallback_name = fallback.file_name().expect("a file name");
+        // Opengeni's command wrappers re-execute the shell through setsid.
+        let setsid_bytes = std::fs::read(std::fs::canonicalize(which("setsid")).expect("setsid"))
+            .expect("read setsid");
+        // `mount` itself is usually in the hidden directory: keep a copy.
+        let tools = tempfile::tempdir().expect("tempdir");
+        let mount = tools.path().join("mount");
+        std::fs::copy(
+            std::fs::canonicalize(which("mount")).expect("mount"),
+            &mount,
+        )
+        .expect("copy mount");
+
+        // The agent is up (platform built) before the shell disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new(&mount)
+            .args(["-t", "tmpfs", "-o", "rw", "none"])
+            .arg(&bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty {}", bin.display());
+        assert!(
+            std::fs::symlink_metadata(system).is_err(),
+            "/bin/sh must be gone"
+        );
+        if mode != "none" {
+            let kept = bin.join(fallback_name);
+            std::fs::write(&kept, &fallback_bytes).expect("put the fallback back");
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            assert!(executable_file(fallback));
+            let setsid = bin.join("setsid");
+            std::fs::write(&setsid, &setsid_bytes).expect("put setsid back");
+            std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        if mode == "ro" {
+            let remounted = std::process::Command::new(&mount)
+                // Only the mount's flags: a user namespace may not remount
+                // the tmpfs itself.
+                .args(["-o", "remount,ro,bind"])
+                .arg(&bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run mount");
+            assert!(remounted.success(), "remount {} read-only", bin.display());
+        }
+        // The fallback the agent should now pick (on a merged-`/usr` system,
+        // the one just put back; elsewhere one outside the hidden directory).
+        let expected = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell));
+
+        let explicit = ExecRequest {
+            command: vec![
+                system.display().to_string(),
+                "-c".to_string(),
+                "echo explicit-sh".to_string(),
+            ],
+            ..Default::default()
+        };
+        if mode == "none" {
+            if let Some(left) = expected {
+                eprintln!(
+                    "skipping mode none: {} is outside the hidden directory",
+                    left.display()
+                );
+                return;
+            }
+            let error = platform
+                .exec(&echo_request("no-shell"))
+                .await
+                .expect_err("nothing can start without a shell");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!(
+                    "spawn or apply execution containment for program \"{}\" ({})",
+                    system.display(),
+                    HIDDEN_SHELL_NOTE
+                )),
+                "{message}"
+            );
+            assert!(!message.contains("echo no-shell"), "{message}");
+            eprintln!("mode {mode}: {message}");
+            return;
+        }
+
+        let response = platform
+            .exec(&echo_request("still-runs"))
+            .await
+            .expect("a shell command runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "still-runs"
+        );
+        let response = platform
+            .exec(&explicit)
+            .await
+            .expect("an explicit /bin/sh command runs after it was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "explicit-sh"
+        );
+        // A wrapper that starts the shell by path, as Opengeni's command
+        // wrappers do, gets the fallback from the agent while /bin/sh is gone.
+        let response = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    r#"exec setsid "${OPENGENI_SYSTEM_SHELL:-/bin/sh}" -c 'echo via-setsid'"#
+                        .to_string(),
+                ],
+                shell: true,
+                ..Default::default()
+            })
+            .await
+            .expect("a setsid re-exec runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "via-setsid",
+            "exit {:?}, stderr {}",
+            response.exit_code,
+            String::from_utf8_lossy(&response.stderr)
+        );
+
+        let link = std::fs::read_link(system).ok();
+        if mode == "ro" {
+            assert_eq!(link, None, "a read-only /bin is never changed");
+        } else if nix::unistd::geteuid().is_root() {
+            // Root restores /bin/sh as a link to the fallback it used.
+            assert_eq!(link.as_deref(), expected);
+            assert!(executable_file(system));
+        }
+        eprintln!("mode {mode}: /bin/sh afterwards: {link:?}");
+    }
+
+    /// Where the agent looks for a shell once `/bin/sh` is gone, in order.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_FALLBACKS: [&str; 4] =
+        ["/bin/dash", "/usr/bin/dash", "/bin/bash", "/usr/bin/bash"];
+    /// The note a start carries when no shell is left.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_NOTE: &str = "the shell /bin/sh is missing and no dash or bash was found";
+
+    /// Whether `path` is a file this process may execute.
+    #[cfg(target_os = "linux")]
+    fn executable_file(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+            && nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+    }
+
+    /// The first `name` on `PATH`.
+    #[cfg(target_os = "linux")]
+    fn which(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{name} is not on PATH"))
+    }
+
+    /// Regression: a chat moved `/workspace` away on a compute box, and every
+    /// command failed with "not found: exec working directory /workspace"
+    /// until a later turn's setup made it again. A missing workspace root or
+    /// home directory is created again and the command runs there.
+    #[tokio::test]
+    async fn exec_recreates_a_missing_workspace_root_or_home() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("workspace");
+        let home = parent.path().join("agent-home");
+        let mut platform = NativePlatform::with_root(&root);
+        platform.home_dir = Some(home.clone());
+        let pwd = |cwd: &str| ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            cwd: cwd.to_string(),
+            ..Default::default()
+        };
+        let reported = |response: &v1::ExecResponse| {
+            std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+                .expect("canonicalize the reported cwd")
+        };
+
+        // The default cwd (the root), then the root named explicitly.
+        for cwd in [String::new(), root.display().to_string()] {
+            if root.exists() {
+                std::fs::remove_dir(&root).expect("move the root away");
+            }
+            let request = pwd(&cwd);
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("a command runs in a missing workspace root");
+            assert_eq!(response.exit_code, 0);
+            assert!(root.is_dir(), "the workspace root is back");
+            assert_eq!(
+                reported(&response),
+                std::fs::canonicalize(&root).expect("root")
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+
+        // The home directory, through `~`: private to its owner.
+        let request = pwd("~");
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("a command runs in a missing home directory");
+        assert!(home.is_dir(), "the home directory is back");
+        assert_eq!(
+            reported(&response),
+            std::fs::canonicalize(&home).expect("home")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+
+        // Commands that find it missing at the same time all run.
+        std::fs::remove_dir(&home).expect("move the home away again");
+        let (first, second, third, fourth) = tokio::join!(
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request)
+        );
+        for response in [first, second, third, fourth] {
+            let response = response.expect("every concurrent command runs");
+            assert_eq!(response.exit_code, 0);
+        }
+
+        // A home is only created inside an existing parent.
+        let nested = parent.path().join("homes").join("agent");
+        platform.home_dir = Some(nested.clone());
+        let error = platform
+            .exec(&pwd("~"))
+            .await
+            .expect_err("a home whose parent is gone is not created");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(!nested.exists());
+
+        // Any other missing directory is still not found, and not created.
+        let other = root.join("missing-project");
+        let error = platform
+            .exec(&pwd(&other.display().to_string()))
+            .await
+            .expect_err("another missing cwd still fails");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(
+            error.to_string().contains("exec working directory"),
+            "{error}"
+        );
+        assert!(!other.exists());
+    }
+
+    #[test]
+    fn spawn_errors_name_a_bounded_single_line_program() {
+        let script = format!("node -e '\nconst raw = 1;\n{}'", "x".repeat(500));
+        let described = describe_program(std::ffi::OsStr::new(&script));
+        assert!(!described.contains('\n'), "{described}");
+        assert!(
+            described.chars().count() <= PROGRAM_NAME_LIMIT + 1,
+            "{described}"
+        );
+        assert_eq!(describe_program(std::ffi::OsStr::new("/bin/sh")), "/bin/sh");
+        assert_eq!(
+            describe_program(std::ffi::OsStr::new("/opt/a \"b\"/run")),
+            "/opt/a 'b'/run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_names_the_program_not_its_arguments() {
+        let (platform, _dir) = rooted();
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    "/nonexistent/opengeni-missing-program".to_string(),
+                    "--secret-argument".to_string(),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect_err("a missing program cannot start");
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "spawn or apply execution containment for program \"/nonexistent/opengeni-missing-program\""
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("--secret-argument"), "{message}");
+    }
+
     #[cfg(any(unix, windows))]
     fn descendant_command(parent_fixture: &str) -> Vec<String> {
         vec![
@@ -2077,6 +2782,171 @@ mod tests {
             }
         };
         assert_eq!(status.code(), Some(7));
+    }
+
+    /// A command that signals its own process group, by number (`kill -TERM
+    /// -<pgid>`) or as `kill 0`, reaches only itself: never the agent that runs
+    /// it (this test process) and never a sibling command. A shared staging
+    /// machine went offline after a test run was stopped that way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_signalling_its_own_process_group_reaches_only_itself() {
+        use nix::sys::signal::Signal;
+        use nix::unistd::{getpgrp, Pid};
+
+        let (platform, _dir) = rooted();
+        let mut sibling_command = tokio::process::Command::new("/bin/sh");
+        sibling_command.arg("-c").arg("exec sleep 60");
+        let mut sibling = spawn_contained(sibling_command, None).expect("spawn the sibling");
+        drop(sibling.stdin.take());
+        let agent_group = getpgrp();
+        for (name, script) in [
+            (
+                "kill -TERM -<own pgid>",
+                "if [ -r /proc/$$/stat ]; then read -r _ _ _ _ pgid _ < /proc/$$/stat; \
+                 else pgid=$(ps -o pgid= -p $$ | tr -d ' '); fi; \
+                 [ -n \"$pgid\" ] || exit 90; \
+                 [ \"$pgid\" != \"$OPENGENI_TEST_AGENT_PGID\" ] || exit 91; \
+                 kill -TERM \"-$pgid\"; sleep 5; exit 92",
+            ),
+            ("kill 0", "kill -TERM 0; sleep 5; exit 92"),
+        ] {
+            let req = ExecRequest {
+                command: vec![script.to_string()],
+                shell: true,
+                env: [(
+                    "OPENGENI_TEST_AGENT_PGID".to_string(),
+                    agent_group.to_string(),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let resp = tokio::time::timeout(
+                Duration::from_secs(20),
+                retry_transient_spawn(|| platform.exec(&req)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the exec must finish"))
+            .unwrap_or_else(|error| panic!("{name}: exec failed: {error}"));
+            assert!(
+                !matches!(resp.exit_code, 90..=92),
+                "{name}: the command was not stopped by its own group signal (exit {}, stderr {:?})",
+                resp.exit_code,
+                String::from_utf8_lossy(&resp.stderr)
+            );
+        }
+        // This process is the agent here: it is still running, and nothing
+        // signalled its group.
+        assert_eq!(nix::sys::signal::kill(Pid::this(), None::<Signal>), Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), sibling.wait())
+                .await
+                .is_err(),
+            "a sibling command must survive another command's group signal"
+        );
+        sibling.terminate().expect("stop the sibling");
+        let _ = sibling.wait().await;
+    }
+
+    /// Set in the helper [`a_command_does_not_share_the_agents_console`]
+    /// starts on a console of its own.
+    #[cfg(windows)]
+    const CONSOLE_HELPER: &str = "OPENGENI_TEST_CONSOLE_HELPER";
+
+    /// Only re-executed, on a new console, by
+    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent:
+    /// reports the console window of a plain child (which shares this
+    /// process's console) and of a command it runs. Processes on one console
+    /// report the same window.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
+    async fn agent_on_a_console() {
+        const CONSOLE_WINDOW: &str = "$k = Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();' -Name ConsoleWindow -Namespace OpengeniTest -PassThru\r\n\
+            'window ' + $k::GetConsoleWindow().ToInt64()\r\n";
+        if std::env::var_os(CONSOLE_HELPER).is_none() {
+            return;
+        }
+        let (platform, dir) = rooted();
+        let script = dir.path().join("console-window.ps1");
+        std::fs::write(&script, CONSOLE_WINDOW).expect("write the console probe");
+        let argv: Vec<String> = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain([script.to_string_lossy().into_owned()])
+        .collect();
+        let inherited = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the console probe");
+        let req = ExecRequest {
+            command: argv,
+            ..Default::default()
+        };
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec the console probe");
+        println!(
+            "\nverdict child: {}",
+            String::from_utf8_lossy(&inherited.stdout).trim()
+        );
+        println!(
+            "\nverdict command: {} (exit {})",
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            resp.exit_code
+        );
+    }
+
+    /// The Windows `kill 0`: a console control event sent to "every process on
+    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
+    /// process sharing the sender's console. A command therefore runs on a
+    /// console of its own, never the agent's. The agent is this test binary
+    /// again, started on a console of its own as from a terminal, since a CI
+    /// runner gives this process none.
+    #[cfg(windows)]
+    #[test]
+    fn a_command_does_not_share_the_agents_console() {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::agent_on_a_console",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_HELPER, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("start the agent on a console");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let window = |name: &str| {
+            text.lines()
+                .find_map(|line| line.split(&format!("verdict {name}: window ")).nth(1))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|window| window.parse::<i64>().ok())
+        };
+        let agents = window("child");
+        assert!(
+            agents.is_some_and(|window| window != 0),
+            "the agent must have a console, or this test proves nothing: {text} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let commands = window("command");
+        assert!(commands.is_some(), "the command's probe failed: {text}");
+        assert_ne!(
+            commands, agents,
+            "a command shares the agent's console: {text}"
+        );
     }
 
     #[tokio::test]

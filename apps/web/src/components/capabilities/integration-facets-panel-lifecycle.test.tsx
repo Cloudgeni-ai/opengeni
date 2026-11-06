@@ -327,7 +327,7 @@ describe("Integration Facet lifecycle state", () => {
     }
   });
 
-  test("shows a saved Knowledge source only as retired and removable, hiding unconfigured ones", async () => {
+  test("never shows a removed knowledge_source facet", async () => {
     const saved = {
       ...binding("active", 1, "drive-content", "702"),
       kind: "knowledge_source" as const,
@@ -361,20 +361,10 @@ describe("Integration Facet lifecycle state", () => {
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
-      await waitFor(() => facet(rendered.container, "drive-content") !== null);
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
 
+      expect(facet(rendered.container, "drive-content")).toBeNull();
       expect(facet(rendered.container, "unused-source")).toBeNull();
-      const row = requiredFacet(rendered.container, "drive-content");
-      expect(row.textContent).toContain("Knowledge sync is retired");
-      expect(optionalButton(row, "Edit")).toBeNull();
-      expect(optionalButton(row, "Configure")).toBeNull();
-      expect(optionalButton(row, "Pause")).toBeNull();
-      expect(optionalButton(row, "Resume")).toBeNull();
-      expect(button(row, "Remove").disabled).toBe(false);
-      expect(row.textContent).toContain("Retired");
-      expect(row.textContent).not.toContain("Active");
-      // The retired facet is listed but not counted as active.
-      expect(button(rendered.container, "Manage facets").textContent).toContain("1/2");
     } finally {
       await rendered.unmount();
     }

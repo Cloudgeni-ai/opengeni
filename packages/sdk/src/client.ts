@@ -1,3 +1,8 @@
+import type {
+  BillingAlertSettings,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
+} from "@opengeni/contracts/billing-credit-notifications";
 import {
   copyObservedSessionSequence,
   recordObservedSessionSequence,
@@ -27,7 +32,17 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  AutoConnectSupport,
+  CheckMcpTrustedIssuerRequest,
+  CheckMcpTrustedIssuerResponse,
+  CheckOrganizationConnectorAutoConnectRequest,
+  CreateMcpTrustedIssuerRequest,
   CreateOrganizationConnectorRequest,
+  ListMcpTrustedIssuerEventsResponse,
+  ListMcpTrustedIssuersResponse,
+  McpTrustedIssuer,
+  TestOrganizationConnectorAutoConnectResponse,
+  UpdateMcpTrustedIssuerRequest,
   ListOrganizationConnectorsResponse,
   OrganizationApiIntegrationHere,
   OrganizationConnector,
@@ -467,6 +482,13 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointsResponse,
+  CreateOrganizationCompatibleEndpointRequest,
+  ReplaceOrganizationCompatibleEndpointKeyRequest,
+  CreateOrganizationCompatibleEndpointModelRequest,
+  OrganizationCompatibleEndpointModel,
+  SetOrganizationCompatibleEndpointModelReasoningRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -2397,7 +2419,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Archive or restore this authenticated member's root chat. */
+  /**
+   * Archive this authenticated member's root chat, or restore it (at any
+   * time; stored content comes back in the background). Archiving refuses
+   * while a sub-chat is in use unless `confirmActiveSubChats` lists it.
+   */
   async updateSessionArchive(
     workspaceId: string,
     sessionId: string,
@@ -6243,6 +6269,124 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Whether a connector can connect everyone automatically: its server must
+   * accept ID-JAGs (MCP Enterprise-Managed Authorization). Ask before adding it.
+   */
+  async checkOrganizationConnectorAutoConnect(
+    organizationId: string,
+    request: CheckOrganizationConnectorAutoConnectRequest,
+  ): Promise<AutoConnectSupport> {
+    return await this.requestJson<AutoConnectSupport>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/auto-connect/check`,
+      request,
+    );
+  }
+
+  /**
+   * Try an auto-connect connector as yourself: Opengeni signs an ID-JAG for
+   * you and the app redeems it. Saves only the outcome on the connector.
+   */
+  async testOrganizationConnectorAutoConnect(
+    organizationId: string,
+    connectorId: string,
+  ): Promise<TestOrganizationConnectorAutoConnectResponse> {
+    return await this.requestJson<TestOrganizationConnectorAutoConnectResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}/auto-connect/test`,
+      {},
+    );
+  }
+
+  /**
+   * Connect yourself to an auto-connect connector that works in this
+   * workspace. When the app refuses, the message says why; sign in instead.
+   */
+  async connectWorkspaceOrganizationConnector(
+    workspaceId: string,
+    connectorId: string,
+  ): Promise<{ status: "connected" } | { status: "refused"; message: string }> {
+    return await this.requestJson<{ status: "connected" } | { status: "refused"; message: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-connectors/${connectorId}/connect`,
+      {},
+    );
+  }
+
+  // --- Auto-connect: trusted issuers (organization MCP server) ----------------------------------
+
+  /**
+   * Issuers whose ID-JAGs connect members to the organization MCP server
+   * with no sign-in (Claude's organization issuer, or an identity provider),
+   * with the MCP URL and audience to give the app. Owners and admins.
+   */
+  async listMcpTrustedIssuers(organizationId: string): Promise<ListMcpTrustedIssuersResponse> {
+    return await this.requestJson<ListMcpTrustedIssuersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+    );
+  }
+
+  /** Look an issuer up before trusting it: whether its signing keys load. */
+  async checkMcpTrustedIssuer(
+    organizationId: string,
+    request: CheckMcpTrustedIssuerRequest,
+  ): Promise<CheckMcpTrustedIssuerResponse> {
+    return await this.requestJson<CheckMcpTrustedIssuerResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/check`,
+      request,
+    );
+  }
+
+  /** Trust an issuer, with the access every app it connects gets. */
+  async createMcpTrustedIssuer(
+    organizationId: string,
+    request: CreateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+      request,
+    );
+  }
+
+  /**
+   * Change a trusted issuer. New access applies to every app it connected;
+   * turning it off disconnects them.
+   */
+  async updateMcpTrustedIssuer(
+    organizationId: string,
+    trustedIssuerId: string,
+    request: UpdateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+      request,
+    );
+  }
+
+  /** Stop trusting an issuer and disconnect every app it connected. */
+  async deleteMcpTrustedIssuer(organizationId: string, trustedIssuerId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+    );
+  }
+
+  /** Recent auto-connect attempts through an issuer, refusals with their reason. */
+  async listMcpTrustedIssuerEvents(
+    organizationId: string,
+    trustedIssuerId: string,
+  ): Promise<ListMcpTrustedIssuerEventsResponse> {
+    return await this.requestJson<ListMcpTrustedIssuerEventsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}/events`,
+    );
+  }
+
   /** List workspace-owned Claude model slugs. */
   async listWorkspaceClaudeCustomModels(
     workspaceId: string,
@@ -6337,6 +6481,98 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** List the organization's OpenAI-compatible endpoints and their models. */
+  async listOrganizationCompatibleEndpoints(
+    organizationId: string,
+  ): Promise<OrganizationCompatibleEndpointsResponse> {
+    return await this.requestJson<OrganizationCompatibleEndpointsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+    );
+  }
+
+  /** Connect an OpenAI-compatible endpoint with its first model. */
+  async createOrganizationCompatibleEndpoint(
+    organizationId: string,
+    request: CreateOrganizationCompatibleEndpointRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+      request,
+    );
+  }
+
+  /** Replace an OpenAI-compatible endpoint's API key. */
+  async replaceOrganizationCompatibleEndpointKey(
+    organizationId: string,
+    connectionId: string,
+    request: ReplaceOrganizationCompatibleEndpointKeyRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/key`,
+      request,
+    );
+  }
+
+  /** Disconnect an OpenAI-compatible endpoint; its models stop at once. */
+  async revokeOrganizationCompatibleEndpoint(
+    organizationId: string,
+    connectionId: string,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /**
+   * Add a model to an OpenAI-compatible endpoint. The response also carries
+   * the model's `reasoning` levels; list the endpoints to read them typed.
+   */
+  async createOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    request: CreateOrganizationCompatibleEndpointModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Set an OpenAI-compatible endpoint model's reasoning levels, or read them again from the endpoint. */
+  async setOrganizationCompatibleEndpointModelReasoning(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
+      request,
+    );
+  }
+
+  /** Remove a model from an OpenAI-compatible endpoint. */
+  async deleteOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}`,
+      request,
     );
   }
 
@@ -7123,7 +7359,7 @@ export class OpenGeniClient {
     };
   }
 
-  /** Browse first-party Atlassian sources without choosing or starting sync. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7134,6 +7370,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7146,6 +7383,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async setAtlassianLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -7705,6 +7943,22 @@ export class OpenGeniClient {
     return await this.requestJson<SlackUserLinkAccessRequest>(
       "POST",
       `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/request-access`,
+      request,
+    );
+  }
+
+  /**
+   * Link the Slack account as a member of the organization, without workspace
+   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   */
+  async linkSlackUserAsOrganizationMember(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/link`,
       request,
     );
   }
@@ -10311,7 +10565,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Browse source metadata through one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -10332,7 +10586,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -10994,6 +11248,11 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /**
+   * @deprecated The native Google Drive source connection was removed with
+   * Integration Knowledge sync. Use `deleteConnection`; this method goes in
+   * the next SDK major.
+   */
   async disconnectGoogleDriveConnection(
     workspaceId: string,
     connectionId: string,
@@ -11007,6 +11266,7 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async transitionGoogleDriveLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -11685,6 +11945,36 @@ export class OpenGeniClient {
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------
+
+  async getBillingAlertSettings(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("GET", "/v1/billing/alerts", undefined, options);
+  }
+
+  async updateBillingAlertSettings(
+    request: UpdateBillingAlertSettingsRequest,
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("PUT", "/v1/billing/alerts", request);
+  }
+
+  async listBillingCreditNotifications(
+    options: { accountId?: string } = {},
+  ): Promise<ListBillingCreditNotificationsResponse> {
+    return this.requestJson("GET", "/v1/billing/notifications", undefined, options);
+  }
+
+  async markBillingCreditNotificationRead(
+    notificationId: string,
+    options: { accountId?: string } = {},
+  ): Promise<{ ok: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/billing/notifications/${encodeURIComponent(notificationId)}/read`,
+      undefined,
+      options,
+    );
+  }
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
     return await this.requestJson<BillingSummary>("GET", "/v1/billing", undefined, {

@@ -60,6 +60,14 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  findRebuildableWorkspacePaths,
+  workspaceCaptureStillRunning,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,
+  workspaceSizeFromArchiveDescriptor,
+  type RebuildableWorkspacePaths,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 
@@ -532,6 +540,7 @@ export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
@@ -587,6 +596,10 @@ export {
   NEVER_SENT_DETAIL_KEY,
   CONNECTION_REPLACED_DETAIL_KEY,
   AGENT_UNANSWERED_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
+  type UnresponsiveAgentRecovery,
   agentNotAnsweredReason,
   isAgentNotAnswered,
   requestWithoutWaking,
@@ -596,6 +609,18 @@ export {
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
+} from "./selfhosted/process-start-failure";
+export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
 export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
@@ -697,6 +722,8 @@ export {
   type ComputeCreateIdentity,
   type ComputeSessionState,
   type ComputeTurnDeps,
+  type UnresponsiveComputeMachine,
+  UNRESPONSIVE_RECOVERY_MS,
 } from "./compute/session";
 export {
   COMPUTE_METADATA,
@@ -731,6 +758,7 @@ export {
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
   OP_START_RESEND_HORIZON_MS,
+  OP_START_UNANSWERED_MS,
   querySelfhostedOp,
   releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,

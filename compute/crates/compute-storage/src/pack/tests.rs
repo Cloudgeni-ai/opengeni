@@ -260,3 +260,126 @@ fn a_reference_must_fit_in_its_pack() {
     huge.pack.as_mut().unwrap().len = crate::chunk::MAX_PACK + 1;
     assert!(huge.validate().is_err());
 }
+
+/// How long a store over [`Crowded`] takes to store an upload for each
+/// upload under way, and the client's deadline for one.
+const PER_UPLOAD: Duration = Duration::from_secs(4);
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// A store whose bandwidth uploads share: each takes [`PER_UPLOAD`] for
+/// every upload under way with it, and one that would take longer than
+/// [`DEADLINE`] times out then, stored or not, as a busy store's uploads
+/// time out together.
+#[derive(Debug, Default)]
+struct Crowded {
+    inner: object_store::memory::InMemory,
+    in_flight: std::sync::atomic::AtomicU32,
+    most_in_flight: std::sync::atomic::AtomicU32,
+    timed_out: std::sync::atomic::AtomicU32,
+}
+
+impl std::fmt::Display for Crowded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("crowded")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for Crowded {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+        self.most_in_flight.fetch_max(now, SeqCst);
+        // Uploads sent together are under way together.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let takes = PER_UPLOAD * self.in_flight.load(SeqCst);
+        tokio::time::sleep(takes.min(DEADLINE)).await;
+        self.in_flight.fetch_sub(1, SeqCst);
+        if takes > DEADLINE {
+            self.timed_out.fetch_add(1, SeqCst);
+            return Err(object_store::Error::Generic {
+                store: "crowded",
+                source: "Error performing PUT in 30s - HTTP error: error sending request".into(),
+            });
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+    ) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+    ) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+/// Thirty-two packs sent at once to a store that takes about seven at a
+/// time within the deadline. Sent all together, as archives did, every
+/// one timed out together and none was stored. Now the store is sent
+/// fewer at once once uploads time out, and those that did are sent
+/// again: every pack is stored.
+#[tokio::test(start_paused = true)]
+async fn packs_sent_at_once_to_a_crowded_store_are_all_stored() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let backend = Arc::new(Crowded::default());
+    let store = ChunkStore::new(backend.clone(), object_store::path::Path::from("p"))
+        .with_clock(paused_clock());
+    let puts = (1..=32_u8).map(|n| store.put_pack(packer(&[n])));
+    let stored = futures::future::join_all(puts).await;
+    for put in &stored {
+        let put = put.as_ref().expect("every pack is stored");
+        assert!(put.new);
+        assert!(store.has_chunk(&put.references[0]).await.unwrap());
+    }
+    // Never more at once than at first, and some timed out on the way.
+    assert!(backend.most_in_flight.load(SeqCst) <= 8);
+    assert!(backend.timed_out.load(SeqCst) > 0);
+}

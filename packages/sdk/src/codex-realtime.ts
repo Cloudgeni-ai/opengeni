@@ -56,7 +56,11 @@ export type StartCodexRealtimeWebrtcOptions = {
   onEventsCreated?: ((events: RTCDataChannel) => void) | undefined;
   /** Reuse a caller-owned microphone across transparent connection rotations. */
   media?: MediaStream | undefined;
-  /** Caller-owned audio element for the provider's remote WebRTC track. */
+  /**
+   * Audio element that plays the provider's remote WebRTC track. Without one,
+   * this low-level transport leaves the track to the caller; the realtime
+   * controllers always supply one (see `defaultRealtimeRemoteAudio`).
+   */
   remoteAudio?: HTMLAudioElement | undefined;
   /** Replacement transports defer taking over the shared audio element until promotion. */
   activateRemoteAudio?: boolean | undefined;
@@ -374,6 +378,20 @@ function defaultPeerConnection(): RTCPeerConnection {
     throw new Error("WebRTC is not available in this environment");
   }
   return new RTCPeerConnection();
+}
+
+/**
+ * The element a realtime controller plays replies through when its host
+ * supplies none. It stays detached from the document: a media element plays a
+ * WebRTC stream the same way without being rendered, and owning it here means
+ * replies never depend on when, or whether, a host mounts an element. Undefined
+ * outside browsers; native hosts pass their own.
+ */
+export function defaultRealtimeRemoteAudio(): HTMLAudioElement | undefined {
+  if (typeof Audio === "undefined") return undefined;
+  const element = new Audio();
+  element.autoplay = true;
+  return element;
 }
 
 async function defaultGetUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream> {

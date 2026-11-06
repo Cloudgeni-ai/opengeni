@@ -1,7 +1,18 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { SandboxSetupAgentUnavailableError } from "./sandbox-setup-agent-failure";
+import {
+  isSandboxProcessStartFailure,
+  SANDBOX_MACHINE_RESTARTING_CODE,
+  SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
+  SandboxMachineBackError,
+  SandboxMachineReplacingError,
+  SandboxMachineRestartingError,
+  SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
+  SandboxSetupAgentUnavailableError,
+} from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -96,11 +107,13 @@ import {
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
+  classifyXaiSubscriptionClientOutdatedError,
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
+  XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import type {
@@ -304,6 +317,7 @@ export function providerRecoveryResult(input: {
               input.failureCode === "provider_unavailable" ||
               input.failureCode === "upstream_connectivity_unavailable" ||
               input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_MACHINE_RESTARTING_CODE ||
               input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
               input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
               input.failureCode === "mcp_transport_timeout" ||
@@ -1761,6 +1775,72 @@ function sandboxSetupAgentUnavailableFailure(
   };
 }
 
+/**
+ * The sandbox could not start programs (see SandboxMachineRestartingError and
+ * SandboxProcessStartFailedError). A restarted box retries the same turn; any
+ * other process-start failure, typed or only marked in a wrapper's text, stops
+ * the turn with short copy, never the agent's raw message or command text.
+ */
+function sandboxProcessStartFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
+  const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
+  if (restarting instanceof SandboxMachineRestartingError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      return {
+        error: restarting.message,
+        code: SANDBOX_MACHINE_RESTARTING_CODE,
+        retryable: true,
+      };
+    }
+  }
+  const failed = nodes.find((node) => node instanceof SandboxProcessStartFailedError);
+  if (failed instanceof SandboxProcessStartFailedError) {
+    return {
+      error: failed.message,
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: failed.detail,
+    };
+  }
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
+    return {
+      error:
+        "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
+    };
+  }
+  return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
+}
+
 const SANDBOX_FAILURE_SUBJECT = {
   [SANDBOX_CAPACITY_UNAVAILABLE_CODE]: "No sandbox capacity is available right now",
   [SANDBOX_SERVICE_UNAVAILABLE_CODE]: "The sandbox service is temporarily unavailable",
@@ -1838,6 +1918,9 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
  */
 export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
+  // An outdated Opengeni client is a platform release fault, not the
+  // account's: it must never mark the account unauthorized or forbidden.
+  if (classifyXaiSubscriptionClientOutdatedError(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -2272,6 +2355,8 @@ function baseAgentRunFailurePayload(
   if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
   const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
   if (setupAgentUnavailable) return setupAgentUnavailable;
+  const processStart = sandboxProcessStartFailure(error);
+  if (processStart) return processStart;
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }
@@ -2407,6 +2492,14 @@ function baseAgentRunFailurePayload(
       error:
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
+      retryable: false,
+    };
+  }
+  const xaiClientOutdated = classifyXaiSubscriptionClientOutdatedError(error);
+  if (xaiClientOutdated) {
+    return {
+      error: xaiClientOutdated.message,
+      code: XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
       retryable: false,
     };
   }

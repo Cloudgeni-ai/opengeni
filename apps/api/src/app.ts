@@ -201,6 +201,7 @@ import {
   configureBillingLegacyAccounts,
   fundedBillingOrigin,
   ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -271,6 +272,8 @@ import {
   buildOpenGeniMcpProtocolServer,
   buildOpenGeniMcpServer,
   isOpenGeniMcpProtocolOnlyMessage,
+  mcpMessageNeedsSlackBotAvailability,
+  resolveSlackBotToolAvailability,
 } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -333,6 +336,7 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
+import { registerOrganizationCompatibleModelEndpointRoutes } from "./routes/organization-compatible-model-endpoints";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
 import {
   registerModelAccountSettingsRoutes,
@@ -1636,7 +1640,7 @@ export function createAppComposition(deps: AppDependencies): {
             { observeAvailability: true },
           );
           const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
-          if (billingOrigin === "api") {
+          if (connectedSubscriptionsRefusedForOrigin(deps.settings, billingOrigin)) {
             selections = selections.filter(
               ({ model }) => ownModelFunding(model) !== "subscription",
             );
@@ -2143,9 +2147,8 @@ export function createAppComposition(deps: AppDependencies): {
           typeof boundSessionId === "string"
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
-        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
-          authorizeBoundSession(),
-          () =>
+        const [, [mcpDeps, startedByPerson, fullAccess, slackBotAvailable]] =
+          await alongsideAuthorization(authorizeBoundSession(), () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
               // Fixed for the session's life: a person started it themselves.
@@ -2156,11 +2159,17 @@ export function createAppComposition(deps: AppDependencies): {
                     (authority) => authority !== null,
                   )
                 : false,
+              // Live: the bot tools are listed only while a bot is available.
+              // Read only for a tool listing or a bot tool call.
+              mcpRequestNeedsSlackBotAvailability(boundedRequest).then((needed) =>
+                needed ? resolveSlackBotToolAvailability(routeDeps.db, grant) : undefined,
+              ),
             ]),
-        );
+          );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          slackBotAvailable,
           appActions: sessionScope
             ? {
                 access: {
@@ -2604,6 +2613,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerOrganizationCompatibleModelEndpointRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerModelAccountSettingsRoutes(app, routeDeps);
   registerModelAccountChoiceRoutes(app, routeDeps);
@@ -2843,6 +2853,17 @@ async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
   }
   const messages = Array.isArray(body) ? body : [body];
   return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
+}
+
+async function mcpRequestNeedsSlackBotAvailability(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself; nothing is listed.
+    return false;
+  }
+  return (Array.isArray(body) ? body : [body]).some(mcpMessageNeedsSlackBotAvailability);
 }
 
 async function requireMcpAccessGrantAuthorization(
@@ -4142,10 +4163,6 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/integrations\/github-personal\/oauth\/callback$/,
     label: "/v1/integrations/github-personal/oauth/callback",
-  },
-  {
-    pattern: /^\/v1\/integrations\/google-drive\/callback$/,
-    label: "/v1/integrations/google-drive/callback",
   },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,

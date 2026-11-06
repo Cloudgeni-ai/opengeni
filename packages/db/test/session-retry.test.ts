@@ -24,6 +24,8 @@ import {
   requestSessionTurnRecovery,
   readSessionTurnToolProgressRecoveryState,
   appendSessionEventsForTurnAttempt,
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
 } from "../src/index";
 import { NOT_STARTED_TOOL_CALL_EVENT_TEXT } from "../src/session-tool-call-settlement";
 import type { SessionRetryRequest } from "@opengeni/contracts";
@@ -655,6 +657,90 @@ describe("intent-preserving failed-session retry", () => {
       },
     ]);
     expect((await f.retry()).outcome).toBe("accepted");
+  });
+
+  test("a turn's process-start restarts are counted from its own events until a human retry", async () => {
+    const f = await fixture(true);
+    // A never-claimed preclaim failure has no started turn; retry it first.
+    expect((await f.retry()).outcome).toBe("accepted");
+    const claimed = await f.claim();
+    if (claimed.action !== "claimed") throw new Error("not claimed");
+    const turn = claimed.turn;
+    const counts = () =>
+      countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: turn.id,
+      });
+    const count = async () => (await counts()).started;
+    const append = async (
+      events: Parameters<typeof appendSessionEventsForTurnAttempt>[6],
+    ): Promise<void> => {
+      const appended = await appendSessionEventsForTurnAttempt(
+        client.db,
+        f.workspaceId,
+        f.session.id,
+        turn.id,
+        turn.executionGeneration,
+        turn.activeAttemptId!,
+        events,
+      );
+      expect(appended.accepted).toBe(true);
+    };
+    expect(await count()).toBe(0);
+    // Other operations do not count.
+    await append([
+      { type: "sandbox.operation.started", payload: { name: "repository-clone" } },
+      { type: "sandbox.operation.failed", payload: { name: "repository-clone", error: "x" } },
+    ]);
+    expect(await count()).toBe(0);
+    await append([
+      {
+        type: "sandbox.operation.started",
+        payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION, reason: "process_start_failed" },
+      },
+    ]);
+    // Begun but not (yet) completed: it counts, but nothing says it happened.
+    expect(await counts()).toEqual({ started: 1, completed: 0 });
+    await append([
+      {
+        type: "sandbox.operation.completed",
+        payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION },
+      },
+    ]);
+    expect(await counts()).toEqual({ started: 1, completed: 1 });
+    // Another turn has its own budget.
+    expect(
+      await countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: crypto.randomUUID(),
+      }),
+    ).toEqual({ started: 0, completed: 0 });
+
+    // The turn fails; the person's Retry is a new request and may restart again.
+    await applySessionTurnSettlement(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId: turn.activeAttemptId!,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "still cannot start programs", code: "sandbox_process_start_failed" },
+        },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    expect(await count()).toBe(1);
+    const failed = (await listSessionEvents(client.db, f.workspaceId, f.session.id))
+      .filter((event) => event.type === "turn.failed")
+      .at(-1)!;
+    expect(
+      (await f.retry({ failureEventId: failed.id, clientEventId: crypto.randomUUID() })).outcome,
+    ).toBe("accepted");
+    expect(await count()).toBe(0);
   });
 
   test("tool-call command-start recovery is bounded by tool progress and stays retryable when exhausted", async () => {

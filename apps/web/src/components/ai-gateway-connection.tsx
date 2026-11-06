@@ -364,13 +364,29 @@ export type ProviderPresentation = Pick<
   | "modelToastName"
   | "connectionManagerDescription"
 > & {
-  /** Azure OpenAI is connected for the organization only. */
-  provider: ProviderConnectionConfig["provider"] | "openai" | "azure_openai";
+  /** OpenAI, Azure OpenAI and OpenAI-compatible endpoints use this view at organization scope only. */
+  provider: ProviderConnectionConfig["provider"] | "openai" | "azure_openai" | "openai_compatible";
   /** Where the key is billed, for the page's aside. */
   billedTo: string;
   analyticsAction?: AnalyticsAction | undefined;
   /** A non-secret resource endpoint saved with the key (Azure OpenAI). */
   endpointField?: ProviderEndpointField | undefined;
+  /**
+   * The first model a new connection serves, asked for on its connect step
+   * and checked with the key before anything is saved (OpenAI: a model ID,
+   * Azure OpenAI: a deployment name). Providers without it add models later.
+   */
+  firstModelField?: ProviderFirstModelField | undefined;
+  /**
+   * The connect step's one sentence when it should read the same wherever
+   * the key is connected (organization or one workspace). Falls back to `summary`.
+   */
+  connectSummary?: string | undefined;
+  /**
+   * What a fixed, non-secret endpoint is called on the page's aside when it
+   * can't be changed with the key (a compatible endpoint's base URL).
+   */
+  endpointLabel?: string | undefined;
   /** What a custom model is called here: "model", or "deployment" for Azure OpenAI. */
   customModelNoun?: string | undefined;
   /** Custom models can be added only once the key is connected (each is checked against it). */
@@ -384,6 +400,23 @@ export interface ProviderEndpointField {
   placeholder: string;
   hint: string;
   /** Why the typed endpoint can't be used, or null when it can. */
+  validate(value: string): string | null;
+  /**
+   * Reads an address the provider shows elsewhere (Azure: a Target URI, or
+   * the resource's Foundry address) as the endpoint to save, and the model it
+   * names, if any. Null when the value isn't such an address.
+   */
+  read?(value: string): { endpoint: string; model?: string | undefined } | null;
+}
+
+/** The first model field of a connect step (see `firstModelField`). */
+export interface ProviderFirstModelField {
+  label: string;
+  hint: string;
+  placeholder: string;
+  /** Prefilled, for providers with an obvious first choice. */
+  initialValue?: string | undefined;
+  /** Why the typed model can't be used, or null when it can. */
   validate(value: string): string | null;
 }
 
@@ -449,20 +482,28 @@ export interface ProviderConnectionView {
   signInMethods?: readonly OrganizationModelProviderAuthMethod[] | undefined;
   /**
    * Connects or replaces the credential: the key, or with `authentication`
-   * a Microsoft Entra ID sign-in instead. Resolves true once it's saved;
-   * toasts on failure.
+   * a Microsoft Entra ID sign-in instead, and with `models` the models it
+   * serves first, each checked with it before anything is saved. Resolves
+   * true once it's saved; on failure it calls `reportError` with why, or
+   * toasts when there is none.
    */
   saveKey(
     apiKey: string,
     options?: {
       endpoint?: string | undefined;
       authentication?: OrganizationModelProviderEntraAuthentication | undefined;
+      models?: readonly string[] | undefined;
+      reportError?: ((message: string) => void) | undefined;
     },
   ): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
   removeCustomModel(model: CustomModelLike): Promise<boolean>;
+  /** A second line under a custom model's readiness, such as its reasoning levels. */
+  customModelDetail?: ((model: CustomModelLike) => ReactNode) | undefined;
+  /** A control before a custom model's Remove button, such as editing its reasoning levels. */
+  customModelAction?: ((model: CustomModelLike) => ReactNode) | undefined;
 }
 
 export function useProviderConnection(
@@ -1325,34 +1366,46 @@ export function ProviderCustomModels({
                       (isClaude ? claudeModelLabel(model.upstreamModelId) : model.upstreamModelId)}
                   </span>
                 }
-                description={readiness}
+                description={
+                  state.customModelDetail ? (
+                    <>
+                      <span className="block">{readiness}</span>
+                      <span className="block">{state.customModelDetail(model)}</span>
+                    </>
+                  ) : (
+                    readiness
+                  )
+                }
                 control={
                   state.canManageCustomModels ? (
-                    <Button
-                      ref={(node) => {
-                        if (node) state.removeButtonRefs.current.set(model.id, node);
-                        else state.removeButtonRefs.current.delete(model.id);
-                      }}
-                      type="button"
-                      size="icon-sm"
-                      variant="ghost"
-                      className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-danger pointer-coarse:size-11"
-                      disabled={state.removingModelId !== null}
-                      aria-label={`Remove ${model.upstreamModelId}`}
-                      onClick={() => {
-                        state.removeFocusTargetRef.current =
-                          state.removeButtonRefs.current.get(model.id) ??
-                          state.modelInputRef.current;
-                        state.restoreRemovalFocusRef.current = true;
-                        state.setModelPendingRemoval(model);
-                      }}
-                    >
-                      {state.removingModelId === model.id ? (
-                        <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
-                      ) : (
-                        <MinusCircleIcon aria-hidden="true" />
-                      )}
-                    </Button>
+                    <span className="flex items-center gap-1">
+                      {state.customModelAction?.(model)}
+                      <Button
+                        ref={(node) => {
+                          if (node) state.removeButtonRefs.current.set(model.id, node);
+                          else state.removeButtonRefs.current.delete(model.id);
+                        }}
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-danger pointer-coarse:size-11"
+                        disabled={state.removingModelId !== null}
+                        aria-label={`Remove ${model.upstreamModelId}`}
+                        onClick={() => {
+                          state.removeFocusTargetRef.current =
+                            state.removeButtonRefs.current.get(model.id) ??
+                            state.modelInputRef.current;
+                          state.restoreRemovalFocusRef.current = true;
+                          state.setModelPendingRemoval(model);
+                        }}
+                      >
+                        {state.removingModelId === model.id ? (
+                          <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
+                        ) : (
+                          <MinusCircleIcon aria-hidden="true" />
+                        )}
+                      </Button>
+                    </span>
                   ) : null
                 }
               />
@@ -1394,18 +1447,21 @@ function ProviderEndpointInput({
   field,
   value,
   onChange,
+  reading = null,
 }: {
   field: ProviderEndpointField;
   value: string;
   onChange: (value: string) => void;
+  /** The endpoint a pasted address amounts to, when it isn't the value itself. */
+  reading?: string | null;
 }) {
   // Judged once the person leaves the field, not while the URL is half typed.
   const [checked, setChecked] = useState(false);
-  const problem = value.trim() ? field.validate(value) : null;
+  const problem = value.trim() ? field.validate(reading ?? value) : null;
   return (
     <Field
       label={field.label}
-      hint={field.hint}
+      hint={reading && !problem ? `Connects to ${reading}.` : field.hint}
       error={checked && problem ? problem : undefined}
       required
     >
@@ -1535,7 +1591,7 @@ const ENTRA_ROLE_HINT =
 type CredentialDraft = ReturnType<typeof useCredentialDraft>;
 
 /** The credential being typed, and the sign-in it amounts to once complete. */
-function useCredentialDraft(state: ProviderConnection) {
+function useCredentialDraft(state: Pick<ProviderConnection, "signInMethods" | "authMethod">) {
   const choices = state.signInMethods ?? ["api_key"];
   const initial =
     state.authMethod && choices.includes(state.authMethod) ? state.authMethod : "api_key";
@@ -1629,7 +1685,7 @@ function CredentialFields({
   keyLabel,
   storedHint,
 }: {
-  state: ProviderConnection;
+  state: Pick<ProviderConnection, "config">;
   draft: CredentialDraft;
   keyLabel: string;
   storedHint: string;
@@ -1897,8 +1953,8 @@ export function ProviderConnectionPage({
                       : "Not connected"}
               </DetailAsideItem>
             )}
-            {config.endpointField && state.connected && state.endpoint ? (
-              <DetailAsideItem label={config.endpointField.label}>
+            {(config.endpointField ?? config.endpointLabel) && state.connected && state.endpoint ? (
+              <DetailAsideItem label={config.endpointField?.label ?? config.endpointLabel}>
                 <span className="font-mono text-xs break-all">{state.endpoint}</span>
               </DetailAsideItem>
             ) : null}
@@ -1961,6 +2017,26 @@ export function ProviderConnectionPage({
 }
 
 /** The key step of Connect: one secret field, then the provider's page. */
+/**
+ * What a connect step needs from a provider's connection. The organization
+ * hook, the workspace gateway hook and a workspace's own model keys
+ * (useWorkspaceModelKeyConnect) all provide it, so a provider's connect step
+ * is the same page wherever it is connected.
+ */
+export type ProviderConnectState = Pick<
+  ProviderConnectionView,
+  | "config"
+  | "accessTarget"
+  | "organization"
+  | "connected"
+  | "canManageConnection"
+  | "saveKey"
+  | "refreshConnection"
+  | "signInMethods"
+  | "authMethod"
+  | "endpoint"
+>;
+
 export function ProviderConnectPage({
   state,
   onClose,
@@ -1970,7 +2046,7 @@ export function ProviderConnectPage({
   blockedReason,
   afterSave,
 }: {
-  state: ProviderConnection;
+  state: ProviderConnectState;
   onClose: () => void;
   onConnected: () => void;
   footerStart?: ReactNode;
@@ -1984,8 +2060,19 @@ export function ProviderConnectPage({
   const listLabel = useModelsListLabel();
   const { config } = state;
   const [endpoint, setEndpoint] = useState(state.endpoint ?? "");
+  // A new connection names its first model here; replacing a key keeps its models.
+  const modelField = state.connected ? undefined : config.firstModelField;
+  const [model, setModel] = useState(modelField?.initialValue ?? "");
+  // The model a pasted address named, kept in step with the address until edited.
+  const modelFromEndpoint = useRef<string | null>(null);
+  const [checked, setChecked] = useState({ model: false });
+  const [error, setError] = useState<string | null>(null);
   const credential = useCredentialDraft(state);
-  const endpointBlocked = Boolean(config.endpointField?.validate(endpoint));
+  const endpointField = config.endpointField;
+  const readEndpoint = endpointField?.read?.(endpoint) ?? null;
+  const endpointToSave = readEndpoint?.endpoint ?? endpoint.trim();
+  const endpointBlocked = Boolean(endpointField?.validate(endpointToSave));
+  const modelProblem = modelField ? modelField.validate(model.trim()) : null;
   if (config.provider === "claude_subscription")
     return (
       <ClaudeSignInPage
@@ -1999,6 +2086,7 @@ export function ProviderConnectPage({
         afterSave={afterSave}
       />
     );
+  const checksFirst = Boolean(modelField);
   return (
     <ModelsFormPage
       connectStep
@@ -2011,13 +2099,17 @@ export function ProviderConnectPage({
             : `Replace ${config.title} API key`
           : `Connect ${config.title}`
       }
-      description={config.summary}
+      description={(!state.connected && config.connectSummary) || config.summary}
       onClose={onClose}
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
-      pendingLabel="Connecting…"
+      pendingLabel={checksFirst ? "Checking connection…" : "Connecting…"}
       submitAnalyticsAction={config.analyticsAction}
       submitDisabled={
-        !credential.ready || endpointBlocked || !state.canManageConnection || Boolean(blockedReason)
+        !credential.ready ||
+        endpointBlocked ||
+        Boolean(modelProblem) ||
+        !state.canManageConnection ||
+        Boolean(blockedReason)
       }
       disabledReason={
         state.canManageConnection
@@ -2025,15 +2117,22 @@ export function ProviderConnectPage({
           : "Only people who can manage connections can add a key."
       }
       footerStart={
-        footerStart ??
-        (state.organization
-          ? "Shared with your organization’s workspaces. You can limit access on the account page."
-          : undefined)
+        // A key checked before saving always says so, wherever it is connected.
+        (footerStart === false && checksFirst ? undefined : footerStart) ??
+        (checksFirst
+          ? "We’ll check it with a short test message before saving."
+          : state.organization
+            ? "Shared with your organization’s workspaces. You can limit access on the account page."
+            : undefined)
       }
+      error={error}
       onSubmit={async () => {
+        setError(null);
         const saved = await state.saveKey(credential.key, {
-          ...(config.endpointField ? { endpoint: endpoint.trim() } : {}),
+          ...(endpointField ? { endpoint: endpointToSave } : {}),
           ...(credential.authentication ? { authentication: credential.authentication } : {}),
+          ...(modelField ? { models: [model.trim()] } : {}),
+          reportError: setError,
         });
         if (saved) await afterSave?.();
         return saved;
@@ -2042,21 +2141,66 @@ export function ProviderConnectPage({
     >
       <FieldStack>
         {fields}
-        {config.endpointField ? (
+        {endpointField ? (
           <ProviderEndpointInput
-            field={config.endpointField}
+            field={endpointField}
             value={endpoint}
-            onChange={setEndpoint}
+            onChange={(value) => {
+              setEndpoint(value);
+              setError(null);
+              // A pasted Target URI names its deployment: fill it in, unless
+              // the person already typed another one.
+              const named = endpointField.read?.(value)?.model ?? null;
+              if (named !== null || modelFromEndpoint.current !== null) {
+                setModel((current) =>
+                  current.trim() === "" || current === modelFromEndpoint.current
+                    ? (named ?? "")
+                    : current,
+                );
+              }
+              modelFromEndpoint.current = named;
+            }}
+            reading={
+              readEndpoint && readEndpoint.endpoint !== endpoint.trim().replace(/\/+$/, "")
+                ? readEndpoint.endpoint
+                : null
+            }
           />
+        ) : null}
+        {modelField ? (
+          <Field
+            label={modelField.label}
+            hint={modelField.hint}
+            error={checked.model && model.trim() && modelProblem ? modelProblem : undefined}
+            required
+          >
+            <TextInput
+              mono
+              aria-label={config.customModelInputAriaLabel}
+              value={model}
+              placeholder={modelField.placeholder}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(event) => {
+                setModel(event.target.value);
+                setError(null);
+              }}
+              onBlur={() => setChecked({ model: true })}
+            />
+          </Field>
         ) : null}
         <CredentialFields
           state={state}
           draft={credential}
           keyLabel={config.credentialLabelText ?? "API key"}
           storedHint={
-            credential.method === "api_key"
-              ? "It is stored encrypted. Connecting makes no model calls."
-              : "It is stored encrypted. Connecting signs in once to check it and makes no model calls."
+            checksFirst
+              ? "It is stored encrypted and never shown again."
+              : credential.method === "api_key"
+                ? "It is stored encrypted. Connecting makes no model calls."
+                : "It is stored encrypted. Connecting signs in once to check it and makes no model calls."
           }
         />
       </FieldStack>

@@ -1369,6 +1369,15 @@ describe("searches that name an integration the person can connect", () => {
           approximate: true,
           setup: { nextAction: { toolName: "capability_authorization_request" } },
         },
+        // A setup the catalog reports unavailable never yields a card.
+        {
+          capabilityId: "registry:calendar",
+          name: "Google Calendar",
+          setup: {
+            status: "unavailable",
+            nextAction: { toolName: "capability_authorization_request" },
+          },
+        },
       ],
     });
     const content = [{ type: "text", text }];

@@ -376,7 +376,7 @@ impl FleetConfig {
             guest: self.guest,
         };
         tokio::select! {
-            result = renewer.run() => result,
+            result = renewer.run_apart() => result,
             result = listen::listen(listener, listening) => result.context("serving the control service"),
         }
     }

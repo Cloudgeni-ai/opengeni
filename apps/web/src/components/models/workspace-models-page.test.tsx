@@ -138,6 +138,19 @@ const client = {
     }),
   ),
   listConnections: mock(async (): Promise<ConnectionMetadata[]> => []),
+  createConnection: mock(
+    async (_workspaceId: string, request: Record<string, unknown>): Promise<unknown> => ({
+      id: "workspace-key",
+      providerDomain: request.providerDomain,
+      kind: "api_key",
+      subjectId: null,
+      status: "active",
+      version: 1,
+      metadata: request.metadata,
+    }),
+  ),
+  deleteConnection: mock(async (_workspaceId: string, _id: string): Promise<void> => undefined),
+  listOrganizationCompatibleEndpoints: mock(async (): Promise<unknown> => ({ endpoints: [] })),
   listClaudeSubscriptionAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -570,6 +583,46 @@ beforeEach(async () => {
 });
 
 const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that run models in";
+
+/** Every provider Connect provider lists, in its order, wherever it is opened. */
+const ALL_CONNECT_CHOICES = [
+  "Codex",
+  "Claude subscription",
+  "SuperGrok",
+  "Azure OpenAI",
+  "OpenAI API",
+  "Anthropic API",
+  "OpenRouter",
+  "Vercel AI Gateway",
+  "Opper",
+  "Custom endpoint",
+];
+
+function connectChoiceRows(container: HTMLElement): HTMLElement[] {
+  return [
+    ...container.querySelectorAll<HTMLElement>('[aria-label="Providers"] [data-slot=list-row]'),
+  ];
+}
+
+/** The providers Connect provider lists, by name. */
+function connectChoiceTitles(container: HTMLElement): string[] {
+  return connectChoiceRows(container).map(
+    (row) => ALL_CONNECT_CHOICES.find((title) => row.textContent?.startsWith(title)) ?? "?",
+  );
+}
+
+/** "Name:reason" for each provider listed but not connectable here. */
+function unavailableChoices(container: HTMLElement): string[] {
+  return connectChoiceRows(container)
+    .filter((row) => !row.querySelector("[data-row-action]"))
+    .map((row) => {
+      const title = ALL_CONNECT_CHOICES.find((name) => row.textContent?.startsWith(name)) ?? "?";
+      const reason = /Only admins can add API keys|Not enabled on this server/.exec(
+        row.textContent ?? "",
+      )?.[0];
+      return `${title}:${reason ?? "?"}`;
+    });
+}
 
 let organizationAdmin = false;
 
@@ -1152,6 +1205,27 @@ describe("Models list", () => {
       await act(async () => codexRow.click());
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Connect provider offers the organization's own OpenAI-compatible endpoint", async () => {
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.startsWith("Custom endpoint"),
+      )!;
+      expect(row.textContent).toContain("Pay per token through any OpenAI-compatible API");
+      await act(async () => row.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect a custom endpoint");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Base URL");
+      expect(text).toContain("Model ID");
     } finally {
       await cleanup(view);
     }
@@ -2165,10 +2239,13 @@ describe("One Models page for the organization and the workspace", () => {
       expect(lastNavigation?.search.view).toBe("connect-org:azure_openai");
 
       const key = view.container.querySelector<HTMLInputElement>(
-        'input[aria-label="Organization Azure OpenAI API key"]',
+        'input[aria-label="Azure OpenAI API key"]',
       )!;
       const endpoint = view.container.querySelector<HTMLInputElement>(
         'input[aria-label="Azure OpenAI endpoint"]',
+      )!;
+      const deployment = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI deployment name"]',
       )!;
       expect(key.type).toBe("password");
       expect(endpoint.placeholder).toBe("https://RESOURCE.openai.azure.com");
@@ -2178,16 +2255,23 @@ describe("One Models page for the organization and the workspace", () => {
       await typeInto(endpoint, "https://proxy.example.com/openai/v1");
       expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(true);
       expect(view.container.textContent).toContain(
-        "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+        "Paste the endpoint of your Azure OpenAI or Foundry resource, like https://RESOURCE.openai.azure.com.",
       );
       expect(client.upsertOrganizationModelProviderConnection).not.toHaveBeenCalled();
 
-      await typeInto(endpoint, "https://acme.openai.azure.com");
+      // A deployment's Target URI from Foundry names the resource and the deployment.
+      await typeInto(
+        endpoint,
+        "https://Acme.cognitiveservices.azure.com/openai/deployments/gpt-6-sol/chat/completions?api-version=2025-01-01-preview",
+      );
+      expect(deployment.value).toBe("gpt-6-sol");
+      expect(view.container.textContent).toContain("https://acme.openai.azure.com");
       expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(false);
       await act(async () => button(view.container, "Connect Azure OpenAI")!.click());
       await flush();
       await flush();
       expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledTimes(1);
+      // One request: the key, its endpoint and the first deployment, checked together.
       expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledWith(
         "organization-a",
         "azure_openai",
@@ -2196,6 +2280,7 @@ describe("One Models page for the organization and the workspace", () => {
           expectedVersion: 0,
           apiKey: "azure-secret-key",
           endpoint: "https://acme.openai.azure.com",
+          models: ["gpt-6-sol"],
         },
       );
       // Its page names the saved endpoint and never the key.
@@ -2488,15 +2573,10 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
       const text = view.container.textContent ?? "";
-      expect(text).toContain(
-        "Connect a subscription or an API key for everyone in Design preview.",
-      );
-      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
-        (row) => row.textContent ?? "",
-      );
-      for (const provider of ["Codex", "SuperGrok", "Claude subscription", "OpenRouter"]) {
-        expect(rows.some((row) => row.includes(provider))).toBe(true);
-      }
+      expect(text).toContain("Connect it for everyone in Design preview.");
+      // The same providers, in the same order, as the organization's Connect provider.
+      expect(connectChoiceTitles(view.container)).toEqual(ALL_CONNECT_CHOICES);
+      expect(unavailableChoices(view.container)).toEqual([]);
       // Codex signs in for this workspace, not for the organization.
       await act(async () => navigateTo({ view: "connect:codex" }));
       await flush();
@@ -2505,6 +2585,180 @@ describe("One Models page for the organization and the workspace", () => {
         "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
       );
       expect(view.container.textContent).not.toContain("Available in");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a shared workspace's admin connects Azure OpenAI and a custom endpoint with the organization's steps", async () => {
+    const saved: ConnectionMetadata[] = [];
+    client.listConnections.mockImplementation(async () => [...saved]);
+    client.createConnection.mockImplementation(
+      async (_workspaceId: string, request: Record<string, unknown>) => {
+        const connection = {
+          id: `workspace-key-${saved.length}`,
+          providerDomain: request.providerDomain as string,
+          kind: "api_key",
+          subjectId: null,
+          status: "active",
+          version: 1,
+          metadata: request.metadata as Record<string, unknown>,
+        } as unknown as ConnectionMetadata;
+        saved.push(connection);
+        return connection;
+      },
+    );
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      const azure = connectChoiceRows(view.container).find((row) =>
+        row.textContent?.startsWith("Azure OpenAI"),
+      )!;
+      await act(async () => azure.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await flush();
+      expect(lastNavigation?.search.view).toBe("connect:azure_openai");
+      // The organization's Azure step: endpoint, deployment and key, said to belong here.
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Azure OpenAI");
+      expect(view.container.textContent).toContain("It will belong to Design preview");
+      const endpoint = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI endpoint"]',
+      )!;
+      const deployment = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI deployment name"]',
+      )!;
+      const key = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI API key"]',
+      )!;
+      // Workspace keys sign in with a key only.
+      expect(view.container.textContent).not.toContain("Microsoft Entra");
+      await typeInto(
+        endpoint,
+        "https://design.openai.azure.com/openai/deployments/gpt-6-sol/chat/completions?api-version=2025-01-01-preview",
+      );
+      expect(deployment.value).toBe("gpt-6-sol");
+      await typeInto(key, "azure-workspace-key");
+      await act(async () => button(view.container, "Connect Azure OpenAI")!.click());
+      await flush();
+      await flush();
+      expect(client.createConnection).toHaveBeenCalledTimes(1);
+      expect(client.createConnection).toHaveBeenCalledWith(
+        "workspace-a",
+        expect.objectContaining({
+          providerDomain: "design.openai.azure.com",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "azure-workspace-key" },
+          verifyModelAccess: true,
+          operationId: expect.any(String),
+          metadata: expect.objectContaining({
+            credentialRole: "direct_azure_openai",
+            directModelProvider: {
+              provider: "azure_openai",
+              endpoint: "https://design.openai.azure.com/openai/v1",
+              model: "gpt-6-sol",
+            },
+          }),
+        }),
+      );
+      expect(client.upsertOrganizationModelProviderConnection).not.toHaveBeenCalled();
+      // Back on the workspace's list, with the key among its accounts.
+      expect(lastNavigation?.search.view).toBeUndefined();
+      await flush();
+      const row = rowsNamed(view.container, "gpt-6-sol").find((candidate) =>
+        candidate.textContent?.startsWith("Azure OpenAI"),
+      );
+      expect(row).toBeDefined();
+      expect(view.container.textContent).not.toContain(
+        "OpenAI, Azure OpenAI and compatible endpoints",
+      );
+
+      // A custom endpoint is the same step as the organization's, saved here.
+      await act(async () => navigateTo({ view: "connect:openai_compatible" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect a custom endpoint");
+      await typeInto(
+        view.container.querySelector<HTMLInputElement>(
+          'input[placeholder="https://api.example.com/v1"]',
+        )!,
+        "https://models.example.com/v1",
+      );
+      await typeInto(
+        view.container.querySelector<HTMLInputElement>('input[aria-label="Endpoint API key"]')!,
+        "endpoint-key",
+      );
+      await typeInto(
+        view.container.querySelector<HTMLInputElement>('input[placeholder="provider/model-name"]')!,
+        "acme/coder-1",
+      );
+      await act(async () => button(view.container, "Connect endpoint")!.click());
+      await flush();
+      await flush();
+      expect(client.createConnection).toHaveBeenLastCalledWith(
+        "workspace-a",
+        expect.objectContaining({
+          providerDomain: "models.example.com",
+          verifyModelAccess: true,
+          metadata: expect.objectContaining({
+            credentialRole: "direct_openai_compatible",
+            directModelProvider: expect.objectContaining({
+              provider: "openai_compatible",
+              baseUrl: "https://models.example.com/v1",
+              model: "acme/coder-1",
+            }),
+          }),
+        }),
+      );
+      expect(client.listOrganizationCompatibleEndpoints).not.toHaveBeenCalled();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace's own key is listed with its accounts and disconnects after asking", async () => {
+    let keys: ConnectionMetadata[] = [
+      {
+        id: "workspace-azure",
+        providerDomain: "design.openai.azure.com",
+        kind: "api_key",
+        subjectId: null,
+        status: "active",
+        version: 1,
+        metadata: {
+          credentialRole: "direct_azure_openai",
+          credentialLabel: "Azure OpenAI",
+          directModelProvider: {
+            provider: "azure_openai",
+            endpoint: "https://design.openai.azure.com",
+            model: "gpt-6-sol",
+          },
+        },
+      } as unknown as ConnectionMetadata,
+    ];
+    client.listConnections.mockImplementation(async () => keys);
+    client.deleteConnection.mockImplementation(async () => {
+      keys = [];
+    });
+    const view = await render();
+    try {
+      const row = rowsNamed(view.container, "gpt-6-sol")[0]!;
+      expect(row.textContent).toContain("Azure OpenAI");
+      expect(row.textContent).toContain("API key");
+      // The test renders menus as plain buttons.
+      const disconnect = row.querySelector<HTMLButtonElement>("[data-menu-item]")!;
+      expect(disconnect.textContent).toBe("Disconnect");
+      await act(async () => disconnect.click());
+      await flush();
+      expect(document.body.textContent).toContain("Disconnect Azure OpenAI?");
+      expect(client.deleteConnection).not.toHaveBeenCalled();
+      const confirm = [
+        ...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
+      ].find((candidate) => candidate.textContent?.trim() === "Disconnect")!;
+      await act(async () => confirm.click());
+      await flush();
+      await flush();
+      expect(client.deleteConnection).toHaveBeenCalledWith("workspace-a", "workspace-azure");
+      expect(rowsNamed(view.container, "gpt-6-sol")).toHaveLength(0);
     } finally {
       await cleanup(view);
     }
@@ -2537,14 +2791,12 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       await act(async () => button(view.container, /Connect provider/)!.click());
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe("Connect your own subscription");
-      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
-        (row) => row.textContent ?? "",
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      // Every provider is listed; keys for the whole workspace say who adds them.
+      expect(connectChoiceTitles(view.container)).toEqual(ALL_CONNECT_CHOICES);
+      expect(unavailableChoices(view.container)).toEqual(
+        ALL_CONNECT_CHOICES.slice(3).map((title) => `${title}:Only admins can add API keys`),
       );
-      // Their own subscriptions, in place; no keys for the whole workspace.
-      for (const provider of ["Codex", "SuperGrok", "Claude subscription"])
-        expect(rows.some((row) => row.includes(provider))).toBe(true);
-      expect(rows.some((row) => row.includes("OpenRouter"))).toBe(false);
       expect(view.container.textContent).not.toContain("Open your Personal workspace");
 
       // Codex signs in from this workspace as theirs.
@@ -2801,9 +3053,7 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         await act(async () => button(view.container, /Connect provider/)!.click());
         await flush();
-        expect(view.container.querySelector("h1")?.textContent).toBe(
-          "Connect your own subscription",
-        );
+        expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
         await act(async () => navigateTo({ workspace: "workspace-a", view: "connect:codex" }));
         await flush();
         expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");

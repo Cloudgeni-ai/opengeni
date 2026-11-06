@@ -1,5 +1,7 @@
+export * from "./billing-credit-notifications";
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export {
+  discoverCompatibleModelReasoning,
   organizationAzureEntraSetupToken,
   verifyDirectModelAccess,
   verifyOrganizationAzureOpenAIDeployment,
@@ -132,6 +134,7 @@ export * from "./model-call";
 export * from "./domain/capabilities";
 export * from "./domain/mcp-credential-content-flow";
 export * from "./domain/organization-connectors";
+export * from "./domain/mcp-auto-connect";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";

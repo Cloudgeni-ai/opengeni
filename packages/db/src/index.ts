@@ -1,3 +1,4 @@
+export * from "./billing-credit-notifications";
 import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
@@ -9,6 +10,7 @@ import {
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./organization-connectors";
@@ -435,6 +437,7 @@ import {
   type ConfigurationEffort,
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
+import { settleExitedWorkerAdmissions } from "./exited-worker-admissions";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
@@ -675,10 +678,6 @@ import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
-import {
-  scheduledTaskKnowledgeSource,
-  requireScheduledTaskKnowledgeSource,
-} from "@opengeni/contracts";
 import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
@@ -768,6 +767,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionNotificationPostedPayload,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -1261,6 +1261,13 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import {
+  CAPACITY_WAIT_NOTICE_KEY,
+  capacityWaitAttention,
+  capacityWaitNoticeWithdrawal,
+  capacityWaitNotificationPayload,
+  withoutCapacityWaitNotice,
+} from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
 import {
   resolveSessionCodeSearchEnabled,
@@ -1304,6 +1311,10 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
 export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+export {
+  QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
+  QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
+} from "./quiescence-receipt-wake-repair";
 import {
   repairMissingQuiescenceReceiptWakesWith,
   type QuiescenceReceiptWakeRepairCursor,
@@ -1331,6 +1342,8 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
     isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
   });
 export * from "./session-model-settings";
+export * from "./capacity-wait-attention";
+export * from "./capacity-wait-release";
 export * from "./session-queue-commands";
 export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
@@ -1359,7 +1372,6 @@ export * from "./scoped-knowledge";
 export * from "./company-brain";
 export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
-export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./session-share-links";
 export * from "./work-claims";
@@ -1579,6 +1591,58 @@ function parsedPersonalConnectionDelegations(
     throw new Error(`Invalid personal MCP delegation snapshot at ${context}`);
   }
   return parsed.data.map((delegation) => ({ ...delegation }));
+}
+
+/** A resolver offered a compaction turn a personal account its person may not lend. */
+class CompactionConnectionAccountRefusal extends Error {
+  constructor() {
+    super("Personal connection owner does not match the compacted turn's person");
+    this.name = "CompactionConnectionAccountRefusal";
+  }
+}
+
+/**
+ * Why a compaction turn runs without connection accounts, for the worker to
+ * report. Only the error's class and SQLSTATE are kept, never its message.
+ */
+function unresolvedConnectionAccountsRecord(
+  error: unknown,
+  failure: "resolution_failed" | "acceptance_refused" = "resolution_failed",
+): {
+  reason: "owner_mismatch" | "resolution_failed" | "acceptance_refused";
+  errorName?: string;
+  sqlState?: string;
+} {
+  if (error instanceof CompactionConnectionAccountRefusal) return { reason: "owner_mismatch" };
+  const errorName =
+    error instanceof Error && /^[A-Za-z0-9_$]{1,64}$/.test(error.name) ? error.name : undefined;
+  const sqlState = nestedPostgresSqlState(error) ?? undefined;
+  return {
+    reason: failure,
+    ...(errorName ? { errorName } : {}),
+    ...(sqlState ? { sqlState } : {}),
+  };
+}
+
+/**
+ * Whether accepted work runs under a credential restriction (for example
+ * developer setup). Work continuing it may not borrow its connection
+ * authority. Unreadable policy counts as restricted.
+ */
+function carriesCredentialRestriction(initiatorContext: unknown, metadata: unknown): boolean {
+  if (
+    initiatorContext &&
+    typeof initiatorContext === "object" &&
+    Object.prototype.hasOwnProperty.call(initiatorContext, "credentialRestriction")
+  ) {
+    return true;
+  }
+  try {
+    const policy = readTurnExecutionPolicyV1(metadata);
+    return policy.kind === "valid" && policy.policy.credentialRestriction !== undefined;
+  } catch {
+    return true;
+  }
 }
 
 /** Raised when a durable session tool-policy write lost its version fence. */
@@ -4988,22 +5052,6 @@ export async function settleTemporalScheduleCleanup(
   return row?.settled === true;
 }
 
-/** Persist the connector half of a combined cleanup before attempting Temporal. */
-export async function completeTemporalScheduleConnectorCleanup(
-  db: Database,
-  input: { id: string; claimId: string },
-): Promise<boolean> {
-  const [row] = await rawRows<{ completed: boolean }>(
-    db,
-    sql`
-      select opengeni_private.complete_temporal_schedule_connector_cleanup(
-        ${input.id}, ${input.claimId}
-      ) as completed
-    `,
-  );
-  return row?.completed === true;
-}
-
 export async function createApiKey(
   db: Database,
   input: {
@@ -7247,6 +7295,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * its generated sessions. An agent-created task stores its creating session's
  * explicit first-party selection (null follows defaults) and permission set
  * so a narrowed session cannot widen its permissions through a schedule.
+ * A human/API creator may instead name the tools and permissions at create
+ * (`agentConfig.firstPartyMcpTools` / `firstPartyMcpPermissions`), stored
+ * here with a null session policy.
  * Its owner's explicit access refresh re-freezes tools and permissions within their grants;
  * the session policy and optional credential restriction never change after
  * create. A restriction alone does not select tools or permissions.
@@ -12363,7 +12414,9 @@ function organizationCustomCatalogItem(
     surfaceType: null,
     transport: null,
     mcpUrl: null,
-    authKind: organizationConnectorLogin(connector.config) === "each_person" ? "oauth2" : null,
+    authKind: ["each_person", "auto_connect"].includes(organizationConnectorLogin(connector.config))
+      ? "oauth2"
+      : null,
     credentialFacts: [],
     tier: null,
     provenance: null,
@@ -21471,85 +21524,10 @@ export async function listActiveScheduledTasksWithPinnedAccounts(
   });
 }
 
-/**
- * Internal connector-control traversal. Keep the whole keyset walk on one
- * repeatable-read snapshot so task creation/update performed after discovery
- * cannot make an older row move between offset pages or hide a matching task.
- */
-export async function listKnowledgeSourceSyncTasksForConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  pageSize = 500,
-): Promise<Array<ScheduledTask>> {
-  const boundedPageSize = Math.max(1, Math.min(1_000, Math.trunc(pageSize)));
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      const tasks: Array<ScheduledTask> = [];
-      let cursor: { createdAt: Date; id: string } | null = null;
-      for (;;) {
-        const rows: Array<typeof schema.scheduledTasks.$inferSelect> = await scopedDb
-          .select()
-          .from(schema.scheduledTasks)
-          .where(
-            and(
-              eq(schema.scheduledTasks.workspaceId, workspaceId),
-              isNull(schema.scheduledTasks.deletedAt),
-              sql`coalesce(${schema.scheduledTasks.agentConfig}->'knowledgeSource',
-                CASE WHEN ${schema.scheduledTasks.action}->>'kind'='knowledge_source_sync' THEN ${schema.scheduledTasks.action} END)->'connection'->>'connectionId' = ${connectionId}`,
-              cursor
-                ? or(
-                    gt(schema.scheduledTasks.createdAt, cursor.createdAt),
-                    and(
-                      eq(schema.scheduledTasks.createdAt, cursor.createdAt),
-                      gt(schema.scheduledTasks.id, cursor.id),
-                    ),
-                  )
-                : undefined,
-            ),
-          )
-          .orderBy(asc(schema.scheduledTasks.createdAt), asc(schema.scheduledTasks.id))
-          .limit(boundedPageSize);
-        for (const row of rows) {
-          const task = mapScheduledTask(row);
-          if (!scheduledTaskKnowledgeSource(task)) {
-            throw new Error("Knowledge source task query returned a non-sync action");
-          }
-          tasks.push(task);
-        }
-        const last: typeof schema.scheduledTasks.$inferSelect | undefined = rows.at(-1);
-        if (!last || rows.length < boundedPageSize) return tasks;
-        const nextCursor: { createdAt: Date; id: string } = {
-          createdAt: last.createdAt,
-          id: last.id,
-        };
-        if (
-          cursor &&
-          (nextCursor.createdAt < cursor.createdAt ||
-            (nextCursor.createdAt.getTime() === cursor.createdAt.getTime() &&
-              nextCursor.id <= cursor.id))
-        ) {
-          throw new Error("Knowledge source scheduled-task keyset did not advance");
-        }
-        cursor = nextCursor;
-      }
-    },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
-  );
-}
-
 export async function deleteScheduledTask(
   db: Database,
   workspaceId: string,
   taskId: string,
-  options: {
-    connectorCleanupSubjectId?: string;
-    connectorCleanupCompleted?: boolean;
-    expectedAuthorityRevision?: number;
-    expectedExecutionDigest?: string;
-  } = {},
 ): Promise<{ cleanup: TemporalScheduleCleanupClaim | null; changed: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (txRaw) => {
@@ -21566,26 +21544,7 @@ export async function deleteScheduledTask(
         .for("update")
         .limit(1);
       if (!task) return { cleanup: null, changed: false };
-      const mappedTask = mapScheduledTask(task);
       const changed = task.deletedAt === null;
-      const connectorCleanupSubjectId = options.connectorCleanupSubjectId ?? null;
-      if (connectorCleanupSubjectId) {
-        if (
-          task.authorityRevision !== options.expectedAuthorityRevision ||
-          task.executionDigest !== options.expectedExecutionDigest
-        ) {
-          throw new Error("scheduled task changed after connector cleanup preflight");
-        }
-        if (
-          !scheduledTaskKnowledgeSource(mappedTask) ||
-          requireScheduledTaskKnowledgeSource(mappedTask).initiatingSubjectId !==
-            connectorCleanupSubjectId ||
-          requireScheduledTaskKnowledgeSource(mappedTask).connection.ownerSubjectId !==
-            connectorCleanupSubjectId
-        ) {
-          throw new Error("scheduled task connector cleanup requires the exact causal subject");
-        }
-      }
       if (!task.deletedAt) {
         await tx
           .update(schema.scheduledTasks)
@@ -21604,37 +21563,16 @@ export async function deleteScheduledTask(
           );
       }
       const claimId = randomUUID();
-      let [cleanup] = await tx
+      const [cleanup] = await tx
         .insert(schema.temporalScheduleCleanupOutbox)
         .values({
           accountId: task.accountId,
           workspaceId: task.workspaceId,
           temporalScheduleId: task.temporalScheduleId,
-          scheduledTaskId: connectorCleanupSubjectId ? task.id : null,
-          connectorCleanupSubjectId,
-          connectorCleanupSnapshot:
-            connectorCleanupSubjectId && Boolean(scheduledTaskKnowledgeSource(mappedTask))
-              ? {
-                  version: 1,
-                  taskId: mappedTask.id,
-                  accountId: mappedTask.accountId,
-                  workspaceId: mappedTask.workspaceId,
-                  connectorKind: mappedTask.metadata.connectorKind,
-                  connectionId:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-                  connectionVersion:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-                  sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-                  sourceLifecycleGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-                  sourceConfigGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-                  externalSourceId: mappedTask.metadata.externalSourceId,
-                  subjectId: connectorCleanupSubjectId,
-                }
-              : null,
-          connectorCleanupCompletedAt:
-            connectorCleanupSubjectId && options.connectorCleanupCompleted ? new Date() : null,
+          scheduledTaskId: null,
+          connectorCleanupSubjectId: null,
+          connectorCleanupSnapshot: null,
+          connectorCleanupCompletedAt: null,
           claimId,
           claimUntil: sql<Date>`now() + interval '15 seconds'`,
           attemptCount: 1,
@@ -21654,65 +21592,6 @@ export async function deleteScheduledTask(
             schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
           attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
         });
-      if (
-        !cleanup &&
-        connectorCleanupSubjectId &&
-        Boolean(scheduledTaskKnowledgeSource(mappedTask))
-      ) {
-        const connectorCleanupSnapshot = {
-          version: 1,
-          taskId: mappedTask.id,
-          accountId: mappedTask.accountId,
-          workspaceId: mappedTask.workspaceId,
-          connectorKind: mappedTask.metadata.connectorKind,
-          connectionId: requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-          connectionVersion:
-            requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-          sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-          sourceLifecycleGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-          sourceConfigGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-          externalSourceId: mappedTask.metadata.externalSourceId,
-          subjectId: connectorCleanupSubjectId,
-        };
-        const [upgraded] = await rawRows<{ upgraded: boolean }>(
-          tx,
-          sql`
-            select opengeni_private.upgrade_temporal_schedule_connector_cleanup(
-              ${task.accountId}::uuid,
-              ${task.workspaceId}::uuid,
-              ${task.temporalScheduleId},
-              ${task.id}::uuid,
-              ${connectorCleanupSubjectId},
-              ${JSON.stringify(connectorCleanupSnapshot)}::jsonb,
-              ${claimId}::uuid
-            ) as upgraded
-          `,
-        );
-        if (upgraded?.upgraded) {
-          [cleanup] = await tx
-            .select({
-              id: schema.temporalScheduleCleanupOutbox.id,
-              accountId: schema.temporalScheduleCleanupOutbox.accountId,
-              workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
-              temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
-              scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
-              connectorCleanupSubjectId:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
-              connectorCleanupSnapshot:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
-              connectorCleanupCompletedAt:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
-              attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
-            })
-            .from(schema.temporalScheduleCleanupOutbox)
-            .where(
-              eq(schema.temporalScheduleCleanupOutbox.temporalScheduleId, task.temporalScheduleId),
-            )
-            .limit(1);
-        }
-      }
       return {
         cleanup: cleanup ? { ...cleanup, claimId } : null,
         changed,
@@ -23847,29 +23726,19 @@ export type OrganizationComputeSummaryRow = {
   reach: OrganizationComputeReach;
 };
 
-const LIST_ORGANIZATION_COMPUTE = "opengeni_private.list_organization_compute_v1(uuid, uuid, text)";
-
 /**
  * Every active organization machine or rig in the account, wherever it works
  * (migration 1224), for the people who decide where they work; the caller
- * checks account:admin and refuses agent runs. Null while the routine's
- * runtime EXECUTE is withheld (runtime-posture
- * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
- * statement, because EXECUTE is checked when a statement starts.
+ * checks organization administration (the owner or an admin) and refuses
+ * agent runs.
  */
 export async function listOrganizationCompute(
   db: Database,
   access: RigAccessContext,
   kind: "machine" | "rig",
-): Promise<OrganizationComputeSummaryRow[] | null> {
+): Promise<OrganizationComputeSummaryRow[]> {
   return await withRlsContext(db, access, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, access.subjectId);
-    const [grant] = await rawRows<{ granted: boolean | null }>(
-      scopedDb,
-      sql`select coalesce(has_function_privilege(
-          to_regprocedure(${LIST_ORGANIZATION_COMPUTE})::oid, 'EXECUTE'), false) as granted`,
-    );
-    if (grant?.granted !== true) return null;
     const rows = await rawRows<{
       value: {
         id: string;
@@ -27157,7 +27026,12 @@ export async function armSubscriptionCoreCapacityWait(
         provider === "codex"
           ? "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait"
           : "session_lifecycle_outbox.arm_subscription_core_capacity_wait",
-      eventTypes: [vocabulary.waitingEventType, "turn.failed", "session.status.changed"],
+      eventTypes: [
+        vocabulary.waitingEventType,
+        "turn.failed",
+        "session.status.changed",
+        "session.notification.posted",
+      ],
       maxAttempts: 3,
     },
     async (scopedDb) =>
@@ -27270,6 +27144,29 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
+        // A long wait is announced once, as it starts: a worker's parent gets
+        // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const attention = stopped
+          ? null
+          : capacityWaitAttention({
+              waitReason: input.waitReason,
+              earliestResetAt: input.earliestResetAt,
+              healthRetryAt: input.healthRetryAt ?? null,
+              now,
+            });
+        const personNotice =
+          attention && !session.parentSessionId
+            ? SessionNotificationPostedPayload.parse(
+                capacityWaitNotificationPayload({
+                  turnId: input.turnId,
+                  provider,
+                  resetsAt: attention.resetsAt,
+                }),
+              )
+            : null;
+        const waitingMetadata = personNotice
+          ? { ...recoveryMetadata, [CAPACITY_WAIT_NOTICE_KEY]: { key: personNotice.key } }
+          : recoveryMetadata;
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27435,6 +27332,23 @@ export async function armSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(personNotice
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: ++sequence,
+                        type: "session.notification.posted",
+                        payload: personNotice,
+                        turnId: input.turnId,
+                        turnGeneration: turn.executionGeneration,
+                        turnAttemptId: input.attemptId,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27446,7 +27360,7 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: recoveryMetadata,
+            metadata: waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27508,12 +27422,13 @@ export async function armSubscriptionCoreCapacityWait(
                 eq(schema.sessionGoals.status, "active"),
               ),
             );
-        } else {
+        } else if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter!.waiterId,
             provider,
             nextCheckAt,
+            resetsAt: attention.resetsAt,
           });
         }
         if (input.leaseFence) {
@@ -27839,6 +27754,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           } as const;
         }
 
+        const noticeWithdrawal = capacityWaitNoticeWithdrawal(blockedTurn.metadata);
         const events = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -27867,6 +27783,21 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   turnAssociation: "current",
                   occurredAt: now,
                 },
+                ...(noticeWithdrawal
+                  ? [
+                      {
+                        accountId: input.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        sequence: session.lastSequence + 3,
+                        ...noticeWithdrawal,
+                        turnId: blockedTurn.id,
+                        turnGeneration: blockedTurn.executionGeneration,
+                        turnAssociation: "current" as const,
+                        occurredAt: now,
+                      },
+                    ]
+                  : []),
               ],
               "payload",
               "payloadCodecVersion",
@@ -27889,7 +27820,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
             status: "recovering",
             activeAttemptId: null,
             metadata: {
-              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ...withoutCapacityWaitNotice(
+                metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              ),
               [CODEX_CAPACITY_RECOVERY_KEY]: {
                 ...recovery,
                 resumeGeneration: blockedTurn.executionGeneration + 1,
@@ -27919,7 +27852,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           .set({
             status: "recovering",
             activeTurnId: blockedTurn.id,
-            lastSequence: session.lastSequence + 2,
+            lastSequence: session.lastSequence + events.length,
             updatedAt: now,
           })
           .where(
@@ -28022,6 +27955,19 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       turnId: input.blockedTurn.id,
       turnGeneration: input.blockedTurn.executionGeneration,
       turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const noticeWithdrawal = capacityWaitNoticeWithdrawal(input.blockedTurn.metadata);
+  if (noticeWithdrawal) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + eventValues.length + 1,
+      ...noticeWithdrawal,
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
       occurredAt: input.now,
     });
   }
@@ -31314,6 +31260,37 @@ export async function previewConnectorActionApproval(
   );
 }
 
+/**
+ * The decision this attempt's frozen tool permissions give one connector tool
+ * on one connection, as a call of it would resolve: an explicit choice, else
+ * `defaultDecision`. Reads only the snapshot; creates no request or audit row.
+ * Lets one tool follow the choice a person made for another, such as a bot
+ * send following the person's own Slack send permission.
+ */
+export async function resolveAttemptConnectorToolDecision(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  input: {
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    defaultDecision: "allow" | "ask";
+  },
+): Promise<"allow" | "ask" | "block"> {
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        ...input,
+        actionName: input.toolName,
+      });
+      return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
+    },
+  );
+}
+
 export async function beginConnectorActionExecution(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -32776,7 +32753,6 @@ async function createSessionInTransaction(
           workspaceId: input.workspaceId,
           runId: input.scheduledSourceRunId,
         });
-        const source = accepted?.task.agentConfig.knowledgeSource;
         // The run must be this exact accepted scheduler occurrence, creating
         // the chat its generated-session binding names.
         const acceptedRun =
@@ -32789,18 +32765,7 @@ async function createSessionInTransaction(
             ? accepted
             : null;
         let scheduledOwner: string | null = null;
-        if (acceptedRun && source) {
-          // A personal-knowledge source run belongs to its connection owner.
-          if (
-            acceptedRun.task.runMode === "new_session_per_run" &&
-            source.destination.kind === "personal" &&
-            source.destination.subjectId === source.initiatingSubjectId &&
-            source.connection.ownerSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanAuthority?.subjectId === source.initiatingSubjectId
-          )
-            scheduledOwner = source.initiatingSubjectId;
-        } else if (acceptedRun) {
+        if (acceptedRun) {
           // An Only me schedule's chats belong to its owner, the human its
           // accepted run was admitted for. The capability below re-proves that
           // person may still create Only me chats here.
@@ -34575,6 +34540,84 @@ export async function getSessionParentXaiProviderAccountAuthority(
   childSessionId: string,
 ): Promise<FrozenXaiExecutionAuthority> {
   return getAcceptedSubscriptionParentAuthority(db, "xai", workspaceId, childSessionId);
+}
+
+/** The top of a worker chain, as it runs now. */
+export type SessionChainRoot = {
+  rootSessionId: string;
+  /** Whether no person answers in the root chat right now. */
+  rootUnattended: boolean;
+  /**
+   * Metadata of the exact root turn that started this chain, through each
+   * child's immutable parent turn. Null when that lineage is not recorded
+   * (legacy children) or the turn is gone.
+   */
+  rootTurnMetadata: Record<string, unknown> | null;
+};
+
+const SESSION_CHAIN_MAX_HOPS = 64;
+
+/**
+ * The root chat of a worker session and the root turn that started its chain,
+ * following `parentSessionId`/`parentTurnId`. Null for a top-level session.
+ * Lets a worker act as attended or not the way the chat it works for does: a
+ * worker spawned by a scheduled or unattended run has nobody to answer it.
+ */
+export async function getSessionChainRoot(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionChainRoot | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    let currentId = sessionId;
+    let rootTurnId: string | null = null;
+    for (let hop = 0; hop <= SESSION_CHAIN_MAX_HOPS; hop += 1) {
+      const [row] = await scopedDb
+        .select({
+          parentSessionId: schema.sessions.parentSessionId,
+          parentTurnId: schema.sessions.parentTurnId,
+          unattendedSetting: schema.sessions.unattendedSetting,
+          metadata: schema.sessions.metadata,
+          forkedFromSessionId: schema.sessions.forkedFromSessionId,
+        })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, currentId)))
+        .limit(1);
+      if (!row) {
+        if (currentId === sessionId) return null;
+        throw new Error("session chain root is unavailable");
+      }
+      if (row.parentSessionId) {
+        rootTurnId = row.parentTurnId;
+        currentId = row.parentSessionId;
+        continue;
+      }
+      if (currentId === sessionId) return null;
+      const [turn] = rootTurnId
+        ? await scopedDb
+            .select({ metadata: schema.sessionTurns.metadata })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, currentId),
+                eq(schema.sessionTurns.id, rootTurnId),
+              ),
+            )
+            .limit(1)
+        : [];
+      return {
+        rootSessionId: currentId,
+        rootUnattended: resolveSessionUnattended({
+          setting: (row.unattendedSetting as SessionUnattendedSetting | null) ?? null,
+          createdUnattended: sessionMetadataUnattended(row.metadata),
+          forked: row.forkedFromSessionId !== null,
+        }),
+        rootTurnMetadata: turn?.metadata ?? null,
+      };
+    }
+    throw new Error("session chain is deeper than any admitted worker chain");
+  });
 }
 
 export async function getSessionSpawnDenial(
@@ -48679,6 +48722,14 @@ type ProviderLossRecord = {
    * lifetime, or the compute control plane's own answer) the loss may at most
    * restore a checkpoint, never continue on an empty workspace. */
   deathProof?: ProviderDeathProof;
+  /** The drain stopped the box itself after its saves kept failing (it did
+   * not vanish). The people in the chat were told when it stopped, so the
+   * later restore of the save made at `unsavedSince` does not announce the
+   * loss a second time. */
+  captureAbandoned?: true;
+  /** With `captureAbandoned`: the time of the last good save the stop notice
+   * named, or null when there was none. Absent on records that predate it. */
+  unsavedSince?: string | null;
 };
 
 type ProviderDeathProof = {
@@ -49462,6 +49513,21 @@ async function acquireLeaseOnce(
             // Re-armed: whatever group end was requested did not happen.
             await tx.execute(sql`
               update sandbox_leases set group_end_requested_at = null, updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (Number(row.drain_capture_failures ?? 0) > 0) {
+            // Re-armed: the drain ended without a save, so its failures no
+            // longer describe the next one. A later drain starts with a full
+            // snapshot and no backoff, and only failures of that drain can
+            // lead to a reduced save or a stop (sandboxDrainCaptureFallback).
+            await tx.execute(sql`
+              update sandbox_leases set
+                drain_capture_failures = 0,
+                drain_capture_failure_epoch = null,
+                drain_capture_first_failed_at = null,
+                drain_capture_last_failed_at = null,
+                updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -51536,6 +51602,9 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
             sessionId: input.sessionId,
             status: "accepted",
             attempt: lane.attempt,
+            // The verified warm commit tells the people in the group which
+            // save their files came back from (see commitWarmingToWarm).
+            capturedAt: selection.capturedAt,
           },
           ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
         })}::jsonb,
@@ -52602,7 +52671,7 @@ export async function commitWarmingToWarm(
     | "fresh_workspace_required"
     | "fresh_workspace_mismatch";
 }> {
-  return await withRlsContext(
+  const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -52787,6 +52856,29 @@ export async function commitWarmingToWarm(
           (automatic as Record<string, unknown>).status === "accepted" &&
           (automatic as Record<string, unknown>).operationId ===
             row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+        // The model learned of the older snapshot from its receipt when the
+        // restore was authorized. The people in the group are told once, after
+        // this commit, when that restore is verified, so a restore that fails,
+        // retries or ends on an empty workspace never claims their files came
+        // back. Only an archive restore qualifies, never an empty workspace or
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
+        const restoredFrom =
+          automaticVerified &&
+          rematerialization !== undefined &&
+          !freshWorkspace &&
+          !continuityRecovery
+            ? (automatic as Record<string, unknown>).capturedAt
+            : undefined;
+        const restoredNotice =
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
+            ? {
+                operationId: (automatic as Record<string, unknown>).operationId,
+                mode: "checkpoint" as const,
+                capturedAt: restoredFrom,
+              }
+            : null;
         const completedResumeState = resumeStateWithRecovery(
           {
             ...(withArchives ?? {}),
@@ -52798,6 +52890,10 @@ export async function commitWarmingToWarm(
                   opengeniAutomaticCheckpointRecovery: {
                     ...(automatic as Record<string, unknown>),
                     status: "verified",
+                    // Durable until the notice is written: a failed write is
+                    // retried (`deliverPendingSandboxRestoreNotice`) and the
+                    // write clears it, so the notice lands exactly once.
+                    ...(restoredNotice ? { noticePending: true } : {}),
                   },
                 }
               : {}),
@@ -52857,9 +52953,146 @@ export async function commitWarmingToWarm(
             reason: "stale_epoch" as const,
           };
         }
-        return { committed: true, lease: mapLeaseRow(updated[0]) };
+        return { committed: true, lease: mapLeaseRow(updated[0]), restoredNotice };
       }),
   );
+  const { restoredNotice, ...outcome } = result as typeof result & {
+    restoredNotice?: Record<string, unknown> | null;
+  };
+  if (outcome.committed && restoredNotice) {
+    // Its own transaction, after the commit: appending locks every member's
+    // session row, and this commit already holds the lease row, which
+    // recovery authorization takes after its own session row. The verified
+    // restore must never be undone for a notice: a failed write leaves the
+    // durable pending flag, and the next turn delivers it.
+    try {
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+      });
+    } catch (error) {
+      console.warn("sandbox restore: older-save notice write failed; retried on the next turn", {
+        sandboxGroupId: input.sandboxGroupId,
+        operationId: restoredNotice.operationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return outcome;
+}
+
+/**
+ * Writes the "files were restored from an older save" notice of a verified
+ * automatic restore to every chat sharing the box, exactly once. The warm
+ * commit records it as pending on the lease's recovery marker; this appends
+ * it and clears that flag in one transaction (sessions locked before the
+ * lease, the canonical order), so concurrent or repeated calls write it once.
+ * Called right after the commit and again at each turn start, so a write that
+ * failed is retried rather than lost. Returns whether this call wrote it.
+ */
+export async function deliverPendingSandboxRestoreNotice(
+  db: Database,
+  input: { accountId: string; workspaceId: string } & (
+    | { sandboxGroupId: string; sessionId?: undefined }
+    | { sessionId: string; sandboxGroupId?: undefined }
+  ),
+): Promise<boolean> {
+  const pendingIn = (resumeState: Record<string, unknown> | null | undefined) => {
+    const marker = resumeState?.opengeniAutomaticCheckpointRecovery as
+      | Record<string, unknown>
+      | undefined;
+    return marker &&
+      typeof marker === "object" &&
+      marker.status === "verified" &&
+      marker.noticePending === true &&
+      typeof marker.operationId === "string" &&
+      typeof marker.capturedAt === "string"
+      ? { operationId: marker.operationId, capturedAt: marker.capturedAt }
+      : null;
+  };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        // Best-effort at turn start and after a restore: never queue behind a
+        // long lock; a pending notice stays pending for the next delivery.
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        return await withCompleteSandboxGroupScope(tx, async () => {
+          const observed = await tx.execute<{
+            id: string;
+            sandbox_group_id: string;
+            resume_state: Record<string, unknown> | null;
+          }>(
+            input.sandboxGroupId !== undefined
+              ? sql`select id, sandbox_group_id, resume_state from sandbox_leases
+                  where workspace_id = ${input.workspaceId}
+                    and sandbox_group_id = ${input.sandboxGroupId}`
+              : sql`select lease.id, lease.sandbox_group_id, lease.resume_state
+                  from sandbox_leases lease
+                  join sessions session
+                    on session.workspace_id = lease.workspace_id
+                   and session.sandbox_group_id = lease.sandbox_group_id
+                  where session.workspace_id = ${input.workspaceId}
+                    and session.id = ${input.sessionId}
+                  limit 1`,
+          );
+          const lease = observed[0];
+          if (!lease || !pendingIn(lease.resume_state)) return false;
+          const sessionIds = (
+            await tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.sandboxGroupId, lease.sandbox_group_id),
+                ),
+              )
+              .orderBy(asc(schema.sessions.id))
+          ).map((session) => session.id);
+          await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionIds,
+          });
+          const locked = await tx.execute<{ resume_state: Record<string, unknown> | null }>(sql`
+            select resume_state from sandbox_leases where id = ${lease.id} for update
+          `);
+          const pending = pendingIn(locked[0]?.resume_state);
+          if (!pending) return false;
+          await appendSessionEventToSandboxGroup(tx, input.workspaceId, lease.sandbox_group_id, {
+            type: "sandbox.recovery.selected",
+            payload: {
+              operationId: pending.operationId,
+              mode: "checkpoint",
+              capturedAt: pending.capturedAt,
+            },
+          });
+          await tx.execute(sql`
+            update sandbox_leases
+            set resume_state = resume_state #- '{opengeniAutomaticCheckpointRecovery,noticePending}',
+                updated_at = now()
+            where id = ${lease.id}
+          `);
+          return true;
+        });
+      }),
+  );
+}
+
+/** The drain's stop notice already told the people in the chat that changes
+ * after exactly this save were not kept. A restore of any other save, or a
+ * loss without that notice, is announced on its own. */
+function stopNoticeNamedSave(
+  loss: ProviderLossRecord | undefined,
+  restoredCapturedAt: string,
+): boolean {
+  if (loss?.captureAbandoned !== true || typeof loss.unsavedSince !== "string") return false;
+  const named = Date.parse(loss.unsavedSince);
+  return Number.isFinite(named) && named === Date.parse(restoredCapturedAt);
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -54846,13 +55079,16 @@ async function linkedLostProviderCommandSessionIdsTx(
 async function lockLostProviderCommandSessionsTx(
   tx: Database,
   input: LostProviderBlockerScope,
+  alsoLockSessionIds: readonly string[] = [],
 ): Promise<Set<string>> {
   const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
-  if (sessionIds.length) {
+  // One call, so every session row is taken in the same sorted order.
+  const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
+  if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
       controlLock: "share",
-      sessionIds,
+      sessionIds: toLock,
     });
   }
   return new Set(sessionIds);
@@ -58469,31 +58705,18 @@ export type QueuedTurnHoldSummary = {
   oldestAgeSeconds: number;
 };
 
-const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
-
 /**
  * Content-free cross-workspace classification of every `status = 'queued'`
  * turn by what holds it (migration 0988). The classes sum to
  * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
  * the rest wait for a running turn, Resume, a new message, or a person.
  *
- * 0988 creates the routine with its runtime EXECUTE withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
- * grants it, this returns null. The grant is checked in a separate statement:
- * EXECUTE is checked when a statement starts.
+ * 0988 created the routine with its runtime EXECUTE withheld; 1274 grants it
+ * and readiness requires it.
  */
 export async function summarizeQueuedTurnsByHold(
   db: Database,
-): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`
-      select has_function_privilege(
-        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
-      ) as granted
-    `,
-  );
-  if (grant?.granted !== true) return null;
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
   const summary = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
@@ -58711,6 +58934,12 @@ export async function reArmDrainingLease(
           liveness = 'warm',
           -- Re-armed: whatever group end was requested did not happen.
           group_end_requested_at = null,
+          -- The drain ended without a save; its failures do not carry over to
+          -- the next drain (see sandboxDrainCaptureFallback).
+          drain_capture_failures = 0,
+          drain_capture_failure_epoch = null,
+          drain_capture_first_failed_at = null,
+          drain_capture_last_failed_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -58770,6 +58999,14 @@ export async function confirmDrainCold(
      * this commit. Only then may a crashed worker's orphaned request on it be
      * settled; a selfhosted machine or backend-less lease is never stopped. */
     providerStopped?: boolean;
+    /** With `providerMissingBeforeCapture`: the drain stopped the box itself
+     * after its saves kept failing. Its failed capture can never publish late. */
+    captureAbandoned?: boolean;
+    /** With `captureAbandoned`: the `sandbox.box.terminated` record telling
+     * the people in the chat which changes were not saved (since the last
+     * good save, `unsavedSince`). Appended in the same commit as the loss, so
+     * a later restore of exactly that save never announces it again. */
+    captureAbandonedNotice?: { unsavedSince: string | null; payload: Record<string, unknown> };
   },
 ): Promise<{
   wentCold: boolean;
@@ -58779,6 +59016,10 @@ export async function confirmDrainCold(
   backgroundCommandEvents?: SessionEvent[];
   /** Committed wakes of sessions waiting on those commands. */
   backgroundCommandWakes?: SessionWorkflowWake[];
+  /** With `captureAbandoned`: a save of this exact claim had published after
+   * all, before this commit. It committed an ordinary saved teardown instead:
+   * no loss, no notice. Carries the save the box now restores from. */
+  capturePublishedBeforeStop?: { archiveRevision: string | null; omittedPaths?: string[] };
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
   const backgroundCommandWakes: SessionWorkflowWake[] = [];
@@ -58824,6 +59065,15 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // A save of this exact claim that published before the stop makes this
+        // an ordinary saved teardown (decided under the lease lock below). The
+        // blocker decisions taken before that lock use the same effective
+        // truth, so a stopped box whose save landed keeps its supervised
+        // commands to their own supervision, like any saved teardown.
+        const observedPublishedBeforeStop =
+          input.captureAbandoned === true && observed.archive_capture_published_at !== null;
+        const observedProviderMissing =
+          input.providerMissingBeforeCapture === true && !observedPublishedBeforeStop;
         // The box is stopped (or proven gone) before this commit, and the cold
         // commit retires its epoch for good. Every open blocker it leaves on
         // that exact box can therefore never progress: a request a crashed
@@ -58837,8 +59087,7 @@ export async function confirmDrainCold(
         // settles as lost only with the missing-provider truth (0496), so a
         // stopped box keeps it to its own supervision path.
         const staleBlockers =
-          observed.instance_id &&
-          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
+          observed.instance_id && (input.providerStopped === true || observedProviderMissing)
             ? await rawRows<{ present: boolean }>(
                 tx,
                 sql`
@@ -58866,7 +59115,7 @@ export async function confirmDrainCold(
                         and process.state = 'active'
                     )
                   ) and (
-                    ${input.providerMissingBeforeCapture === true}
+                    ${observedProviderMissing}
                     or not exists (
                       select 1 from sandbox_retained_processes supervised
                       where supervised.lease_id = ${observed.id}
@@ -58881,7 +59130,7 @@ export async function confirmDrainCold(
               )
             : [];
         const blockerScope =
-          (input.providerMissingBeforeCapture ||
+          (observedProviderMissing ||
             observed.unobservable_command_drain_ids?.length ||
             observed.deadline_forced_admission_ids?.length ||
             staleBlockers[0]?.present === true) &&
@@ -58900,10 +59149,44 @@ export async function confirmDrainCold(
         // lease lock, matching the canonical session -> blocker -> lease lock
         // order used by retained-process settlement. Revalidate the lease after
         // locking the entire exact provider-owned blocker set.
+        // A box the drain stopped itself tells every member session in this
+        // commit (below). Appending locks the workspace and those session rows,
+        // so take them here, before any blocker or the lease, in the canonical
+        // order; the append then finds them already held.
+        const abandonedNoticeSessionIds =
+          input.captureAbandoned === true && input.captureAbandonedNotice
+            ? await withCompleteSandboxGroupScope(tx, async () =>
+                (
+                  await tx
+                    .select({ id: schema.sessions.id })
+                    .from(schema.sessions)
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, input.workspaceId),
+                        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+                      ),
+                    )
+                    .orderBy(asc(schema.sessions.id))
+                ).map((session) => session.id),
+              )
+            : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          lockedCommandSessions =
+            abandonedNoticeSessionIds.length > 0
+              ? await withCompleteSandboxGroupScope(tx, () =>
+                  lockLostProviderCommandSessionsTx(tx, blockerScope, abandonedNoticeSessionIds),
+                )
+              : await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        } else if (abandonedNoticeSessionIds.length > 0) {
+          await withCompleteSandboxGroupScope(tx, () =>
+            lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: abandonedNoticeSessionIds,
+            }),
+          );
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
@@ -58928,6 +59211,24 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // The drain stopped the box because its save had not published, but
+        // a slow save of this exact claim can land between that decision and
+        // the stop (or report an error after its store committed). The claim
+        // is still ours (checked above), so a publication on it is this box's
+        // save: commit an ordinary saved teardown. The decision is final here,
+        // under the lease lock; nothing can publish on the claim after it.
+        const capturePublishedBeforeStop =
+          input.captureAbandoned === true && row.archive_capture_published_at !== null;
+        if (capturePublishedBeforeStop !== observedPublishedBeforeStop) {
+          // The save published between the unlocked read and the lock: the
+          // blocker set above was decided on the other outcome. Retry.
+          throw new LostProviderCommandSessionsChangedError(
+            "drain capture published while the cold commit locked its blockers",
+          );
+        }
+        const providerMissingBeforeCapture =
+          input.providerMissingBeforeCapture === true && !capturePublishedBeforeStop;
+        const captureAbandoned = input.captureAbandoned === true && !capturePublishedBeforeStop;
         if (blockerScope) {
           // Enrolled commands are contained only when this drain published the
           // current checkpoint before stopping the box; otherwise the truthful
@@ -58935,7 +59236,7 @@ export async function confirmDrainCold(
           // A pre-0547 enrollment records no reason: settle it as plain loss.
           const reason = row.command_containment_reason;
           const contained =
-            !input.providerMissingBeforeCapture &&
+            !providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
               reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
@@ -58973,14 +59274,14 @@ export async function confirmDrainCold(
         // instead of minting a lost-workspace verdict that would block every
         // later turn of the session. A published box keeps the loss contract.
         const unpublishedWarmingLoss =
-          input.providerMissingBeforeCapture === true &&
+          providerMissingBeforeCapture &&
           current.provider.status === "creating" &&
           current.provider.instanceId !== null &&
           current.provider.instanceId === row.instance_id;
-        const workspaceLost =
-          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
+        const workspaceLost = providerMissingBeforeCapture && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
+          !captureAbandoned &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59079,12 +59380,22 @@ export async function confirmDrainCold(
                 row,
                 recovery,
                 workspaceLost
-                  ? providerLossRecordForLostRow(
-                      row,
-                      "drain_probe",
-                      now,
-                      input.providerMaxRemainingLifetimeMs,
-                    )
+                  ? {
+                      ...providerLossRecordForLostRow(
+                        row,
+                        "drain_probe",
+                        now,
+                        input.providerMaxRemainingLifetimeMs,
+                      ),
+                      ...(captureAbandoned
+                        ? {
+                            captureAbandoned: true as const,
+                            ...(input.captureAbandonedNotice
+                              ? { unsavedSince: input.captureAbandonedNotice.unsavedSince }
+                              : {}),
+                          }
+                        : {}),
+                    }
                   : undefined,
               ),
             )
@@ -59161,12 +59472,32 @@ export async function confirmDrainCold(
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
         }
+        if (rows.length > 0 && workspaceLost && captureAbandoned && input.captureAbandonedNotice) {
+          const notice = input.captureAbandonedNotice;
+          await withCompleteSandboxGroupScope(tx, () =>
+            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+              type: "sandbox.box.terminated",
+              payload: notice.payload,
+            }),
+          );
+        }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
         return {
           wentCold: rows.length > 0,
           ...(rows.length > 0 && unpublishedWarmingLoss ? { unpublishedProviderLost: true } : {}),
+          ...(rows.length > 0 && capturePublishedBeforeStop
+            ? {
+                capturePublishedBeforeStop: {
+                  archiveRevision: current.archive.current?.revision ?? null,
+                  ...(current.archive.current?.version === 1 &&
+                  current.archive.current.omittedPaths?.length
+                    ? { omittedPaths: [...current.archive.current.omittedPaths] }
+                    : {}),
+                },
+              }
+            : {}),
         };
       },
     );
@@ -63486,17 +63817,29 @@ export async function releaseWorkspaceArchiveCapture(
      * this lease epoch's consecutive drain snapshot failures, atomically with
      * the release (a fenced, already replaced claim counts nothing). */
     recordDrainCaptureFailure?: boolean;
+    /** Called with the epoch's new consecutive failure count when
+     * `recordDrainCaptureFailure` counted this failure (the lease was still
+     * draining), after the release commits. */
+    onDrainCaptureFailureCounted?: (consecutiveFailures: number) => void;
   },
 ): Promise<boolean> {
-  return await withRlsContext(
+  let counted: number | null = null;
+  const released = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const rows = await tx.execute<{ id: string; rotation_requested_at: Date | null }>(sql`
+        const rows = await tx.execute<{
+          id: string;
+          rotation_requested_at: Date | null;
+          current_rotation_requested_at: Date | null;
+          drain_capture_failures: number | null;
+          liveness: string;
+        }>(sql`
         with owned as (
-          select id, rotation_requested_at as prior_rotation_requested_at
+          select id, rotation_requested_at as prior_rotation_requested_at,
+            liveness as prior_liveness
           from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
@@ -63560,8 +63903,16 @@ export async function releaseWorkspaceArchiveCapture(
           updated_at = now()
         from owned
         where sandbox_leases.id = owned.id
-        returning sandbox_leases.id, owned.prior_rotation_requested_at as rotation_requested_at, sandbox_leases.rotation_requested_at as current_rotation_requested_at
+        returning sandbox_leases.id, owned.prior_rotation_requested_at as rotation_requested_at, sandbox_leases.rotation_requested_at as current_rotation_requested_at,
+          sandbox_leases.drain_capture_failures, owned.prior_liveness as liveness
       `);
+        if (
+          input.recordDrainCaptureFailure === true &&
+          rows.length === 1 &&
+          rows[0]!.liveness === "draining"
+        ) {
+          counted = Number(rows[0]!.drain_capture_failures);
+        }
         if (
           rows.length === 1 &&
           rows[0]!.rotation_requested_at !== null &&
@@ -63572,6 +63923,10 @@ export async function releaseWorkspaceArchiveCapture(
         return rows.length === 1;
       }),
   );
+  if (counted !== null && Number.isSafeInteger(counted) && counted > 0) {
+    input.onDrainCaptureFailureCounted?.(counted);
+  }
+  return released;
 }
 
 /**
@@ -65108,7 +65463,8 @@ async function foldWorkspaceArchiveOntoLease(
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       -- A published save ends any run of drain snapshot failures: the count
-      -- means failures since this box's last successful save.
+      -- means failures of this drain since this box's last successful save
+      -- (a re-arm to warm resets it too).
       drain_capture_failures = 0,
       drain_capture_failure_epoch = null,
       drain_capture_first_failed_at = null,
@@ -66251,6 +66607,32 @@ export async function readLease(
   });
 }
 
+/** The session's sandbox group's latest save when it deliberately left
+ * rebuildable folders out (a drain's reduced save, DC-G3), else null. A later
+ * complete save replaces it, so the answer is current on every turn. */
+export async function readSandboxReducedSave(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ capturedAt: string; omittedPaths: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<LeaseRow>(sql`
+      select lease.* from sandbox_leases lease
+      join sessions session
+        on session.workspace_id = lease.workspace_id
+       and session.sandbox_group_id = lease.sandbox_group_id
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      limit 1
+    `);
+    const current = rows[0] ? recoveryStateFromLeaseRow(rows[0]).archive.current : null;
+    if (current?.version !== 1 || !Array.isArray(current.omittedPaths)) return null;
+    const omittedPaths = current.omittedPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    return omittedPaths.length ? { capturedAt: current.capturedAt, omittedPaths } : null;
+  });
+}
+
 /**
  * Waits while a sandbox group's lease is warming, the spawner that won
  * cold->warming still bringing its box up, reading it every `pollMs`. Returns
@@ -66470,6 +66852,17 @@ export type EnrollmentRecord = {
   agentUpdateChannel: "stable" | "beta" | null;
   agentCapabilities: Record<string, boolean>;
   agentUpdate: EnrollmentAgentUpdateRecord | null;
+  /** When the current run of unsuccessful update attempts first postponed
+   * the update for managed browsers in use, or null. A run continues while
+   * the latest attempt failed retryably or was postponed. */
+  agentUpdateBrowsersWaitSince: string | null;
+  /** Attempts of the current run for the current target that failed for a
+   * reason other than a busy machine (`update_busy_*`), before the current
+   * operation. */
+  agentUpdateFailedAttempts: number;
+  /** The announced time at which an automatic update closes an older
+   * agent's managed browsers, or null. */
+  agentUpdateBrowsersCloseAt: string | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -66546,6 +66939,9 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
             completedAt: row.agentUpdateCompletedAt?.toISOString() ?? null,
           }
         : null,
+    agentUpdateBrowsersWaitSince: row.agentUpdateBrowsersWaitSince?.toISOString() ?? null,
+    agentUpdateFailedAttempts: row.agentUpdateFailedAttempts ?? 0,
+    agentUpdateBrowsersCloseAt: row.agentUpdateBrowsersCloseAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -68340,6 +68736,21 @@ export async function beginEnrollmentAgentUpdate(
     connectionGeneration: number;
     operationId: string;
     targetVersion: string;
+    /** Announce that this update closes the machine's managed browsers at
+     * this time, or clear an announcement (null). Otherwise an announced time
+     * is kept while the run continues. */
+    browsersCloseAt?: Date | null;
+    /** For a postponement for browsers in use: `start` keeps the run's wait
+     * or begins it now, `restart` begins it again now. Otherwise the wait is
+     * kept while the run continues. */
+    browsersWait?: "start" | "restart";
+    /** The target is newer than the one the latest attempt was for, so the
+     * run's failed attempts no longer count. */
+    newerTarget?: boolean;
+    /** Reserve only while the machine's latest operation is still this one
+     * (null: none), so a decision made from an older read of the machine
+     * never replaces a newer record. */
+    expectedOperationId?: string | null;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -68347,6 +68758,13 @@ export async function beginEnrollmentAgentUpdate(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
+      // A run of unsuccessful attempts continues while the latest one failed
+      // retryably or was postponed (`update_busy_*`); a success, a
+      // non-retryable failure or a first attempt starts a new one.
+      const previousFailureWasBusy = sql`starts_with(coalesce(${schema.enrollments.agentUpdateErrorCode}, ''), 'update_busy')`;
+      const continuesRun = sql`(${schema.enrollments.agentUpdateStatus} = 'failed'
+        and (${schema.enrollments.agentUpdateRetryable} or ${previousFailureWasBusy}))`;
+      const nowSql = sql`${now.toISOString()}::timestamptz`;
       const rows = await scopedDb
         .update(schema.enrollments)
         .set({
@@ -68363,6 +68781,36 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateRequestedAt: now,
           agentUpdateUpdatedAt: now,
           agentUpdateCompletedAt: null,
+          agentUpdateBrowsersWaitSince:
+            input.browsersWait === "restart"
+              ? now
+              : input.browsersWait === "start"
+                ? sql`case
+                    when ${continuesRun}
+                      then coalesce(${schema.enrollments.agentUpdateBrowsersWaitSince}, ${nowSql})
+                    else ${nowSql}
+                  end`
+                : sql`case
+                    when ${continuesRun} then ${schema.enrollments.agentUpdateBrowsersWaitSince}
+                    else null
+                  end`,
+          agentUpdateFailedAttempts:
+            input.newerTarget === true
+              ? 0
+              : sql`case
+                  when ${continuesRun} and not ${previousFailureWasBusy}
+                    then ${schema.enrollments.agentUpdateFailedAttempts} + 1
+                  when ${continuesRun}
+                    then ${schema.enrollments.agentUpdateFailedAttempts}
+                  else 0
+                end`,
+          agentUpdateBrowsersCloseAt:
+            input.browsersCloseAt !== undefined
+              ? input.browsersCloseAt
+              : sql`case
+                  when ${continuesRun} then ${schema.enrollments.agentUpdateBrowsersCloseAt}
+                  else null
+                end`,
           updatedAt: now,
         })
         .where(
@@ -68378,6 +68826,9 @@ export async function beginEnrollmentAgentUpdate(
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
             ),
+            input.expectedOperationId === undefined
+              ? undefined
+              : sql`${schema.enrollments.agentUpdateOperationId} is not distinct from ${input.expectedOperationId}::uuid`,
           ),
         )
         .returning();
@@ -76356,9 +76807,56 @@ function boundedInternalUpdateEventText(
   return { text: `${text}${suffix}`, truncated: true };
 }
 
-function internalUpdateEventMember(update: BoundedSystemUpdate) {
+/**
+ * The names of the automations behind these updates, by update id. An
+ * automation run's own summary is its instructions, which only the agent
+ * reads; people see the automation's name.
+ */
+async function automationNamesForUpdatesInTransaction(
+  tx: Database,
+  workspaceId: string,
+  updates: readonly Pick<BoundedSystemUpdate, "id" | "kind" | "scheduledTaskRunId">[],
+): Promise<ReadonlyMap<string, string>> {
+  const runIds = [
+    ...new Set(
+      updates.flatMap((update) =>
+        update.kind === "scheduled_occurrence" && update.scheduledTaskRunId
+          ? [update.scheduledTaskRunId]
+          : [],
+      ),
+    ),
+  ];
+  const names = new Map<string, string>();
+  if (runIds.length === 0) return names;
+  const rows = await tx
+    .select({ runId: schema.scheduledTaskRuns.id, name: schema.scheduledTasks.name })
+    .from(schema.scheduledTaskRuns)
+    .innerJoin(schema.scheduledTasks, eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId))
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    );
+  const byRun = new Map(rows.map((row) => [row.runId, row.name]));
+  for (const update of updates) {
+    const name = update.scheduledTaskRunId ? byRun.get(update.scheduledTaskRunId) : undefined;
+    if (update.kind === "scheduled_occurrence" && name) names.set(update.id, name);
+  }
+  return names;
+}
+
+function internalUpdateEventMember(
+  update: BoundedSystemUpdate,
+  automationNames?: ReadonlyMap<string, string>,
+) {
+  const automation =
+    update.kind === "scheduled_occurrence"
+      ? automationRunPresentation(update, automationNames?.get(update.id))
+      : null;
   const summary = boundedInternalUpdateEventText(
-    update.summary,
+    // People see what happened; only the agent gets the instructions.
+    automation?.name ?? update.summary,
     MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES,
   );
   const source = boundedInternalUpdateEventText(
@@ -76374,6 +76872,7 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     summary: summary.text,
     summaryTruncated: summary.truncated,
   };
+  if (automation) return { ...preview, automation };
   if (update.kind !== "media_generation_result") return preview;
   const payload = SessionSystemUpdatePayload.safeParse(update.payload);
   return payload.success && payload.data.type === "media_generation_result"
@@ -78384,6 +78883,11 @@ export async function claimSessionWorkForAttempt(
             };
           }
           const modelOrdered = systemUpdatesInModelOrder(deliverable);
+          const automationNames = await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            workspaceId,
+            deliverable,
+          );
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
@@ -78538,7 +79042,9 @@ export async function claimSessionWorkForAttempt(
               historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
-              members: modelOrdered.map(internalUpdateEventMember),
+              members: modelOrdered.map((update) =>
+                internalUpdateEventMember(update, automationNames),
+              ),
             },
             occurredAt,
           };
@@ -79351,6 +79857,140 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               [session],
             );
+            const compactionInitiatingHumanSubjectId =
+              latestStarted?.initiatingHumanSubjectId ??
+              (latestStarted?.initiatorKind === "subject"
+                ? latestStarted.initiatorSubjectId
+                : null);
+            // Compaction continues the turn it compacts after, so it runs with
+            // that person's current connection accounts, resolved like an
+            // internal update continuing the same turn. The request then
+            // carries the same connector and personal tools as the turn before
+            // it and reuses its cached prompt prefix. A carried principal that
+            // is not the turn's person, or not a private session's owner, never
+            // lends personal accounts. A compaction turn cannot carry an
+            // external link's permission ceiling or a credential restriction
+            // forward, so a turn with either gives it no connection accounts
+            // and no intent at all.
+            let compactionPersonalConnectionDelegations: McpPersonalConnectionDelegation[] = [];
+            let compactionMcpAccountBindings: McpConnectionAccountBinding[] = [];
+            let compactionConnectionAccountMetadata: Record<string, unknown> = {};
+            // A stored intent the current schema no longer reads lends nothing
+            // and is not carried forward; it never fails the claim.
+            let compactionConnectionAccountIntent: ConnectionAccountIntent | null = null;
+            try {
+              compactionConnectionAccountIntent = latestStarted
+                ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
+                : null;
+            } catch (error) {
+              compactionConnectionAccountMetadata = {
+                connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+              };
+            }
+            // In a savepoint, so a failed read lends nothing instead of
+            // failing the claim.
+            const compactedTurnHasNoExternalLink = async (compactedTurnId: string) => {
+              try {
+                const rows = await tx.transaction(
+                  async (savepoint) =>
+                    await savepoint.execute<{ present: number }>(sql`
+                      select 1 as present from external_link_turn_authorities
+                      where account_id = ${session.accountId}
+                        and workspace_id = ${workspaceId}
+                        and turn_id = ${compactedTurnId}
+                      limit 1
+                    `),
+                );
+                return rows.length === 0;
+              } catch (error) {
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+                return false;
+              }
+            };
+            const compactionAuthorityBorrowable =
+              latestStarted !== null &&
+              compactionConnectionAccountIntent !== null &&
+              !carriesCredentialRestriction(
+                latestStarted.initiatorContext,
+                latestStarted.metadata,
+              ) &&
+              !carriesCredentialRestriction(null, session.metadata) &&
+              (await compactedTurnHasNoExternalLink(latestStarted.id));
+            if (
+              compactionAuthorityBorrowable &&
+              compactionConnectionAccountIntent &&
+              input.resolveContinuedConnectionAccounts
+            ) {
+              const resolveContinuedConnectionAccounts = input.resolveContinuedConnectionAccounts;
+              const claimedSession = session;
+              const principal = compactionConnectionAccountIntent.principal;
+              const principalMayLend =
+                principal.kind === "subject" &&
+                principal.subjectId === compactionInitiatingHumanSubjectId &&
+                (claimedSession.visibility !== "user_private" ||
+                  principal.subjectId === claimedSession.ownerSubjectId?.trim());
+              const intent: ConnectionAccountIntent =
+                principal.kind === "subject" && !principalMayLend
+                  ? { ...compactionConnectionAccountIntent, principal: { kind: "none" } }
+                  : compactionConnectionAccountIntent;
+              const lendingSubjectId =
+                intent.principal.kind === "subject" ? intent.principal.subjectId : null;
+              try {
+                // A savepoint, so a failed resolution leaves the claim usable.
+                // Maintenance is never blocked by connection accounts: without
+                // them it runs as before, with only the session's shared tools.
+                const resolved = await tx.transaction(async (savepoint) => {
+                  const connectorMetadata = await sessionMcpServerMetadataForSessions(
+                    savepoint as unknown as Database,
+                    workspaceId,
+                    [sessionId],
+                  );
+                  const result = await resolveContinuedConnectionAccounts(
+                    savepoint as unknown as Database,
+                    {
+                      sessionId,
+                      session: mapSession(
+                        claimedSession,
+                        serializeEffectiveSessionControl(effectiveControl),
+                        connectorMetadata.get(sessionId) ?? [],
+                      ),
+                      intent,
+                    },
+                  );
+                  const delegations = parsedPersonalConnectionDelegations(
+                    result.personalConnectionDelegations,
+                    `session_turns:${workspaceId}:${sessionId}:${turnId}:compaction`,
+                  );
+                  const bindings = parseAcceptedMcpAccountBindings(result.mcpAccountBindings) ?? [];
+                  if (
+                    delegations.some(
+                      (delegation) => delegation.ownerSubjectId !== lendingSubjectId,
+                    ) ||
+                    bindings.some(
+                      (binding) =>
+                        binding.subjectScope === "subject" &&
+                        binding.ownerSubjectId !== lendingSubjectId,
+                    )
+                  ) {
+                    throw new CompactionConnectionAccountRefusal();
+                  }
+                  return { delegations, bindings, gaps: (result.gaps ?? []).slice(0, 32) };
+                });
+                compactionPersonalConnectionDelegations = resolved.delegations;
+                compactionMcpAccountBindings = resolved.bindings;
+                if (resolved.gaps.length > 0) {
+                  compactionConnectionAccountMetadata = { connectionAccountGaps: resolved.gaps };
+                }
+              } catch (error) {
+                // A lost connection fails the turn insert below instead. The
+                // worker reports this record; it never carries the message.
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+              }
+            }
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const sharedCompactionPool = latestStarted
               ? null
@@ -79358,75 +79998,134 @@ export async function claimSessionWorkForAttempt(
                   tx as unknown as Database,
                   workspaceId,
                 );
-            const [compactionTurn] = await tx
-              .insert(schema.sessionTurns)
-              .values(
-                withLosslessContentWriteVersion(
-                  {
-                    id: turnId,
-                    accountId: session.accountId,
-                    workspaceId,
-                    sessionId,
-                    triggerEventId,
-                    temporalWorkflowId: workflowId,
-                    status: "running",
-                    executionGeneration: 1,
-                    activeAttemptId: input.attemptId,
-                    source: "compaction",
-                    // Maintenance continues the session's work; keep the
-                    // surface of the turn it compacts after.
-                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
-                    position: Number(position),
-                    prompt: "",
-                    resources: [],
-                    tools: [],
-                    model: effectivePolicy!.model,
-                    reasoningEffort: reasoningEffortForMetadata(
-                      { reasoningEffort: effectivePolicy!.reasoningEffort },
-                      session.reasoningEffort as ReasoningEffort,
-                    ),
-                    latencyMode: latencyModeForMetadata(
-                      { latencyMode: effectivePolicy!.latencyMode },
-                      session.latencyMode as LatencyMode,
-                    ),
-                    sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
-                    sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-                    metadata: metadataWithTurnDispatchAttempt(
-                      { executionKind: "context_compaction" },
-                      {
-                        id: input.dispatchId,
-                        generation: dispatchGeneration,
-                        triggerEventId,
-                      },
-                    ),
-                    ...initiatorColumns(compactionInitiator),
-                    initiatingHumanSubjectId:
-                      latestStarted?.initiatingHumanSubjectId ??
-                      (latestStarted?.initiatorKind === "subject"
-                        ? latestStarted.initiatorSubjectId
-                        : null),
-                    personalConnectionDelegations: [],
-                    mcpAccountBindings: [],
-                    xaiProviderAccountAuthoritySnapshot:
-                      latestStarted?.xaiProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.xai,
-                    claudeProviderAccountAuthoritySnapshot:
-                      latestStarted?.claudeProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.claude,
-                    // The immutable v2 accepted authority of the turn this
-                    // compacts after (NULL without a Codex cutover, so the
-                    // legacy path is unchanged). A session with no started
-                    // turn has none: shared capacity only.
-                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
-                    startedAt: now,
-                    createdAt: now,
-                    updatedAt: now,
-                  },
-                  "prompt",
-                  "promptCodecVersion",
-                ),
-              )
-              .returning();
+            const compactionIntent = compactionAuthorityBorrowable
+              ? compactionConnectionAccountIntent
+              : null;
+            type CompactionAccounts = {
+              delegations: McpPersonalConnectionDelegation[];
+              bindings: McpConnectionAccountBinding[];
+              metadata: Record<string, unknown>;
+            };
+            const insertCompactionTurn = async (writer: typeof tx, accounts: CompactionAccounts) =>
+              await writer
+                .insert(schema.sessionTurns)
+                .values(
+                  withLosslessContentWriteVersion(
+                    {
+                      id: turnId,
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      triggerEventId,
+                      temporalWorkflowId: workflowId,
+                      status: "running",
+                      executionGeneration: 1,
+                      activeAttemptId: input.attemptId,
+                      source: "compaction",
+                      // Maintenance continues the session's work; keep the
+                      // surface of the turn it compacts after.
+                      surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
+                      position: Number(position),
+                      prompt: "",
+                      resources: [],
+                      tools: [],
+                      model: effectivePolicy!.model,
+                      reasoningEffort: reasoningEffortForMetadata(
+                        { reasoningEffort: effectivePolicy!.reasoningEffort },
+                        session.reasoningEffort as ReasoningEffort,
+                      ),
+                      latencyMode: latencyModeForMetadata(
+                        { latencyMode: effectivePolicy!.latencyMode },
+                        session.latencyMode as LatencyMode,
+                      ),
+                      sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
+                      sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                      metadata: metadataWithTurnDispatchAttempt(
+                        {
+                          executionKind: "context_compaction",
+                          ...accounts.metadata,
+                        },
+                        {
+                          id: input.dispatchId,
+                          generation: dispatchGeneration,
+                          triggerEventId,
+                        },
+                      ),
+                      ...initiatorColumns(compactionInitiator),
+                      initiatingHumanSubjectId: compactionInitiatingHumanSubjectId,
+                      personalConnectionDelegations: accounts.delegations,
+                      mcpAccountBindings: accounts.bindings,
+                      // Only a borrowable turn's intent is carried, so later
+                      // work continuing this compaction never resolves accounts
+                      // the compacted turn could not lend.
+                      connectionAccountIntent: compactionIntent,
+                      xaiProviderAccountAuthoritySnapshot:
+                        latestStarted?.xaiProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.xai,
+                      claudeProviderAccountAuthoritySnapshot:
+                        latestStarted?.claudeProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.claude,
+                      // The immutable v2 accepted authority of the turn this
+                      // compacts after (NULL without a Codex cutover, so the
+                      // legacy path is unchanged). A session with no started
+                      // turn has none: shared capacity only.
+                      subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
+                      startedAt: now,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                    "prompt",
+                    "promptCodecVersion",
+                  ),
+                )
+                .returning();
+            let compactionTurn:
+              | Awaited<ReturnType<typeof insertCompactionTurn>>[number]
+              | undefined;
+            if (
+              compactionPersonalConnectionDelegations.length > 0 ||
+              compactionMcpAccountBindings.length > 0
+            ) {
+              try {
+                // Acceptance re-checks live authority in the turn's triggers.
+                // A refusal falls back to no accounts instead of failing the
+                // claim, so the pending request can still run.
+                [compactionTurn] = await tx.transaction(async (savepoint) => {
+                  if (compactionPersonalConnectionDelegations.length > 0) {
+                    // Transaction-local: released with the savepoint, it stays
+                    // set for the rest of the claim (as on the internal-update
+                    // path); rolled back with it on refusal.
+                    await savepoint.execute(sql`
+                      SELECT set_config(
+                        'opengeni.initiating_human_subject_id',
+                        ${compactionInitiatingHumanSubjectId},
+                        true
+                      )
+                    `);
+                  }
+                  return await insertCompactionTurn(savepoint as unknown as typeof tx, {
+                    delegations: compactionPersonalConnectionDelegations,
+                    bindings: compactionMcpAccountBindings,
+                    metadata: compactionConnectionAccountMetadata,
+                  });
+                });
+              } catch (error) {
+                compactionTurn = undefined;
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(
+                    error,
+                    "acceptance_refused",
+                  ),
+                };
+              }
+            }
+            compactionTurn ??= (
+              await insertCompactionTurn(tx, {
+                delegations: [],
+                bindings: [],
+                metadata: compactionConnectionAccountMetadata,
+              })
+            )[0];
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
             await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
               { kind: "session_turn", workspaceId, id: compactionTurn.id },
@@ -81066,10 +81765,11 @@ export async function getSessionAttemptActivityRef(
  * carry a physical settlement before the ordinary receipt transaction is
  * allowed to run.
  *
- * With that proof, owned-box setup that the attempt's provably exited worker
- * left unsettled is settled first (`settleCrashedWorkerSetupAdmissions`).
- * `workerProcessExitDeadlineMs` is the turn worker's process-exit deadline
- * after a shutdown signal; without it a worker-shutdown closure keeps its gate.
+ * With that proof, every request that the attempt's provably exited worker
+ * left unsettled is settled first (`settleExitedWorkerAdmissions`), and the
+ * session is woken when any was. `workerProcessExitDeadlineMs` is the turn
+ * worker's process-exit deadline after a shutdown signal; without it a crashed
+ * worker's requests keep their gate.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -81085,7 +81785,19 @@ export async function reconcileSessionAttemptQuiescence(
     workerProcessExitDeadlineMs?: number;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-  if (input.activitySettled) await settleCrashedWorkerSetupAdmissions(db, input);
+  if (input.activitySettled && (await settleExitedWorkerAdmissions(db, input)) > 0) {
+    // A worker-death closure needs no receipt, so this reconciliation reports
+    // `stale` below and its workflow run may close; the wake brings it back.
+    await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, (tx) =>
+      enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: input.temporalWorkflowId,
+        reason: "exited_worker_admissions_settled",
+      }),
+    );
+  }
   const eligibility = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -81222,113 +81934,6 @@ export async function reconcileSessionAttemptQuiescence(
     temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
-}
-
-/**
- * Reject the owned-box setup requests that a worker-shutdown closure left
- * behind once the closing worker's process provably no longer exists. Nothing
- * else settles them: the worker closed the attempt `interrupted_recoverable`
- * and exited before its writer drain released them, and a box that stays warm
- * (compute is never drained for being idle) never reaches the cold commit that
- * rejects crashed-worker requests. The closed attempt then never quiesced and
- * its session never claimed another turn, Steer or message.
- *
- * A settled activity and a missing holder do not prove the worker exited (a
- * closed attempt's holder is removed at once, and Temporal reports a cancelled
- * activity settled while its code still runs). Time does: the closure came
- * from the attempt's own `worker_shutdown` recovery request, which follows the
- * worker's shutdown signal, and a standalone worker process exits within its
- * process-exit deadline of that signal whatever its drain does. So the attempt
- * must have closed at least that deadline ago, with no Pause/Steer interruption
- * row.
- *
- * The request must be the attempt's own owned-box setup, unsettled, without a
- * holder or retained process, on a turn whose setup Start outcome is not
- * recorded unknown (that turn waits for the box to be gone). Setup writes only
- * through its attempt's command fence, and the replacement attempt runs the same
- * setup again before any model work. Pause, Steer, cancellation, other recovery
- * reasons, other closures and every other request keep today's gate.
- */
-async function settleCrashedWorkerSetupAdmissions(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    attemptId: string;
-    temporalWorkflowId: string;
-    temporalWorkflowRunId: string;
-    temporalActivityId: string;
-    workerProcessExitDeadlineMs?: number;
-  },
-): Promise<void> {
-  const exitDeadlineMs = input.workerProcessExitDeadlineMs;
-  if (exitDeadlineMs === undefined || !Number.isSafeInteger(exitDeadlineMs) || exitDeadlineMs < 0)
-    return;
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`
-        update sandbox_workspace_mutation_admissions admission
-        set provider_outcome = 'rejected', settled_at = now()
-        from session_turn_attempts attempt
-        join session_turns turn
-          on turn.workspace_id = attempt.workspace_id
-         and turn.session_id = attempt.session_id
-         and turn.id = attempt.turn_id
-        where attempt.account_id = ${input.accountId}
-          and attempt.workspace_id = ${input.workspaceId}
-          and attempt.session_id = ${input.sessionId}
-          and attempt.id = ${input.attemptId}
-          and attempt.temporal_workflow_id = ${input.temporalWorkflowId}
-          and attempt.temporal_workflow_run_id = ${input.temporalWorkflowRunId}
-          and attempt.temporal_activity_id = ${input.temporalActivityId}
-          and attempt.state = 'closed'
-          and attempt.quiesced_at is null
-          and attempt.outcome = 'interrupted_recoverable'
-          and attempt.closed_at <= now() - (${exitDeadlineMs}::integer * interval '1 millisecond')
-          and not exists (
-            select 1 from session_attempt_interruptions interruption
-            where interruption.workspace_id = attempt.workspace_id
-              and interruption.session_id = attempt.session_id
-              and interruption.attempt_id = attempt.id
-          )
-          and exists (
-            select 1 from session_events recovery
-            where recovery.account_id = attempt.account_id
-              and recovery.workspace_id = attempt.workspace_id
-              and recovery.session_id = attempt.session_id
-              and recovery.turn_id = attempt.turn_id
-              and recovery.turn_attempt_id = attempt.id
-              and recovery.type = 'turn.recovery.requested'
-              and recovery.payload ->> 'reason' = 'worker_shutdown'
-          )
-          and (turn.metadata -> 'sandboxSetupOutcomeUnknown') is null
-          and admission.account_id = attempt.account_id
-          and admission.workspace_id = attempt.workspace_id
-          and admission.session_id = attempt.session_id
-          and admission.turn_id = attempt.turn_id
-          and admission.attempt_id = attempt.id
-          and admission.actor_kind = 'turn'
-          and admission.actor_id = attempt.id
-          and admission.holder_kind = 'turn'
-          and admission.execution_generation = attempt.execution_generation
-          and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
-          and admission.settled_at is null
-          and admission.provider_outcome is null
-          and not exists (
-            select 1 from sandbox_retained_processes retained
-            where retained.parent_admission_id = admission.id
-          )
-          and not exists (
-            select 1 from sandbox_lease_holders holder
-            where holder.lease_id = admission.lease_id
-              and holder.holder_id = admission.holder_id
-          )
-      `);
-    },
-  );
 }
 
 /**
@@ -87123,6 +87728,240 @@ export async function readSessionTurnToolProgressRecoveryState(
   });
 }
 
+/** The `sandbox.operation.*` name a worker records when it restarts a turn's
+ * sandbox because the sandbox could no longer start programs. */
+export const SANDBOX_PROCESS_START_RESTART_OPERATION = "sandbox.process_start_restart";
+
+/**
+ * How many times this turn already restarted its sandbox because it could not
+ * start programs, since the person last asked to retry it: restarts begun
+ * (recorded before the restart call, so a crash still counts) and restarts
+ * that completed. The worker begins at most one per turn, so a box that stays
+ * broken fails the turn instead of restarting in a loop; a human Retry is a
+ * new request and may restart again.
+ */
+export async function countSessionTurnSandboxProcessStartRestarts(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<{ started: number; completed: number }> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ started: number | string; completed: number | string }>(
+      scopedDb as unknown as Database,
+      sql`select
+          count(*) filter (where restart.type = 'sandbox.operation.started') as started,
+          count(*) filter (where restart.type = 'sandbox.operation.completed') as completed
+        from session_events restart
+        where restart.workspace_id = ${workspaceId}
+          and restart.session_id = ${input.sessionId}
+          and restart.turn_id = ${input.turnId}
+          and restart.type in ('sandbox.operation.started', 'sandbox.operation.completed')
+          and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
+          and restart.sequence > coalesce((
+            select max(retry.sequence) from session_events retry
+            where retry.workspace_id = ${workspaceId}
+              and retry.session_id = ${input.sessionId}
+              and retry.turn_id = ${input.turnId}
+              and retry.type = 'turn.recovery.requested'
+              and retry.payload->>'reason' = 'human_retry'
+          ), 0)`,
+    );
+    return { started: Number(row?.started ?? 0), completed: Number(row?.completed ?? 0) };
+  });
+}
+
+/**
+ * Ask the lease to replace one exact live box whose programs cannot start
+ * (Modal: its /bin/sh is gone). The same operator rotation an image conflict
+ * requests: new arrivals are fenced instead of reusing the box, the drain
+ * grace is zero once its last holder leaves, and the reaper saves /workspace
+ * with the provider's own snapshot before ending the box, so the next acquire
+ * restores a fresh one. A box whose save fails stays draining under the
+ * existing capture policy, and arrivals keep waiting instead of reusing it.
+ * Null when the lease no longer names this box (another epoch or instance, or
+ * not live): nothing is changed.
+ */
+export async function requestSandboxProcessStartReplacement(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseEpoch: number;
+    instanceId: string;
+  },
+): Promise<{
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  liveness: "warm" | "draining";
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        lease_epoch: number | string;
+        instance_id: string;
+        liveness: "warm" | "draining";
+      }>(
+        scopedDb as unknown as Database,
+        sql`update sandbox_leases set
+            rotation_requested_at = coalesce(rotation_requested_at, now()),
+            rotation_reason = coalesce(rotation_reason, 'operator'),
+            expires_at = least(expires_at, now()),
+            updated_at = now()
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.leaseEpoch}
+            and instance_id = ${input.instanceId}
+            and liveness in ('warm', 'draining')
+          returning lease_epoch, instance_id, liveness`,
+      );
+      const row = rows[0];
+      return row
+        ? {
+            sandboxGroupId: input.sandboxGroupId,
+            leaseEpoch: Number(row.lease_epoch),
+            instanceId: row.instance_id,
+            liveness: row.liveness,
+          }
+        : null;
+    },
+  );
+}
+
+/** The box a turn asked to replace because it could not start programs. */
+export type SandboxProcessStartReplacementTarget = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+};
+
+/** Turn metadata naming a box that could not start programs and whose save
+ * failed while the turn waited on its replacement. */
+export const SANDBOX_BOX_NOT_SAVED_METADATA_KEY = "sandboxBoxNotSaved";
+
+/**
+ * The box a drain could not save while this turn waited on its replacement
+ * (it could not start programs), as recorded by
+ * {@link releaseSandboxProcessStartReplacementWaiters}. It holds across a
+ * person's retry: a retry fenced by the same unsaved box stops at once. Null
+ * when no such save failed while the turn waited.
+ */
+export async function readSessionTurnSandboxBoxNotSaved(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<SandboxProcessStartReplacementTarget | null> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ sandbox_group_id: string | null; lease_epoch: string | null }>(
+      scopedDb as unknown as Database,
+      sql`select turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'sandboxGroupId' as sandbox_group_id,
+          turn.metadata->${SANDBOX_BOX_NOT_SAVED_METADATA_KEY}->>'leaseEpoch' as lease_epoch
+        from session_turns turn
+        where turn.workspace_id = ${workspaceId}
+          and turn.session_id = ${input.sessionId}
+          and turn.id = ${input.turnId}
+        limit 1`,
+    );
+    const leaseEpoch = Number(row?.lease_epoch);
+    return row?.sandbox_group_id && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
+      ? { sandboxGroupId: row.sandbox_group_id, leaseEpoch }
+      : null;
+  });
+}
+
+/**
+ * A drain could not save a box that a turn asked to replace because it could
+ * not start programs. No turn should wait, possibly until the provider's
+ * lifetime limit, on a save that keeps failing: every turn waiting on that
+ * box's rotation has its wait cleared, is marked with the unsaved box, and is
+ * woken, so its next attempt stops with clear copy (failure settlement). The
+ * box stays fenced and its drain keeps retrying under the existing policy.
+ * Only a rotation some turn requested for this exact box (its process-start
+ * restart event names the group and epoch) releases anyone. Returns how many
+ * turns were released.
+ */
+export async function releaseSandboxProcessStartReplacementWaiters(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string; leaseEpoch: number },
+): Promise<number> {
+  const waitJson = JSON.stringify({
+    [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+      reason: "rotation_in_progress",
+    } satisfies SandboxLifecycleWait,
+  });
+  const notSavedJson = JSON.stringify({
+    [SANDBOX_BOX_NOT_SAVED_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.leaseEpoch,
+    },
+  });
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const released = await rawRows<{
+        account_id: string;
+        session_id: string;
+        temporal_workflow_id: string | null;
+      }>(
+        tx,
+        sql`with replacement as (
+            select 1 from sessions requester
+            join session_events restart
+              on restart.workspace_id = requester.workspace_id
+              and restart.session_id = requester.id
+            where requester.workspace_id = ${input.workspaceId}
+              and requester.sandbox_group_id = ${input.sandboxGroupId}
+              and restart.type = 'sandbox.operation.started'
+              and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
+              and restart.payload->>'sandboxGroupId' = ${input.sandboxGroupId}
+              and restart.payload->>'leaseEpoch' = ${String(input.leaseEpoch)}
+            limit 1
+          ), waiting as (
+            select turn.id as turn_id, session.id as session_id, session.account_id,
+              session.temporal_workflow_id
+            from sessions session
+            join session_turns turn
+              on turn.workspace_id = session.workspace_id
+              and turn.session_id = session.id
+              and turn.id = session.active_turn_id
+            where session.workspace_id = ${input.workspaceId}
+              and session.sandbox_group_id = ${input.sandboxGroupId}
+              and session.status = 'recovering'
+              and turn.status = 'recovering'
+              and turn.metadata @> ${waitJson}::jsonb
+              and exists (select 1 from replacement)
+            for update of turn
+          )
+          update session_turns turn
+          set metadata = (turn.metadata - ${SANDBOX_LIFECYCLE_WAIT_METADATA_KEY})
+              || ${notSavedJson}::jsonb,
+            version = turn.version + 1,
+            updated_at = now()
+          from waiting
+          where turn.id = waiting.turn_id
+          returning waiting.account_id, waiting.session_id, waiting.temporal_workflow_id`,
+      );
+      for (const waiter of released) {
+        await enqueueSessionWorkflowWakeInTransaction(tx, {
+          accountId: waiter.account_id,
+          workspaceId: input.workspaceId,
+          sessionId: waiter.session_id,
+          temporalWorkflowId: waiter.temporal_workflow_id ?? `session-${waiter.session_id}`,
+          reason: "sandbox_lifecycle_advanced",
+        });
+      }
+      return released.length;
+    }),
+  );
+}
+
 export async function requestSessionTurnRecovery(
   db: Database,
   workspaceId: string,
@@ -89005,6 +89844,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     waiterId: string;
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
+    resetsAt: Date | null;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -89014,6 +89854,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     childTurnId: input.turnId,
     provider: input.provider,
     nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+    resetsAt: input.resetsAt?.toISOString() ?? null,
   };
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childWaitingCapacityDedupeKey({
@@ -90862,7 +91703,14 @@ export async function addSessionSystemUpdateWithSourceMutation<
         ]);
 
         const now = new Date();
-        const eventPreview = internalUpdateEventMember(inserted);
+        const eventPreview = internalUpdateEventMember(
+          inserted,
+          await automationNamesForUpdatesInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+            [inserted],
+          ),
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -95723,6 +96571,8 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
+export * from "./id-jag-issuer";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
 export * from "./workspace-member-execution-defaults";
@@ -95774,6 +96624,7 @@ export * from "./event-source-feeds";
 export * from "./automation-templates";
 export * from "./bot-templates";
 export * from "./organization-model-providers";
+export * from "./organization-compatible-model-endpoints";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
 export * from "./subscription-core-claude-oauth";

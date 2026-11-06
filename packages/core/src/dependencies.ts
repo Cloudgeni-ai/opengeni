@@ -123,6 +123,20 @@ export type SessionWorkflowClient = {
     runAt: Date;
   }) => Promise<void>;
   /**
+   * Durably restores the stored content of a chat (and the sub-chats
+   * archived with it) whose restore was just requested. Repeating one
+   * request is a no-op. Optional for embedded clients; without it the
+   * maintenance pass restores them a few minutes later.
+   */
+  scheduleSessionArchiveRestore?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    /** Who restored it: the chats it brings back are resumed as them. */
+    subjectId: string;
+    requestedAt: string;
+  }) => Promise<void>;
+  /**
    * Start a recording's transcript or deletion workflow. Starting one that is
    * already running does nothing. Optional for embedded clients; the worker's
    * recovery sweep starts any it misses.
@@ -133,6 +147,17 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     recordingId: string;
     versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Tell a meeting's speakers apart while it is still being recorded. Starting
+   * it while it runs does nothing. Optional: without it the speakers are told
+   * apart only after the meeting ends, which takes longer.
+   */
+  startRecordingSpeakerScan?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
     ownerSubjectId: string;
   }) => Promise<void>;
   /**
@@ -170,6 +195,7 @@ export type ManagedEmailMessage = {
     | "password_reset"
     | "organization_user_setup"
     | "sign_in_method_changed"
+    | "billing_credit_notification"
     | "site_abuse_notice";
   from: string;
   to: string;
@@ -300,6 +326,12 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /**
+   * Injectable MCP auto-connect transport (issuer discovery and key sets,
+   * Client ID Metadata Documents, and redeeming ID-JAGs at an app), still
+   * network-policy checked. For tests.
+   */
+  mcpAutoConnectFetch?: typeof fetch;
   /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
   mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;

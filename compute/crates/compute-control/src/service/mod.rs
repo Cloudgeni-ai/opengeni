@@ -14,7 +14,7 @@ mod reach;
 mod requests;
 mod templates;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ use compute_storage::store::ChunkStore;
 use crate::hosts::{Answered, Hosts};
 use crate::link::Links;
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
-use crate::view::{Target, Unplaced, View, shape_key};
+use crate::view::{Refused, Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
 pub use moves::{Drained, Resize};
@@ -241,6 +241,13 @@ pub struct Service<S> {
     hosts: Hosts,
     archive: Option<ChunkStore>,
     settings: Settings,
+    /// Whose turn it is to place each sandbox nobody owns, on this
+    /// replica ([`Service::turn`]).
+    turns: std::sync::Mutex<HashMap<Id, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    /// The last adopt of each sandbox this replica saw a host refuse as
+    /// full: that host holds nothing of it under that owner epoch, for
+    /// good ([`Service::held_nothing`]).
+    refused_adopts: std::sync::Mutex<HashMap<Id, (HostId, OwnerEpoch)>>,
 }
 
 /// The wall-clock time in milliseconds since the Unix epoch.
@@ -289,6 +296,8 @@ impl<S: Store> Service<S> {
             hosts,
             archive,
             settings,
+            turns: std::sync::Mutex::new(HashMap::new()),
+            refused_adopts: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -548,6 +557,11 @@ impl<S: Store> Service<S> {
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
                 Next::PlaceElsewhere => {
+                    // Not asked again for a create like it until what it
+                    // reports could have changed.
+                    if answered.code() == Some(ErrorCode::HostFull) {
+                        self.view.refused(target.host, Refused::Place(demand));
+                    }
                     exclude.insert(target.host);
                     refused = Some(answered);
                 }

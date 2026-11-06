@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.9.0",
+  "version": "6.10.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./billing-credit-notifications": {
+      "types": "./src/billing-credit-notifications.ts",
+      "default": "./src/billing-credit-notifications.ts"
+    },
     "./event-triggers": {
       "types": "./src/event-triggers.ts",
       "default": "./src/event-triggers.ts"
@@ -81,6 +85,10 @@
     "./claude-cite-tags": {
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"
+    },
+    "./no-reply": {
+      "types": "./src/no-reply.ts",
+      "default": "./src/no-reply.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
@@ -341,10 +349,6 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
-    },
-    "./google-drive-native-retirement": {
-      "types": "./src/google-drive-native-retirement.ts",
-      "default": "./src/google-drive-native-retirement.ts"
     }
   },
   "publishConfig": {

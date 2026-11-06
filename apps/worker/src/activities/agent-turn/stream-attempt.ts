@@ -13,7 +13,9 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
+  readSandboxReducedSave,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -71,6 +73,9 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  queueSandboxSetupNotice,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
   withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
@@ -87,7 +92,7 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -100,6 +105,7 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelPreparationPhase,
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
@@ -301,11 +307,12 @@ export type TurnStreamAttemptDeps = {
     initialExpiresAt?: Date,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   withProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   withSessionTitleProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   publishCompactionLiveEvents: (events: SessionEvent[]) => Promise<void>;
@@ -652,12 +659,36 @@ export async function runTurnStreamAttempt(
       // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
       // existing history stays byte-for-byte intact, including after retries;
       // the durable receipt restores the warning after compaction as well.
+      // A verified restore's "restored from an older save" notice whose write
+      // failed after the restore is delivered now, once. Never fails a turn.
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      }).catch((error: unknown) => {
+        // Still pending: a later turn or restore delivers it. The warning
+        // itself must never fail the turn either.
+        try {
+          observability.warn?.("pending restore notice delivery failed", {
+            ...safeErrorDiagnostic(error),
+            origin: "worker",
+          });
+        } catch {
+          // Diagnostics only.
+        }
+        return false;
+      });
       const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
         db,
         input.workspaceId,
         input.sessionId,
         "explicit_notice",
       );
+      // Repeated each turn while the latest save is a reduced one; a turn
+      // never fails because this optional notice could not be read.
+      const reducedSave = await (async () =>
+        await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
+      const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -666,6 +697,7 @@ export async function runTurnStreamAttempt(
         },
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
+        ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -913,14 +945,28 @@ export async function runTurnStreamAttempt(
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
-    if (pendingSteer.value) {
+    // The Steer read ran alongside the slower checks, so the watch may have
+    // seen a Steer committed after it. Such a watch is not proof of a
+    // withdrawn Steer: read again before re-arming it, or the request would
+    // go out unpreemptible and the Steer would wait a whole further step.
+    const steerPending =
+      pendingSteer.value ||
+      (checkSteer &&
+        steerWatch?.signal().aborted === true &&
+        (await hasPendingSteerForTurn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })));
+    if (steerPending) {
       // The request has not left the worker. The SDK finishes the run at
       // this boundary after delivering every event of the completed step.
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
-    // The watch noticed a Steer that no longer waits (withdrawn, or the
-    // automation run that steered was paused) before this boundary. Listen
+    // The watch noticed a Steer that, read again just now, no longer waits
+    // (withdrawn, or the automation run that steered was paused). Listen
     // again, or every later request would be cut short at once.
     if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };
@@ -1201,10 +1247,15 @@ export async function runTurnStreamAttempt(
                         const pinnedCredentialSession = sandboxState.setupBoxSession
                           ? (sandboxState.setupBoxSession as RunCredentialCommandSession)
                           : credentialSession;
-                        await attachRunCredentialRenewal(
+                        const softFailure = await attachRunCredentialRenewal(
                           pinnedCredentialSession,
                           initialRunCredentialMaterial,
                         );
+                        // No turn input is left to add to; the notice joins
+                        // the next plain-text tool result.
+                        if (softFailure) {
+                          queueSandboxSetupNotice(agent, softSetupFailureNotice([softFailure]));
+                        }
                       },
                     }
                   : {}),
@@ -1232,16 +1283,12 @@ export async function runTurnStreamAttempt(
               eventing.modelRunSettings,
             ),
           },
-          onModelPreparationPhase: (measurement) => {
-            recordTurnStartupPhase(observability, {
-              phase: `model_prepare_${measurement.phase}`,
+          onModelPreparationPhase: (measurement) =>
+            recordModelPreparationPhase(observability, {
               provider: turnExecutionPolicy.providerId,
               backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: measurement.outcome,
-              durationSeconds: measurement.durationSeconds,
-              ...(measurement.count === undefined ? {} : { count: measurement.count }),
-            });
-          },
+              measurement,
+            }),
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,

@@ -135,6 +135,7 @@ export type {
 } from "./hooks/use-human-input";
 
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
   creditRefusalFromEvents,

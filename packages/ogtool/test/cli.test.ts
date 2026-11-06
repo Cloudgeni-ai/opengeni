@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -897,6 +897,96 @@ describe("ogtool CLI", () => {
     } finally {
       mock.server.stop(true);
     }
+  });
+
+  describe('names why Opengeni cannot be reached instead of "fetch failed"', () => {
+    // The box runs the Node bundle (Node's fetch says only "fetch failed");
+    // Bun programs import the same client. Check both runtimes.
+    // One bundle for the whole block; the per-test cleanup must not remove it.
+    let bundleDirectory: string | undefined;
+    let built: Promise<Array<[string, string[]]>> | undefined;
+    afterAll(() => {
+      if (bundleDirectory) rmSync(bundleDirectory, { recursive: true, force: true });
+    });
+    const clients = (): Promise<Array<[string, string[]]>> => (built ??= bundleClients());
+    const bundleClients = async (): Promise<Array<[string, string[]]>> => {
+      const list: Array<[string, string[]]> = [["bun", [process.execPath, cliSource]]];
+      const node = Bun.which("node");
+      // The Node run is the regression itself; CI must not skip it silently.
+      if (!node && process.env.CI) throw new Error("node is required for the ogtool Node check");
+      if (node) {
+        bundleDirectory = mkdtempSync(join(tmpdir(), "ogtool-node-bundle-"));
+        const bundle = await Bun.build({
+          entrypoints: [cliSource],
+          outdir: bundleDirectory,
+          naming: "ogtool.cjs",
+          format: "cjs",
+          target: "node",
+        });
+        if (!bundle.success) throw new Error("ogtool Node bundle failed");
+        list.push(["node", [node, join(bundleDirectory, "ogtool.cjs")]]);
+      }
+      return list;
+    };
+
+    /** stderr and exit code of `ogtool list` against `url`, per runtime. */
+    const listFailures = async (url: string) => {
+      const results: Record<string, { exitCode: number; stderr: string }> = {};
+      for (const [runtime, client] of await clients()) {
+        const result = await run(
+          ["list"],
+          {
+            OPENGENI_CODEMODE_URL: url,
+            OPENGENI_CODEMODE_TOKEN: "test",
+            // A proxy would answer instead of the network under test.
+            ...Object.fromEntries(
+              [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+              ].map((name) => [name, undefined]),
+            ),
+          },
+          client,
+        );
+        results[runtime] = { exitCode: result.exitCode, stderr: result.stderr };
+      }
+      return results;
+    };
+
+    test("a host that does not resolve points at the DNS settings", async () => {
+      const results = await listFailures(
+        "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
+      );
+      const expected = {
+        exitCode: 1,
+        stderr: expect.stringMatching(
+          process.platform === "linux"
+            ? /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u
+            : /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check this machine's DNS settings\.\n$/u,
+        ),
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
+    }, 30_000);
+
+    test("a refused connection names the host and port", async () => {
+      const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = closed.port;
+      closed.stop(true);
+      const results = await listFailures(`http://127.0.0.1:${port}/codemode`);
+      const expected = {
+        exitCode: 1,
+        stderr: `Can't reach Opengeni: the connection to 127.0.0.1:${port} was refused (ECONNREFUSED). Check this machine's network, firewall and proxy settings.\n`,
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
+    }, 30_000);
   });
 
   test("reads a renewed token on the next process", async () => {

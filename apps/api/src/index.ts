@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
@@ -63,6 +62,7 @@ import {
   type SessionWorkflowClient,
 } from "./app";
 import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
+import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -82,7 +82,6 @@ import {
   startEventTriggerDispatchPump,
   startEventSubscriptionPump,
 } from "./event-trigger-dispatch";
-import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
@@ -352,6 +351,20 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startRecordingSpeakerScan: async (input) => {
+      try {
+        await temporal.workflow.start("recordingSpeakerScanWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-speaker-scan:${input.recordingId}`,
+          // One that ended (a long pause) starts again when audio does.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     startBrowserRecordingVideo: async (input) => {
       try {
         await temporal.workflow.start("browserRecordingVideoWorkflow", {
@@ -381,6 +394,26 @@ export async function createTemporalWorkflowClient(
               sessionId: input.sessionId,
               subjectId: input.subjectId,
               archivedAt: input.archivedAt,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchiveRestore: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRestoreWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One restore request, one run; a repeated request has a new time.
+          workflowId: `session-archive-restore-${input.workspaceId}-${input.sessionId}-${Date.parse(input.requestedAt)}`,
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
             },
           ],
         });
@@ -689,6 +722,15 @@ export async function startApi(options: StartApiOptions = {}) {
     },
   });
   const metricsServer = startApiMetricsListener(settings, observability);
+  const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
+  const stopBillingCreditNotificationDelivery =
+    routeDeps.managedAuth && billingAppUrl
+      ? startBillingCreditNotificationDelivery(
+          dbClient.db,
+          routeDeps.managedEmailTransport,
+          billingAppUrl,
+        )
+      : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
@@ -709,8 +751,6 @@ export async function startApi(options: StartApiOptions = {}) {
   });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
-    cleanupConnectorAuthorization: async (claim) =>
-      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },
@@ -810,6 +850,7 @@ export async function startApi(options: StartApiOptions = {}) {
       // Start private CLI session cleanup even if another service's drain stalls.
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
+      await stopBillingCreditNotificationDelivery?.();
       stopSlackInteractionPump?.();
       await stopSlackAgentUpdatePump?.();
       stopTeamsBotPump();
@@ -985,12 +1026,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
 }
 
 function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
-  if (task.status === "paused") return true;
-  if (!scheduledTaskKnowledgeSource(task)) return false;
-  const control = task.metadata.knowledgeSourceSync;
-  if (!control || typeof control !== "object") return false;
-  const record = control as Record<string, unknown>;
-  return record.sourceEnabled === false || record.connectionPaused === true;
+  return task.status === "paused";
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

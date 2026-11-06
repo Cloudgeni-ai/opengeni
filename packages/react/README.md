@@ -219,6 +219,17 @@ someone else's product with zero styling:
   `modelPicker`, or report `modelSelection: true` from the proxy
   (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
   also fixes the policy server-side.
+- **Agent signals can be hidden**: the goal pill (and any agents or commands
+  segments you pass in `chromeProps`) show how the agent works. For end users
+  to whom a paused goal or a helper-agent count means nothing, pass
+  `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
+  `OpenGeniChat`). Queued messages, approvals and the agent's questions still
+  show, and the goal is not read at all. Turn rows then show only their status,
+  and an automation run shows as its one line and its answer.
+- **Automation runs read as what happened**: a run shows one line, the
+  automation's name and what the event that started it says, never its
+  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
+  person) is not drawn at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
@@ -1019,6 +1030,15 @@ headless controller and compound primitives as a namespace. The controller is
 the one behavior path for keyboard routing, guarded queue/steer submission,
 attachments, commands, pause/resume, focus, confirmations, and feedback.
 
+Pass `imageTags` (on `ChatComposer`, `useChatComposerController`, or
+`SessionConversation`'s `composerProps`) to keep each image next to the words
+about it. Pasting, dropping or attaching an image puts a plain-text
+`[Image N]` tag in the text where the person was writing, and the image's chip
+shows the same number. Removing an image removes its tag and renumbers the
+later ones. Image N is the Nth image the message carries, which is the order
+the agent receives them, so the message and API stay the same. It is off by
+default.
+
 ```tsx
 import * as Composer from "@opengeni/react/composer";
 
@@ -1369,6 +1389,16 @@ earlier prose and activity in chronological order, not a fold of multiple turns.
 An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
+
+`turnSummary.renderLiveMark` leads the live Working, Waiting or Paused row with
+the host's own mark, such as a small animated mascot. It receives the row's
+state (`{ kind: "working" | "waiting" | "paused", waitingOn?: "you" }`, where
+`waitingOn: "you"` marks an approval or question), is no longer called once
+the turn settles, and renders nothing by default. Draw it about 20 px tall; it
+is `aria-hidden` because the row's words carry the meaning.
+`SessionConversation` takes it as
+`timelineProps={{ turnSummary: { rolling: true, renderLiveMark } }}`.
+
 Expanded outer work headers stay reachable at the top of the timeline until
 their own details end; nested headers never stick. The contextual navigation
 pill stays below the sticky-header strip and avoids interactive controls. If

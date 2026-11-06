@@ -16,7 +16,10 @@ import {
   type TurnFinalizationDeps,
 } from "../src/activities/agent-turn/finalization";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
-import { classifyXaiProviderError } from "../src/activities/agent-turn/errors";
+import {
+  agentRunFailurePayload,
+  classifyXaiProviderError,
+} from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
@@ -84,6 +87,19 @@ describe("SuperGrok provider-error classification", () => {
     expect(
       classifyXaiProviderError(Object.assign(new Error("unrelated 401"), { status: 401 })),
     ).toBeNull();
+  });
+
+  test("an outdated-client refusal never refuses the account and fails with a clear message", () => {
+    const refusal = "Grok CLI version (1.0.3) is outdated, update to 1.0.13";
+    for (const status of [400, 403, 426]) {
+      const error = Object.assign(marked(status), { message: `${status} ${refusal}` });
+      expect(classifyXaiProviderError(error)).toBeNull();
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "xai_client_outdated",
+        retryable: false,
+        error: expect.stringContaining("xAI requires 1.0.13 or newer"),
+      });
+    }
   });
 });
 

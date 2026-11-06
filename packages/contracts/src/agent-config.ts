@@ -594,15 +594,13 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   view_image: "sandbox",
   repository_skill_read: "sandbox",
   code_search: "sandbox",
-  // Derived runtime mechanics: search router, operation recovery, credential
-  // renewal, and a scheduled task's own bound knowledge source.
+  // Derived runtime mechanics: search router, operation recovery and credential
+  // renewal.
   tool_search: "runtime",
   tool_list: "runtime",
   tool_invoke: "runtime",
   operation_read: "runtime",
   refresh_credentials: "runtime",
-  knowledge_source_fetch: "runtime",
-  knowledge_source_read: "runtime",
 } as const satisfies Record<string, AgentFunctionToolClass>;
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 
@@ -677,12 +675,6 @@ export type AgentToolEnvironment = {
    * find a command; undefined means not yet known and keeps them.
    */
   sandboxAttached?: boolean;
-  /**
-   * Whether the turn has a person who can answer: its initiating user or
-   * external user. `false` means proven absent (an API-key turn), which leaves
-   * `wait_for_input` nothing human to wait on; undefined keeps it.
-   */
-  humanRecipient?: boolean;
 };
 
 /**
@@ -749,10 +741,12 @@ export function resolveAgentToolFamilies(
   // Notifications reach the same person a question does, so a workspace or
   // deployment without human input withholds them too.
   const notifications = enabled("notifications") && humanInput;
-  // `wait_for_input` resumes the agent when something it started settles or a
-  // person answers. With no compute, no children, no goal, no automations, no
-  // browser handoff, no media job and no person to answer, nothing could
-  // resume it except its own timeout, so a configured agent does without it.
+  // `wait_for_input` resumes the agent when something it started settles. With
+  // no compute, no children, no goal, no automations, no browser handoff, no
+  // media job and no `run_on` command on another machine (workspaceAdmin),
+  // nothing could resume it except its own timeout, so a configured agent does
+  // without it. A person needs no wait: an answer to
+  // `request_human_input` resumes the paused turn, and a new message starts one.
   const waitForInput =
     !config ||
     sandboxTools ||
@@ -760,8 +754,8 @@ export function resolveAgentToolFamilies(
     enabled("goals") ||
     enabled("schedules") ||
     enabled("browser") ||
-    media ||
-    (humanInput && environment.humanRecipient !== false);
+    enabled("workspaceAdmin") ||
+    media;
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
     if (owner === "sandbox") return sandboxTools;

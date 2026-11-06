@@ -295,8 +295,10 @@ describe("first-party MCP tool listing", () => {
     // The liveness check and the learning policy are read together, then the
     // bound-session check, model catalog and admin access. Legacy Memory
     // settings and selectors no longer contribute to the tool surface.
+    // Whether a Slack bot is available is one more parallel read (one
+    // statement in its own transaction), since the bot tools follow it.
     expect(listed.mostOpenTransactions).toBeGreaterThanOrEqual(3);
-    expect(listed.statements.length).toBeLessThanOrEqual(25);
+    expect(listed.statements.length).toBeLessThanOrEqual(29);
   });
 
   test("a refused bound-session check still refuses tools/list after the surface reads", async () => {

@@ -5785,9 +5785,11 @@ export function describeSubscriptionCoreConformance<Credential>(
             expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
             expect(armedCheckAt).toBe(resetAt);
           }
+          // An hour-long wait is long, so this top-level chat's person is told at once.
           expect(armed.events.map((event): string => event.type)).toEqual([
             waits.events.waiting,
             "session.status.changed",
+            "session.notification.posted",
           ]);
           const [row] = await admin()<{ provider: string }[]>`
           select provider from subscription_capacity_waiters
@@ -5914,6 +5916,7 @@ export function describeSubscriptionCoreConformance<Credential>(
           expect(resumed.events.map((event): string => event.type)).toEqual([
             waits.events.resumed,
             "session.status.changed",
+            "session.notification.withdrawn",
           ]);
           const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
           select session.status as session_status, turn.status as turn_status
@@ -6231,9 +6234,11 @@ export function describeSubscriptionCoreConformance<Credential>(
           evaluation: { kind: "revoked" },
         });
         expect(superseded.action).toBe("superseded");
+        // A wait with no known reset is long; its notice is withdrawn with it.
         expect(superseded.events.map((event): string => event.type)).toEqual([
           waits.events.superseded,
           "session.status.changed",
+          "session.notification.withdrawn",
         ]);
         expect(superseded.events[0]!.payload).toMatchObject({
           waiterId: revoked.waiter.waiterId,

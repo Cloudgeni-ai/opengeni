@@ -29,8 +29,6 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { noteRoutedCallRouteResolved, resolveRoutedCallRoute } from "./routed-call-scope";
-import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
-import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   ModalCommandStartPreDispatchUnavailableError,
@@ -68,10 +66,9 @@ import {
   isConnectedMachineAbsolutePath,
   resolveConnectedMachinePath,
 } from "../selfhosted/workspace-path";
-import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
+import { renderSelfhostedFault, selfhostedFaultContext } from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
-  isDefinitePathNotFoundError,
   isExecSessionLostBanner,
   SandboxChannelAService,
   stripExecBanner,
@@ -104,6 +101,7 @@ import {
   type RemoteOperationObservation,
 } from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
+import { isReadOnlyPathProbeMiss } from "../operation-purpose";
 import {
   clearSecretFilesCommand,
   secretEnvFileContent,
@@ -449,22 +447,6 @@ export type RoutingSandboxFirstOperationObserver = (
 ) => void;
 
 type RoutingSandboxFirstOperationTiming = Pick<RoutingSandboxFirstOperationObservation, "phases">;
-
-const READ_ONLY_PATH_PROBE_OPERATIONS = new Set(["readFile", "listDir", "pathExists", "viewImage"]);
-
-/** A definite path miss is the provider's authoritative answer to a read-only
- * probe (repository skill discovery lists absent `.agents/skills` on almost
- * every turn), not a failed provider operation. Writes never qualify. Only
- * typed misses count, the same set skill discovery treats as absent: generic
- * 404 statuses or "not found" text never do. */
-function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
-  return (
-    READ_ONLY_PATH_PROBE_OPERATIONS.has(op) &&
-    (isDefinitePathNotFoundError(error) ||
-      error instanceof SandboxWorkspaceReadNotFoundError ||
-      error instanceof SandboxFilesystemNotFoundError)
-  );
-}
 
 function recordFirstOperationPhase(
   timing: RoutingSandboxFirstOperationTiming | undefined,
@@ -2521,7 +2503,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    */
   private renderSelfhostedFaultOrThrow(error: unknown, backendKind?: string): string {
     if (error instanceof SelfhostedControlError && !error.fenced) {
-      return renderSelfhostedFault(error, { connectedMachine: backendKind === "selfhosted" });
+      return renderSelfhostedFault(error, selfhostedFaultContext(backendKind));
     }
     throw error;
   }

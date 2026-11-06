@@ -60,8 +60,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * register, claim, device count, busy check and ring (1107), the lock-free
  * read of a known external identity (1172), the list of every
  * organization vault wherever it works (1218), the organization's
- * names-only member list (1211) and the Slack agent update sweeper's
- * ids-only inventory of installations that send updates (1153). Each is
+ * names-only member list (1211), the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153) and the
+ * recording compaction sweep's inventory of meeting tracks not yet kept
+ * compact (1240). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -92,6 +94,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const;
 
 /**
@@ -104,8 +107,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withheld the connected-command re-arm the same way and 1101 granted
- * it. 0988 withholds the queued-turn
- * hold summary; until it is granted, the control worker does not publish it.
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
@@ -117,26 +119,24 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
- * 1218 withholds the organization vault list; until it is granted, the API
- * lists the organization vaults that work in the current workspace and says
- * the list is incomplete.
+ * 1218 withheld the organization vault list and 1224 the organization machine
+ * and rig list; 1272 granted both.
  * 1211 withholds the names-only member list; until it is granted, members
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1224 withholds the organization machine and rig list the same way as the
- * vault list.
+ * 1240 withholds the inventory of meeting tracks not yet kept compact; until
+ * it is granted, existing meetings keep their audio as it is and only new
+ * transcripts keep it compact.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "read_external_identity_v1(uuid, text, text)",
-  "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
-  "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -230,6 +230,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
   "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
   "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
+  "list_uncompacted_recording_tracks_v1(integer, text)": [
+    "recordings",
+    "recording_tracks",
+    "recording_chunks",
+    "recording_transcript_versions",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -568,13 +574,9 @@ const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
 const GOOGLE_DRIVE_AUTHORITY_TABLES = [
   "connections",
   "files",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "knowledge_document_versions",
   "knowledge_providers",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_states",
   "knowledge_sources",
 ] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -883,6 +885,17 @@ export const RETIRING_FEATURE_TABLES = {
     "session_variable_set_attachments",
     "workspace_variable_set_variables",
     "workspace_variable_sets",
+  ],
+  // Migration 1275 removes the retired Knowledge-source sync rows and stops
+  // every SQL routine from reading these tables; a later release drops them.
+  knowledgeSourceSync: [
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_item_outcomes",
+    "knowledge_source_sync_object_observations",
+    "knowledge_source_sync_states",
+    "knowledge_source_sync_wakes",
   ],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
@@ -1842,6 +1855,17 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
 );
 
+/**
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
+ * triggers mirror bot_templates and slack_agents writes into the agents
+ * tables; the guard keeps sessions.agent_id immutable once set.
+ */
+const AGENTS_TRIGGER_ROUTINES = [
+  "sync_agent_from_bot_template()",
+  "sync_agent_from_slack_agent()",
+  "guard_session_agent_id_immutable()",
+] as const;
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "guard_session_agent_creation_provenance()",
@@ -1865,6 +1889,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1889,6 +1914,7 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
@@ -1911,7 +1937,10 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_revisions",
   "agent_run_states",
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "attached_browser_devices",
   "attached_browser_inventories",
@@ -1927,6 +1956,10 @@ export const FORCE_RLS_TABLES = [
   "billing_auto_top_up_mutations",
   "billing_auto_top_up_operations",
   "billing_auto_top_up_settings",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notification_recipients",
+  "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
@@ -2128,11 +2161,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
@@ -2484,6 +2522,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
   "agent_call_host_phones",
   "agent_run_states",
+  // 1243_agents: the agent directory and its Slack installations.
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "audit_events",
   "auth_identities",
@@ -2500,6 +2541,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_trigger_revisions",
   "automation_triggers",
   "automation_webhook_endpoints",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notifications",
   "billing_customers",
   "bot_templates",
   "browser_session_associations",
@@ -2580,6 +2624,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
@@ -2789,6 +2838,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_credit_notification_recipients",
   "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",
@@ -2835,6 +2885,8 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  // 1243_agents: immutable agent revisions.
+  "agent_revisions",
   "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",

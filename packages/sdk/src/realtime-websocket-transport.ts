@@ -13,6 +13,22 @@ const AUDIO_SAMPLE_RATE = 24_000;
 const DELEGATION_TOOL = "delegate_to_session";
 
 /**
+ * The delegation tool's output, sent as soon as the voice model calls it. The
+ * agent's answer arrives later as an `<execution_result>` item.
+ *
+ * A delegation must not stay an unanswered tool call while the agent works.
+ * Eleven Realtime waits about 20 seconds for a tool result, then lets the model
+ * continue with nothing to go on, so it filled the gap with invented answers,
+ * and it drops a later result for that call. A model that is spoken to while
+ * its call is open has the same gap. This output says plainly that the answer
+ * is not known yet.
+ */
+const REALTIME_DELEGATION_PENDING_OUTPUT = JSON.stringify({
+  status: "running",
+  note: "The request was passed on and is being worked on. You do not have its answer yet. If you have not already said so, tell the user briefly that you are checking. Do not state any answer, cause, status, or other fact about it until its result arrives in <execution_result>.",
+});
+
+/**
  * Client events of the two realtime WebSocket wire protocols. Everything else
  * (provider URL, credentials, session configuration) comes from the server, so
  * a new OpenAI-compatible provider needs no browser changes.
@@ -357,6 +373,13 @@ function handleRealtimeEvent(input: {
         content: [{ type: "input_text", text: request }],
       },
     });
+    // Answer the call at once; the result follows as its own item. No
+    // response is requested: the model has usually just said it is checking,
+    // and a provider that continues after every tool result reads this note.
+    send(
+      input.websocket,
+      input.codec.functionOutput(callId, DELEGATION_TOOL, REALTIME_DELEGATION_PENDING_OUTPUT),
+    );
     return;
   }
   if (event.type === "error") {
@@ -478,18 +501,9 @@ class RealtimeWebsocketContextOutbox {
         continue;
       }
       this.flush();
-      if (group.type === "delegation.context.append" && group.id) {
-        send(
-          this.websocket,
-          this.codec.functionOutput(
-            group.id,
-            DELEGATION_TOOL,
-            JSON.stringify({ result: group.text }),
-          ),
-        );
-      } else {
-        send(this.websocket, this.codec.textItem(`<${wrapper}>\n${group.text}\n</${wrapper}>`));
-      }
+      // The delegation's tool call was already answered as running, so its
+      // result is a new item rather than a second output for the same call.
+      send(this.websocket, this.codec.textItem(`<${wrapper}>\n${group.text}\n</${wrapper}>`));
       send(this.websocket, this.codec.responseCreate());
     }
   }

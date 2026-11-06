@@ -39,6 +39,23 @@ import {
 // can also sign in with Microsoft Entra ID instead of a key: the organization's
 // own app, or this deployment's identity when the operator offers it.
 
+/**
+ * Why a connect step failed, in the API's own words when it refused the
+ * request (a provider's check failed: wrong key, unknown deployment), or plain
+ * advice otherwise.
+ */
+export function providerRefusalText(error: unknown): string {
+  if (error instanceof OpenGeniApiError && error.status < 500) {
+    try {
+      const body = JSON.parse(error.body) as { error?: { message?: unknown } };
+      if (typeof body.error?.message === "string") return body.error.message;
+    } catch {
+      /* Keep the plain advice when the body has no structured message. */
+    }
+  }
+  return userErrorText(error);
+}
+
 /** Whether `slug` is an upstream id this provider accepts. */
 function upstreamIdValid(providerKind: ProviderKind, slug: string): boolean {
   if (providerKind === "openai" || providerKind === "azure_openai") {
@@ -116,6 +133,7 @@ export function useOrganizationProviderConnection({
   const pendingSaveRef = useRef<{
     key: string;
     endpoint: string | undefined;
+    models: string | undefined;
     version: number;
     operationId: string;
   } | null>(null);
@@ -219,11 +237,15 @@ export function useOrganizationProviderConnection({
     options?: {
       endpoint?: string | undefined;
       authentication?: OrganizationModelProviderEntraAuthentication | undefined;
+      models?: readonly string[] | undefined;
+      reportError?: ((message: string) => void) | undefined;
     },
   ): Promise<boolean> {
     const key = apiKey.trim();
     const endpoint = azure ? options?.endpoint?.trim() : undefined;
     const authentication = azure ? options?.authentication : undefined;
+    // OpenAI and Azure save their first models with the key, each checked first.
+    const firstModels = direct && options?.models?.length ? [...options.models] : undefined;
     if (!epoch.active || !enabled || catalogConnection || connectionBusy) return false;
     if (!key && !authentication) return false;
     if (azure && !endpoint) return false;
@@ -231,14 +253,22 @@ export function useOrganizationProviderConnection({
     const credentialIdentity = authentication ? JSON.stringify(authentication) : key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
-    // A changed endpoint is a different request, so it gets its own operation.
+    const modelsIdentity = firstModels ? JSON.stringify(firstModels) : undefined;
+    // A changed endpoint or model is a different request, so it gets its own operation.
     const operationId =
       pending?.key === credentialIdentity &&
       pending.endpoint === endpoint &&
+      pending.models === modelsIdentity &&
       pending.version === version
         ? pending.operationId
         : crypto.randomUUID();
-    pendingSaveRef.current = { key: credentialIdentity, endpoint, version, operationId };
+    pendingSaveRef.current = {
+      key: credentialIdentity,
+      endpoint,
+      models: modelsIdentity,
+      version,
+      operationId,
+    };
     setConnectionBusy(true);
     const journey = beginIntegrationConnect(
       modelConnectionClass(providerKind) ?? "other",
@@ -250,6 +280,7 @@ export function useOrganizationProviderConnection({
         expectedVersion: version,
         ...(authentication ? { authentication } : { apiKey: key }),
         ...(endpoint ? { endpoint } : {}),
+        ...(firstModels ? { models: firstModels } : {}),
       });
     const commit = (saved: Connection) => {
       journey.finish("connected");
@@ -280,9 +311,11 @@ export function useOrganizationProviderConnection({
       void invalidateSharedQueries(client, ["model-settings"]);
       if (!epoch.active) return false;
       await refreshConnection();
-      toast.error(`Couldn't connect ${meta.title}`, {
-        description: userErrorText(finalError),
-      });
+      if (options?.reportError) options.reportError(providerRefusalText(finalError));
+      else
+        toast.error(`Couldn't connect ${meta.title}`, {
+          description: userErrorText(finalError),
+        });
       return false;
     } finally {
       if (epoch.active) setConnectionBusy(false);

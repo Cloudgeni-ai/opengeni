@@ -1,6 +1,7 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { ID_JAG_GRANT_PROFILE, JWT_BEARER_GRANT_TYPE } from "./mcp-auto-connect";
 
 export const MCP_OAUTH_SCOPE = "mcp:access" as const;
 export const MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
@@ -18,12 +19,14 @@ export const McpOAuthClientRegistrationRequest = /* @__PURE__ */ defineSchema(()
     token_endpoint_auth_method: z.literal("none").default("none"),
     scope: z.literal(MCP_OAUTH_SCOPE).optional(),
     grant_types: z
-      .array(z.enum(["authorization_code", "refresh_token"]))
+      .array(z.enum(["authorization_code", "refresh_token", JWT_BEARER_GRANT_TYPE]))
       .min(1)
-      .max(2)
-      .refine((grantTypes) => grantTypes.includes("authorization_code"), {
-        message: "authorization_code grant is required",
-      })
+      .max(3)
+      .refine(
+        (grantTypes) =>
+          grantTypes.includes("authorization_code") || grantTypes.includes(JWT_BEARER_GRANT_TYPE),
+        { message: "authorization_code or jwt-bearer grant is required" },
+      )
       .default(["authorization_code", "refresh_token"]),
     response_types: z.array(z.literal("code")).min(1).max(1).default(["code"]),
   }),
@@ -66,11 +69,18 @@ export const McpOAuthAuthorizationServerMetadata = /* @__PURE__ */ defineSchema(
     token_endpoint: z.string().url(),
     registration_endpoint: z.string().url(),
     response_types_supported: z.array(z.literal("code")).length(1),
-    grant_types_supported: z.array(z.enum(["authorization_code", "refresh_token"])).length(2),
+    grant_types_supported: z
+      .array(z.enum(["authorization_code", "refresh_token", JWT_BEARER_GRANT_TYPE]))
+      .min(2)
+      .max(3),
     code_challenge_methods_supported: z.array(z.literal("S256")).length(1),
     token_endpoint_auth_methods_supported: z.array(z.literal("none")).length(1),
     scopes_supported: z.array(z.literal(MCP_OAUTH_SCOPE)).length(1),
     authorization_response_iss_parameter_supported: z.literal(true),
+    /** Client ID Metadata Documents: an https client_id URL needs no registration. */
+    client_id_metadata_document_supported: z.literal(true).optional(),
+    /** draft-ietf-oauth-identity-assertion-authz-grant §7.2: ID-JAGs are redeemed here. */
+    authorization_grant_profiles_supported: z.array(z.literal(ID_JAG_GRANT_PROFILE)).optional(),
   }),
 );
 export type McpOAuthAuthorizationServerMetadata = z.infer<

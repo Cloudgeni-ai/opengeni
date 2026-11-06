@@ -172,6 +172,8 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   workspaceRecoveryNote?: string;
+  /** The latest save left rebuildable folders out (see `reducedWorkspaceSaveNote`). */
+  workspaceSaveNote?: string;
   /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
   attendanceNote?: string;
   /**
@@ -772,6 +774,7 @@ export async function turnInput(
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
     options.workspaceRecoveryNote,
+    options.workspaceSaveNote,
     options.attendanceNote,
   );
   if (trigger.type === "user.message") {
@@ -855,6 +858,21 @@ export async function turnInput(
 function joinInternalContext(...parts: Array<string | undefined>): string | undefined {
   const content = parts.map((part) => part?.trim()).filter((part): part is string => Boolean(part));
   return content.length > 0 ? content.join("\n\n") : undefined;
+}
+
+/** Folders named in the reduced-save note before it summarizes the rest. */
+const REDUCED_SAVE_NOTE_MAX_PATHS = 20;
+
+/** Turn notice while the session's latest save is a drain's reduced save: a
+ * workspace restored from it lacks those folders until they are rebuilt. */
+export function reducedWorkspaceSaveNote(save: {
+  capturedAt: string;
+  omittedPaths: readonly string[];
+}): string {
+  const shown = save.omittedPaths.slice(0, REDUCED_SAVE_NOTE_MAX_PATHS);
+  const more = save.omittedPaths.length - shown.length;
+  const paths = `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+  return `Workspace note: this workspace was last saved at ${save.capturedAt} without these folders, which can be rebuilt: ${paths}. If they are missing, reinstall dependencies or rebuild before relying on them.`;
 }
 
 async function openSuffixMessageInput(

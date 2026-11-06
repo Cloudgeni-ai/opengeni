@@ -242,6 +242,32 @@ impl<S: Store> Service<S> {
         ))
     }
 
+    /// Boots a team's sandbox afresh from its disk, keeping its files and
+    /// its shape: its owner hands it off as in [`Self::resize`] (even while
+    /// it is awake), and the service takes it anew with its copy's files
+    /// only, so whichever host takes it up next boots it from its disk
+    /// instead of restoring its memory. Its running programs end. One
+    /// nobody owns is taken anew at once. This recovers a machine whose
+    /// running system is broken (for example its `/dev/null` was removed)
+    /// while its files are fine.
+    pub async fn restart(&self, team: &str, id: Id) -> Result<SandboxRow, Failure> {
+        for _ in 0..RESIZE_TRIES {
+            let mut row = self.get(team, id).await?;
+            if let Some(host) = row.ownership.owner {
+                self.hand_off(&row, host, true).await?;
+                continue;
+            }
+            row.ownership = row.ownership.retake(false).set;
+            if self.store.respec(&row).await? {
+                tracing::info!(%id, "sandbox restarted from its disk");
+                return self.get(team, id).await;
+            }
+        }
+        Err(Failure::Unavailable(
+            "it was taken up again each time it was handed off; try again".into(),
+        ))
+    }
+
     /// Has `host`, the owner, hand `row`'s sandbox off, even while it is
     /// awake with `awake`, and clears its owner under a raised epoch once
     /// it has.

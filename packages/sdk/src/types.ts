@@ -2434,6 +2434,8 @@ export type SessionRetention = {
   archive: {
     state: "archiving" | "archived";
     archivedAt: string | null;
+    /** Someone restored the chat; its stored content is being put back. */
+    restoring?: true | undefined;
   } | null;
 };
 
@@ -2446,8 +2448,17 @@ export type UpdateSessionUnattendedRequest = {
   unattended: boolean;
 };
 
+/**
+ * `archived: true` archives a root chat and its sub-chats; it is refused
+ * (409 `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless each is listed in `confirmActiveSubChats`.
+ * `archived: false` brings the chat back at any time: exactly as it was within
+ * the undo window, and later with stored content restored in the background.
+ */
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ids of sub-chats still in use to archive (and stop) too. */
+  confirmActiveSubChats?: string[];
   /** Ignored; kept for older clients. */
   clientEventId?: string;
   /** Ignored; there is one kind of archive. Kept for older clients. */
@@ -3795,6 +3806,7 @@ export type ScheduledTaskAgentConfig = {
   pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Skip an occurrence instead of running without an unusable pinned account. */
   pinnedAccountsRequired?: true | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -3839,6 +3851,7 @@ export type ScopedKnowledgeScope =
   | { kind: "workspace"; workspaceId: string; subjectId: null }
   | { kind: "personal"; workspaceId: string | null; subjectId: string };
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncLimits = {
   maxItems: number;
   maxBytes: number;
@@ -4750,7 +4763,8 @@ export type ModelConnectionAccessKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
@@ -4858,6 +4872,80 @@ export type OrganizationProviderCustomModelsResponse = {
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+/**
+ * The reasoning levels a model on an OpenAI-compatible endpoint accepts as
+ * `reasoning_effort`, lowest first, and the one it uses by default.
+ */
+export type CompatibleModelReasoning = {
+  efforts: ReasoningEffort[];
+  defaultEffort: ReasoningEffort;
+};
+
+/**
+ * One model of an organization's OpenAI-compatible endpoint. `reasoning` is
+ * null when it declares no reasoning levels: chats then offer no reasoning
+ * choice and send no `reasoning_effort`.
+ */
+export type OrganizationCompatibleEndpointModel = OrganizationProviderCustomModel & {
+  reasoning: CompatibleModelReasoning | null;
+};
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export type OrganizationCompatibleEndpoint = {
+  id: string;
+  status: "active" | "revoked";
+  version: number;
+  /** The public HTTPS base URL, usually ending in `/v1`. */
+  baseUrl: string;
+  /** `chat` for Chat Completions, `responses` for the Responses API. */
+  api: "chat" | "responses";
+  label: string | null;
+  /** The endpoint's active models. */
+  models: OrganizationCompatibleEndpointModel[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationCompatibleEndpointsResponse = {
+  endpoints: OrganizationCompatibleEndpoint[];
+};
+/**
+ * Connect an endpoint with its first model; the API checks it with a short
+ * test request first. Without `reasoning`, the model's levels are read from
+ * the endpoint's model listing when it publishes them; `null` declares none.
+ */
+export type CreateOrganizationCompatibleEndpointRequest = {
+  operationId: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api?: "chat" | "responses" | undefined;
+  label?: string | undefined;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
+  operationId: string;
+  expectedVersion: number;
+  apiKey: string;
+};
+/** Add a model to an endpoint; `reasoning` works as when connecting the endpoint. */
+export type CreateOrganizationCompatibleEndpointModelRequest = {
+  operationId: string;
+  upstreamModelId: string;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+/**
+ * Set one endpoint model's reasoning levels: given levels, `null` for none,
+ * or omitted to read them again from the endpoint's model listing.
+ */
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = {
+  expectedVersion: number;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
@@ -6973,6 +7061,11 @@ export type OrganizationMcpConnection = {
   expiresAt: string;
   revokedAt: null;
   /**
+   * Set when it connected automatically, through an issuer the organization
+   * trusts (auto-connect). Its access is that issuer's, changed by an admin.
+   */
+  autoConnect?: { trustedIssuerId: string; issuerName: string } | null;
+  /**
    * Listed agents: whether the caller can disconnect this one. Everyone
    * disconnects their own; owners and admins anyone's, except only an owner an
    * owner's.
@@ -7420,6 +7513,13 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set for the person linking when they may link this Slack account as a
+   * member of the organization, without workspace access, once they confirm
+   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
+   * account when Slack says who it is.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {
@@ -8074,6 +8174,7 @@ export type ScheduledTaskAgentConfigInput = {
    * omitted runs follow the workspace's agent defaults.
    */
   agent?: AgentConfigRequest | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
@@ -8129,6 +8230,15 @@ export type ScheduledTaskAgentConfigInput = {
   memoryScope?: SessionMemoryScope | undefined;
   agentAccess?: SessionAgentAccess | undefined;
   skills?: ScheduledTaskSkill[] | undefined;
+  /**
+   * Opengeni tools and permissions of each chat the task starts, as on
+   * session create. Set once at creation (an update that names them is
+   * refused); omitted, an agent's task keeps its own chat's selection and any
+   * other task follows the defaults. Permissions must be held by the creating
+   * credential. Only a task that starts its own chats can carry them.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -8173,6 +8283,7 @@ export type CreateAgentScheduledTaskRequest = {
   creatorLocked?: boolean | undefined;
 };
 
+/** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
@@ -8244,6 +8355,7 @@ export type UpdateScheduledTaskRequest = {
 
 export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncRunSummary = {
   phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
   scanned: number;
@@ -8612,15 +8724,17 @@ export type OrganizationComputeSummary = {
 };
 
 /** GET .../organization-machines: every organization machine, wherever it
- * works, for organization owners. `complete` is false while the server can
- * only list the ones that work in the requested workspace. */
+ * works, for organization owners and admins. `complete` is always true;
+ * servers before migration 1272 could list only the ones that work in the
+ * requested workspace and sent false. */
 export type ListOrganizationMachinesResponse = {
   machines: OrganizationComputeSummary[];
   complete: boolean;
 };
 
 /** GET .../organization-rigs: every organization sandbox environment,
- * wherever it works, for organization owners. `complete` as for machines. */
+ * wherever it works, for organization owners and admins. `complete` as for
+ * machines. */
 export type ListOrganizationRigsResponse = {
   rigs: OrganizationComputeSummary[];
   complete: boolean;

@@ -73,6 +73,7 @@ import {
 } from "@opengeni/db";
 import {
   ConnectionApprovalPreflightError,
+  isMcpAccountParameterChoiceError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -98,7 +99,7 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import { buildOpenGeniMcpServer, resolveSlackBotToolAvailability } from "./mcp/server";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
 import {
   withSiteSecretContext,
@@ -941,7 +942,15 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     });
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
-      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
+      ? [
+          // Read alongside the other first-party servers, not before them.
+          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
+            inMemoryMcpRegistration(
+              "opengeni",
+              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+            ),
+          ),
+        ]
       : []),
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
@@ -1557,6 +1566,16 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   }
   if (error instanceof ToolGatewayBlockedError) {
     throw new HTTPException(403, { message: error.code, cause: error });
+  }
+  if (isMcpAccountParameterChoiceError(error)) {
+    // Nothing was sent; the message names the account's values to choose from.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "account_parameter_choice_required", parameter: error.parameter },
+    });
   }
   if (error instanceof ConnectionApprovalPreflightError) {
     // Nothing reached the provider: the person's connection needs attention.

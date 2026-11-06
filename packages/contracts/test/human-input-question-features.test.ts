@@ -108,31 +108,24 @@ describe("tool families attach what can be used", () => {
 
   test("wait_for_input needs something that can resume the agent", () => {
     const detached = { sandboxAttached: false };
-    expect(
-      resolveAgentToolFamilies(none, { ...detached, humanRecipient: false }).waitForInput,
-    ).toBe(false);
-    expect(resolveAgentToolFamilies(none, { ...detached, humanRecipient: true }).waitForInput).toBe(
-      true,
-    );
-    expect(
-      resolveAgentToolFamilies(none, { sandboxAttached: true, humanRecipient: false }).waitForInput,
-    ).toBe(true);
-    for (const id of ["subagents", "goals", "schedules", "browser", "media"] as const) {
+    // Human input alone needs no wait: an answer resumes the paused turn and a
+    // new message starts one.
+    expect(none.capabilities.humanInput).toBe(true);
+    expect(resolveAgentToolFamilies(none, detached).waitForInput).toBe(false);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).waitForInput).toBe(true);
+    for (const id of [
+      "subagents",
+      "goals",
+      "schedules",
+      "browser",
+      "media",
+      "workspaceAdmin",
+    ] as const) {
       const caps = { ...noneAgentCapabilities(), [id]: true };
-      expect(
-        resolveAgentToolFamilies(configured(caps), { ...detached, humanRecipient: false })
-          .waitForInput,
-      ).toBe(true);
+      expect(resolveAgentToolFamilies(configured(caps), detached).waitForInput).toBe(true);
     }
-    // A person to answer only matters when the agent can ask.
-    const silent = configured({ ...noneAgentCapabilities(), humanInput: false });
-    expect(
-      resolveAgentToolFamilies(silent, { ...detached, humanRecipient: true }).waitForInput,
-    ).toBe(false);
     // Legacy sessions keep it unconditionally.
-    expect(
-      resolveAgentToolFamilies(null, { ...detached, humanRecipient: false }).waitForInput,
-    ).toBe(true);
+    expect(resolveAgentToolFamilies(null, detached).waitForInput).toBe(true);
   });
 
   test("notifications are off under none and need human input", () => {

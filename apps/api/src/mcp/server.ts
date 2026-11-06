@@ -440,6 +440,7 @@ import {
   prepareSlackBotPost,
   resolveSlackBotConnectionForTool,
   sendSlackBotPost,
+  slackBotToolsAvailable,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
@@ -464,7 +465,10 @@ import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
-import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import {
+  deploymentCannotConnect,
+  inChatCapabilitySetup,
+} from "@opengeni/contracts/personal-integration-setup";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
@@ -517,7 +521,60 @@ export type McpServerOptions = {
     | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
     | null
     | undefined;
+  /**
+   * Whether the workspace has an Opengeni Slack bot available, resolved by the
+   * route with `resolveSlackBotToolAvailability`. `false` leaves every
+   * `slack_bot_*` tool unlisted; omitted keeps them listed.
+   */
+  slackBotAvailable?: boolean | undefined;
 };
+
+/**
+ * Whether this grant could list any `slack_bot_*` tool at all: they need
+ * `connections:read`, and a session lists only what its signed selection holds.
+ * Lets the route skip the availability read when its answer changes nothing.
+ */
+export function grantMayListSlackBotTools(grant: AccessGrant): boolean {
+  if (!hasPermission(grant.permissions, "connections:read")) return false;
+  if (typeof grant.metadata?.["sessionId"] !== "string") return true;
+  const selection = grant.metadata?.["firstPartyMcpTools"];
+  return (
+    Array.isArray(selection) &&
+    selection.some((name) => typeof name === "string" && name.startsWith("slack_bot_"))
+  );
+}
+
+/**
+ * The `slackBotAvailable` fact for one first-party MCP surface. The bot tools
+ * are offered only where a bot is installed or shared, like other tools that
+ * are listed only when what they act on exists; selection still decides which
+ * of them a session holds.
+ */
+export async function resolveSlackBotToolAvailability(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+): Promise<boolean> {
+  if (!grantMayListSlackBotTools(grant)) return false;
+  return await slackBotToolsAvailable(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+  });
+}
+
+/**
+ * Whether one JSON-RPC message's answer depends on the bot tools being
+ * registered: a tool listing, or a call of a `slack_bot_*` tool. Other calls
+ * answer the same either way, so the route skips the availability read.
+ */
+export function mcpMessageNeedsSlackBotAvailability(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const { method, params } = message as { method?: unknown; params?: unknown };
+  if (method === "tools/list") return true;
+  if (method !== "tools/call") return false;
+  const name =
+    params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
+  return typeof name === "string" && name.startsWith("slack_bot_");
+}
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 // A person's message to a session on someone else's personal machine waits
@@ -1512,7 +1569,10 @@ export function buildOpenGeniMcpServer(
     registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
-  registerSlackBotTools(server, deps, grant, sessionId, json);
+  // Only where an Opengeni Slack bot is installed or shared: elsewhere the
+  // tools can only fail, and listing them hides the Slack Connect card.
+  if (options.slackBotAvailable !== false)
+    registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
 
   // Orchestration, secret, and GitHub status tools are permission-gated
@@ -2464,10 +2524,11 @@ export function buildOpenGeniMcpServer(
           );
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
-        const agentRunUsageIdempotencyKey =
-          task.action.kind === "agent_turn"
-            ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
-            : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
+        const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+          grant.workspaceId,
+          task.id,
+          triggerToken,
+        );
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
         await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
@@ -7206,6 +7267,10 @@ function registerWorkspaceOrchestrationTools(
               reasoningEffort: result.reasoningEffort,
               latencyMode: result.latencyMode,
               effectiveFrom: result.effectiveFrom,
+              // The turn that was waiting for subscription capacity continues on this model now.
+              ...(result.releasedCapacityWaitTurnId
+                ? { capacityWaitingTurnContinuesNow: result.releasedCapacityWaitTurnId }
+                : {}),
             },
             nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
           }),
@@ -7848,6 +7913,17 @@ async function capabilitySetupProjection(
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  // The rule the Capabilities page uses to hide such entries: no card could
+  // finish a connection this deployment cannot start.
+  if (deploymentCannotConnect(item)) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        item.runtime.notes ??
+        "New connections to this integration are not available on this deployment.",
+    };
+  }
   if (item.surfaceType === "first_party_onepassword") {
     // 1Password is connected and its vaults linked in Settings > Secrets; the
     // agent reaches linked vaults through secret references, not tools.

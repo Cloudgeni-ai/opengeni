@@ -158,11 +158,13 @@ Create only one delegation for one execution request. Do not submit duplicates w
 
 ## Progress and completion
 
-Backend messages may be intermediate progress or final output. A completion result or error indicates that the delegated work has finished.
+Backend messages may be intermediate progress or final output. Progress, such as text wrapped in <execution_progress>, is the backend's working notes while it runs: plans, guesses, and partial observations, not conclusions. A completion result or error, such as text wrapped in <execution_result>, is the backend's answer and indicates that the delegated work has finished.
 
 Do not claim success, completion, or a changed state until authoritative backend output confirms it. If execution fails, explain the failure briefly and give the clearest supported next step without exposing raw internal errors.
 
 Only report what the backend actually sent. Never state a result, status, change, name, number, time, or identifier the backend has not reported. While work is running, say that it is still running or repeat what the backend last reported; if the user asks for something the backend has not reported, say you don't have it yet and pass the question on if useful.
+
+Facts about the user's workspace, code, systems, files, accounts, or the backend's findings come only from this conversation, the session context, or a backend result. While a delegation is running you do not know its answer, even if you think you can guess it. Never answer a delegated question yourself from general knowledge, the session history, or progress notes, and never present a plan or guess from progress as a finding. Say you are checking, and give the answer when its result arrives.
 
 Use at most one short spoken acknowledgement before work that may take noticeable time. After that, speak only when a progress update is genuinely useful or the user explicitly asks for frequent updates. Do not fill waiting time with repeated reassurance.
 
@@ -328,6 +330,11 @@ async function createRealtimeCall(
  * through negotiation, with refresh under the per-connection lock. The chat
  * binding is never written; the client protocol and HTTP error translation
  * are the legacy broker's.
+ *
+ * A recorded plan can be out of date (a cancelled plan keeps its last
+ * recorded type until the credential next reports one), so when the
+ * provider refuses realtime for one connection's account, the call moves on
+ * to the next candidate; every other failure is final.
  */
 export async function brokerSessionCoreCodexRealtime(
   db: Database,
@@ -335,6 +342,7 @@ export async function brokerSessionCoreCodexRealtime(
   context: { accountId: string; workspaceId: string; sessionId: string },
   input: Omit<CodexRealtimeBrokerInput, "sessionId">,
   fetchImpl: CodexFetch = fetch,
+  brokerOptions: CodexRealtimeBrokerOptions = {},
 ): Promise<CodexRealtimeProviderAnswer> {
   if (!settings.codexSubscriptionEnabled) {
     throw new CodexRealtimeBrokerError(
@@ -363,6 +371,7 @@ export async function brokerSessionCoreCodexRealtime(
   ];
   const operationId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
+  let refused: CodexRealtimeBrokerError | null = null;
   for (const candidate of ordered) {
     const ref: SubscriptionCoreCodexOperationLeaseRef = {
       operationId,
@@ -415,13 +424,46 @@ export async function brokerSessionCoreCodexRealtime(
         },
         { ...input, sessionId: context.sessionId },
       );
+    } catch (error) {
+      if (!codexRealtimeRefusedForConnection(error)) throw error;
+      refused = error;
+      try {
+        brokerOptions.onConnectionRefused?.(error);
+      } catch {
+        // An observer must never change the call's outcome.
+      }
     } finally {
       await releaseSubscriptionCoreCodexOperationLease(db, scope, ref).catch(() => false);
     }
   }
+  if (refused) throw refused;
   throw new CodexRealtimeBrokerError(
     "credential_unavailable",
     "No connected Codex subscription is available for this session",
+  );
+}
+
+export type CodexRealtimeBrokerOptions = {
+  /**
+   * Called when the provider refused realtime for one connection and the
+   * call moves on to the next candidate (for operator logs).
+   */
+  onConnectionRefused?: (error: CodexRealtimeBrokerError) => void;
+};
+
+/**
+ * The provider refused realtime for this connection's account, not for the
+ * request: a plan without voice answers call creation with 404, an account
+ * without the entitlement with 403. Nothing was created, so another
+ * connected subscription may serve the same request.
+ */
+export function codexRealtimeRefusedForConnection(
+  error: unknown,
+): error is CodexRealtimeBrokerError {
+  return (
+    error instanceof CodexRealtimeBrokerError &&
+    (error.reason === "entitlement_denied" ||
+      (error.reason === "incompatible" && error.providerStatus === 404))
   );
 }
 
@@ -431,6 +473,7 @@ export function buildSessionCodexRealtimeBroker(
   settings: Settings,
   context: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl: CodexFetch = fetch,
+  options: CodexRealtimeBrokerOptions = {},
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   const { accountId, workspaceId, sessionId } = context;
   return async (input) => {
@@ -440,6 +483,7 @@ export function buildSessionCodexRealtimeBroker(
       { accountId, workspaceId, sessionId },
       input,
       fetchImpl,
+      options,
     );
   };
 }

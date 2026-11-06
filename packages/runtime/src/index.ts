@@ -1,4 +1,9 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+// Nothing was sent: callers render the message, which names the choices.
+export {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
@@ -15,6 +20,25 @@ import {
   installCommandCompletionDelivery,
   type CommandCompletionDelivery,
 } from "./command-completion-delivery";
+import {
+  installSandboxSetupNoticeDelivery,
+  queueSandboxSetupNotice,
+  takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
+} from "./sandbox-setup-notices";
+export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
+import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
+  softFailingSetupHooks,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
+import { SandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
+export {
+  softRunCredentialWriteFailure,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -139,6 +163,7 @@ import {
 import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
+  ToolGatewayToolNotFoundError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -146,6 +171,7 @@ import {
   type ToolGatewayApprovalResolver,
   type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
+  type ToolGatewayCatalogWarning,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { createSecretArgumentResolver } from "./secret-argument-resolution";
@@ -229,18 +255,22 @@ export {
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
   assertMcpServerSelectionWithinBounds,
-  assertMcpToolListWithinBounds,
   boundedParallelMap,
   cancelMcpResponseBody,
+  describeMcpToolListDrops,
+  fitMcpToolListWithinBounds,
   guardedMcpFetch,
+  isMcpPayloadTooLargeError,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
   undiciFetch,
+  type McpToolListDrop,
   type McpRequestReplayInfo,
 } from "./mcp-network";
 import {
@@ -284,6 +314,17 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+  accountChoicesFromResult,
+  fillAccountParameters,
+  mcpAccountParametersFor,
+  withAccountParameterDefaults,
+  type AccountParameterFill,
+  type McpAccountChoice,
+  type McpAccountParameter,
+} from "./mcp-account-parameters";
 import {
   MCP_INPUT_PENDING_RESULT,
   awaitingMcpInput,
@@ -515,6 +556,13 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import {
+  ownedBoxRepairCommand,
+  ownedBoxRepairHost,
+  ownedBoxRepairNote,
+  parseOwnedBoxRepairOutput,
+  type OwnedBoxRepairReport,
+} from "./sandbox/owned-box-repair";
+import {
   sandboxHookOperationPurpose,
   withSandboxOperationPurpose,
 } from "./sandbox/operation-purpose";
@@ -586,6 +634,7 @@ import {
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -2736,6 +2785,11 @@ export type BuildAgentOptions = {
    * settings.experimentCutPolling is on.
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
+  /**
+   * Receives each sandbox setup notice appended to a tool result
+   * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
+   */
+  onSandboxSetupNoticeDelivered?: (appended: string) => void;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3366,6 +3420,10 @@ export function mcpToolErrorOutput(error: unknown): {
   structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  // Nothing was sent: the text names the account's values to choose from.
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   // Nothing ran; the output names each failure and, for a missing secret,
@@ -3841,6 +3899,11 @@ export function buildOpenGeniAgent(
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
+    installSandboxSetupNoticeDelivery(agent, {
+      ...(options.onSandboxSetupNoticeDelivered
+        ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+        : {}),
+    });
     return agent;
   }
 
@@ -3993,6 +4056,11 @@ export function buildOpenGeniAgent(
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
+  installSandboxSetupNoticeDelivery(agent, {
+    ...(options.onSandboxSetupNoticeDelivered
+      ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+      : {}),
+  });
   return agent;
 }
 
@@ -4062,7 +4130,12 @@ function maybeInstallLazyToolTransport(
         if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
           continue;
         for (const name of server.modelToolNames()) {
-          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          // Server lists are disjoint by model name (the shared budget leaves a
+          // taken name out), so this is only a backstop: keep the first owner.
+          if (identities.has(name)) {
+            warnMcpModelNameCollision(name, identities.get(name)!, server.registryId);
+            continue;
+          }
           identities.set(name, server.registryId);
         }
       }
@@ -4360,6 +4433,9 @@ export function toolPreflightFailureOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4566,13 +4642,24 @@ function installMcpApprovalPolicy(
         connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
+        accountChoice: (
+          toolName: string,
+          args: unknown,
+        ) => Promise<McpAccountParameterChoiceError | undefined>;
       }
     >();
     for (const server of agent.mcpServers ?? []) {
       if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
         continue;
       for (const descriptor of await server.listTools()) {
-        if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        if (identities.has(descriptor.name)) {
+          warnMcpModelNameCollision(
+            descriptor.name,
+            identities.get(descriptor.name)!.serverId,
+            server.registryId,
+          );
+          continue;
+        }
         const display = server.toolDisplayMetadata(descriptor.name);
         const accountLabel = display?.connector
           ? display.accountLabel
@@ -4585,6 +4672,7 @@ function installMcpApprovalPolicy(
           inputSchema: descriptor.inputSchema,
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
+          accountChoice: (name, args) => server.accountParameterChoice(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -4677,6 +4765,13 @@ function installMcpApprovalPolicy(
             parsedInput: Parameters<typeof originalNeedsApproval>[1],
             callId: Parameters<typeof originalNeedsApproval>[2],
           ) => {
+            // A call the account's values must first be chosen for is never
+            // sent; containment returns the choice for this call id instead of
+            // asking anyone. Without an id the call itself returns it.
+            const choice = callId
+              ? await identity?.accountChoice(unprefixed, parsedInput)
+              : undefined;
+            if (choice) throw choice;
             if (!connectorActionPolicy) {
               return (
                 recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
@@ -5998,6 +6093,13 @@ class DeferredPreparedMcpServer implements MCPServer {
     return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
   }
 
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -6053,6 +6155,43 @@ class DeferredPreparedMcpServer implements MCPServer {
   }
 }
 
+/**
+ * More servers than one turn can connect must not fail the turn. Opengeni's
+ * own server is kept first, then required servers, then best-effort ones
+ * (optional or connection-backed), each group in selection order; the
+ * servers left out are logged and named to the model.
+ */
+function fitMcpServerSelection(
+  settings: Settings,
+  tools: ToolRef[],
+  unavailableSink: Map<string, string>,
+): ToolRef[] {
+  if (tools.length <= MCP_MAX_SELECTED_SERVERS) return tools;
+  const configs = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const rank = (tool: ToolRef): number => {
+    const config = configs.get(tool.id);
+    if (config && !config.connectionRef && isFirstPartyMcpServer(settings, config)) return 0;
+    return tool.optional === true || config?.connectionRef ? 2 : 1;
+  };
+  const ordered = [0, 1, 2].flatMap((group) => tools.filter((tool) => rank(tool) === group));
+  const kept = new Set(ordered.slice(0, MCP_MAX_SELECTED_SERVERS));
+  const left = tools.filter((tool) => !kept.has(tool));
+  console.warn("[mcp] more servers selected than one turn can connect; skipping the rest", {
+    event: "tool_catalog_degraded",
+    code: "server_selection_limit",
+    selectedCount: tools.length,
+    keptCount: kept.size,
+    skippedServerIds: left.slice(0, 32).map((tool) => tool.id.slice(0, 256)),
+  });
+  for (const tool of left) {
+    unavailableSink.set(
+      tool.id,
+      `not loaded this turn: more than ${MCP_MAX_SELECTED_SERVERS} integrations are selected, so its tools are unavailable.`,
+    );
+  }
+  return tools.filter((tool) => kept.has(tool));
+}
+
 export async function prepareAgentTools(
   settings: Settings,
   tools: ToolRef[],
@@ -6065,7 +6204,7 @@ export async function prepareAgentTools(
   const unavailableMcpServers = new Map<string, string>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
-  assertMcpServerSelectionWithinBounds(tools);
+  tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
@@ -6237,10 +6376,18 @@ export async function prepareAgentTools(
               codexConnectorNamespaces,
             )
           : mcpFetchImpl;
+        // The SDK can replace a size refusal's error (a later page, an SSE
+        // disconnect); this record lets the server still recognise it.
+        const listSizeRefusal = { refused: false };
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
+            onSizeRefusal: (rpcMethod) => {
+              if (rpcMethod === undefined || rpcMethod === "tools/list") {
+                listSizeRefusal.refused = true;
+              }
+            },
             ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
             ...(useBunNativeFetch && !isCodexAppsMcpServer(config)
               ? { usePinnedRequestTransport: true }
@@ -6429,12 +6576,14 @@ export async function prepareAgentTools(
             undefined,
             firstParty,
             eagerToolNames,
+            firstParty || bridge ? [] : mcpAccountParametersFor(config.url),
           ),
           config,
           options,
           url,
           Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
+        if (!bridge) server.listSizeRefusal = listSizeRefusal;
         return {
           server,
           bestEffort,
@@ -6463,7 +6612,9 @@ export async function prepareAgentTools(
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
   for (const entry of servers) {
-    if (entry.bestEffort && entry.server instanceof PrefixedMcpServer) {
+    // Every server reports missing tools: a best-effort server that failed to
+    // list, and any server whose list was trimmed to fit this turn.
+    if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
     }
   }
@@ -6556,23 +6707,30 @@ export async function prepareAgentTools(
     }
     return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
-  const connectedEager = await connectEntryGroups(
-    eagerRequiredEntries,
-    eagerBestEffortEntries,
-    "blocking",
-  );
-  const connectedEagerRequired = connectedEager.required;
-  const connectedEagerBestEffort = connectedEager.bestEffort;
-  warnBestEffortFailures(connectedEagerBestEffort);
-  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
-  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
+  // Built-in tools claim their model names and budget before any connector
+  // lists, so a connector's tool can never displace or impersonate one.
   let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
         attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
+        unavailableMcpServers,
       )
     : null;
+  const connectedEager = await connectEntryGroups(
+    eagerRequiredEntries,
+    eagerBestEffortEntries,
+    "blocking",
+  ).catch(async (error: unknown) => {
+    // The built-in tool server is created first; free its budget share too.
+    await localToolServer?.close().catch(() => undefined);
+    throw error;
+  });
+  const connectedEagerRequired = connectedEager.required;
+  const connectedEagerBestEffort = connectedEager.bestEffort;
+  warnBestEffortFailures(connectedEagerBestEffort);
+  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
+  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
   // Eager servers must connect before disclosure, but their complete execution
   // catalog is still independent of the first model request. The same deferred
   // lifecycle owns catalog work even when no server needs a deferred connection.
@@ -6608,6 +6766,9 @@ export async function prepareAgentTools(
         ...(connectedDeferredRequired?.active ?? []),
         ...(connectedDeferredBestEffort?.active ?? []),
       ];
+      // Eager servers come first here and in the first-request freeze below,
+      // so both fix one consistent admission order.
+      PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, activeMcpServers);
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
@@ -6618,6 +6779,7 @@ export async function prepareAgentTools(
             resolvedMcpConnectionIds,
             options,
             settings.modelToolOutputTruncationTokens,
+            unavailableMcpServers,
           ),
         execution,
       );
@@ -6736,12 +6898,15 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   try {
+    const eagerActive = [
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+    ];
+    PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, eagerActive);
     await Promise.all(
-      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-        async (server) => {
-          if (server instanceof PrefixedMcpServer) await server.freezeTools();
-        },
-      ),
+      eagerActive.map(async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      }),
     );
   } catch (error) {
     // Publication did not complete, so no caller can own these resources.
@@ -6817,7 +6982,8 @@ function localMcpServerRegistry(
   registrations: readonly LocalMcpServerRegistration[],
   settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
 ): ReadonlyMap<string, LocalMcpServerRegistration> {
-  assertMcpServerSelectionWithinBounds(registrations);
+  // No count limit here: a host registers a server for every tool it offers,
+  // and only the selection that fits the turn (fitMcpServerSelection) is built.
   const registry = new Map<string, LocalMcpServerRegistration>();
   for (const registration of registrations) {
     if (!settingsRegistry.has(registration.id)) {
@@ -6915,6 +7081,7 @@ async function prepareAttemptToolEnvironment(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
   defaultModelToolOutputTruncationTokens: number,
+  unavailableSink?: Map<string, string>,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -7010,11 +7177,49 @@ async function prepareAttemptToolEnvironment(
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
     ...(secretArguments ? { resolveArguments: secretArguments } : {}),
+    ...(unavailableSink
+      ? { onWarnings: (warnings) => noteToolCatalogOmissions(warnings, unavailableSink) }
+      : {}),
   });
   for (const { server } of prepared.servers) {
     server.bindAttemptToolEnvironment(environment, subjectId);
   }
   return environment;
+}
+
+/**
+ * Tell the model, through tool_search's unavailable sources, which servers lost
+ * tools while the catalog was built. A server that already reported its own,
+ * more specific reason keeps it.
+ */
+function noteToolCatalogOmissions(
+  warnings: readonly ToolGatewayCatalogWarning[],
+  unavailableSink: Map<string, string>,
+): void {
+  const omitted = new Map<string, { count: number; full: boolean; names: string[] }>();
+  for (const warning of warnings) {
+    if (warning.code === "path_disambiguated" || warning.code === "duplicate_identity") continue;
+    if (!warning.serverId) continue;
+    const entry = omitted.get(warning.serverId) ?? { count: 0, full: false, names: [] };
+    entry.count += 1;
+    entry.full ||= warning.code === "catalog_entry_limit" || warning.code === "catalog_byte_limit";
+    if (entry.names.length < 5 && warning.toolName) entry.names.push(warning.toolName);
+    omitted.set(warning.serverId, entry);
+  }
+  for (const [serverId, { count, full, names }] of omitted) {
+    if (unavailableSink.has(serverId)) continue;
+    unavailableSink.set(
+      serverId,
+      `connected, but ${count} of its tools are unavailable this turn (${
+        full
+          ? "this turn's tool catalog is full"
+          : "their definitions conflict with another tool or are invalid"
+      })${names.length ? `, for example ${names.join(", ")}` : ""}. Its other tools work.`.slice(
+        0,
+        1_000,
+      ),
+    );
+  }
 }
 
 function installAttemptConnectorActionGatewayLifecycle(
@@ -7349,6 +7554,11 @@ async function prepareToolGatewayDefinitionsFromServers(
     }
     return { server, config };
   });
+  // Network listings run within the concurrency bound; ordered admission
+  // happens afterwards, so a slow early server never blocks later listings.
+  await boundedParallelMap(preparedServers, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, ({ server }) =>
+    server.prefetchTools(),
+  );
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -8427,7 +8637,29 @@ type McpPublicFailureCode =
   | "mcp_close_failed"
   | "mcp_transport_failed"
   | "mcp_tools_list_failed"
-  | "mcp_tool_call_failed";
+  | "mcp_tool_call_failed"
+  | "mcp_account_parameter_lookup_failed";
+
+/** Bound for looking up a connected account's parameter values; past it the call goes on unfilled. */
+const MCP_ACCOUNT_PARAMETER_LOOKUP_MS = 10_000;
+/** After a lookup that found nothing, calls go on unfilled for this long before it is tried again. */
+const MCP_ACCOUNT_PARAMETER_RETRY_MS = 60_000;
+
+/** A shared promise, abandoned (not cancelled) when this caller's signal aborts. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
+}
 
 function safeMcpServerIdentity(serverId: string): string {
   return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
@@ -9482,13 +9714,8 @@ class AttemptDefinitionMcpServer implements MCPServer {
     definitions: readonly AttemptToolDefinition[],
     private readonly aggregateToolBudget: McpAggregateToolListBudget,
     private readonly subjectId: string,
+    unavailableSink?: Map<string, string>,
   ) {
-    for (const definition of definitions) {
-      this.catalogIdentities.set(definition.modelName, {
-        identity: definition.identity,
-        source: definition.source,
-      });
-    }
     const descriptors = definitions.map(
       (definition) =>
         ({
@@ -9501,9 +9728,29 @@ class AttemptDefinitionMcpServer implements MCPServer {
           ...(definition.icons ? { icons: definition.icons } : {}),
         }) as RuntimeMcpTool,
     );
-    this.tools = [
-      ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
-    ];
+    // These tools register before any connector lists, so a connector can
+    // never take one of their names. Limits still trim instead of failing.
+    const fitted = this.aggregateToolBudget.admit(this.name, descriptors);
+    this.tools = [...fitted.tools];
+    const listed = new Set(this.tools.map((tool) => tool.name));
+    for (const definition of definitions) {
+      if (!listed.has(definition.modelName) || this.catalogIdentities.has(definition.modelName))
+        continue;
+      this.catalogIdentities.set(definition.modelName, {
+        identity: definition.identity,
+        source: definition.source,
+      });
+    }
+    if (fitted.dropped.length > 0) {
+      console.warn("[mcp] built-in tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.name,
+        keptCount: this.tools.length,
+        droppedCount: fitted.dropped.length,
+        dropped: fitted.dropped.slice(0, 32),
+      });
+      unavailableSink?.set(this.name, describeMcpToolListDrops(fitted.dropped));
+    }
   }
 
   /** Canonical identity behind one model-visible name, for analytics only. */
@@ -9562,12 +9809,14 @@ class AttemptDefinitionMcpServer implements MCPServer {
     const sourceCallId = modelMcpSourceCallId(toolName);
     // Bind the call to the tool this server advertised: if another server's
     // tool won this model name in the catalog, the call is not found.
+    // A name this server did not list (or left out this turn) is not found.
     const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
+    if (expectedIdentity === undefined) throw new ToolGatewayToolNotFoundError();
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
-        ...(expectedIdentity === undefined ? {} : { expectedIdentity }),
+        expectedIdentity,
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9611,13 +9860,16 @@ export class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
-  /** Where a best-effort server records that its tools are unavailable this attempt. */
+  /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Set by this server's transport when a tools/list response is refused for size. */
+  listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
   private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private rawToolList: Promise<unknown[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
   /**
@@ -9628,6 +9880,13 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly displayTitles = new Map<string, string>();
   /** Unprefixed names of API integration operations; their cards read the request's fields. */
   private readonly apiOperations = new Set<string>();
+  /** Unprefixed tool name -> the account parameters its calls may have filled in. */
+  private readonly accountParameterTools = new Map<string, readonly McpAccountParameter[]>();
+  /** One shared lookup of the account's values per parameter for this attempt. */
+  private readonly accountChoiceLookups = new Map<
+    string,
+    { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number }
+  >();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9683,6 +9942,11 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    /**
+     * Parameters the connected account fixes (mcp-account-parameters.ts).
+     * Applied only by the wrapper around the physical server.
+     */
+    private readonly accountParameters: readonly McpAccountParameter[] = [],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9798,6 +10062,27 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
+  /** Fix the order in which these servers' tool lists are admitted to the shared budget. */
+  static sequenceAggregateBudget(
+    budget: McpAggregateToolListBudget,
+    servers: readonly MCPServer[],
+  ) {
+    const prefixed = servers
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .filter((server) => server.aggregateToolBudget === budget);
+    // Opengeni's own server (harness control, goals) is admitted before any
+    // connector, so a full budget never cuts its tools.
+    budget.sequence(
+      [
+        ...prefixed.filter((server) => server.firstPartyCatalog),
+        ...prefixed.filter((server) => !server.firstPartyCatalog),
+      ].map((server) => ({
+        sourceId: server.aggregateSourceId,
+        start: () => server.freezeTools(),
+      })),
+    );
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
@@ -9818,6 +10103,27 @@ export class PrefixedMcpServer implements MCPServer {
         ...(count === undefined ? {} : { count }),
       });
     }
+  }
+
+  /**
+   * Starts this server's network listing without admitting it. The catalog
+   * build prefetches inside its bounded concurrency so a server waiting for
+   * its admission turn never holds a listing slot.
+   */
+  prefetchTools(): Promise<void> {
+    if (this.frozenTools) return Promise.resolve();
+    return this.rawTools().then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  private rawTools(): Promise<unknown[]> {
+    if (!this.rawToolList) {
+      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
+      this.rawToolList = this.inner.listTools() as Promise<unknown[]>;
+    }
+    return this.rawToolList;
   }
 
   freezeTools(): Promise<RuntimeMcpTool[]> {
@@ -9901,10 +10207,30 @@ export class PrefixedMcpServer implements MCPServer {
 
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
-      const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      // De-duplicate before any size check: a paginated listing that repeats
+      // pages must not count its repeats against the limits.
+      const tools = (await this.rawTools()) as RuntimeMcpTool[];
+      // Account parameters apply once, around the physical server, and only
+      // when the server lists the tool that looks the account's values up.
+      const listedNames = new Set(tools.map((tool) => tool.name));
+      const accountParameters =
+        this.inner instanceof PrefixedMcpServer
+          ? []
+          : this.accountParameters.filter((parameter) =>
+              listedNames.has(parameter.resolver.toolName),
+            );
+      this.accountParameterTools.clear();
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // A recoverable operation is never filled, so it keeps its own schema.
+          const defaults = configuredMcpOperationRecovery(this, tool.name)
+            ? { inputSchema: tool.inputSchema, filled: [] }
+            : withAccountParameterDefaults(tool.inputSchema, accountParameters);
+          if (defaults.filled.length > 0) {
+            this.accountParameterTools.set(tool.name, defaults.filled);
+            tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
+          }
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
           if (prior !== undefined && prior !== tool.name) {
@@ -9946,8 +10272,30 @@ export class PrefixedMcpServer implements MCPServer {
           };
         })
         .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
-      const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
-        assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
+      // Over-limit lists and model names another server already lists are
+      // trimmed, never fatal: the server stays connected with the tools that
+      // fit. Harness control and eager tools are admitted first.
+      const keepFirst = (tool: RuntimeMcpTool) =>
+        isHarnessControlMcpToolName(this.registryId, tool.name) ||
+        this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? "");
+      // Servers list concurrently; the budget admits them in their configured
+      // order so the same selection keeps the same tools on every turn.
+      const fitted = this.aggregateToolBudget
+        ? await this.aggregateToolBudget.admitInOrder(this.aggregateSourceId, exposed, {
+            keepFirst,
+          })
+        : fitMcpToolListWithinBounds(exposed, { keepFirst });
+      const bounded = fitted.tools;
+      if (fitted.dropped.length > 0) {
+        const kept = new Set(bounded.map((tool) => tool.name));
+        for (const name of [...this.originalToolNames.keys()]) {
+          if (kept.has(name)) continue;
+          this.originalToolNames.delete(name);
+          this.displayMetadata.delete(name);
+          this.omittedModelNames.add(name);
+        }
+        this.reportDroppedTools(fitted.dropped, bounded.length);
+      }
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
       const alwaysVisible = bounded.filter(
         (tool) =>
@@ -9960,9 +10308,16 @@ export class PrefixedMcpServer implements MCPServer {
         alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;
     } catch (error) {
+      // A size-limit refusal is deterministic: failing the turn would fail
+      // every later turn the same way. Even a required server degrades to no
+      // tools here; it was reached, and the model is told why its tools are
+      // missing. Any other required-server failure still fails loudly.
+      const tooLarge = isMcpPayloadTooLargeError(error) || this.listSizeRefusal?.refused === true;
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
-      if (!this.bestEffort) {
+      if (!this.bestEffort && !tooLarge) {
+        // Let servers ordered after this one admit without waiting on it.
+        this.releaseAggregateBudget();
         throw mcpTransportErrorWithRetryMetadata(error, {
           recoverySafeSetup: this.recoverySafeSetup,
         });
@@ -9982,14 +10337,46 @@ export class PrefixedMcpServer implements MCPServer {
       if (!this.loggedListToolsFailure) {
         this.loggedListToolsFailure = true;
         console.warn(
-          "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+          tooLarge
+            ? "[mcp] server tools/list is over its size limit; its tools are unavailable this turn"
+            : "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
+          {
+            ...mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+            ...(tooLarge ? { event: "tool_catalog_degraded", required: !this.bestEffort } : {}),
+          },
         );
       }
-      this.unavailableSink?.set(this.registryId, mcpUnavailableReason(error, "list"));
+      this.unavailableSink?.set(
+        this.registryId,
+        tooLarge
+          ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
+          : mcpUnavailableReason(error, "list"),
+      );
       this.releaseAggregateBudget();
       return [];
     }
+  }
+
+  private loggedDroppedTools = false;
+  private readonly omittedModelNames = new Set<string>();
+
+  /** Warn once per attempt and tell the model which of this server's tools are missing. */
+  private reportDroppedTools(dropped: readonly McpToolListDrop[], keptCount: number): void {
+    if (!this.loggedDroppedTools) {
+      this.loggedDroppedTools = true;
+      const reasons: Record<string, number> = {};
+      for (const { reason } of dropped) reasons[reason] = (reasons[reason] ?? 0) + 1;
+      console.warn("[mcp] server tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.registryId.slice(0, 256),
+        required: !this.bestEffort,
+        keptCount,
+        droppedCount: dropped.length,
+        reasons,
+        dropped: dropped.slice(0, 32),
+      });
+    }
+    this.unavailableSink?.set(this.registryId, describeMcpToolListDrops(dropped));
   }
 
   /** Latest exact tools/list projection used to build the model request. */
@@ -10029,6 +10416,9 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
+    // A tool this server listed but left out of this turn (over a limit, or
+    // its name is another server's) is unavailable here, never rerouted.
+    if (this.omittedModelNames.has(toolName)) throw new ToolGatewayToolNotFoundError();
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -10154,6 +10544,14 @@ export class PrefixedMcpServer implements MCPServer {
           : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
+      const accountFill = recordsPhysicalCall
+        ? await this.fillAccountParameters(unprefixed, args ?? {}, options?.signal)
+        : undefined;
+      // Nothing was sent: the model chooses one of the account's values.
+      if (accountFill?.kind === "choose") {
+        throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
+      }
+      const providerArgs = accountFill?.arguments ?? args ?? {};
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
@@ -10189,7 +10587,7 @@ export class PrefixedMcpServer implements MCPServer {
               call: async (callArgs) =>
                 AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
             })
-          : await physicalCall(args ?? {});
+          : await physicalCall(providerArgs);
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -10240,6 +10638,8 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      // Not a provider failure: the choice text is the result, never "unavailable".
+      if (isMcpAccountParameterChoiceError(error)) throw error;
       if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
@@ -10367,6 +10767,99 @@ export class PrefixedMcpServer implements MCPServer {
       return this.inputWaitYield?.beginWait(request);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The choice the model must make before this call can run, or undefined.
+   * Approval hooks ask first, so nobody approves a call that would not be
+   * sent. Never fatal; the lookup is shared with the call itself.
+   */
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    if (this.inner instanceof PrefixedMcpServer)
+      return await this.inner.accountParameterChoice(this.inner.unprefixedToolName(toolName), args);
+    const fill = await this.fillAccountParameters(
+      toolName,
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ).catch(() => undefined);
+    return fill?.kind === "choose"
+      ? new McpAccountParameterChoiceError(fill.parameter, fill.choices)
+      : undefined;
+  }
+
+  /**
+   * Fill this tool's unset account parameters from the connected account.
+   * Any lookup failure sends the call on as the model made it; only the
+   * caller's own abort ends it. A recoverable operation dispatches exactly one
+   * physical call, so it is left as it is.
+   */
+  private async fillAccountParameters(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AccountParameterFill | undefined> {
+    const parameters = this.accountParameterTools.get(toolName);
+    if (!parameters || hasActiveRecoverableMcpOperation()) return undefined;
+    signal?.throwIfAborted();
+    try {
+      return await fillAccountParameters(parameters, args, (parameter) =>
+        abortable(this.accountChoices(parameter), signal),
+      );
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return undefined;
+    }
+  }
+
+  /**
+   * The account's values for a parameter, looked up once per attempt and
+   * shared by concurrent calls. A lookup that found nothing is retried after
+   * a short pause, so a hanging provider delays at most one call per window.
+   */
+  private accountChoices(parameter: McpAccountParameter): Promise<readonly McpAccountChoice[]> {
+    const key = JSON.stringify([parameter.resolver.toolName, parameter.name]);
+    const existing = this.accountChoiceLookups.get(key);
+    if (existing && (existing.retryAfter === undefined || Date.now() < existing.retryAfter))
+      return existing.lookup;
+    const entry: { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number } = {
+      lookup: this.lookUpAccountChoices(parameter),
+    };
+    this.accountChoiceLookups.set(key, entry);
+    void entry.lookup.then((choices) => {
+      if (choices.length === 0) entry.retryAfter = Date.now() + MCP_ACCOUNT_PARAMETER_RETRY_MS;
+    });
+    return entry.lookup;
+  }
+
+  private async lookUpAccountChoices(
+    parameter: McpAccountParameter,
+  ): Promise<readonly McpAccountChoice[]> {
+    const signal = AbortSignal.timeout(MCP_ACCOUNT_PARAMETER_LOOKUP_MS);
+    const { toolName, arguments: resolverArgs } = parameter.resolver;
+    try {
+      const call = async () =>
+        this.inner.callToolResult
+          ? await this.inner.callToolResult(toolName, { ...resolverArgs }, null, { signal })
+          : mcpContentAsResult(
+              await this.inner.callTool(toolName, { ...resolverArgs }, null, { signal }),
+            );
+      const aborted = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      aborted.catch(() => undefined);
+      const result = await Promise.race([call(), aborted]);
+      return accountChoicesFromResult(parameter, unwrapSdkMcpResultProjection(result));
+    } catch (error) {
+      console.warn(
+        "[mcp] account parameter lookup failed; the call goes on as the model made it",
+        mcpErrorFields(error, "mcp_account_parameter_lookup_failed", this.registryId),
+      );
+      return [];
     }
   }
 
@@ -11009,6 +11502,7 @@ async function runAgentStreamInternal(
         ? { codemodeClientDownload: ownedCodemodeClientDownload }
         : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+      onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
@@ -11116,6 +11610,7 @@ async function runAgentStreamInternal(
                 "sandbox_session_manifest_inventory",
                 (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
               );
+              deliverHeldSandboxSetupNotices(agent, prepared);
               return runScopedRunner(settings, agent, inputWaitYield).run(
                 agent,
                 prepared.input,
@@ -11198,6 +11693,7 @@ async function runAgentStreamInternal(
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
+          onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
         },
       )
     : undefined;
@@ -11289,6 +11785,7 @@ async function runAgentStreamInternal(
               "sandbox_agent_manifest_inventory",
               (agent as { defaultManifest?: Manifest }).defaultManifest,
             );
+            deliverHeldSandboxSetupNotices(agent, prepared);
             return runScopedRunner(settings, agent, inputWaitYield).run(
               agent,
               prepared.input,
@@ -11306,20 +11803,60 @@ function appendSandboxFileDownloadFailureNote(
   input: PreparedAgentInput,
   failures: SandboxFileDownloadFailure[],
 ): void {
-  const note = sandboxFileDownloadFailureNote(failures);
+  appendPreparedInputNote(input, sandboxFileDownloadFailureNote(failures));
+}
+
+/**
+ * Append a platform note to this turn's model input, after the person's
+ * message. False when that input cannot take one.
+ */
+function appendPreparedInputNote(input: PreparedAgentInput, note: string): boolean {
   if (!note) {
-    return;
+    return true;
   }
   if (typeof input.input === "string") {
     input.input = [input.input, "", note].join("\n");
-    return;
+    return true;
   }
   if (Array.isArray(input.input)) {
     input.input = [
       ...input.input,
       { type: "message", role: "user", content: note } as AgentInputItem,
     ];
+    return true;
   }
+  return false;
+}
+
+/**
+ * Route a setup notice: into the turn's input while the model has not started,
+ * otherwise held for the next tool result.
+ */
+function sandboxSetupNoticeSink(
+  agent: Agent<any, any>,
+  preparedInput: PreparedAgentInput | undefined,
+): (notice: string) => void {
+  return (notice) => {
+    if (preparedInput && appendPreparedInputNote(preparedInput, notice)) return;
+    queueSandboxSetupNotice(agent, notice);
+  };
+}
+
+/** Notices held by setup that finished before this run starts join its input. */
+function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: PreparedAgentInput) {
+  const held = takeSandboxSetupNotices(agent);
+  if (held && !appendPreparedInputNote(prepared, held)) {
+    queueSandboxSetupNotice(agent, held);
+  }
+}
+
+/**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
 }
 
 /**
@@ -11474,6 +12011,20 @@ async function resolveBareFirstPartyToolCall(
   return tool;
 }
 
+/**
+ * Two servers offering one model name must never fail the run. The first
+ * owner keeps the name; the later tool is unavailable this attempt.
+ */
+function warnMcpModelNameCollision(modelName: string, keptOwner: string, skippedOwner: string) {
+  console.warn("[mcp] two tools share one model name; keeping the first", {
+    event: "tool_catalog_degraded",
+    code: "duplicate_model_name",
+    modelName: modelName.slice(0, 256),
+    keptOwner: keptOwner.slice(0, 256),
+    skippedOwner: skippedOwner.slice(0, 256),
+  });
+}
+
 /** Old hashes are aliases only for an exact tool in the current authorized
  * catalog. Never recover tools from history, labels, URLs, or a different account. */
 function mcpToolResolverForAgent(agent: Agent<any, any>) {
@@ -11493,8 +12044,11 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
       for (const descriptor of await server.listTools()) {
         const rawName = await server.unprefixedToolName(descriptor.name);
         if (legacyMcpToolDigest(server.registryId, rawName) !== input.name) continue;
-        if (resolvedName !== undefined && resolvedName !== descriptor.name)
-          throw new Error("MCP legacy model tool identity collision");
+        if (resolvedName !== undefined && resolvedName !== descriptor.name) {
+          // Ambiguous old alias: resolve to no tool rather than guess one.
+          warnMcpModelNameCollision(input.name, resolvedName, descriptor.name);
+          return null;
+        }
         resolvedName = descriptor.name;
       }
     }
@@ -11815,6 +12369,9 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Setup steps the worker ran first that already failed softly (run
+     * credential files), reported in the same notice as the hooks'. */
+    priorSoftSetupFailures?: readonly SoftSetupFailure[];
     /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
     recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
@@ -11880,6 +12437,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    onSetupNotice: sandboxSetupNoticeSink(agent, opts.preparedInput),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -11889,7 +12447,19 @@ export async function runOwnedSandboxSetup(
   // (effective backend "selfhosted"): the box is the user's REAL computer — the
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
+  // Setup steps that failed softly this turn, including the worker's own
+  // earlier steps (run credential files), reported in one notice below.
+  const softFailures: SoftSetupFailure[] = [...(opts.priorSoftSetupFailures ?? [])];
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // clock or resolver the agent broke is repaired before anything below needs
+    // the network (rig setup, clones, the Codemode client). Never on any other
+    // backend, and above all never on a connected machine.
+    if ((agentActiveSandboxBackend.get(agent) ?? settings.sandboxBackend) === "compute") {
+      const repair = await repairOwnedComputeBox(setupSession, environment, opts.commandRunner);
+      const note = repair ? ownedBoxRepairNote(repair) : null;
+      if (note && opts.preparedInput) appendPreparedInputNote(opts.preparedInput, note);
+    }
     if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
       const execute = async (): Promise<void> => {
         await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
@@ -11919,8 +12489,30 @@ export async function runOwnedSandboxSetup(
         await execute();
       }
     }
-    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
+    // A hook failure the box itself caused (a full /workspace, a blocked
+    // path) must not fail every later turn before the model can fix it: the
+    // turn starts and the model is told what failed (sandbox-setup-soft-failure.ts).
+    await runBeforeAgentStartHooks(
+      setupSession,
+      softFailingSetupHooks(ownedTurnPrivateHooks, softFailures, (failure) => {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "platform setup step failed softly; the turn continues with a notice",
+            event: "sandbox.setup.soft_failure",
+            hookId: failure.hookId,
+            cause: failure.cause.kind,
+            ...(failure.cause.kind === "command_failed"
+              ? { exitCode: failure.cause.exitCode }
+              : {}),
+          }),
+        );
+      }),
+      ownedHookContext,
+    );
   }
+  const softFailureNotice = softSetupFailureNotice(softFailures);
+  if (softFailureNotice) sandboxSetupNoticeSink(agent, opts.preparedInput)(softFailureNotice);
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
   // workspace-relative, integrity-verified, read-only, and atomic; repository,
@@ -12731,7 +13323,54 @@ export type SandboxLifecycleHookContext = {
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
   commandRunner?: SandboxLifecycleCommandRunner;
+  /**
+   * Model-facing text a hook needs the agent to read, such as where a
+   * repository folder was moved aside. Delivered with the turn's input when
+   * setup runs before the model, otherwise with the next tool result.
+   */
+  onSetupNotice?: (notice: string) => void;
 };
+
+/**
+ * Check a compute box's clock and resolver against the worker and repair what
+ * is broken (see sandbox/owned-box-repair). Best effort: a failed check never
+ * fails setup, but a Steer/Pause cancellation still stops it.
+ */
+async function repairOwnedComputeBox(
+  session: SandboxSessionLike,
+  environment: Record<string, string>,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<OwnedBoxRepairReport | null> {
+  let result: unknown;
+  try {
+    result = await withSandboxOperationPurpose("box_repair", () =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: ownedBoxRepairCommand({
+            workerEpochSeconds: Date.now() / 1000,
+            host: ownedBoxRepairHost(environment),
+          }),
+          workdir: "/workspace",
+          yieldTimeMs: 30_000,
+          maxOutputTokens: 1_000,
+        },
+        commandRunner,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+    });
+    return null;
+  }
+  const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
+  if (report.clock || report.dns) {
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
+  }
+  return report;
+}
 
 async function runSandboxLifecycleCommand(
   session: SandboxSessionLike,
@@ -14581,6 +15220,107 @@ export async function refreshGitCredentialBindingTokenFiles(
 const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
 
 /**
+ * The clone script's report of a folder it moved aside instead of deleting:
+ * this prefix, the run's token in brackets, a colon, then the target, the new
+ * path and a reason code, tab-separated.
+ */
+const RECOVERED_REPOSITORY_PREFIX = "Notice: moved repository folder aside";
+const RECOVERED_REPOSITORY_NAME = /^\.opengeni-recovered-\d{8}T\d{6}Z(?:-\d+)?$/u;
+const RECOVERED_REPOSITORY_REASONS: Record<string, string> = {
+  unreadable: "it was not a readable Git work tree",
+  "remote-commits": "the remote now has commits",
+};
+
+/** A fresh token for one clone run's move-aside reports. */
+export function repositoryRecoveryNoticeToken(): string {
+  return randomUUID().replaceAll("-", "");
+}
+
+/** One repository folder the clone hook moved aside before cloning fresh. */
+export type RecoveredRepositoryFolder = {
+  /** Absolute path of the repository folder, as the sandbox sees it. */
+  target: string;
+  /** Absolute path the earlier copy now has. */
+  movedTo: string;
+  /** Workspace-relative mount path of the repository. */
+  path: string;
+  /** Workspace-relative path of the earlier copy. */
+  movedToPath: string;
+  reason: string;
+};
+
+/**
+ * The folders the clone script reported moving aside. Only whole lines carrying
+ * this run's token count, for this hook's own repository targets moved to
+ * their own recovery sibling, with a known reason code: no other output (a
+ * remote's fetch messages) can add an entry or choose its text.
+ */
+export function recoveredRepositoryFolders(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  token: string,
+): RecoveredRepositoryFolder[] {
+  if (!/^[0-9a-f]{32}$/u.test(token)) return [];
+  const linePrefix = `${RECOVERED_REPOSITORY_PREFIX} [${token}]: `;
+  // The longest matching mount path, so `app` never claims `repos/acme/app`.
+  const repositories = resources
+    .map((resource) => ({ resource, mountPath: resourceMountPath(resource) }))
+    .sort((left, right) => right.mountPath.length - left.mountPath.length);
+  const recovered: RecoveredRepositoryFolder[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    if (!line.startsWith(linePrefix)) continue;
+    const fields = line.slice(linePrefix.length).split("\t");
+    if (fields.length !== 3) continue;
+    const [target = "", movedTo = "", code = ""] = fields;
+    const repository = repositories.find(({ mountPath }) => target.endsWith(`/${mountPath}`));
+    if (!repository) continue;
+    const recoveredName = movedTo.slice(target.length);
+    if (!movedTo.startsWith(target) || !RECOVERED_REPOSITORY_NAME.test(recoveredName)) continue;
+    const pinned = repository.resource.expectedCommitSha;
+    const reason =
+      code === "pin"
+        ? pinned
+          ? `its checked-out commit is not the pinned commit ${pinned}`
+          : undefined
+        : RECOVERED_REPOSITORY_REASONS[code];
+    if (!reason) continue;
+    if (recovered.some((entry) => entry.movedTo === movedTo)) continue;
+    recovered.push({
+      target,
+      movedTo,
+      path: repository.mountPath,
+      movedToPath: `${repository.mountPath}${recoveredName}`,
+      reason,
+    });
+  }
+  return recovered;
+}
+
+/** The clone event's workspace-relative record of folders moved aside. */
+function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
+  return folders.length > 0
+    ? {
+        recoveredRepositories: folders.map((folder) => ({
+          path: folder.path,
+          movedTo: folder.movedToPath,
+        })),
+      }
+    : {};
+}
+
+/** Model text for repository folders the clone hook moved aside. */
+export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
+  if (folders.length === 0) return "";
+  return [
+    "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+    ...folders.map(
+      (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
+    ),
+    "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+  ].join("\n");
+}
+
+/**
  * Wall-clock bound for one automatically attached (optional) repository clone,
  * and the share of the repository-clone lifecycle command all optional clones
  * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
@@ -14635,33 +15375,135 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
+  // not a broken repository: Git only refuses to read it. Trust exactly that
+  // path (and its resolved form) in the global Git config and keep the work
+  // tree as it is. The message is matched in the C locale, in both wordings.
+  "  repository_trust_owner() {",
+  '    trust_output="$(export LC_ALL=C; repository_git -C "$target" rev-parse --is-inside-work-tree 2>&1 >/dev/null)" && return 0',
+  '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
+  '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
+  '    for trust_path in "$target" "$trust_resolved"; do',
+  '      if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$trust_path"; then continue; fi',
+  "      trust_attempt=0",
+  // Parallel clones share one global config file; retry its lock briefly.
+  '      until command git config --global --add safe.directory "$trust_path" 2>/dev/null; do',
+  "        trust_attempt=$((trust_attempt + 1))",
+  '        if [ "$trust_attempt" -ge 5 ]; then break; fi',
+  "        sleep 1",
+  "      done",
+  "    done",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
+  "    else",
+  '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
+  "    fi",
+  "  }",
+  // Whether a readable work tree still serves the pinned commit. The clone
+  // records the commit it materialized, so the agent's own commits, branches
+  // and rebases keep the folder while the pin is unchanged, and a changed pin
+  // (in either direction) does not. Folders cloned before the record existed
+  // count when HEAD is the pin or built on it, and get the record.
+  "  repository_pin_kept() {",
+  '    if [ -z "$expected_commit" ]; then return 0; fi',
+  '    pin_recorded="$(repository_git -C "$target" config --get opengeni.materializedCommit 2>/dev/null || true)"',
+  '    if [ -n "$pin_recorded" ]; then',
+  '      if [ "$pin_recorded" = "$expected_commit" ]; then return 0; fi',
+  "      return 1",
+  "    fi",
+  '    pin_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '    if [ -z "$pin_head" ]; then return 1; fi',
+  '    if [ "$pin_head" != "$expected_commit" ] && ! repository_git -C "$target" merge-base --is-ancestor "$expected_commit" "$pin_head" >/dev/null 2>&1; then return 1; fi',
+  '    repository_git -C "$target" config opengeni.materializedCommit "$expected_commit" >/dev/null 2>&1 || true',
+  "    return 0",
+  "  }",
+  // Never delete a folder that may hold work. Rename it to a sibling (a mount
+  // point cannot be renamed, so its entries are moved, which copies them across
+  // the mount), report where it went, and let the caller clone fresh into the
+  // empty target. The argument is the reason code the hook turns into text.
+  "  repository_move_aside() {",
+  '    move_base="${target}.opengeni-recovered-$(date -u +%Y%m%dT%H%M%SZ)"',
+  '    move_path="$move_base"',
+  "    move_index=1",
+  '    while [ -e "$move_path" ] || [ -L "$move_path" ]; do',
+  "      move_index=$((move_index + 1))",
+  '      move_path="${move_base}-${move_index}"',
+  "    done",
+  '    if ! mv "$target" "$move_path" 2>/dev/null; then',
+  // A concurrent setup already moved it.
+  '      if [ ! -e "$target" ] && [ ! -L "$target" ]; then return 0; fi',
+  "      move_failed=1",
+  '      if [ -d "$target" ] && [ ! -L "$target" ] && mkdir "$move_path" 2>/dev/null; then',
+  '        find "$target" -mindepth 1 -maxdepth 1 -exec mv -- {} "$move_path/" \\; 2>/dev/null || true',
+  '        if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "          move_failed=0",
+  "        else",
+  // Keep the folder whole: put back what was moved.
+  '          find "$move_path" -mindepth 1 -maxdepth 1 -exec mv -- {} "$target/" \\; 2>/dev/null || true',
+  '          rmdir "$move_path" 2>/dev/null || true',
+  "        fi",
+  "      fi",
+  '      if [ "$move_failed" -ne 0 ]; then',
+  '        if [ -e "$move_path" ]; then',
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted; some entries are in $move_path." >&2',
+  "        else",
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted." >&2',
+  "        fi",
+  "        exit 1",
+  "      fi",
+  "    fi",
+  // One write per line, tagged with this run's token so no other output
+  // (a remote's fetch messages) can pass for it.
+  `    printf '%s [%s]: %s\\t%s\\t%s\\n' ${shellQuote(RECOVERED_REPOSITORY_PREFIX)} "\${OPENGENI_REPOSITORY_NOTICE_TOKEN:-}" "$target" "$move_path" "$1" >&2`,
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
   // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
   // this check forever. A full-repo target must actually BE a work tree to be
-  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-  // the mount path before the repo exists). Subpath extracts are not git repos —
-  // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  // skipped; anything else is moved aside, never deleted, and rebuilt. Subpath
+  // extracts are not git repos: for those the plain non-empty check stands (no
+  // stronger signal is available, pinned or not).
+  '    if [ -n "$subpath" ]; then',
+  '      echo "Repository resource already present at $target"',
+  "      return 0",
+  "    fi",
+  "    repository_trust_owner",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      present_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '      if [ -n "$expected_commit" ]; then',
+  "        if repository_pin_kept; then",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "        repository_move_aside pin",
   // An empty remote materializes as an unborn branch (below). If the remote now
   // has that branch and the mount still holds nothing but `.git` (no agent work,
   // committed or not), clone it properly instead of keeping the stub. Commits
   // on any other branch keep the stub: re-fetching the requested ref would fail.
-  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
-  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  '      elif [ -z "$present_head" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '        echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  // The stub Opengeni created holds no work while it has no refs and nothing
+  // staged, as Git itself confirms; anything more is moved aside like any
+  // other work.
+  '        if stub_refs="$(repository_git -C "$target" for-each-ref 2>/dev/null)" && [ -z "$stub_refs" ] && stub_files="$(repository_git -C "$target" ls-files 2>/dev/null)" && [ -z "$stub_files" ]; then',
+  '          rm -rf "$target/.git"',
   "        else",
-  '          echo "Repository resource already present at $target"',
-  "          return 0",
+  "          repository_move_aside remote-commits",
   "        fi",
   "      else",
-  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
   "      fi",
+  // Only Opengeni's own temporary clones, nested by a lost install race.
+  '    elif [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name "${target##*/}.tmp.*" -print -quit 2>/dev/null)" ]; then',
+  '      echo "Re-materializing partial repository resource at $target" >&2',
+  '      find "$target" -mindepth 1 -maxdepth 1 -name "${target##*/}.tmp.*" -exec rm -rf {} +',
   "    else",
   '      echo "Re-materializing partial repository resource at $target" >&2',
+  "      repository_move_aside unreadable",
   "    fi",
-  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
@@ -14734,6 +15576,9 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    rm -rf "$tmp"',
   "    exit 1",
   "  fi",
+  '  if [ -n "$expected_commit" ] && [ -z "$subpath" ]; then',
+  '    repository_git -C "$tmp" config opengeni.materializedCommit "$expected_commit"',
+  "  fi",
   '  if [ -n "$subpath" ]; then',
   '    if [ ! -e "$tmp/$subpath" ]; then',
   '      echo "Repository subpath not found: $subpath" >&2',
@@ -14753,14 +15598,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // Two concurrent turn holders can race this install: without the existence
   // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
   // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-  // accept it; a non-empty non-repo survivor here is a mount point the manifest
-  // re-filled — install into it by content copy instead of rename.
+  // accept it. Anything else that appeared there is moved aside, never
+  // overwritten; an empty survivor is a mount point, so install into it by
+  // content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-  '        rm -rf "$tmp"',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  "        if repository_pin_kept; then",
+  '          rm -rf "$tmp"',
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "        repository_move_aside pin",
+  '      elif [ -f "$target" ] || [ -L "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "        repository_move_aside unreadable",
   "      fi",
+  "    fi",
+  '    if [ -e "$target" ]; then',
   '      cp -a "$tmp/." "$target/"',
   '      rm -rf "$tmp"',
   "    else",
@@ -15606,6 +16459,7 @@ export async function runRepositoryCloneHook(
   let stagedCloneScript: string | null = null;
   // A successful program has moved every staged broker seed into its token file.
   let brokerSeedsConsumed = false;
+  let recoveredFolders: RecoveredRepositoryFolder[] = [];
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -15621,9 +16475,12 @@ export async function runRepositoryCloneHook(
       gitCredentialBindings,
       context.runAs,
     );
+    // Per run, inline with the seeds, so the staged program stays reusable.
+    const noticeToken = repositoryRecoveryNoticeToken();
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+      `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -15721,6 +16578,20 @@ export async function runRepositoryCloneHook(
         }
       }
     }
+    // A folder moved aside stays moved even when a later clone fails, so the
+    // model hears where it is either way.
+    recoveredFolders = recoveredRepositoryFolders(
+      sandboxCommandOutput(result),
+      resources,
+      noticeToken,
+    );
+    if (recoveredFolders.length > 0) {
+      console.warn("[sandbox] repository folders were moved aside before a fresh clone", {
+        movedCount: recoveredFolders.length,
+        repositoryCount: resources.length,
+      });
+      context.onSetupNotice?.(recoveredRepositoryFoldersNote(recoveredFolders));
+    }
     assertSandboxCommandSucceeded(result, "Repository clone hook");
     brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
@@ -15738,6 +16609,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
   } catch (error) {
@@ -15746,6 +16618,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         error: errorMessage(error),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
     throw error;
@@ -15799,8 +16672,10 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(
+    throw new SandboxLifecycleCommandExitError(
       `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+      exitCode,
+      output,
     );
   }
   if (exitCode === null) {

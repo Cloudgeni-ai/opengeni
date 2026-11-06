@@ -191,6 +191,8 @@ export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60
 const ACCIDENTAL_START_MAX_MILLISECONDS = 3_000;
 const DEFAULT_POLL_MILLISECONDS = 1_000;
 const MAX_POLL_MILLISECONDS = 15_000;
+/** How long one check holds on the server for the text to be ready. */
+const TRANSCRIPT_WAIT_SECONDS = 20;
 const TAKEN_STORAGE_KEY = "opengeni.voice-input.taken.v1";
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const currentDate = () => new Date();
@@ -542,10 +544,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       for (;;) {
         if (generation !== generationRef.current) return;
         let version: RecordingTranscriptVersion | undefined;
+        const asked = Date.now();
         try {
+          // The server answers the moment the text is ready.
           const versions = await client.listRecordingTranscriptVersions(
             workspace,
             dictation.recordingId,
+            { waitSeconds: TRANSCRIPT_WAIT_SECONDS, ...(versionId ? { waitFor: versionId } : {}) },
           );
           version = versionId
             ? versions.find((item) => item.id === versionId)
@@ -586,7 +591,9 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
             return;
           }
         }
-        await sleep(delay);
+        // A server that answered at once (one that doesn't wait, or a hiccup)
+        // is asked again after the usual pause; one that waited, right away.
+        await sleep(Math.max(0, delay - (Date.now() - asked)));
       }
     },
     [hold, settleIdle, take],
