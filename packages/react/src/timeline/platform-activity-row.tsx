@@ -90,7 +90,9 @@ export default function PlatformActivityRow({
   const failed = item.status === "failed";
   const running = item.status === "running";
   // A running step shows how long it has taken so far; a settled one its duration.
-  const duration = running ? startupElapsed(item.startedAt, nowMs) : startupDuration(item.durationMs);
+  const duration = running
+    ? startupElapsed(item.startedAt, nowMs)
+    : startupDuration(item.durationMs);
   // A failed step's recorded error is diagnostic detail: behind the row, never
   // its title, and absent where the host hides raw technical detail.
   const detail = failed && !plainDetails ? item.detail : undefined;

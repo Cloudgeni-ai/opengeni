@@ -40974,6 +40974,7 @@
       "SessionStatusTone": "type",
       "STARTUP_WAIT_TITLES": "value",
       "startupDuration": "value",
+      "startupElapsed": "value",
       "startupPhaseTitle": "value",
       "stringifyPayload": "value",
       "stripExecBanner": "value",

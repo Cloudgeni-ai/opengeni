@@ -3546,9 +3546,9 @@ describe("buildTimeline", () => {
     reset();
     const turn = { turnId: "turn-named-setup" };
     const setup = { rigId: "rig-1", versionId: "version-1", rigName: " cloudgeni " };
-    const running = buildTimeline(englishText, [
-      event("rig.setup.started", setup, turn),
-    ]).find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    const running = buildTimeline(englishText, [event("rig.setup.started", setup, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
     expect(running).toMatchObject({ phase: "rig", status: "running", subject: "cloudgeni" });
 
     const settled = buildTimeline(englishText, [

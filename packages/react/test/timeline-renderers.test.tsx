@@ -4183,11 +4183,9 @@ describe("StartupPhaseRow", () => {
       await flush();
       const text = () => r.container.textContent ?? "";
       expect(text()).toContain("Setting up the cloudgeni environment");
-      expect(text()).toMatch(/\b41s\b/);
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1_100));
-      });
-      expect(text()).toMatch(/\b42s\b/);
+      expect(text()).toMatch(/(^|[^0-9])41s/);
+      await flush(1_100);
+      expect(text()).toMatch(/(^|[^0-9])42s/);
 
       // Settled, the step shows its recorded duration and the ordinary title.
       await r.rerender(

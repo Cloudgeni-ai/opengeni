@@ -605,7 +605,9 @@ function StartupPhaseRow({
   const running = item.status === "running";
   const nowMs = useSecondTick(running);
   // A running step shows how long it has taken so far; a settled one its duration.
-  const duration = running ? startupElapsed(item.startedAt, nowMs) : startupDuration(item.durationMs);
+  const duration = running
+    ? startupElapsed(item.startedAt, nowMs)
+    : startupDuration(item.durationMs);
   return (
     <ActivityDisclosure
       icon="bot"

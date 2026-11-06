@@ -253,11 +253,11 @@ test("a running setup step names its environment and counts up while it runs", a
   const view = await renderComponent(<Row item={running} />);
   try {
     expect(view.container.textContent).toContain("Setting up the cloudgeni environment");
-    expect(view.container.textContent).toMatch(/\b41s\b/);
+    expect(view.container.textContent).toMatch(/(^|[^0-9])41s/);
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_100));
     });
-    expect(view.container.textContent).toMatch(/\b42s\b/);
+    expect(view.container.textContent).toMatch(/(^|[^0-9])42s/);
     await view.rerender(
       <Row
         item={{
