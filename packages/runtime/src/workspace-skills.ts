@@ -456,13 +456,14 @@ export class WorkspaceSkillsCapability extends Capability {
               "invalid_request",
               "listFiles:true cannot be combined with paths.",
             );
-          const skill = (await this.discover()).skills.find(
+          const discovery = await this.discover();
+          const skill = discovery.skills.find(
             (entry) => repositorySkillId(entry) === request.skill,
           );
           if (!skill)
             throw new SkillFileError(
               "missing_file",
-              repositorySkillMissMessage(await this.discover(), this.options.deferred === true),
+              repositorySkillMissMessage(discovery, this.options.deferred === true),
             );
           const session = requireWorkspaceSkillSession(this._session);
           const root = skill.path.slice(0, -SKILL_FILE.length - 1);
