@@ -96922,6 +96922,7 @@ export {
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type ConnectionCredentialLookupInput,
+  type ConnectionNeedsReauth,
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,

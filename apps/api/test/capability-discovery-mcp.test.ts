@@ -1534,6 +1534,189 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       }
     }
   }, 60_000);
+
+  test("names an account that stopped working and posts a card that reconnects that same account", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const capabilityId = "mcp:mail-reconnect-test";
+    const serverId = "mail-reconnect-test";
+    const providerDomain = "mail-reconnect.example.test";
+    const mcpUrl = "https://mail-reconnect.example.test/mcp";
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Mail reconnect test",
+      endpointUrl: mcpUrl,
+      authModel: "credential_ref",
+      metadata: { mcpServerId: serverId },
+    });
+    const broken = async (email: string) => {
+      const connection = await createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        providerDomain,
+        kind: "oauth2",
+        credentialEncrypted: "unused-test-credential",
+        metadata: { email, mcpUrl },
+      });
+      expect(
+        await setConnectionStatus(
+          client.db,
+          workspace.workspaceId,
+          "needs_reauth",
+          "connection refresh failed with HTTP 400",
+          { id: connection.id, version: connection.version },
+        ),
+      ).toBe(true);
+      return connection;
+    };
+    const first = await broken("team@mail-reconnect.example.test");
+    // The workspace's shared account for it, which later stopped working.
+    await enableCapabilityInstallation(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+      config: {
+        connectionRef: {
+          providerDomain,
+          kind: "oauth2",
+          subjectScope: "workspace",
+          connectionId: first.id,
+        },
+      },
+    });
+    const today = new Date().toISOString().slice(0, 10);
+
+    const session = async () => {
+      // An explicitly empty account selection: no account is ready this turn.
+      const attempt = await seedAttempt(true);
+      await persistAttemptToolCatalog(
+        client.db,
+        createAttemptToolEnvironment({
+          scope: { ...attempt, accountId: workspace.accountId, workspaceId: workspace.workspaceId },
+          generation: 1,
+          definitions: [
+            {
+              identity: { serverId: "other-server", toolName: "list_labels" },
+              modelName: "other-server__list_labels",
+              description: "List labels",
+              inputSchema: { type: "object" },
+              source: "mcp",
+              approval: "none",
+              execute: async () => ({ content: [] }),
+            },
+          ],
+        }).catalog,
+      );
+      const bus = new MemoryEventBus();
+      const server = buildOpenGeniMcpServer(
+        { settings: testSettings(), db: client.db, bus } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "mail-reconnect-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      const cards = async () =>
+        (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+          (event) => event.type === "tool.auth_needed",
+        );
+      return { mcp, server, cards };
+    };
+
+    const one = await session();
+    try {
+      const search = mcpJson(
+        await one.mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query: "Mail reconnect test" },
+        }),
+      ) as { matches: Array<{ capabilityId: string; setup: Record<string, unknown> }> };
+      const setup = search.matches.find((entry) => entry.capabilityId === capabilityId)?.setup;
+      expect(setup).toMatchObject({
+        status: "authorization_required",
+        nextAction: { toolName: "capability_authorization_request", capabilityId },
+        reconnect: [
+          {
+            connectionId: first.id,
+            account: "team@mail-reconnect.example.test",
+            ownership: "workspace",
+            stoppedWorkingOn: today,
+            reconnectHere: true,
+          },
+        ],
+      });
+      expect(setup?.detail).toBe(
+        `The workspace's shared Mail reconnect test account team@mail-reconnect.example.test was connected but stopped working on ${today}: its sign-in expired or was revoked, so it needs reconnecting. Tell the person plainly that it was connected and stopped working. capability_authorization_request posts a card that reconnects that same account. Once reconnected, it works from the person's next message.`,
+      );
+
+      // The only broken account is reconnected without naming it.
+      const request = await one.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId, rationale: "Read the team inbox." },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toMatchObject({
+        status: "authorization_requested",
+        connectionId: first.id,
+      });
+      const [card] = await one.cards();
+      expect(card?.payload).toMatchObject({
+        reason: "refresh_failed",
+        connectionId: first.id,
+        connectionSubjectScope: "workspace",
+        capability: { id: capabilityId, action: "connect" },
+      });
+    } finally {
+      await Promise.all([one.mcp.close(), one.server.close()]);
+    }
+
+    // With several broken accounts the agent names the one the task needs.
+    const second = await broken("ops@mail-reconnect.example.test");
+    const two = await session();
+    try {
+      const unnamed = await two.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId, rationale: "Read the ops inbox." },
+      });
+      expect(unnamed.isError).toBe(true);
+      const unknown = await two.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: {
+          capabilityId,
+          rationale: "Read the ops inbox.",
+          connectionId: crypto.randomUUID(),
+        },
+      });
+      expect(unknown.isError).toBe(true);
+      expect(await two.cards()).toHaveLength(0);
+      const named = await two.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId, rationale: "Read the ops inbox.", connectionId: second.id },
+      });
+      expect(named.isError).not.toBe(true);
+      expect(mcpJson(named)).toMatchObject({ connectionId: second.id });
+      expect((await two.cards()).map((event) => event.payload)).toMatchObject([
+        { reason: "refresh_failed", connectionId: second.id },
+      ]);
+    } finally {
+      await Promise.all([two.mcp.close(), two.server.close()]);
+    }
+  }, 60_000);
 });
 
 function mcpJson(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
