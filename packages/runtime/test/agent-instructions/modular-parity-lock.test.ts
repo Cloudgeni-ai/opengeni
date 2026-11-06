@@ -27,11 +27,11 @@ const LOCKED: Record<string, string> = {
   "all/unattended/selfhosted":
     "39952:2059b1e303e3521f798c44ea05c704dd469b0cad25dad231f84efac8b48f7562",
   "all/secret-references/none":
-    "34951:8d947f1b66720ce494aaee0dc3db4903b240508c235806d9391a4b0965d3bdd3",
+    "34955:1f9eab391293cc4e640aa918a2fc61ba162fc9c7aab4aee264bcfc48c8ae3616",
   "all/secret-references/docker":
-    "39423:0a5be6fea768597b086ca7238d2f98d0ec35ca5a485080c2db24ca8f343e8ff0",
+    "39427:68b7bdcf50acb0ae19f67e6fd0f492496f6990d7a556f5f755a95c1a00035d60",
   "all/secret-references/selfhosted":
-    "41097:bd7051c4cd8c097a16af3775b6dce7e9ceacc6715a28e4dc5343eb9863f82640",
+    "41101:334314a8dab0c66c92f2b1b61a35653e68f5f55d4ae0b7c1ece4a1e81d5f480c",
   "all/skills-read/none": "33399:df282f2185182985f997d4ca829b4c6ce88ce1dd91061cd6fe1e184a63cded56",
   "all/skills-read/docker":
     "37871:a165b835e352d4f88563d23c070ecdf635796f8ebc9f44e398d447d3e8255834",

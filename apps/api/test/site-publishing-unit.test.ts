@@ -482,7 +482,7 @@ describe("readiness", () => {
     );
     // The sign-in line stays when there is also something to fix.
     expect(publicationAnswer(both as unknown as SitePublication).nextStep).toContain(
-      "\nVisitors sign in to Opengeni before the Site opens",
+      "\nVisitors sign in before the Site opens",
     );
     expect(
       publicationAnswer({

@@ -312,7 +312,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         ...(handedToIntegration
           ? {
               handedToIntegration: true,
-              note: "No person owns this session, so Opengeni notified no one itself. The notification was handed to the integration that delivers this workspace's notifications; don't retry it or report it as failed.",
+              note: "No person owns this session, so no one was notified directly. The notification was handed to the integration that delivers this workspace's notifications; don't retry it or report it as failed.",
             }
           : {
               delivered: target !== null,

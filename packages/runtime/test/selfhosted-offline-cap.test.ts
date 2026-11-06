@@ -232,7 +232,7 @@ describe("the words a command whose workspace machine stopped answering gets", (
   test("restarted", () => {
     const text = renderSelfhostedFault(unresponsive("restarted", false));
     expect(text).toContain(
-      "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+      "this chat's workspace machine stopped responding and didn't come back. It was restarted; re-run the command.",
     );
     expect(text).toContain("did not answer for 3 minutes");
     expect(text).toContain("If it had started, the restart stopped it.");
@@ -258,7 +258,7 @@ describe("the words a command whose workspace machine stopped answering gets", (
   test("host busy moving or saving it", () => {
     const text = renderSelfhostedFault(unresponsive("host_busy", true));
     expect(text).toContain("is being moved or saved by its host");
-    expect(text).toContain("so Opengeni did not restart it");
+    expect(text).toContain("so it was not restarted");
     expect(text).toContain("wait a couple of minutes, then re-run the command");
   });
 
@@ -273,19 +273,19 @@ describe("the words a command whose workspace machine stopped answering gets", (
     // A start that may have reached it may still be running, or be stopping:
     // the words never promise either.
     expect(renderSelfhostedFault(unresponsive("answering", false))).toContain(
-      "If it started, it may still be running, or Opengeni may be stopping it.",
+      "If it started, it may still be running, or it may be being stopped.",
     );
   });
 
   test("restarting", () => {
     const text = renderSelfhostedFault(unresponsive("restarting", false));
-    expect(text).toContain("Opengeni asked for a restart; re-run the command in a moment.");
+    expect(text).toContain("A restart was requested; re-run the command in a moment.");
     expect(text).toContain("If it had started, the restart stops it.");
   });
 
   test("no restart could be arranged", () => {
     const text = renderSelfhostedFault(unresponsive("restart_unavailable", true));
-    expect(text).toContain("Opengeni could not restart it");
+    expect(text).toContain("it could not be restarted");
     expect(text).toContain("so none was made");
   });
 
