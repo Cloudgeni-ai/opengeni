@@ -17,9 +17,11 @@ import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
   getSessionAuthorityProjection,
+  getSessionRepositoryMembershipForAuthority,
   getSessionResourcesForAuthority,
   getSessionTurnForAttempt,
   resolveAcceptedConnectionUse,
+  sessionRepositoryRemoved,
 } from "@opengeni/db";
 import {
   openPersonalGitHubGitBrokerClaims,
@@ -502,15 +504,35 @@ async function assertCurrentConnectionAndSelection(
   // (or from the parent chat of this child) stops on its next Git request,
   // even for a turn or goal continuation that captured an older snapshot.
   // All my repositories reaches every repository the person can use, so
-  // there the chat's list does not limit it.
-  const sessionResources = allRepositoriesAccess
-    ? null
-    : await getSessionResourcesForAuthority(deps.db, claims.workspaceId, claims.sessionId);
-  if (
-    !allRepositoriesAccess &&
-    (!sessionResources || !resourcesIncludeRepository(sessionResources, repository.canonicalUrl))
-  ) {
-    throw new BrokerRepositoryRemovedError();
+  // there the chat's list does not limit it, but a repository a person
+  // removed from the chat stays refused.
+  if (allRepositoriesAccess) {
+    const membership = await getSessionRepositoryMembershipForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !membership ||
+      sessionRepositoryRemoved(membership, [
+        repository.canonicalUrl,
+        `https://github.com/${repository.fullName}`,
+      ])
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
+  } else {
+    const sessionResources = await getSessionResourcesForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !sessionResources ||
+      !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
   }
   const connection = await getConnectionMetadata(
     deps.db,

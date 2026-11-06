@@ -1148,7 +1148,7 @@ describe("personal GitHub Git broker", () => {
   test("All my repositories keeps Git working across selection edits until the mode is turned off", async () => {
     if (!shared || !dbClient) return;
     const fixture = await acceptedPersonalBrokerFixture({ allRepositories: "write" });
-    const { app, session, target, originGrant, connection, emptySelection, subjectId } = fixture;
+    const { app, session, originGrant, connection, emptySelection, subjectId } = fixture;
     const route = await fixture.brokerFor(session);
     const first = await app.request(route.brokerUrl, {
       headers: { authorization: basic(route.brokerBearer) },
@@ -1172,24 +1172,6 @@ describe("personal GitHub Git broker", () => {
     });
     expect(afterEdit.status).toBe(200);
 
-    // Removing the repository from the chat does not revoke it in this mode.
-    await removeSessionResources(
-      { db: dbClient.db, bus: new MemoryEventBus() },
-      {
-        accountId: originGrant.accountId,
-        workspaceId: target.id,
-        subjectId,
-        permissions: ["sessions:read", "sessions:control"],
-        principalKind: "human_session",
-      },
-      session.id,
-      { resources: [{ kind: "repository", uri: repository.canonicalUrl }] },
-    );
-    const afterRemoval = await app.request(route.brokerUrl, {
-      headers: { authorization: basic(route.brokerBearer) },
-    });
-    expect(afterRemoval.status).toBe(200);
-
     await replacePersonalGitHubRepositorySelections(dbClient.db, {
       accountId: originGrant.accountId,
       originWorkspaceId: originGrant.workspaceId,
@@ -1207,5 +1189,72 @@ describe("personal GitHub Git broker", () => {
     });
     expect(afterOff.status).toBe(401);
     expect(fixture.counter.providerCalls).toBe(providerCallsBeforeOff);
+  }, 120_000);
+
+  test("All my repositories still refuses a repository removed from the chat, including in a child chat", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ allRepositories: "write" });
+    const { app, session, target, subjectId, originGrant, frozen } = fixture;
+    const child = await createSession(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      parentSessionId: session.id,
+      initialMessage: "child uses personal GitHub",
+      resources: session.resources,
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      subjectId,
+      personalConnectionDelegations: frozen,
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const parentRoute = await fixture.brokerFor(session);
+    const childRoute = await fixture.brokerFor(child);
+    for (const route of [parentRoute, childRoute]) {
+      const accepted = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(accepted.status).toBe(200);
+    }
+    const providerCallsBeforeRemoval = fixture.counter.providerCalls;
+
+    await removeSessionResources(
+      { db: dbClient.db, bus: new MemoryEventBus() },
+      {
+        accountId: originGrant.accountId,
+        workspaceId: target.id,
+        subjectId,
+        permissions: ["sessions:read", "sessions:control"],
+        principalKind: "human_session",
+      },
+      session.id,
+      { resources: [{ kind: "repository", uri: repository.canonicalUrl }] },
+    );
+
+    // The mode reaches every repository the person can use, but not one a
+    // person removed from this chat (or its parent chat).
+    for (const route of [parentRoute, childRoute]) {
+      const refused = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).toContain("This repository was removed from this chat.");
+      const push = await app.request(
+        route.brokerUrl.replace("service=git-upload-pack", "service=git-receive-pack"),
+        { headers: { authorization: basic(route.brokerBearer) } },
+      );
+      expect(push.status).toBe(403);
+    }
+    expect(fixture.counter.providerCalls).toBe(providerCallsBeforeRemoval);
   }, 120_000);
 });

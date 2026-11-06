@@ -77,6 +77,58 @@ export async function getSessionResourcesForAuthority(
   });
 }
 
+/** A session's live repository membership: what it attaches and what a person removed. */
+export type SessionRepositoryMembership = {
+  resources: ResourceRef[];
+  removedRepositories: SessionRemovedRepository[];
+};
+
+/**
+ * The session's current resources and removal records, read live for an
+ * authority check, or null when the session is not visible in the workspace.
+ * All my repositories does not limit a chat to its attached repositories,
+ * but a repository a person removed from the chat (or from a parent chat,
+ * which records the removal on its descendants) stays refused there.
+ */
+export async function getSessionRepositoryMembershipForAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionRepositoryMembership | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        resources: schema.sessions.resources,
+        removedRepositories: schema.sessions.removedRepositories,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    const resources = ResourceRef.array().safeParse(row.resources);
+    return {
+      resources: resources.success ? resources.data : [],
+      removedRepositories: parseSessionRemovedRepositories(row.removedRepositories),
+    };
+  });
+}
+
+/**
+ * Whether a person removed the repository at any of `uris` from the session
+ * and it is not attached again. A removal record that outlived a re-attach
+ * never refuses a repository the session attaches.
+ */
+export function sessionRepositoryRemoved(
+  membership: SessionRepositoryMembership,
+  uris: readonly string[],
+): boolean {
+  return uris.some(
+    (uri) =>
+      findSessionRemovedRepository(membership.removedRepositories, uri) !== undefined &&
+      !resourcesIncludeRepository(membership.resources, uri),
+  );
+}
+
 /**
  * Every live descendant of a session (children, their children, ...),
  * shallower first. Imported read-only sessions are skipped; the walk still

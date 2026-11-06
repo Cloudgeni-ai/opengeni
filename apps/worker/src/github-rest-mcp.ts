@@ -22,10 +22,12 @@ import {
 import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
+  getSessionRepositoryMembershipForAuthority,
   getSessionResourcesForAuthority,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
   resolveAcceptedConnectionUse,
+  sessionRepositoryRemoved,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -325,6 +327,29 @@ async function assertRepositoryStillAttached(
     input.sessionId,
   );
   if (!resources || !resourcesIncludeRepository(resources, repository.canonicalUrl)) {
+    throw new GitHubRestRepositoryDetachedError(
+      `${repository.fullName} was removed from this chat`,
+    );
+  }
+}
+
+/** All my repositories: a repository a person removed from the chat stays refused. */
+async function assertRepositoryNotRemoved(
+  input: { db: Database; workspaceId: string; sessionId: string },
+  repository: GitHubRestRepository,
+): Promise<void> {
+  const membership = await getSessionRepositoryMembershipForAuthority(
+    input.db,
+    input.workspaceId,
+    input.sessionId,
+  );
+  if (
+    !membership ||
+    sessionRepositoryRemoved(membership, [
+      repository.canonicalUrl,
+      `https://github.com/${repository.fullName}`,
+    ])
+  ) {
     throw new GitHubRestRepositoryDetachedError(
       `${repository.fullName} was removed from this chat`,
     );
@@ -674,8 +699,10 @@ async function validatePersonalRepository(
   ) {
     throw new GitHubRestAuthorityError("Personal GitHub repository exceeds accepted authority");
   }
-  // Without All my repositories the chat's list is live authority too.
-  if (!snapshot.allRepositoriesAccess) await assertRepositoryStillAttached(input, repository);
+  // Without All my repositories the chat's list is live authority too; with
+  // it, a repository a person removed from the chat stays refused.
+  if (snapshot.allRepositoriesAccess) await assertRepositoryNotRemoved(input, repository);
+  else await assertRepositoryStillAttached(input, repository);
   const decision = personalGitHubRepositoryAuthority({
     current,
     metadata,

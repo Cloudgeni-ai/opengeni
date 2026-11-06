@@ -157,8 +157,9 @@ in `@opengeni/core` (`packages/core/src/domain/personal-github-repository-access
   `api.github.com` is followed once. Editing the explicit list does not
   interrupt running work; turning the mode off, narrowing it to read,
   reconnecting or disconnecting does.
-- Removing a repository from a chat does not revoke it in this mode, because
-  the person already allows every repository they can reach.
+- A repository a person removed from a chat (or from its parent chat) stays
+  refused in that chat in this mode too, by the git broker and the REST
+  bridge, until a person attaches it again.
 
 Rollout: releases older than this change reject a delegation with the mode or
 without repositories. The mode is therefore offered only when
