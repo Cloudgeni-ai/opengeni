@@ -22,8 +22,6 @@ import {
   clampReasoningEffortForConfiguredModel,
   isWorkspaceModelAdmissible,
   ModelCallError,
-  modelCallMaxCreditCostMicros,
-  modelCallReservesCredits,
   ownModelFunding,
   connectedSubscriptionsRefusedForOrigin,
   resolveCallerWorkspaceModelSelections,
@@ -35,7 +33,6 @@ import {
   sessionUsageLimitRefusalFromError,
   settingsWithModelProviderCredentials,
   settleModelUsage,
-  withModelCallOutputLimit,
   type HeldSessionUsageReceipt,
   type ModelCallCaller,
   type ModelCallInput,
@@ -51,7 +48,6 @@ import {
   fetchSubscriptionCoreCodexUsage,
   getWorkspace,
   listSubscriptionCoreCodexOperationCandidates,
-  releaseModelCallCredits,
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   reserveSubscriptionCoreCodexOperationRequest,
@@ -195,10 +191,6 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
       const sourceId = `model_call:${input.requestId}`;
-      // An Opengeni-credit call reserves its maximum cost at admission, so its
-      // output must be bounded: a request without a limit gets the default.
-      const reservesCredits = modelCallReservesCredits(deps, chargesOpenGeniCredits);
-      const callRequest = reservesCredits ? withModelCallOutputLimit(input.request) : input.request;
       // Who pays: API work spends credits only, never plan credit. Decided
       // before custody opens, so a failed read leaves no marker behind.
       const billingOrigin = await billingOriginForAccessGrant(deps, input.grant);
@@ -237,24 +229,6 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           // then disclosed as unpriced by maintenance; never fails the call.
         });
       };
-      // Admission's credit hold is released once the call has settled, been
-      // refused after admission, failed or been aborted (a refused admission
-      // leaves none).
-      const releaseCreditHold = async (): Promise<void> => {
-        if (!reservesCredits) return;
-        await releaseModelCallCredits(deps.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          requestId: input.requestId,
-        }).catch((error: unknown) => {
-          // An unreleased hold stops counting when it expires.
-          deps.log?.("Model call credit hold release failed", {
-            requestId: input.requestId,
-            model: model.id,
-            errorName: error instanceof Error ? error.name : typeof error,
-          });
-        });
-      };
       // Everything between opening the marker and dispatching the request can
       // refuse the call. No request was sent on those exits, so the marker is
       // released; once dispatch starts, custody stays until settlement.
@@ -269,18 +243,6 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           billingOrigin,
           byok,
           ownSubscription,
-          ...(reservesCredits
-            ? {
-                creditHold: {
-                  requestId: input.requestId,
-                  maxCostMicros: modelCallMaxCreditCostMicros(
-                    catalogSettings,
-                    model.id,
-                    withModelCallOutputLimit(input.request),
-                  ),
-                },
-              }
-            : {}),
         });
         if (!admission.allowed) {
           throw new ModelCallError({
@@ -321,12 +283,11 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         prepared = await prepareDispatch();
       } catch (error) {
         await releaseMarker();
-        await releaseCreditHold();
         throw error;
       }
       const { admission, settings } = prepared;
       const request = {
-        ...callRequest,
+        ...input.request,
         ...reasoningEffortFor(model, input.request.reasoningEffort),
         ...(input.signal ? { signal: input.signal } : {}),
       };
@@ -359,7 +320,6 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       } catch (error) {
         // No response, so no reported usage to record for this call.
         await releaseMarker();
-        await releaseCreditHold();
         const mapped = publicModelCallError(error);
         if (mapped instanceof ModelCallError && mapped.status >= 500) {
           // Names and statuses only: provider messages can echo prompt content.
@@ -445,8 +405,6 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           logSettlementFailure(error);
         });
       }
-      // The actual cost is debited (or its settlement failed and was logged).
-      await releaseCreditHold();
       const owed = owedReceipt as HeldSessionUsageReceipt | null;
       if (owed) {
         // Whatever the failure class, this task's known usage is still owed.
