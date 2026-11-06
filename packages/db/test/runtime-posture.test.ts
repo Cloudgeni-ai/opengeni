@@ -953,7 +953,7 @@ describe("runtime database posture evaluator", () => {
   });
 
   test("predecessor table lists come from the tables later migration files create", () => {
-    const holds = "1290_model_call_credit_holds.sql";
+    const holds = "1295_model_call_credit_holds.sql";
     const before = publicTablesCreatedAfter(holds, true);
     expect(before).toContain("model_call_credit_holds");
     expect(publicTablesCreatedAfter(holds, false)).not.toContain("model_call_credit_holds");
@@ -2187,7 +2187,7 @@ describe("runtime database posture evaluator", () => {
               : tables === RUNTIME_READ_INSERT_TABLES
                 ? 1
                 : 0) +
-          // 1290 model call credit holds: one full-DML FORCE-RLS table.
+          // 1295 model call credit holds: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -2272,7 +2272,7 @@ describe("runtime database posture evaluator", () => {
         5 + // 1263 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
         4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
         3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
-        1; // 1290 model call credit holds: full-DML, FORCE-RLS.
+        1; // 1295 model call credit holds: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
