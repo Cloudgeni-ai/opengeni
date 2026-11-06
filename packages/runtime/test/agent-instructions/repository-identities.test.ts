@@ -111,10 +111,10 @@ describe("GitHub identity per mounted repository", () => {
     });
     expect(text).toContain("GitHub identity per mounted repository:");
     expect(text).toContain("`repos/github.com/octocat/private`: as the person (@octocat)");
-    expect(text).toContain("`repos/github.com/acme/web`: as the Opengeni app.");
+    expect(text).toContain("`repos/github.com/acme/web`: as the workspace's GitHub app.");
     expect(text).toContain("use plain git and the github_personal__* tools");
     expect(text).toContain("gh and raw GitHub API calls do not act as the person");
-    expect(text).toContain("On Opengeni app repositories, use the github_app__* tools.");
+    expect(text).toContain("On GitHub app repositories, use the github_app__* tools.");
     expect(text).toContain("for repositories that are not mounted as the person");
   });
 

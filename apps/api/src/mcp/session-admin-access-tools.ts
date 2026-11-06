@@ -88,7 +88,7 @@ const READ_ONLY =
 // For someone who uses Opengeni through another product, there is no
 // Opengeni app page to send them to.
 const EXTERNAL_PERSON_READ_ONLY =
-  "Nothing was run: this person uses Opengeni through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.";
+  "Nothing was run: this person uses this chat through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.";
 const SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
 const EXTERNAL_PERSON_SECRETS =

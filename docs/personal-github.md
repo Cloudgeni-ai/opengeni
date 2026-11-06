@@ -96,7 +96,7 @@ then links to the repository chooser. Requests such as "connect my GitHub" or
 "do it as me" map to the personal identity; "install the GitHub app" or "give
 Opengeni access to the org" map to the App. The repositories prompt lists each
 mounted GitHub repository's identity (as the person, with their login when
-known, or as the Opengeni app) and says that on personal repositories the agent
+known, or as the workspace's GitHub app) and says that on personal repositories the agent
 uses plain git and `github_personal__*` tools: the token never reaches the
 sandbox, so `gh` and raw GitHub API calls do not act as the person.
 

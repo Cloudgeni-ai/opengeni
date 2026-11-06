@@ -2364,7 +2364,7 @@ describe("an exec whose agent stops answering and does not come back", () => {
     // Connected Machine.
     const text = renderSelfhostedFault(error, selfhostedFaultContext("compute"));
     expect(text).toContain(
-      "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+      "this chat's workspace machine stopped responding and didn't come back. It was restarted; re-run the command.",
     );
     expect(text).not.toStartWith("[connected machine]");
   }, 30_000);

@@ -2181,7 +2181,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       });
       expect(notices).toEqual([
         [
-          "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+          "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
           `- ${target} was moved to ${recovered} because it was not a readable Git work tree.`,
           "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
         ].join("\n"),
