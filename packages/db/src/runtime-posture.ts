@@ -2785,7 +2785,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_outbox",
   "teams_bot_proofs",
   "teams_bot_routes",
-  // 1290_teams_bot_welcomes: install welcomes claimed once across replicas.
+  // 1294_teams_bot_welcomes: install welcomes claimed once across replicas.
   "teams_bot_welcomes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
