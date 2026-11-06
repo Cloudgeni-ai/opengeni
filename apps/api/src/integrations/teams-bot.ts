@@ -335,7 +335,9 @@ export function teamsSelfServeSetupAvailable(settings: Settings, tenantId: strin
  * reply, and replies are bounded per person, per tenant and per process, so a
  * tenant can't make the bot answer every message forever. Installing the app
  * (`source` "install") gets at most a welcome, from its own smaller budget, and
- * never a not-available notice.
+ * never a not-available notice. The operator setup link, which skips the
+ * Microsoft sign-in, only answers a person's own authenticated 1:1 message:
+ * an install event's sender needn't be the person whose chat it is.
  */
 export async function replyToUnconnectedTeamsTenant(
   deps: ApiRouteDeps,
@@ -357,7 +359,10 @@ export async function replyToUnconnectedTeamsTenant(
     await send(app, { ...m, threadId: null }, TEAMS_TENANT_UNAVAILABLE_TEXT);
     return "tenant_unavailable_notice_sent";
   }
-  if (deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)) {
+  if (
+    source === "message" &&
+    deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
+  ) {
     await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
     return "setup_link_sent";
   }

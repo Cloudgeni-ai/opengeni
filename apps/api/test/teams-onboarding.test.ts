@@ -208,6 +208,12 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     ).toBe("tenant_disabled");
     expect(calls).toEqual([]);
     const approved = onboardingDeps({ teamsBotSetupAdminIds: [`${tenantId}:${actorId}`] });
+    // An install event's sender needn't own the chat, so installs never carry
+    // the operator setup link; the installer's own message gets it.
+    expect(
+      await replyToUnconnectedTeamsTenant(approved, app, message, "install", budgetsOf(limiter)),
+    ).toBe("setup_not_permitted");
+    expect(calls).toEqual([]);
     expect(
       await replyToUnconnectedTeamsTenant(approved, app, message, "message", budgetsOf(limiter)),
     ).toBe("setup_link_sent");

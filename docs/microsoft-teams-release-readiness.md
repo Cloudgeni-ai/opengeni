@@ -163,6 +163,11 @@ active role assignments, so an administrator whose role is eligible through
 Privileged Identity Management activates it first. Microsoft personal accounts
 (tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) can never self-serve.
 
+An operator-approved installer (`OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS`) gets the
+setup link without the Microsoft sign-in only in reply to their own 1:1
+message, never on an install event, whose sender needn't be the person whose
+chat it is.
+
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
 that tenant), replace, take over or move an active connection, or bind a
@@ -394,9 +399,9 @@ conversation, organization connected or not, account linked or not).
   A redelivered install within ten minutes isn't welcomed again (per API process),
   and messages never repeat it. A linked person's first 1:1 chat adds one line
   about AI and `help` to the "Started" notice. In an organization that hasn't
-  connected Opengeni, an installer who may connect it gets the self-serve
-  "Connect your organization" card (or the operator setup link) instead of this
-  welcome; see [Self-serve organization setup](#self-serve-organization-setup).
+  connected Opengeni and has self-serve on, the installer gets the
+  "Connect your organization" card instead of this welcome; see
+  [Self-serve organization setup](#self-serve-organization-setup).
   The bot only answers in tenants enabled for rollout, so a tenant used to
   review the app must be in
   `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS` (or broad rollout must be on).
