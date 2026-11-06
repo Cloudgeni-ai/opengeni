@@ -4,7 +4,7 @@
 # Run as root from the unpacked bundle:
 #
 #   ./install.sh --config host.env [--authority ca.pem] [--state-device /dev/nvme0n1]
-#                [--units-installed] [--no-start]
+#                [--reformat-state-device DEV] [--units-installed] [--no-start]
 #
 #   --config FILE        the host's configuration (see host.env.example),
 #                        installed as /etc/compute/host.env; without it the
@@ -13,10 +13,16 @@
 #                        service's hosts TLS Secret), installed as
 #                        /etc/compute/ca.pem unless the host has one already:
 #                        its renewals keep that one current
-#   --state-device DEV   format DEV as the state volume (XFS) and mount it
-#                        at /var/lib/compute, unless a state volume is
-#                        already recorded for this host; without it
+#   --state-device DEV   mount DEV at /var/lib/compute as the state volume,
+#                        unless a state volume is already recorded for this
+#                        host: a file system on DEV is kept (the state
+#                        volume of a host whose boot disk was rebuilt), and
+#                        only a blank DEV is formatted (XFS); without it
 #                        /var/lib/compute must already be a mount point
+#   --reformat-state-device DEV
+#                        format DEV as a new, empty state volume even though
+#                        it holds a file system or other data, all of which
+#                        is lost; /var/lib/compute must not be mounted
 #   --units-installed    the machine's own configuration installs this
 #                        bundle's systemd units and enables them, as NixOS
 #                        does from the unit files of the bundle it names:
@@ -37,8 +43,9 @@
 #     pins.env names, checking each SHA-256, under /opt/compute; Firecracker
 #     binaries of earlier releases stay, and the agent keeps running memory
 #     images they made (--retained-firecracker)
-#   - records the state volume's filesystem UUID, which the agent checks at
-#     every start
+#   - sets up the state volume (state-volume) and records its filesystem
+#     UUID, which the agent checks at every start, on the boot disk and on
+#     the volume itself
 #   - builds the base image from COMPUTE_BASE_IMAGE_REF into
 #     /var/lib/compute/base.ext4
 #   - installs the systemd units and the certificate's daily timer, gets
@@ -61,6 +68,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 config=
 authority=
 state_device=
+reformat_device=
 units_installed=
 start=1
 while [ $# -gt 0 ]; do
@@ -68,6 +76,7 @@ while [ $# -gt 0 ]; do
     --config) config=$2; shift 2 ;;
     --authority) authority=$2; shift 2 ;;
     --state-device) state_device=$2; shift 2 ;;
+    --reformat-state-device) reformat_device=$2; shift 2 ;;
     --units-installed) units_installed=1; shift ;;
     --no-start) start=; shift ;;
     *) echo "install.sh: unknown argument $1" >&2; exit 2 ;;
@@ -183,42 +192,7 @@ fi
 source /etc/compute/host.env
 
 log "state volume"
-install -d -m 755 /var/lib/compute
-# The marker names the state volume this host uses. It is written whole
-# (see below); one with no UUID in it, from an interrupted older write,
-# counts as none (the GCP startup script uses the same test).
-recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
-if [ -z "$recorded" ] && [ -n "$state_device" ]; then
-  if mountpoint -q /var/lib/compute; then
-    # An earlier attempt formatted and mounted this device but stopped
-    # before recording it; anything else mounted there is refused.
-    have=$(findmnt -no UUID /var/lib/compute || true)
-    want=$(blkid -s UUID -o value "$state_device" 2>/dev/null || true)
-    [ -n "$have" ] && [ "$have" = "$want" ] ||
-      fail "/var/lib/compute is mounted already, not from $state_device; leave out --state-device"
-  else
-    mkfs.xfs -q -f -m reflink=1 "$state_device"
-    uuid=$(blkid -s UUID -o value "$state_device")
-    [ -n "$uuid" ] || fail "$state_device has no file system UUID after formatting"
-    sed -i '\# /var/lib/compute #d' /etc/fstab
-    echo "UUID=$uuid /var/lib/compute xfs noatime,nofail 0 2" >>/etc/fstab
-    systemctl daemon-reload
-    mount /var/lib/compute
-  fi
-fi
-mountpoint -q /var/lib/compute || fail "/var/lib/compute is not a mount point: mount the state volume there, or pass --state-device"
-mounted=$(findmnt -no UUID /var/lib/compute || true)
-[ -n "$mounted" ] || fail "the file system on /var/lib/compute has no UUID; use one that has (XFS does)"
-if [ -n "$recorded" ]; then
-  [ "$recorded" = "$mounted" ] ||
-    fail "/var/lib/compute holds $mounted, not the state volume $recorded recorded for this host"
-else
-  echo "$mounted" >/etc/compute/state-volume.uuid.part
-  mv /etc/compute/state-volume.uuid.part /etc/compute/state-volume.uuid
-fi
-[ "$(findmnt -no FSTYPE /var/lib/compute)" = xfs ] ||
-  log "warning: the state volume is not XFS; saves and clones copy instead of sharing extents"
-install -d -m 700 /var/lib/compute/state
+"$here/state-volume" ${state_device:+--device "$state_device"} ${reformat_device:+--reformat "$reformat_device"}
 
 log "base image ${COMPUTE_BASE_IMAGE_REF:?COMPUTE_BASE_IMAGE_REF is not set}"
 # The base image is the OCI image with the bundle's guest programs (init,

@@ -335,9 +335,10 @@ release under `/opt/compute/releases/<version>` behind
 `/opt/compute/current`, once its `compute-host` has run on this host (a
 binary that cannot, say one built for another C library, is refused
 before anything switches to it); downloads Firecracker, its jailer and the guest
-kernel that `pins.env` names, checking each SHA-256; formats and mounts the
-state volume at `/var/lib/compute` the first time and records its
-filesystem UUID; builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
+kernel that `pins.env` names, checking each SHA-256; mounts the state
+volume at `/var/lib/compute` the first time and records its filesystem
+UUID, in `/etc/compute/state-volume.uuid` and on the volume itself
+(`.compute-state-volume`); builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
 installs three units:
 
 - `compute-host-setup.service` applies the kernel settings at every boot:
@@ -832,6 +833,19 @@ before users move to compute from Modal:
 
 ## Storage
 
+- **A state volume is formatted only when it is blank.** With
+  `--state-device`, `install.sh` keeps a file system it finds on the
+  device: a host whose boot disk was rebuilt (a cloud restart that
+  recreates the boot disk from a newer image, losing
+  `/etc/compute/state-volume.uuid` and the mount entry) mounts its state
+  volume again, sandboxes and all, and records it anew. It formats only a
+  device with nothing on it, and refuses one with a file system holding
+  other files, or with anything else (a partition table, swap, an array
+  member), leaving it as it is. To start a host over on such a device,
+  losing what it holds, pass `--reformat-state-device DEV` instead, with
+  `/var/lib/compute` unmounted. The Google Cloud startup script likewise
+  assembles striped local SSDs that already carry an array instead of
+  creating one over them.
 - **Mount the state volume before the agent starts.** The agent creates its
   state root if the parent directory exists, so an unmounted volume looks
   like an empty host and the agent would start keeping new records on the
