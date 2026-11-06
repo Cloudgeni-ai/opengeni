@@ -278,7 +278,7 @@ CREATE OR REPLACE FUNCTION mutate_self_personal_github_repository_selection(p_ac
       head_found := FOUND;
       current_generation := CASE WHEN head_found THEN head_row.generation ELSE 0 END;
       current_mode := CASE WHEN head_found THEN head_row.all_repositories_access ELSE NULL END;
-      request_digest := digest(convert_to(jsonb_build_object(
+      request_digest := digest(convert_to((jsonb_build_object(
         'expectedConnectionAuthorityGeneration', p_expected_connection_authority_generation,
         'expectedSelectionGeneration', p_expected_selection_generation,
         'verifyOnly', p_verify_only,
