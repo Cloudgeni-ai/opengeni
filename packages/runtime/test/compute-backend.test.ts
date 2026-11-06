@@ -41,6 +41,7 @@ import {
   resolveComputeProviderBinding,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
+import { COMPUTE_BINDING_FAILURE_CACHE_MS } from "../src/sandbox/providers/compute";
 import {
   AGENT_UNRESPONSIVE_DETAIL_KEY,
   AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
@@ -1704,6 +1705,31 @@ describe("compute control service client", () => {
     expect(await client.getTemplate("env-a")).toBeNull();
   });
 
+  test("a capture is asked once even when the client retries other requests", async () => {
+    let captures = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        captures += 1;
+        return new Response("busy", { status: 503 });
+      },
+    });
+    try {
+      const client = new ComputeControlClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        apiKey: "control-key",
+        maxAttempts: 3,
+        sleep: async () => {},
+      });
+      await expect(client.captureTemplate("sbx", "env-once")).rejects.toBeInstanceOf(
+        ComputeControlError,
+      );
+      expect(captures).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("a capture's own timeout outlasts the client's request timeout", async () => {
     const server = Bun.serve({
       port: 0,
@@ -1774,10 +1800,11 @@ describe("compute environment templates", () => {
       imageDigest: "blake3-9",
       providerBindingKey: "compute:https://compute.test:team-build",
       providerBinding: { provider: "compute", apiUrl: "https://compute.test", team: "team-build" },
+      created: true,
     });
   });
 
-  test("a retried build finds the template its earlier attempt captured", async () => {
+  test("a name another build already captured is reused and not this build's", async () => {
     const built = await buildComputeEnvironmentTemplate(
       {
         settings,
@@ -1803,6 +1830,95 @@ describe("compute environment templates", () => {
       },
     );
     expect(built.imageId).toBe("tpl-earlier");
+    expect(built.created).toBe(false);
+  });
+
+  test("a capture whose answer was lost is found by name and is this build's", async () => {
+    let captures = 0;
+    const built = await buildComputeEnvironmentTemplate(
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
+      {
+        linkKeys: async () => ({ team: "team-build", keys: [] }),
+        captureTemplate: async () => {
+          captures += 1;
+          throw new ComputeControlError({ kind: "transport", status: null, message: "timed out" });
+        },
+        getTemplate: async (key) => ({
+          id: "tpl-lost",
+          name: key,
+          image: "blake3-lost",
+          source: "sbx-build",
+          vcpus: 2,
+          memory_mib: 4096,
+          disk_mib: 1,
+          created_ms: 1,
+        }),
+      },
+    );
+    expect(captures).toBe(1);
+    expect(built).toMatchObject({ imageId: "tpl-lost", created: true });
+  });
+
+  test("a lost capture with nothing under its name fails, and a cancelled one is not looked up", async () => {
+    const lost = new ComputeControlError({ kind: "transport", status: null, message: "timed out" });
+    let lookups = 0;
+    const control = {
+      linkKeys: async () => ({ team: "team-build", keys: [] }),
+      captureTemplate: async () => {
+        throw lost;
+      },
+      getTemplate: async () => {
+        lookups += 1;
+        return null;
+      },
+    };
+    const input = {
+      settings,
+      session: { state: { sandboxId: "sbx-build" } },
+      requestId: REQUEST,
+      timeoutMs: 1,
+    };
+    await expect(buildComputeEnvironmentTemplate(input, control)).rejects.toBe(lost);
+    expect(lookups).toBe(1);
+    const stop = new AbortController();
+    stop.abort();
+    await expect(
+      buildComputeEnvironmentTemplate({ ...input, signal: stop.signal }, control),
+    ).rejects.toBe(lost);
+    expect(lookups).toBe(1);
+  });
+
+  test("a turn's failed team lookup is asked once and remembered briefly", async () => {
+    let asks = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        asks += 1;
+        return new Response("down", { status: 503 });
+      },
+    });
+    try {
+      const own = {
+        computeApiUrl: `http://127.0.0.1:${server.port}`,
+        computeApiKey: "turn-key",
+      } as never;
+      let clock = 1_000_000;
+      const now = () => clock;
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(1);
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(1);
+      clock += COMPUTE_BINDING_FAILURE_CACHE_MS;
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(2);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("a build needs the live sandbox and a UUID request id", async () => {

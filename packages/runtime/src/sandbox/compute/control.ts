@@ -329,7 +329,9 @@ export class ComputeControlClient {
   /** Capture a sandbox's disk as a new team template named `name`. The
    * control service saves the sandbox, copies its disk and stores it before
    * answering, so this can take as long as the upload; `timeoutMs` bounds it.
-   * A name the team already has answers `exists`. */
+   * A name the team already has answers `exists`. Asked once: a repeated
+   * request would start another capture, so a lost answer is for the caller
+   * to look up by name. */
   async captureTemplate(
     sandboxId: string,
     name: string,
@@ -340,6 +342,7 @@ export class ComputeControlClient {
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/templates`,
       { name },
       options.timeoutMs,
+      1,
     );
   }
 
@@ -372,9 +375,10 @@ export class ComputeControlClient {
     path: string,
     body?: unknown,
     timeoutMs?: number,
+    maxAttempts: number = this.maxAttempts,
   ): Promise<T> {
     let lastError: ComputeControlError | undefined;
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (attempt > 0) await this.backoff(Math.min(8_000, 250 * 2 ** attempt));
       if (this.signal?.aborted) break;
       try {

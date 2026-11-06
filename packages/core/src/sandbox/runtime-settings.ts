@@ -148,12 +148,9 @@ export function rigProviderImageContentSourceImage(
   return rigProviderImageSourceImage(settings, backend);
 }
 
-const IMMUTABLE_IMAGE_REFERENCE = /@sha256:[0-9a-f]{64}$/u;
-
 function computeImageContentIdentity(settings: Settings): string | null {
   const image = computeSourceImage(settings);
   if (!image) return null;
-  if (IMMUTABLE_IMAGE_REFERENCE.test(image)) return image;
   const revision = settings.deploymentRevision?.trim();
   if (!revision || revision === "dev") return null;
   return `${image} release ${revision}`;
@@ -197,6 +194,7 @@ export type RigProviderImageSelectionReason =
   | "selected"
   | "missing"
   | "unbuilt"
+  | "build_abandoned"
   | "provider_unsupported"
   | "not_ready"
   | "not_cold_boot_validated"
@@ -204,11 +202,17 @@ export type RigProviderImageSelectionReason =
   | "provider_binding_unavailable"
   | "provider_binding_mismatch";
 
+/** A build record still `building` after this long was abandoned (its worker
+ * stopped); a new build may take it over. Matches the build claim's
+ * staleness window in the worker. */
+export const RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS = 20 * 60_000;
+
 export function resolveRigProviderImageSelection(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
   currentProviderBindingKeyHash: string | null,
+  nowMs: number = Date.now(),
 ): {
   settings: Settings;
   reason: RigProviderImageSelectionReason;
@@ -226,13 +230,16 @@ export function resolveRigProviderImageSelection(
     definition: version,
   });
   const image = version.providerImages[backend];
-  if (!image || image.status === "unsupported") {
-    // Never built for this backend, or recorded before the backend could
-    // build: worth building once when there is setup to skip.
-    return (version.setupScript ?? "").trim()
-      ? { settings, reason: "unbuilt", contentHash: expectedContentHash, imageId: null }
-      : { settings, reason: "missing", contentHash: null, imageId: null };
+  if (backend === "compute") {
+    // A compute template is captured over one release's image, so each
+    // release builds again; every way a build can end up missing asks for one
+    // (see requestStaleRigProviderImageRefresh), except a failed build of
+    // this exact content, which waits for the content to change.
+    const rebuild = computeRebuildReason(version, image, expectedContentHash, nowMs);
+    if (rebuild === "missing") return { settings, reason: "missing", contentHash: null, imageId: null };
+    if (rebuild) return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
   }
+  if (!image) return { settings, reason: "missing", contentHash: null, imageId: null };
   if (image.status !== "ready" || !image.imageId) {
     return {
       settings,
@@ -283,6 +290,32 @@ export function resolveRigProviderImageSelection(
     contentHash: expectedContentHash,
     imageId: image.imageId,
   };
+}
+
+/** Why a compute Sandbox Environment without a usable template should be
+ * built again, "missing" when there is nothing to build, or null when the
+ * record is for the current content and needs no rebuild. */
+function computeRebuildReason(
+  version: RigVersion,
+  image: RigVersion["providerImages"][SandboxBackend],
+  expectedContentHash: string,
+  nowMs: number,
+): "unbuilt" | "build_abandoned" | "content_mismatch" | "missing" | null {
+  if (!image || image.status === "unsupported") {
+    // Never built for compute, or recorded before compute could build:
+    // worth building once when there is setup to skip.
+    return (version.setupScript ?? "").trim() ? "unbuilt" : "missing";
+  }
+  if (image.status === "ready") return null;
+  // A record for other content: an earlier release's build that failed or
+  // stopped. It must not hold back this release's build.
+  if (image.contentHash !== expectedContentHash) return "content_mismatch";
+  if (image.status === "building") {
+    const startedAtMs = Date.parse(image.startedAt);
+    if (!Number.isFinite(startedAtMs) || nowMs - startedAtMs >= RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS)
+      return "build_abandoned";
+  }
+  return null;
 }
 
 export async function resolveRigProviderImageForRun(

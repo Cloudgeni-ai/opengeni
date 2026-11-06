@@ -54,27 +54,38 @@ function computeControlFor(
 
 export type ComputeProviderBinding = { provider: "compute"; apiUrl: string; team: string };
 
-const computeBindings = new Map<
-  string,
-  Promise<{ key: string; binding: ComputeProviderBinding }>
->();
+type ComputeBindingLookup = Promise<{ key: string; binding: ComputeProviderBinding }>;
+
+const computeBindings = new Map<string, ComputeBindingLookup>();
+const failedComputeBindings = new Map<string, { at: number; error: unknown }>();
+
+/** How long a turn's failed team lookup is remembered, so a slow or
+ * unreachable control service costs one short lookup, not one per turn. */
+export const COMPUTE_BINDING_FAILURE_CACHE_MS = 30_000;
 
 /** The compute team behind the configured key, at its control service: the
  * namespace templates live in. A prebuilt environment is used only while the
- * deployment still reaches that exact team. Cached per process and key; a
- * failed lookup is not cached. */
+ * deployment still reaches that exact team. Cached per process and key.
+ * Without an explicit client this is a turn's lookup: one short attempt, and
+ * a failure is remembered briefly (the turn then boots the plain image and
+ * runs setup). A build passes its own client and always asks. */
 export async function resolveComputeProviderBinding(
   settings: Settings,
-  control: Pick<ComputeControlClient, "linkKeys"> = computeControlFor(settings, {
-    requestTimeoutMs: 10_000,
-    maxAttempts: 2,
-  }),
+  control?: Pick<ComputeControlClient, "linkKeys">,
+  now: () => number = Date.now,
 ): Promise<{ key: string; binding: ComputeProviderBinding }> {
   const apiUrl = (settings.computeApiUrl ?? "").replace(/\/+$/u, "");
   const cacheKey = `${apiUrl}\0${settings.computeApiKey ?? ""}`;
   const cached = computeBindings.get(cacheKey);
   if (cached) return await cached;
-  const pending = control.linkKeys().then(({ team }) => {
+  const turnLookup = control === undefined;
+  if (turnLookup) {
+    const failed = failedComputeBindings.get(cacheKey);
+    if (failed && now() - failed.at < COMPUTE_BINDING_FAILURE_CACHE_MS) throw failed.error;
+  }
+  const client =
+    control ?? computeControlFor(settings, { requestTimeoutMs: 3_000, maxAttempts: 1 });
+  const pending = client.linkKeys().then(({ team }) => {
     if (typeof team !== "string" || !team) {
       throw new Error("the compute control service named no team for this key");
     }
@@ -83,9 +94,12 @@ export async function resolveComputeProviderBinding(
   });
   computeBindings.set(cacheKey, pending);
   try {
-    return await pending;
+    const resolved = await pending;
+    failedComputeBindings.delete(cacheKey);
+    return resolved;
   } catch (error) {
     if (computeBindings.get(cacheKey) === pending) computeBindings.delete(cacheKey);
+    if (turnLookup) failedComputeBindings.set(cacheKey, { at: now(), error });
     throw error;
   }
 }
@@ -95,16 +109,31 @@ export async function deleteComputeTemplate(settings: Settings, template: string
   await computeControlFor(settings, { maxAttempts: 2 }).deleteTemplate(template);
 }
 
+/** How long one capture may take. The control service saves the sandbox and
+ * uploads its disk before answering, which for a large environment can take
+ * minutes; the verification activity's own deadline aborts it earlier. */
+export const COMPUTE_TEMPLATE_CAPTURE_TIMEOUT_MS = 10 * 60_000;
+
 /** Capture a verified sandbox's disk as a team template. A template of the
- * build's name that already exists is that same build's earlier capture. */
+ * build's name that already exists is an earlier or concurrent build's
+ * capture of the same content, used as is and never deleted by this build.
+ * A capture is asked once: a second request would start a second capture.
+ * When its answer is lost, the template it made is looked up by name. */
 export async function buildComputeEnvironmentTemplate(
-  input: { settings: Settings; session: unknown; requestId: string; timeoutMs: number },
+  input: {
+    settings: Settings;
+    session: unknown;
+    requestId: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  },
   control: Pick<
     ComputeControlClient,
     "captureTemplate" | "getTemplate" | "linkKeys"
   > = computeControlFor(input.settings, {
-    requestTimeoutMs: Math.max(input.timeoutMs, COMPUTE_MIN_REQUEST_TIMEOUT_MS),
+    requestTimeoutMs: COMPUTE_MIN_REQUEST_TIMEOUT_MS,
     maxAttempts: 2,
+    ...(input.signal ? { signal: input.signal } : {}),
   }),
 ): Promise<ProviderImmutableImageBuildResult> {
   const state = (input.session as { state?: { sandboxId?: unknown } } | null)?.state;
@@ -114,15 +143,20 @@ export async function buildComputeEnvironmentTemplate(
   }
   const name = computeEnvironmentTemplateName(input.requestId);
   const binding = await resolveComputeProviderBinding(input.settings, control);
-  let template;
+  let template: Awaited<ReturnType<typeof control.getTemplate>>;
+  let created = true;
   try {
     template = await control.captureTemplate(sandboxId, name, {
-      timeoutMs: Math.max(input.timeoutMs, COMPUTE_MIN_REQUEST_TIMEOUT_MS),
+      timeoutMs: Math.max(input.timeoutMs, COMPUTE_TEMPLATE_CAPTURE_TIMEOUT_MS),
     });
   } catch (error) {
-    if (!(error instanceof ComputeControlError && error.kind === "exists")) throw error;
+    const exists = error instanceof ComputeControlError && error.kind === "exists";
+    if (!exists && input.signal?.aborted) throw error;
+    // An existing name is another build's; a lost answer may still have
+    // stored this capture under the name.
     template = await control.getTemplate(name);
     if (!template) throw error;
+    created = !exists;
   }
   if (!template?.id) throw new Error("the compute template capture returned no template id");
   return {
@@ -132,6 +166,7 @@ export async function buildComputeEnvironmentTemplate(
     imageDigest: template.image || null,
     providerBindingKey: binding.key,
     providerBinding: binding.binding,
+    created,
   };
 }
 

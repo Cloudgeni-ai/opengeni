@@ -1036,7 +1036,34 @@ export async function verifyRigProviderImageColdBoot(
   return dependencies.now().toISOString();
 }
 
-export async function buildVerifiedRigProviderImage(input: {
+export type BuildVerifiedRigProviderImageDependencies = {
+  buildImage: typeof buildImmutableProviderImage;
+  verifyColdBoot: typeof verifyRigProviderImageColdBoot;
+  claim: typeof claimRigVersionProviderImageBuild;
+  finalize: typeof finalizeRigVersionProviderImageBuild;
+  /** The version's current record for the backend, as stored now. */
+  currentImage: (
+    db: Database,
+    workspaceId: string,
+    versionId: string,
+    backend: SandboxBackend,
+  ) => Promise<RigProviderImage | null>;
+  deleteComputeTemplate: typeof deleteComputeTemplate;
+};
+
+const defaultBuildVerifiedRigProviderImageDependencies: BuildVerifiedRigProviderImageDependencies =
+  {
+    buildImage: buildImmutableProviderImage,
+    verifyColdBoot: verifyRigProviderImageColdBoot,
+    claim: claimRigVersionProviderImageBuild,
+    finalize: finalizeRigVersionProviderImageBuild,
+    currentImage: async (db, workspaceId, versionId, backend) =>
+      (await getRigVersionById(db, workspaceId, versionId))?.providerImages[backend] ?? null,
+    deleteComputeTemplate,
+  };
+
+export async function buildVerifiedRigProviderImage(
+  input: {
   settings: ControlActivityServices["settings"];
   db: Database;
   observability: ControlActivityServices["observability"];
@@ -1049,7 +1076,9 @@ export async function buildVerifiedRigProviderImage(input: {
   ownership: RigVerificationSandboxRunContext["ownership"];
   lifecycle: RigVerificationActivityLifecycle;
   signal: AbortSignal;
-}): Promise<RigProviderImage> {
+  },
+  dependencies: BuildVerifiedRigProviderImageDependencies = defaultBuildVerifiedRigProviderImageDependencies,
+): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
   const providerSupportsBuild =
     providerSupportsImmutableImageBuild(backend) &&
@@ -1089,7 +1118,7 @@ export async function buildVerifiedRigProviderImage(input: {
 
   let replaced: RigProviderImage | null = null;
   if (input.existingVersionId) {
-    const claim = await claimRigVersionProviderImageBuild(input.db, {
+    const claim = await dependencies.claim(input.db, {
       workspaceId: input.workspaceId,
       versionId: input.existingVersionId,
       image: building,
@@ -1122,7 +1151,7 @@ export async function buildVerifiedRigProviderImage(input: {
 
   const finalize = async (image: RigProviderImage): Promise<RigProviderImage> => {
     if (input.existingVersionId) {
-      const persisted = await finalizeRigVersionProviderImageBuild(input.db, {
+      const persisted = await dependencies.finalize(input.db, {
         workspaceId: input.workspaceId,
         versionId: input.existingVersionId,
         image,
@@ -1164,7 +1193,7 @@ export async function buildVerifiedRigProviderImage(input: {
         code: "provider_image_build_unsupported",
         message:
           backend === "compute"
-            ? "compute builds need a compute image pinned by digest, or a deployment revision that identifies it"
+            ? "compute builds need a configured compute image and a deployment revision that identifies it"
             : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
@@ -1176,15 +1205,56 @@ export async function buildVerifiedRigProviderImage(input: {
     imageId: string;
     providerBindingKey: string;
   } | null = null;
+  // Whether this build made its compute template. A template found under
+  // the build's name is an earlier or concurrent build's, and stays.
+  let builtCreated = false;
   let artifactId: string | null = null;
   let coldBootValidatedAt: string | null = null;
+  /**
+   * Delete the compute template this build made, unless another build of the
+   * same name now owns it: a build that took over a stale claim captures
+   * under the same name and reuses the template, and may already have
+   * published it. When the record cannot be read, the template stays; the
+   * next build of the same content reuses it.
+   */
+  const releaseOwnComputeTemplate = async (): Promise<void> => {
+    if (backend !== "compute" || !builtIdentity || !builtCreated) return;
+    const template = builtIdentity.imageId;
+    if (input.existingVersionId) {
+      let current: RigProviderImage | null;
+      try {
+        current = await dependencies.currentImage(
+          input.db,
+          input.workspaceId,
+          input.existingVersionId,
+          backend,
+        );
+      } catch {
+        return;
+      }
+      if (current?.imageId === template) return;
+      if (
+        current?.buildRequestId === building.buildRequestId &&
+        current.startedAt !== building.startedAt
+      ) {
+        return;
+      }
+    }
+    await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+      input.observability.warn("unused compute environment template was not deleted", {
+        template,
+        error: errorMessage(error),
+      });
+    });
+  };
   try {
-    const built = await buildImmutableProviderImage({
+    const built = await dependencies.buildImage({
       backend,
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
       timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      signal: input.signal,
     });
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
@@ -1225,7 +1295,7 @@ export async function buildVerifiedRigProviderImage(input: {
       // A snapshot receipt is not proof that the artifact can cold-start. Boot
       // a second, independently owned sandbox from the exact image before it
       // can become runtime-selectable.
-      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
+      coldBootValidatedAt = await dependencies.verifyColdBoot({
         settings: input.settings,
         db: input.db,
         observability: input.observability,
@@ -1246,9 +1316,10 @@ export async function buildVerifiedRigProviderImage(input: {
         imageId: built.imageId,
         providerBindingKey: built.providerBindingKey,
       };
+      builtCreated = built.created !== false;
       // A captured template is not proof that it boots. Start a second,
       // independently owned sandbox from it before runtime can select it.
-      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
+      coldBootValidatedAt = await dependencies.verifyColdBoot({
         settings: input.settings,
         db: input.db,
         observability: input.observability,
@@ -1293,9 +1364,10 @@ export async function buildVerifiedRigProviderImage(input: {
       finishedAt: new Date().toISOString(),
       error: null,
     });
-    // A fenced publication keeps its template: a newer claim of the same build
-    // captures under the same name and may be using it.
-    if (backend === "compute" && published.status === "ready") {
+    if (backend === "compute" && published.status !== "ready") {
+      // Fenced: another build owns the record now.
+      await releaseOwnComputeTemplate();
+    } else if (backend === "compute") {
       if (
         replaced?.backend === "compute" &&
         replaced.imageId &&
@@ -1304,20 +1376,20 @@ export async function buildVerifiedRigProviderImage(input: {
         // Nothing references the template this rebuild replaced. Sandboxes
         // already started from it keep running; a create racing the delete
         // boots the plain image and runs setup.
-        await deleteComputeTemplate(input.settings, replaced.imageId).catch((error: unknown) => {
-          input.observability.warn("replaced compute environment template was not deleted", {
-            template: replaced!.imageId,
-            error: errorMessage(error),
+        await dependencies
+          .deleteComputeTemplate(input.settings, replaced.imageId)
+          .catch((error: unknown) => {
+            input.observability.warn("replaced compute environment template was not deleted", {
+              template: replaced!.imageId,
+              error: errorMessage(error),
+            });
           });
-        });
       }
     }
     return published;
   } catch (error) {
     if (input.signal.aborted) {
-      if (backend === "compute" && builtIdentity) {
-        await deleteComputeTemplate(input.settings, builtIdentity.imageId).catch(() => undefined);
-      }
+      await releaseOwnComputeTemplate();
       throw abortReason(input.signal);
     }
     if (artifactId) {
@@ -1337,8 +1409,8 @@ export async function buildVerifiedRigProviderImage(input: {
         builtIdentity.providerBindingKey,
         builtIdentity.imageId,
       ).catch(() => "not_found" as const);
-    } else if (backend === "compute" && builtIdentity) {
-      await deleteComputeTemplate(input.settings, builtIdentity.imageId).catch(() => undefined);
+    } else if (backend === "compute") {
+      await releaseOwnComputeTemplate();
     }
     const message = errorMessage(error).slice(0, 2000);
     return await finalize({
@@ -1352,6 +1424,97 @@ export async function buildVerifiedRigProviderImage(input: {
         retryable: true,
       },
     });
+  }
+}
+
+/**
+ * Record that a compute Sandbox Environment version could not be built for
+ * its current content because its verification failed before any build. A
+ * turn then sees a failed build of this exact content, which it does not ask
+ * to rebuild, instead of an unbuilt version, which it would ask to verify
+ * again every day. The content changes with each release, so a release gets
+ * one more attempt. A ready template for older content that the record
+ * replaces is deleted. Best effort: a failure here leaves the version as it
+ * was.
+ */
+export async function recordComputeEnvironmentVerificationFailure(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    workspaceId: string;
+    version: RigProviderImageDefinition & { id: string };
+    message: string;
+  },
+  dependencies: Pick<
+    BuildVerifiedRigProviderImageDependencies,
+    "claim" | "finalize" | "deleteComputeTemplate"
+  > = defaultBuildVerifiedRigProviderImageDependencies,
+): Promise<boolean> {
+  const backend = input.settings.sandboxBackend as SandboxBackend;
+  if (backend !== "compute" || !rigProviderImageBuildSupported(input.settings, backend)) {
+    return false;
+  }
+  try {
+    const sourceImage = rigProviderImageContentSourceImage(input.settings, backend);
+    const contentHash = rigProviderImageContentHash({
+      backend,
+      sourceImage,
+      definition: input.version,
+    });
+    const claim = await dependencies.claim(input.db, {
+      workspaceId: input.workspaceId,
+      versionId: input.version.id,
+      image: {
+        backend,
+        provider: backend,
+        status: "building",
+        contentHash,
+        setupHash: rigProviderImageSetupHash(input.version),
+        sourceImage,
+        buildRequestId: rigProviderImageBuildRequestId({
+          targetId: input.version.id,
+          backend,
+          contentHash,
+        }),
+        imageId: null,
+        imageDigest: null,
+        artifactId: null,
+        providerBindingKeyHash: null,
+        provenance: { kind: "rig_verification", targetKind: "version", targetId: input.version.id },
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        error: null,
+      },
+      staleAfterMs: RIG_VERIFICATION_OWNER_TTL_MS,
+      retryUnsupported: true,
+    });
+    if (claim.status !== "claimed") return false;
+    const recorded = await dependencies.finalize(input.db, {
+      workspaceId: input.workspaceId,
+      versionId: input.version.id,
+      image: {
+        ...claim.image,
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        error: {
+          code: "provider_image_verification_failed",
+          message: input.message.slice(0, 2000) || "Sandbox Environment verification failed",
+          retryable: true,
+        },
+      },
+    });
+    const stale = claim.replaced;
+    if (recorded && stale?.backend === "compute" && stale.status === "ready" && stale.imageId) {
+      await dependencies.deleteComputeTemplate(input.settings, stale.imageId);
+    }
+    return recorded;
+  } catch (error) {
+    input.observability.warn("compute environment verification failure was not recorded", {
+      versionId: input.version.id,
+      error: errorMessage(error),
+    });
+    return false;
   }
 }
 
@@ -1709,6 +1872,16 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               const passed =
                 platformCheckResults.every((result) => result.exitCode === 0) &&
                 checkResults.every((result) => result.exitCode === 0);
+              if (!passed) {
+                await recordComputeEnvironmentVerificationFailure({
+                  settings: runSettings,
+                  db,
+                  observability,
+                  workspaceId: input.workspaceId,
+                  version,
+                  message: "Sandbox Environment checks failed",
+                });
+              }
               const providerImage = passed
                 ? await buildVerifiedRigProviderImage({
                     settings: runSettings,
@@ -1754,6 +1927,19 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           // re-run instead of staying stale, symmetric to verifyRigChange. Then
           // rethrow so the Temporal activity still surfaces the failure.
           const detail = errorMessage(error);
+          if (!lifecycle.signal.aborted) {
+            // A cancelled run leaves the version for the next attempt; any
+            // other failure is recorded so turns stop asking for a rebuild of
+            // this exact content.
+            await recordComputeEnvironmentVerificationFailure({
+              settings: settingsForRigVerification(settings, version.image),
+              db,
+              observability,
+              workspaceId: input.workspaceId,
+              version,
+              message: detail,
+            });
+          }
           await recordRigAuditEvent(db, {
             grant,
             action: "rig.verification.failed",

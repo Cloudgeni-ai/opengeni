@@ -16,14 +16,20 @@ export function rigProviderImageRefreshWorkflowId(input: {
   return `rig-provider-image-refresh:${input.versionId}:${content}:${day}`;
 }
 
+const REFRESH_REASONS: ReadonlySet<RigProviderImageSelectionReason> = new Set([
+  "content_mismatch",
+  "unbuilt",
+  "build_abandoned",
+]);
+
 /**
  * A ready, cold-boot-proven provider image whose content no longer matches is
  * stale: the deployment base image (or the content identity protocol) moved
- * after it was built. A version with setup that was never built for this
- * backend (built before the backend could build, or before builds existed) is
- * unbuilt. Either way the turn uses the ordinary setup path, and asks once in
- * the background for a build on the current base so later fresh sandboxes
- * start from a prebuilt image. Never awaited by the turn.
+ * after it was built. On compute, a version with setup that was never built
+ * (built before compute could build) is unbuilt, and a build that stopped
+ * without finishing is abandoned. Each way the turn uses the ordinary setup
+ * path, and asks once in the background for a build on the current base so
+ * later fresh sandboxes start from a prebuilt image. Never awaited by the turn.
  */
 export function requestStaleRigProviderImageRefresh(input: {
   selection: { reason: RigProviderImageSelectionReason; contentHash: string | null };
@@ -37,10 +43,7 @@ export function requestStaleRigProviderImageRefresh(input: {
   start: StartRigProviderImageRefresh | null | undefined;
   warn: (message: string, context: { versionId: string; error: string }) => void;
 }): boolean {
-  if (
-    (input.selection.reason !== "content_mismatch" && input.selection.reason !== "unbuilt") ||
-    !input.turnUsesDeploymentBase
-  ) {
+  if (!REFRESH_REASONS.has(input.selection.reason) || !input.turnUsesDeploymentBase) {
     return false;
   }
   if (!input.versionId || !input.selection.contentHash || !input.start) return false;
