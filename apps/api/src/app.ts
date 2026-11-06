@@ -263,6 +263,7 @@ import {
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
+import { managedSignUpBrowserMiddleware } from "./auth/managed-sign-up-browser";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -1278,6 +1279,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
+    // Email verification keeps only a password chosen in the verifying browser.
+    app.use("/v1/auth/sign-up/email", managedSignUpBrowserMiddleware(deps.settings));
+    app.use("/v1/auth/verify-email", managedSignUpBrowserMiddleware(deps.settings));
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);

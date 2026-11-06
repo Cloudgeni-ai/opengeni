@@ -863,18 +863,31 @@ setup. A reused link only redirects and never mints another session. `dual` and
 `broker` modes leave it off: there, sign-in belongs to the isolated browser
 transaction (see `docs/browser-login-session-sets.md`).
 
-This is a deliberate trade-off with two known edges. While an unused link is
-live (one hour), whoever holds it gets a session for a brand-new, empty
-account; anyone who can read that mailbox could already reset the password.
-The reverse case is pre-account takeover: someone signs up with another
-person's email and a password they know, and that person clicks the
-unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
-reset the password, which revokes sessions and locks the other party out; now
-the victim is signed in and may start using an account whose password someone
-else holds. Every verification email therefore says to ignore it if the
-recipient did not create an Opengeni account. Signing in only when the link is
-opened in the browser that signed up would close that edge and remains a
-possible follow-up.
+While an unused link is live (one hour), whoever holds it gets a session for a
+brand-new, empty account; anyone who can read that mailbox could already
+reset the password. Every verification email also says to ignore it if the
+recipient did not create an Opengeni account.
+
+Verification proves who controls the address, not who chose the stored
+password, so a password only becomes usable when the address is verified from
+the browser that chose it (`apps/api/src/auth/managed-sign-up-browser.ts`).
+Every email sign-up response sets an HttpOnly, `SameSite=Lax` browser cookie
+(`opengeni.sign_up_browser`, `__Secure-` prefixed over HTTPS, 30 days, reused
+while present), whatever the outcome, and while the address is unverified the
+sign-up remembers its password hash for that browser; a repeated sign-up for
+the address leaves the stored password alone. Only a sign-up whose `Origin` is
+one of the deployment's trusted browser origins remembers anything, so a
+cross-site form post another page makes the owner's browser send (or a
+request without an `Origin`) can never plant a password that the owner's later
+verification in that browser would keep. When a link is followed, under
+the auth user's row lock, the password remembered for the verifying browser
+becomes the account's password; without one (another browser or device, a mail
+scanner that follows the link first, or someone else's unsolicited sign-up)
+every stored password is discarded. Either way the address is verified,
+existing sessions are revoked and the answer is the same; a person left
+without a password sets one with a password reset. This closes pre-account
+takeover, where someone signs up with another person's address and a password
+they know and the owner later verifies the address.
 
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 
