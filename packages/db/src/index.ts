@@ -15608,6 +15608,42 @@ export async function getSlackInteractionSessionAccess(
   });
 }
 
+/**
+ * The person a private Slack interaction (a bot DM or a private handoff)
+ * reserved this session's root for, or null. Session authorization fences such
+ * a session to that person, so the files it produces belong to them alone, as
+ * an Only-me session's do. A session that does not exist yet is its own root,
+ * which covers a Slack session that is about to be created on its reservation.
+ */
+export async function getSlackPrivateSessionOwnerSubjectId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ owning_subject_id: string }>(
+      scopedDb,
+      sql`
+        select slack.owning_subject_id
+        from ${schema.slackInteractions} slack
+        where slack.workspace_id = ${workspaceId}
+          and slack.visibility = 'private'
+          and slack.session_reservation_id = coalesce(
+            (
+              select session.root_session_id
+              from ${schema.sessions} session
+              where session.workspace_id = ${workspaceId}
+                and session.id = ${sessionId}::uuid
+            ),
+            ${sessionId}::uuid
+          )
+        limit 1
+      `,
+    );
+    return row?.owning_subject_id ?? null;
+  });
+}
+
 export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {

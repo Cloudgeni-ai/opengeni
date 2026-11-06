@@ -6506,6 +6506,13 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(session!.initial_model_context).toContain("attachments/slack/01-incident.png");
     expect(objectStore.objects.size).toBe(1);
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
+    // A channel mention is a workspace task: its imported image stays a workspace file.
+    const importedOwners = await shared!.admin<{ owners: string[] | null }[]>`
+      select private_owner_subject_ids as owners
+      from files
+      where workspace_id = ${value.owner.workspaceId}
+        and object_key like '%/slack-reactions/%'`;
+    expect(importedOwners.map((row) => row.owners)).toEqual([null]);
   });
 
   test("limited threaded file invocations prioritize the exact attachment message without a second history read", async () => {
@@ -6785,6 +6792,16 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(messages[1]!.model_context).not.toContain("initial-context.png");
     expect(objectStore.objects.size).toBe(2);
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(2);
+    // A bot DM is fenced to its owner, and so are the images imported into it.
+    const importedOwners = await shared!.admin<{ owners: string[] | null }[]>`
+      select private_owner_subject_ids as owners
+      from files
+      where workspace_id = ${value.owner.workspaceId}
+        and object_key like '%/slack-reactions/%'`;
+    expect(importedOwners.map((row) => row.owners)).toEqual([
+      [value.owner.subjectId],
+      [value.owner.subjectId],
+    ]);
   });
 
   test("an interaction bound before compact messages keeps its exact first message, Status, and controls card", async () => {

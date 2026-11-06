@@ -45,7 +45,11 @@ import {
 } from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
-import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
+import {
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
@@ -3514,7 +3518,7 @@ async function createSessionForRequestInFileScope(
           ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
           : grant.principalKind === "agent_attempt"
             ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-            : undefined;
+            : await inProcessFileOwnerContext({ db }, grant, payload.requestedSessionId, resources);
       await validateFileResources(
         db,
         grant.accountId,
@@ -4806,7 +4810,7 @@ async function acceptSessionUserMessageInFileScope(
       ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
       : grant.principalKind === "agent_attempt"
         ? await fileOwnerContextForAgent({ db }, grant, "sessions:control")
-        : undefined;
+        : await inProcessFileOwnerContext({ db }, grant, sessionId, requestedResources);
     await validateFileResources(
       db,
       grant.accountId,
@@ -6535,23 +6539,49 @@ function hasOwnProperty(value: unknown, key: string): boolean {
 export async function createSessionForRequestWithOutcome(
   ...args: Parameters<typeof createSessionForRequestInFileScope>
 ): Promise<CreateSessionRequestOutcome> {
-  const [deps, grant, , , authorization] = args;
+  const [deps, grant, , rawPayload, authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:create")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(
+          deps,
+          grant,
+          requestedSessionIdOf(rawPayload),
+          rawPayloadField(rawPayload, "resources"),
+        )) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => createSessionForRequestInFileScope(...args));
+}
+
+function rawPayloadField(rawPayload: unknown, field: string): unknown {
+  return typeof rawPayload === "object" && rawPayload !== null
+    ? (rawPayload as Record<string, unknown>)[field]
+    : undefined;
+}
+
+/** The requested session id of a not-yet-parsed create payload, when it is a UUID. */
+function requestedSessionIdOf(rawPayload: unknown): string | null {
+  const requested = rawPayloadField(rawPayload, "requestedSessionId");
+  return typeof requested === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requested)
+    ? requested
+    : null;
 }
 
 export async function acceptSessionUserMessageWithOutcome(
   ...args: Parameters<typeof acceptSessionUserMessageInFileScope>
 ): ReturnType<typeof acceptSessionUserMessageInFileScope> {
-  const [deps, grant, , , input] = args;
+  const [deps, grant, , sessionId, input] = args;
   const actor = input.authorization
     ? await fileOwnerContextForAccess(deps, input.authorization, "sessions:control")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:control")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(deps, grant, sessionId, input.resources)) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => acceptSessionUserMessageInFileScope(...args));
 }

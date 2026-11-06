@@ -3370,20 +3370,30 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             await requireSlackSharedReadAuthorization(deps, client, entry, policyResolution);
           }
         : undefined;
+    // What a person attaches in a private interaction (their bot DM or a
+    // private handoff) is theirs alone, like the session it starts or continues.
+    const attachmentVisibility = existing
+      ? existing.visibility
+      : openAgent
+        ? "workspace"
+        : routePolicy.visibility;
     const prepared = await prepareSlackInvocationEntry(
       deps,
       client,
       routedEntry,
       target,
       authorizeRead,
-      continuedThread
-        ? {
-            recordedThreadContext: async () => {
-              await authorizeRead?.();
-              return await slackRecordedThreadContext(deps, entry, continuedThread);
-            },
-          }
-        : {},
+      {
+        privateOwnerSubjectId: attachmentVisibility === "private" ? grant.subjectId : null,
+        ...(continuedThread
+          ? {
+              recordedThreadContext: async () => {
+                await authorizeRead?.();
+                return await slackRecordedThreadContext(deps, entry, continuedThread);
+              },
+            }
+          : {}),
+      },
     );
     preparedEntry = prepared.entry;
     preparedModelContext = prepared.modelContext;
@@ -4429,6 +4439,8 @@ async function prepareSlackInvocationEntry(
      * Slack is read only for the invocation's own attachments.
      */
     recordedThreadContext?: () => Promise<string | null>;
+    /** The private interaction's person, who alone may open its imported attachments. */
+    privateOwnerSubjectId?: string | null;
   } = {},
 ): Promise<{
   entry: SlackInteractionInboxEntry;
@@ -4463,6 +4475,7 @@ async function prepareSlackInvocationEntry(
             target,
             exactMessage.files,
             authorizeRead,
+            options.privateOwnerSubjectId ?? null,
           )
         : {
             resources: [],
@@ -4506,6 +4519,7 @@ async function prepareSlackInvocationEntry(
         target,
         exactMessage.files,
         authorizeRead,
+        options.privateOwnerSubjectId ?? null,
       )
     : {
         resources: [],
@@ -5103,7 +5117,16 @@ async function processSlackReactionInboxEntry(
     target = { accountId: existing.accountId, workspaceId: existing.workspaceId };
     grant = await authorizeTarget();
   }
-  const preparedTask = await prepareSlackReactionTask(deps, client, entry, target, context);
+  // A reaction in a private interaction's thread imports its images for that
+  // interaction's person only; a new reaction route is workspace-visible.
+  const preparedTask = await prepareSlackReactionTask(
+    deps,
+    client,
+    entry,
+    target,
+    context,
+    existing?.visibility === "private" ? grant.subjectId : null,
+  );
   if (existing?.sessionId) {
     const appendedTask = await remountSlackReactionTaskForSession(
       deps,
@@ -5484,6 +5507,7 @@ async function prepareSlackReactionTask(
   entry: SlackInteractionInboxEntry,
   target: { accountId: string; workspaceId: string },
   context: SlackReactionMessageContext,
+  privateOwnerSubjectId: string | null,
 ): Promise<PreparedSlackReactionTask> {
   return await prepareSlackMessageAttachments(
     deps,
@@ -5491,6 +5515,8 @@ async function prepareSlackReactionTask(
     entry,
     target,
     context.reactedMessage.files,
+    undefined,
+    privateOwnerSubjectId,
   );
 }
 
@@ -5500,7 +5526,8 @@ async function prepareSlackMessageAttachments(
   entry: SlackInteractionInboxEntry,
   target: { accountId: string; workspaceId: string },
   exactFiles: readonly { id: string; name: string; title: string }[],
-  authorizeSharedRead?: () => Promise<void>,
+  authorizeSharedRead: (() => Promise<void>) | undefined,
+  privateOwnerSubjectId: string | null,
 ): Promise<PreparedSlackReactionTask> {
   if (exactFiles.length === 0) {
     return { resources: [], attachments: [], omissionCodes: [], omittedCount: 0 };
@@ -5565,6 +5592,7 @@ async function prepareSlackMessageAttachments(
             slackTeamId: entry.slackTeamId,
             slackChannelId: entry.slackChannelId,
             slackMessageTs: entry.slackMessageTs,
+            privateOwnerSubjectId,
           },
           image,
           attachments.length + 1,
