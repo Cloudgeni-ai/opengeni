@@ -60,6 +60,70 @@ describe("Teams app package", () => {
     expect(() => buildTeamsAppManifest({ ...options, appName: "x".repeat(31) })).toThrow();
   });
 
+  test("adds team scope and the conversation-context RSC permissions only on request", () => {
+    const channels = buildTeamsAppManifest({ ...options, channels: true, groupChats: true });
+    expect(channels.bots[0]?.scopes).toEqual(["personal", "team", "groupChat"]);
+    expect(channels).toHaveProperty("supportsChannelFeatures", "tier1");
+    expect(buildTeamsAppManifest(options)).not.toHaveProperty("supportsChannelFeatures");
+    expect(buildTeamsAppManifest({ ...options, groupChats: true })).not.toHaveProperty(
+      "supportsChannelFeatures",
+    );
+    expect(channels).not.toHaveProperty("authorization");
+    expect(channels).not.toHaveProperty("webApplicationInfo");
+
+    const context = buildTeamsAppManifest({
+      ...options,
+      channels: true,
+      groupChats: true,
+      conversationContext: true,
+    });
+    expect(context.webApplicationInfo).toEqual({
+      id: options.botId,
+      resource: "https://RscBasedStoreApp",
+    });
+    expect(context.authorization?.permissions.resourceSpecific).toEqual([
+      { name: "ChannelMessage.Read.Group", type: "Application" },
+      { name: "ChatMessage.Read.Chat", type: "Application" },
+    ]);
+    expect(context.description.full).toContain("recent messages");
+
+    // Each permission follows its scope; personal-only packages claim none.
+    expect(
+      buildTeamsAppManifest({ ...options, groupChats: true, conversationContext: true })
+        .authorization?.permissions.resourceSpecific,
+    ).toEqual([{ name: "ChatMessage.Read.Chat", type: "Application" }]);
+    expect(() => buildTeamsAppManifest({ ...options, conversationContext: true })).toThrow(
+      "needs channels or groupChats",
+    );
+
+    const fromEnv = teamsManifestOptionsFromEnv({
+      OPENGENI_TEAMS_APP_ID: options.appId,
+      OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+      OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+      OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+      OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+      OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+      OPENGENI_TEAMS_APP_CHANNELS: "true",
+      OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT: "1",
+    });
+    expect([fromEnv.channels, fromEnv.groupChats, fromEnv.conversationContext]).toEqual([
+      true,
+      false,
+      true,
+    ]);
+    expect(() =>
+      teamsManifestOptionsFromEnv({
+        OPENGENI_TEAMS_APP_ID: options.appId,
+        OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+        OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+        OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+        OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+        OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+        OPENGENI_TEAMS_APP_CHANNELS: "yes",
+      }),
+    ).toThrow("OPENGENI_TEAMS_APP_CHANNELS must be true or false");
+  });
+
   test("requires explicit legal URLs and never serializes runtime secrets", () => {
     expect(() => teamsManifestOptionsFromEnv({})).toThrow("OPENGENI_TEAMS_APP_ID");
     const env = {
@@ -119,7 +183,11 @@ describe("Teams app package", () => {
   });
 
   test("describes the app, its AI, its requirements and its limits within Store limits", () => {
-    for (const variant of [options, { ...options, groupChats: true }]) {
+    for (const variant of [
+      options,
+      { ...options, groupChats: true },
+      { ...options, channels: true, groupChats: true, conversationContext: true },
+    ]) {
       const { short, full } = buildTeamsAppManifest(variant).description;
       expect(short.length).toBeLessThanOrEqual(80);
       expect(full.length).toBeLessThanOrEqual(4000);
@@ -143,6 +211,9 @@ describe("Teams app package", () => {
       "every participant must have linked an Opengeni account with access to that workspace",
     );
     expect(buildTeamsAppManifest(options).description.full).not.toContain("group chat");
+    const channelsOnly = buildTeamsAppManifest({ ...options, channels: true }).description.full;
+    expect(channelsOnly).toContain("mention Opengeni in a channel where it is enabled");
+    expect(channelsOnly).not.toContain("group chat");
   });
 
   test("lists help, account commands and prompt starters for personal chats", () => {
@@ -162,6 +233,11 @@ describe("Teams app package", () => {
       scopes: ["groupChat"],
       commands: [{ title: "help", description: "See what Opengeni can do in this conversation" }],
     });
+    // Help answers a mention in a channel too.
+    expect(
+      buildTeamsAppManifest({ ...options, channels: true, groupChats: true }).bots[0]!
+        .commandLists[1]!.scopes,
+    ).toEqual(["team", "groupChat"]);
     // The v1.25 schema accepts only these scope spellings (not "groupchat").
     const bot = buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]!;
     for (const scope of [...bot.scopes, ...bot.commandLists.flatMap((list) => list.scopes)])
