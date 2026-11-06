@@ -6,7 +6,11 @@
 import { describe, expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import type { Manifest } from "@openai/agents/sandbox";
-import { allAgentCapabilities, type ResolvedAgentConfig, type ResourceRef } from "@opengeni/contracts";
+import {
+  allAgentCapabilities,
+  type ResolvedAgentConfig,
+  type ResourceRef,
+} from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, repositoryWorkspaceSkillPathsOption } from "../src/index";
 
@@ -37,20 +41,35 @@ const { prepareSandboxAgent } = (await import(
   prepareSandboxAgent: (input: { agent: unknown; session: unknown }) => PreparedSandboxAgent;
 };
 
-/** A provided session whose every method call is a use of the workspace. */
+/** Every call on this object is a use of the workspace. */
+function recordingOperations(prefix: string, uses: string[]): object {
+  return new Proxy(
+    {},
+    {
+      get(_target, property) {
+        if (property === "then" || typeof property === "symbol") return undefined;
+        return (..._args: unknown[]) => {
+          uses.push(`${prefix}${String(property)}`);
+          throw new Error(`the workspace was used before the model: ${String(property)}`);
+        };
+      },
+    },
+  );
+}
+
+/** A provided session whose every operation is recorded. Binding the file
+ * editor is not an operation; using it is. */
 function recordingSession(manifest: Manifest): { session: unknown; uses: string[] } {
   const uses: string[] = [];
-  const state = { manifest };
+  const operations = recordingOperations("", uses) as Record<string | symbol, unknown>;
+  const editor = recordingOperations("editor.", uses);
   const session = new Proxy(
-    { state },
+    { state: { manifest } },
     {
       get(target, property) {
         if (property === "state") return target.state;
-        if (property === "then" || typeof property === "symbol") return undefined;
-        return (..._args: unknown[]) => {
-          uses.push(String(property));
-          throw new Error(`the workspace was used before the model: ${String(property)}`);
-        };
+        if (property === "createEditor") return () => editor;
+        return operations[property];
       },
     },
   );

@@ -309,7 +309,9 @@ describe("workspace repository skills", () => {
       );
     expect(tool).toBeDefined();
     if (tool?.type !== "function") throw new Error("missing reader");
-    expect(tool.description).toContain("Use the exact repository: identifier from the Repository skills index.");
+    expect(tool.description).toContain(
+      "Use the exact repository: identifier from the Repository skills index.",
+    );
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
