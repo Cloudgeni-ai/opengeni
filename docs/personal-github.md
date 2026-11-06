@@ -287,7 +287,10 @@ checkout's remote stays `https://github.com/<owner>/<repo>`, `gh` resolves the
 repository as usual. `gh repo clone` and the Git commands `gh` runs clone and
 push through the same gateway (`git/<owner>/<repo>`), so a clone keeps working
 with plain git afterwards. The person's own `gh` config (aliases) is not used
-in this mode.
+in this mode. The static part of this (the proxy and the wrapper logic) is
+one content-addressed file in the wrapper directory, delivered through the
+same private file ingress as the broker bearer, so the per-turn setup program
+stays small; if that delivery fails, `gh` behaves as before for that turn.
 
 The gateway (`/v1/github/personal/gateway/{api,uploads,git}/...`) checks, for
 every request: the bearer, its turn, the delegation's credential binding and

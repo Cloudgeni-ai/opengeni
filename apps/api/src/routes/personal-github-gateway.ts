@@ -403,6 +403,9 @@ function downstreamHeaders(upstream: Response): Headers {
     if (!DROPPED_RESPONSE_HEADERS.has(name.toLowerCase())) headers.append(name, value);
   }
   headers.set("cache-control", upstream.headers.get("cache-control") ?? "no-store");
+  // Read by gh, never rendered: a browser that opens it gets inert bytes.
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("content-security-policy", "sandbox; default-src 'none'");
   return headers;
 }
 

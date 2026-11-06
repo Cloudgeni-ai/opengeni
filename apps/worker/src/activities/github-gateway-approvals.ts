@@ -1,4 +1,22 @@
-import type { GitHubGatewayApproval } from "@opengeni/db";
+import { listTurnGitHubGatewayApprovals, type GitHubGatewayApproval } from "@opengeni/db";
+
+/**
+ * The turn's gateway requests that wait for or carry a decision. A failed
+ * read leaves them out rather than failing the turn; gh already told the
+ * agent the request waits, and running it again asks again.
+ */
+export async function turnGitHubGatewayApprovals(
+  ...args: Parameters<typeof listTurnGitHubGatewayApprovals>
+): Promise<GitHubGatewayApproval[]> {
+  try {
+    return await listTurnGitHubGatewayApprovals(...args);
+  } catch (error) {
+    console.warn("github_gateway.approvals_unavailable", {
+      errorClass: error instanceof Error ? error.name : typeof error,
+    });
+    return [];
+  }
+}
 
 function reviewArguments(value: string | null): unknown {
   if (!value) return {};

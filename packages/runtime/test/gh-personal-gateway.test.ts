@@ -17,6 +17,8 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
+  GH_GATEWAY_KIT_FILE_NAME,
+  GH_GATEWAY_KIT_SCRIPT,
   gitCredentialBindingHash,
   gitCredentialBindingTokenRefreshCommand,
   repositoryCloneCommand,
@@ -248,7 +250,10 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
         },
       },
     ];
-    const setup = repositoryCloneCommand(resources, bindings)
+    // The static gateway kit also arrives as a staged private file.
+    const kitSeed = join(root, "kit-seed");
+    writeFileSync(kitSeed, GH_GATEWAY_KIT_SCRIPT, { mode: 0o600 });
+    const setup = repositoryCloneCommand(resources, bindings, [], { ghGatewayKitSeed: kitSeed })
       .split("\n")
       .filter(
         (line) =>
@@ -377,8 +382,9 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
     for (const name of files) {
       expect(readFileSync(join(credentials, name), "utf8")).not.toContain("ambient-token");
     }
-    expect(
-      readFileSync(join(home, ".opengeni", "bin", "gh-gateway-proxy.cjs"), "utf8"),
-    ).not.toContain(PASS);
+    expect(readFileSync(join(home, ".opengeni", "bin", GH_GATEWAY_KIT_FILE_NAME), "utf8")).toBe(
+      GH_GATEWAY_KIT_SCRIPT,
+    );
+    expect(existsSync(join(root, "kit-seed"))).toBe(false);
   });
 });

@@ -20,7 +20,6 @@ import {
   getSessionHumanInputRequest,
   getWorkspace,
   listTurnCodemodeApprovals,
-  listTurnGitHubGatewayApprovals,
   isGitHubGatewayApprovalId,
   recordUsageEvent,
   registerPendingSessionToolCallInTransaction,
@@ -130,7 +129,11 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
-import { githubGatewayApproval, githubGatewayContinuationNote } from "../github-gateway-approvals";
+import {
+  githubGatewayApproval,
+  githubGatewayContinuationNote,
+  turnGitHubGatewayApprovals,
+} from "../github-gateway-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import type { WorkspaceMutationOptions } from "./sandbox-runtime";
@@ -2311,7 +2314,7 @@ export async function runTurnStreamAttempt(
         .map(programmaticApproval),
       // `gh` and Git requests the personal GitHub gateway held for a decision.
       ...(
-        await listTurnGitHubGatewayApprovals(db, {
+        await turnGitHubGatewayApprovals(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
@@ -2759,7 +2762,7 @@ export async function runTurnStreamAttempt(
       return eventing.codemodeDispatcher;
     },
   );
-  const gatewayRequests = await listTurnGitHubGatewayApprovals(db, {
+  const gatewayRequests = await turnGitHubGatewayApprovals(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
