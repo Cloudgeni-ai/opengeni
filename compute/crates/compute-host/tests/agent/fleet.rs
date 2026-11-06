@@ -701,6 +701,49 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
     two.assert_clean();
 }
 
+/// A copy the service rules set aside, as one from before its host was
+/// declared gone, is moved aside whole, newer writes and all, instead of
+/// deleted; the store's copy stays for whoever has the sandbox now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_ruled_set_aside_is_kept_on_disk_and_the_stores_copy_left() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(10);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set archived", "write archived"]).await;
+    one.sleep_to(sandbox, LevelName::Archived).await;
+    one.wait_level(sandbox, LevelName::Archived).await;
+    // It changes here after its last archive, as on a host declared gone.
+    one.run(sandbox, &["set newer", "write newer"]).await;
+    let state = one.root.join("state/vm");
+    let dir = state.join("firecracker").join(sandbox.to_string());
+    assert!(dir.exists(), "{dir:?}");
+    one.handle
+        .reconcile(vec![ruling(sandbox, Verdict::SetAside)])
+        .await
+        .unwrap();
+    let status = one.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert!(!dir.exists(), "no longer the host's sandbox");
+    let aside: Vec<_> = std::fs::read_dir(state.join("aside"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert!(aside[0].starts_with(&format!("{sandbox}-e1-")), "{aside:?}");
+    assert!(
+        std::fs::read_dir(state.join("aside").join(&aside[0]))
+            .unwrap()
+            .next()
+            .is_some(),
+        "its files are kept"
+    );
+    // Whoever has it now goes on from the store's copy.
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["archived"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
 /// A host whose agent restarts after its lease ran out finds its VMs held
 /// frozen by the guard, their VMMs unable to answer. It lists them under
 /// the owner epochs their records name, so it can register, and carries

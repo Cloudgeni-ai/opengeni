@@ -610,6 +610,9 @@ struct Slot<V> {
     holds: holds::Holds,
     /// Its removal hands it off: it keeps the store's copy.
     hand_off: bool,
+    /// Its removal, a hand-off, sets this host's copy aside rather than
+    /// deleting it (see [`crate::state::Record::set_aside`]).
+    set_aside: bool,
 }
 
 /// A request waiting for a sandbox to run.
@@ -1248,6 +1251,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 removers: Vec::new(),
                 waiters: Vec::new(),
                 hand_off: false,
+                set_aside: false,
                 deferred: None,
                 usage: usage::Usage::default(),
                 check: None,

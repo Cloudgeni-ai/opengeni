@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_6,
     MIGRATION_7,
     MIGRATION_8,
+    MIGRATION_9,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -195,6 +196,14 @@ create table if not exists compute_pointers_imported (
     imported_ms bigint not null,
     from_store text not null
 );
+";
+
+/// Version 9: the loss a sandbox's row notes once its host's copy was
+/// given up for gone (`lost`, see `LostCopy`), and when each pointer last
+/// pointed at a new copy (`saved_ms`), which that note tells.
+const MIGRATION_9: &str = "
+alter table compute_sandboxes add column if not exists lost jsonb;
+alter table compute_pointers add column if not exists saved_ms bigint;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

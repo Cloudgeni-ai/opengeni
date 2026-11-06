@@ -15,8 +15,8 @@ use compute_protocol::host::{
 };
 use futures::StreamExt as _;
 
-use super::{Asked, Failure, Service, host_failure};
-use crate::store::{SandboxRow, Store};
+use super::{Asked, Failure, Service, host_failure, now_ms};
+use crate::store::{Forsaken, Gone, SandboxRow, Store};
 
 /// How long a host may take to hand a sandbox off: it archives it first.
 const HAND_OFF_WAIT: Duration = Duration::from_secs(300);
@@ -276,7 +276,7 @@ impl<S: Store> Service<S> {
         let target = self
             .view
             .target(host)
-            .ok_or_else(|| Failure::Unavailable("its host is not reachable".into()))?;
+            .ok_or_else(|| Failure::Unavailable(self.unreachable(host)))?;
         let request = Request::HandOff {
             id: row.id,
             owner_epoch: epoch.0,
@@ -335,6 +335,35 @@ impl<S: Store> Service<S> {
             }
         }
         Ok(drained)
+    }
+
+    /// Declares the host named `name`, given up on, gone for good: each
+    /// sandbox that waits for it goes on from its newest stored copy, and
+    /// notes what it went back to. For an operator who knows the host is
+    /// not coming back; one that comes back after all sets its copies
+    /// aside rather than dropping them.
+    pub async fn declare_gone(&self, name: &str) -> Result<Vec<Forsaken>, Failure> {
+        let known = self.view.named(name).ok_or(Failure::NotFound)?;
+        if known.state != HostState::Lost {
+            return Err(Failure::Invalid(format!(
+                "{name} was not given up on: only a host that stopped answering can be declared gone"
+            )));
+        }
+        let forsaken = self
+            .store
+            .declare_gone(known.target.host, Gone::Declared, now_ms())
+            .await?
+            .ok_or_else(|| {
+                Failure::Invalid(format!(
+                    "{name} registered again: it is no longer given up on"
+                ))
+            })?;
+        tracing::warn!(
+            host = name,
+            sandboxes = forsaken.len(),
+            "a host was declared gone: its sandboxes go on from their stored copies"
+        );
+        Ok(forsaken)
     }
 
     /// Takes the host named `name` back into placement after a drain.
