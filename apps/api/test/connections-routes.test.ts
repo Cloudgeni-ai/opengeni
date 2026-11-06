@@ -2081,6 +2081,7 @@ describe("connections routes", () => {
       body: JSON.stringify({
         providerDomain: "WWW.Example.COM",
         kind: "api_key",
+        ownership: "personal",
         credential: { headers: { authorization: "Bearer X" } },
       }),
     });
@@ -2103,6 +2104,126 @@ describe("connections routes", () => {
       ((await updated.json()) as { connection: { providerDomain: string } }).connection
         .providerDomain,
     ).toBe("other-example.com");
+  });
+
+  test("retargeting a shared connection requires integration administration and a new credential", async () => {
+    if (!available) throw new Error("Shared connection retargeting requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const adminPermissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      "capabilities:manage",
+    ];
+    await shared!
+      .admin`update workspace_memberships set permissions = ${shared!.admin.json(adminPermissions)}
+        where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+    const adminHeaders = {
+      authorization: await bearer(workspace, "subject-a", adminPermissions),
+      "content-type": "application/json",
+    };
+    const memberHeaders = {
+      authorization: await bearer(workspace, "subject-b", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const originalMetadata = { mcpUrl: "https://service.example.test/mcp" };
+    const created = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        providerDomain: "service.example.test",
+        kind: "api_key",
+        credential: { headers: { "x-api-key": "shared-fixture" } },
+        metadata: originalMetadata,
+      }),
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const { connection } = (await created.json()) as {
+      connection: { id: string; subjectId: string | null };
+    };
+    expect(connection.subjectId).toBeNull();
+    const patch = (headers: Record<string, string>, body: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(body),
+      });
+    const storedRow = async () => {
+      const [row] = await shared!.admin<
+        { provider_domain: string; kind: string; metadata: Record<string, unknown> }[]
+      >`select provider_domain, kind, metadata from connections where id = ${connection.id}`;
+      return row!;
+    };
+
+    for (const body of [
+      { providerDomain: "elsewhere.example.test" },
+      { metadata: { mcpUrl: "https://elsewhere.example.test/mcp" } },
+      { metadata: { ...originalMetadata, resource: "https://elsewhere.example.test/" } },
+      { kind: "delegated" },
+      {
+        providerDomain: "elsewhere.example.test",
+        metadata: { mcpUrl: "https://elsewhere.example.test/mcp" },
+        credential: { headers: { "x-api-key": "member-fixture" } },
+      },
+    ]) {
+      const denied = await patch(memberHeaders, body);
+      expect(denied.status, await denied.clone().text()).toBe(403);
+    }
+    expect(await storedRow()).toMatchObject({
+      provider_domain: "service.example.test",
+      kind: "api_key",
+      metadata: originalMetadata,
+    });
+
+    // Edits that keep the destination are still open to members.
+    const renamed = await patch(memberHeaders, {
+      metadata: { ...originalMetadata, displayName: "Renamed" },
+    });
+    expect(renamed.status, await renamed.clone().text()).toBe(200);
+    expect((await storedRow()).metadata).toEqual({ ...originalMetadata, displayName: "Renamed" });
+
+    const adminWithoutCredential = await patch(adminHeaders, {
+      providerDomain: "moved.example.test",
+      metadata: { mcpUrl: "https://moved.example.test/mcp" },
+    });
+    expect(adminWithoutCredential.status).toBe(400);
+    expect((await storedRow()).provider_domain).toBe("service.example.test");
+
+    const moved = await patch(adminHeaders, {
+      providerDomain: "moved.example.test",
+      metadata: { mcpUrl: "https://moved.example.test/mcp" },
+      credential: { headers: { "x-api-key": "moved-fixture" } },
+    });
+    expect(moved.status, await moved.clone().text()).toBe(200);
+    expect(await storedRow()).toMatchObject({
+      provider_domain: "moved.example.test",
+      metadata: { mcpUrl: "https://moved.example.test/mcp" },
+    });
+
+    // A member's own personal connection keeps its existing edit behaviour.
+    const personal = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers: memberHeaders,
+      body: JSON.stringify({
+        providerDomain: "personal.example.test",
+        kind: "api_key",
+        ownership: "personal",
+        credential: { headers: { "x-api-key": "personal-fixture" } },
+      }),
+    });
+    expect(personal.status, await personal.clone().text()).toBe(201);
+    const personalId = ((await personal.json()) as { connection: { id: string } }).connection.id;
+    const personalMoved = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${personalId}`,
+      {
+        method: "PATCH",
+        headers: memberHeaders,
+        body: JSON.stringify({ providerDomain: "personal-moved.example.test" }),
+      },
+    );
+    expect(personalMoved.status, await personalMoved.clone().text()).toBe(200);
   });
 
   test("a providerDomain that canonicalizes to empty is rejected, not stored blank", async () => {
