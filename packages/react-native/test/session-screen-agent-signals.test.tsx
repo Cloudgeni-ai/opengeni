@@ -177,7 +177,7 @@ const client = new Proxy({} as Record<string, unknown>, {
 });
 
 const noop = async () => {};
-function Screen(props: { agentSignals?: boolean }) {
+function Screen(props: { agentSignals?: boolean; loadReview?: unknown }) {
   const control = useSessionControl("session-a", {
     client: client as never,
     workspaceId: "workspace-a",
@@ -237,6 +237,7 @@ function Screen(props: { agentSignals?: boolean }) {
     renderComposer: (composer: { above?: ReactNode }) =>
       createElement("div", { "data-testid": "above-composer" }, composer.above),
     ...(props.agentSignals === undefined ? {} : { agentSignals: props.agentSignals }),
+    ...(props.loadReview === undefined ? {} : { loadReview: props.loadReview }),
   } as never);
 }
 
@@ -264,5 +265,38 @@ test("agentSignals={false} hides the chips but keeps the queue, approvals and th
   expect(text).toContain("1 queued");
   expect(text).toContain("Approval needed");
   expect(text).toContain("Which colour should the kitchen wall be?");
+  await view.unmount();
+});
+
+test("the host's loadReview reaches the approval card", async () => {
+  const read: string[] = [];
+  const loadReview = async (approval: { id: string }) => {
+    read.push(approval.id);
+    return {
+      version: 1,
+      id: approval.id,
+      actionDigest: "",
+      revision: "host",
+      status: "pending",
+      title: "Deploy the test site?",
+      consequence: "People using the test site see the new version.",
+      effects: [],
+      fields: [],
+      moreFields: 0,
+      reason: "",
+      createdAt: "",
+      updatedAt: "",
+      approveLabel: "Deploy",
+      availableActions: ["approve", "reject"],
+      detailsAvailable: true,
+    };
+  };
+  const view = await renderComponent(createElement(Screen, { loadReview }));
+  await flush();
+  const text = view.container.textContent ?? "";
+  expect(read).toEqual(["call-1"]);
+  expect(text).toContain("Deploy the test site?");
+  expect(text).toContain("People using the test site see the new version.");
+  expect(text).not.toContain("Environment");
   await view.unmount();
 });
