@@ -12,6 +12,11 @@ export type TeamsBotStatus = {
 export type TeamsMicrosoftSignInStart = { authorizationUrl: string | null };
 /** The `code` and `state` Microsoft returned to the setup page. */
 export type TeamsMicrosoftSignInResult = { code: string; state: string };
+/**
+ * `replaceOwnLink` removes the signed-in person's own link to another Teams
+ * account in this workspace, only once setup is otherwise verified.
+ */
+export type TeamsInstallOptions = { replaceOwnLink?: boolean };
 
 /** Managed-browser setup and linking; these methods never infer an actor or tenant. */
 export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceId: string) {
@@ -34,12 +39,16 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
       client.requestJson<TeamsMicrosoftSignInStart>("POST", `${base}/bot/microsoft-sign-in`, {
         setupToken,
       }),
-    installBot: (setupToken: string, microsoft?: TeamsMicrosoftSignInResult) =>
-      client.requestJson<TeamsBotStatus>(
-        "PUT",
-        `${base}/bot`,
-        microsoft ? { setupToken, microsoft } : { setupToken },
-      ),
+    installBot: (
+      setupToken: string,
+      microsoft?: TeamsMicrosoftSignInResult,
+      options: TeamsInstallOptions = {},
+    ) =>
+      client.requestJson<TeamsBotStatus>("PUT", `${base}/bot`, {
+        setupToken,
+        ...(microsoft ? { microsoft } : {}),
+        ...(options.replaceOwnLink ? { replaceOwnLink: true } : {}),
+      }),
     disconnectBot: () => client.requestJson<{ ok: true }>("DELETE", `${base}/bot`),
     linkAccount: (token: string) =>
       client.requestJson<{ ok: true }>("POST", `${base}/link`, { token }),

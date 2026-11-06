@@ -86,12 +86,17 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 // Every control character except tab and newline.
 // oxlint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B-\u001F\u007F]/g;
-const URL_WITH_QUERY = /\bhttps?:\/\/[^\s?#"'<>()`]*[?#][^\s"'<>()`]*/gi;
+// A whole http(s) URL token. The query or fragment is cut in the replacement,
+// so a match never backtracks and the scan stays linear in the text length.
+const URL_TOKEN = /\bhttps?:\/\/[^\s"'<>()`]*/gi;
 const LINE_AND_COLUMN_SUFFIX = /(?::\d+){1,2}$/;
 // A credential, not prose such as "Basic authentication": it contains a digit.
 const AUTHORIZATION_VALUE =
   /\b(Bearer|Basic|Token)\s+(?=[A-Za-z._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{8,}/gi;
-const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*)?/g;
+// A JWT-shaped candidate: `eyJ`, a header run, and up to two `.`-separated
+// runs. Every part is optional, so a match never backtracks; `redactJwts`
+// decides whether the candidate is long enough to be a token.
+const JWT_CANDIDATE = /\beyJ([A-Za-z0-9_-]*)(?:\.([A-Za-z0-9_-]*)(?:\.[A-Za-z0-9_-]*)?)?/g;
 const KNOWN_TOKEN =
   /\b(?:sk-(?:proj-|ant-)?|sk_(?:live|test)_|rk_(?:live|test)_|gh[pousr]_|github_pat_|glpat-|npm_|xox[abposr]-|ops_|AKIA|ASIA|AIza)[A-Za-z0-9_-]{12,}/g;
 // The value never starts with `[` or `…`, so an already redacted value and a
@@ -115,6 +120,29 @@ function isOpaqueCredential(run: string): boolean {
 }
 
 /**
+ * Replace each JWT (`eyJ` plus at least five header characters, a `.`, at
+ * least five payload characters, and an optional `.signature`) with
+ * `[redacted]` in one linear pass. A candidate that is too short is skipped
+ * to the end of its header run: any later `eyJ` inside that run has a shorter
+ * header followed by the same text, so it cannot be a JWT either.
+ */
+function redactJwts(text: string): string {
+  const candidates = new RegExp(JWT_CANDIDATE);
+  let result = "";
+  let copied = 0;
+  for (let match = candidates.exec(text); match; match = candidates.exec(text)) {
+    const [candidate, header = "", payload] = match;
+    if (header.length >= 5 && payload !== undefined && payload.length >= 5) {
+      result += text.slice(copied, match.index) + REDACTED;
+      copied = match.index + candidate.length;
+    } else {
+      candidates.lastIndex = match.index + "eyJ".length + header.length;
+    }
+  }
+  return result + text.slice(copied);
+}
+
+/**
  * Remove what an error text must never carry while keeping what makes it
  * useful. Query strings and fragments are dropped from http(s) URLs (keeping a
  * stack frame's `:line:column`); authorization values, JWTs, well-known API
@@ -124,18 +152,18 @@ function isOpaqueCredential(run: string): boolean {
  * UUIDs and stack frames survive. Applying it twice changes nothing.
  */
 export function scrubClientErrorText(text: string): string {
-  return text
+  const scrubbed = text
     .replace(LONE_SURROGATE, "\uFFFD")
     .replace(/\r\n?/g, "\n")
     .replace(CONTROL_CHARACTERS, " ")
-    .replace(URL_WITH_QUERY, (url) => {
-      if (ERROR_DECODER_URL.test(url)) return url;
+    .replace(URL_TOKEN, (url) => {
       const cut = url.search(/[?#]/);
+      if (cut < 0 || ERROR_DECODER_URL.test(url)) return url;
       const suffix = url.slice(cut).match(LINE_AND_COLUMN_SUFFIX)?.[0] ?? "";
       return url.slice(0, cut) + suffix;
     })
-    .replace(AUTHORIZATION_VALUE, `$1 ${REDACTED}`)
-    .replace(JWT, REDACTED)
+    .replace(AUTHORIZATION_VALUE, `$1 ${REDACTED}`);
+  return redactJwts(scrubbed)
     .replace(KNOWN_TOKEN, REDACTED)
     .replace(SECRET_ASSIGNMENT, `$1${REDACTED}`)
     .replace(OPAQUE_RUN, (run) => (isOpaqueCredential(run) ? REDACTED : run));

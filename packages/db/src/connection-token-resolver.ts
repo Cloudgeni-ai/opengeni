@@ -517,6 +517,15 @@ export type ConnectionTokenResolverOptions = {
   transitionPermanentRefreshFailure?: (
     failure: PermanentConnectionRefreshFailure,
   ) => Promise<boolean>;
+  /**
+   * Called when a refresh was attempted and failed for a reason that may pass
+   * (the token endpoint was unreachable, answered 5xx, 408 or 429, or the
+   * refresh raced another change). The connection stays active and the result
+   * is still `refresh_failed`. Not called for a rejected grant or for a
+   * connection that cannot be refreshed at all (see
+   * ConnectionNotRefreshableError): only reconnecting fixes those.
+   */
+  onTransientRefreshFailure?: (failure: { connectionId: string }) => void;
 };
 
 export type RefreshTransportOptions = {
@@ -892,6 +901,8 @@ export function buildConnectionTokenResolver(
               })
               .catch(() => undefined);
           }
+        } else if (!(error instanceof ConnectionNotRefreshableError)) {
+          options.onTransientRefreshFailure?.({ connectionId: cred.id });
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
@@ -1062,6 +1073,19 @@ export class ConnectionRefreshHttpError extends Error {
     this.name = "ConnectionRefreshHttpError";
     this.httpStatus = httpStatus;
     this.oauthErrorCode = oauthErrorCode;
+  }
+}
+
+/**
+ * The connection holds nothing to refresh with (no refresh token or token
+ * endpoint, or an unusable endpoint). Retrying cannot help; a rejected access
+ * token stays rejected until the person reconnects. The connection itself is
+ * left as it is, since its access token may still work for other requests.
+ */
+export class ConnectionNotRefreshableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectionNotRefreshableError";
   }
 }
 
@@ -1258,7 +1282,7 @@ export async function refreshOAuthConnectionCredential(
     stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
   const tokenEndpoint = personalGitHub ? PERSONAL_GITHUB_TOKEN_URL : storedTokenEndpoint;
   if (!refreshToken || !tokenEndpoint) {
-    throw new Error("connection has no refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has no refresh token endpoint");
   }
   if (personalGitHub && storedTokenEndpoint !== PERSONAL_GITHUB_TOKEN_URL) {
     throw new ConnectionRefreshHttpError(401, "client_unavailable");
@@ -1270,7 +1294,7 @@ export async function refreshOAuthConnectionCredential(
       allowLoopbackHttp: settings.environment === "local" || settings.environment === "test",
     });
   } catch {
-    throw new Error("connection has an invalid refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has an invalid refresh token endpoint");
   }
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");

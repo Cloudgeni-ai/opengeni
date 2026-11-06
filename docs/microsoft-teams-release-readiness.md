@@ -197,6 +197,30 @@ What a tenant administrator can do with a connection that already exists:
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.
 
+Each setup refusal, and each refused account link, is a 4xx whose
+`details.code` is `teams_connection_refused` and whose `details.reason` names
+the refusal (for example `not_tenant_admin`, `user_mismatch`,
+`move_requires_global_admin` or `opengeni_account_linked`). Its message says
+what happened and what to do next, and the setup page and the link dialog show
+it as is. The wording never names the workspace, account or person that holds a
+conflicting connection, and nothing about an existing binding is revealed before
+the tenant administrator sign-in passes.
+
+A workspace links one Teams account per Opengeni account, and links survive a
+disconnect. When the installer's Opengeni account is already linked to a
+different Teams account in the chosen workspace, setup refuses with
+`opengeni_account_linked` and changes nothing (the setup link stays usable).
+The setup page then offers **Unlink and connect**: it starts setup again with a
+new Microsoft sign-in and `replaceOwnLink: true`. The API removes only the
+signed-in person's own link in that workspace, as **Unlink account** does, and
+only after the administrator sign-in and every binding check pass and that link
+is what refused the install, so a refused or abandoned attempt keeps the link.
+When the installer's Teams account is linked to another Opengeni account
+(`teams_account_linked`), nothing is removed and they sign in to Opengeni with
+that account instead. A refused account link from the plugins page
+(`link_opengeni_account_linked`) tells the person to unlink in the Teams
+integration and get a new link.
+
 Replies to tenants that have not connected are bounded on each API replica, in
 separate budgets so one kind can't use up another:
 
@@ -266,8 +290,80 @@ export OPENGENI_TEAMS_PRIVACY_URL='https://YOUR_APPROVED_PRIVACY_PAGE'
 export OPENGENI_TEAMS_TERMS_URL='https://YOUR_APPROVED_TERMS_PAGE'
 export OPENGENI_TEAMS_APP_VERSION='1.0.0'
 export OPENGENI_TEAMS_APP_NAME='Opengeni'
+# Optional: the publisher name and Microsoft AI Cloud Partner Program ID.
+export OPENGENI_TEAMS_DEVELOPER_NAME='Opengeni'
+export OPENGENI_TEAMS_MPN_ID='7181379'
 bun scripts/generate-teams-app-manifest.ts --package-dir /absolute/private/path/teams-package
 ```
+
+For the Opengeni Store listing the legal URLs are `https://opengeni.ai`,
+`https://opengeni.ai/privacy` and `https://opengeni.ai/terms`; the generator
+still requires them explicitly. `developer.name` defaults to `Opengeni`, the
+Partner Center publisher name (the legal entity is Cloudgeni AS), and must match
+the publisher shown in Partner Center; set `OPENGENI_TEAMS_DEVELOPER_NAME` (at
+most 32 characters) for another publisher. `developer.mpnId` defaults to
+Opengeni's PartnerGlobal ID `7181379`; set `OPENGENI_TEAMS_MPN_ID` to another
+numeric ID, or to `none` to leave it out (for example for a private staging
+package); an empty value uses the default. Anyone publishing their own
+deployment's package must set both to their own publisher, or `none` for the
+partner ID. The descriptions and command text name the product, Opengeni, even
+when `OPENGENI_TEAMS_APP_NAME` changes the app's display name; a deployment
+that rebrands must change that copy in the generator too, because the Store
+requires the name to be consistent across the metadata.
+
+The short and full descriptions are generated for the enabled scopes. They name
+Microsoft Teams on first reference, say that Opengeni is an AI agent whose
+replies can be wrong and how to report one, state the one-time administrator
+setup, the Opengeni account with access to the connected workspace and the
+account link, with the website as the way to sign up, and list the main
+limitations (text messages only; approvals and private information requests
+open Opengeni in a web browser). Copy `description.short` and
+`description.full` verbatim from the submitted `manifest.json` into Partner
+Center, and update both whenever you regenerate the package (the copy depends
+on the group-chat flag, website URL and generator version):
+the Store requires them to match.
+
+The bot declares `commandLists`: in personal chats `help`, `link`, `unlink` and
+three prompt starters (`Research a topic`, `Draft a message`, `Plan a project`);
+in enabled group chats, `help`. In a connected organization the bot
+answers `help` and `unlink` itself, without starting agent work, and `link`
+replies with the account-link card (or says the account is already linked);
+prompt starters are ordinary messages to the agent.
+
+Store submission gate: don't submit until every listed command and prompt
+starter gets a reply with a way forward in every tenant and account state.
+With self-serve setup on (`OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED`), a
+person in an admitted work or school tenant that isn't connected gets the
+Connect your organization card when installing the app and for 1:1 messages
+other than `help` and `unlink`, and a 1:1 message from a tenant that isn't
+admitted gets the not-available notice. Today these cases still get no reply or
+no way forward:
+
+- In an admitted tenant that isn't connected, `help` and `unlink` reply without a way
+  forward: help says the organization must connect Opengeni but carries no
+  Connect your organization card, and unlink says the account isn't linked.
+- The not-available notice tells the admin to contact the Opengeni team but
+  gives no contact route.
+- With self-serve setup off, a tenant that isn't admitted gets no reply at all,
+  and an admitted tenant that isn't connected answers only `help` and `unlink`:
+  `link` and prompt starters from anyone other than a setup administrator get
+  no reply, and the welcome gives no way to sign up or get access.
+- Installing the app in a tenant that isn't admitted sends no welcome; the
+  not-available notice only answers a message.
+- Onboarding replies are limited per person, per tenant and per process; once
+  a limit is spent, further messages from a tenant that isn't connected get no
+  reply.
+- A Microsoft personal (consumer) account's tenant can't be connected through
+  self-serve setup, so `link` and prompt starters get no reply and the welcome
+  gives no way forward.
+- In a tenant that isn't connected, `link` and prompts sent in a group chat get
+  no reply.
+- A linked person whose workspace access doesn't allow starting chats gets no
+  reply to prompt starters.
+- A group chat that isn't on the allowlist answers nothing, including `help`.
+
+Keep the package personal-only (the default) until conversations that aren't
+enabled get a reply.
 
 The output directory must not exist. The generator writes `manifest.json`,
 `color.png` (192 × 192), and `outline.png` (32 × 32, white on transparent),
@@ -530,7 +626,7 @@ The retained binding preserves existing conversation and delivery history.
 Group chats are opt-in through `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS`:
 exact tenant UUID and conversation ID pairs, separated by commas. Tenant admission
 alone never enables a group. Set `OPENGENI_TEAMS_APP_GROUP_CHATS=true` when generating
-an internal package to advertise personal and groupchat scopes. Default packages
+an internal package to advertise personal and `groupChat` scopes. Default packages
 advertise personal chats only; no unsupported all-channel feature is claimed.
 
 Only explicit bot mentions are admitted. Each participant must link their own

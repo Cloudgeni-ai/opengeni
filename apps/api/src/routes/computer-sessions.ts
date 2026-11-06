@@ -111,6 +111,7 @@ import {
 } from "../browser-controller-authority";
 import {
   recordSourcePlacementMove,
+  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -306,17 +307,28 @@ export function registerComputerSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/computer-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const listed = await listComputerSessions(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      ...parseInteractionSessionListQuery(context.req.query()),
-    });
-    return context.json(
-      ComputerSessionListResponse.parse({
+    const list = async () => {
+      const listed = await listComputerSessions(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        ...parseInteractionSessionListQuery(context.req.query()),
+      });
+      return {
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      }),
-    );
+      };
+    };
+    let listed = await list();
+    // A Desktop left behind by its task's move is retired, not reusable.
+    if (
+      await reconcileListedSourcePlacementMoves(channelServices, {
+        grant,
+        sessions: listed.sessions,
+      })
+    ) {
+      listed = await list();
+    }
+    return context.json(ComputerSessionListResponse.parse(listed));
   });
 
   app.get("/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId", async (context) => {

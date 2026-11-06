@@ -161,6 +161,37 @@ export function userErrorTextWithoutReference(error: unknown, fallback?: string)
   return fallback ?? "Something went wrong. Try again.";
 }
 
+/** `details.code` from an API error body, when it has one. */
+export function apiErrorDetailCode(error: unknown): string | undefined {
+  const details =
+    error !== null && typeof error === "object"
+      ? (error as { details?: unknown }).details
+      : undefined;
+  const code =
+    details !== null && typeof details === "object"
+      ? (details as { code?: unknown }).code
+      : undefined;
+  return typeof code === "string" && code ? code : undefined;
+}
+
+/**
+ * The server's own sentence for an expected refusal (a 4xx) whose
+ * `details.code` is one of `detailCodes`. A route that words each refusal for
+ * people (what happened, then what to do next) marks it with such a code, and
+ * the page that knows the code shows the sentence instead of the generic advice
+ * `userErrorText` gives for its status. Undefined for any other error, so fall
+ * back to `userErrorText`.
+ */
+export function serverRefusalText(
+  error: unknown,
+  detailCodes: readonly string[],
+): string | undefined {
+  const { status, serverMessage } = apiErrorFacts(error);
+  if (status === undefined || status < 400 || status >= 500 || !serverMessage) return undefined;
+  const code = apiErrorDetailCode(error);
+  return code && detailCodes.includes(code) ? serverMessage : undefined;
+}
+
 /**
  * Props for `ErrorMessage`'s Technical details: the reference (with Copy),
  * then the status, code and the server's own message.

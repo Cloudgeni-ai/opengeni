@@ -46,6 +46,9 @@ async function main() {
     OPENGENI_TEMPORAL_TASK_QUEUE: `rig-ui-${crypto.randomUUID()}`,
     OPENGENI_API_HOST: "127.0.0.1",
     OPENGENI_API_PORT: String(apiPort),
+    // The web app calls the unauthenticated local-mode API from its own
+    // origin, which local mode grants CORS only when configured.
+    OPENGENI_WEB_BASE_URL: `http://127.0.0.1:${webPort}`,
     OPENGENI_PRODUCT_ACCESS_MODE: "local",
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",

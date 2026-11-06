@@ -54,6 +54,7 @@ export default defineConfig({
     "src/workspace-control-event.ts",
     "src/vault-provider-wire.ts",
     "src/organization-access.ts",
+    "src/api-key-delegation.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",

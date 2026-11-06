@@ -112,7 +112,7 @@ wakes the agent once more; the deadline bounds that cost.
 `sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
 predicate for this rule. Worker peek and settlement, wake and claim admission,
 public `inputWait`, and waiting-descendant counts all read it.
-The operational instructions still tell the agent to answer and then call
+The `wait_for_input` tool description still tells the agent to answer and then call
 `wait_for_input` again while the awaited work is still in flight, reusing the
 earlier reason and only the time left before the earlier deadline, because
 each turn's wait sets a fresh deadline from its timeout.

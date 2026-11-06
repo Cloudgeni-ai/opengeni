@@ -181,7 +181,6 @@ import {
   canManageWorkspaceIntegrations,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
-import { request } from "@/api";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -283,7 +282,6 @@ export function apiIntegrationAccess(
 type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "skills";
-  slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
 
@@ -295,7 +293,7 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
   );
 }
 
-function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
+function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProps) {
   const context = useAppContext();
 
   const client = context.client;
@@ -903,30 +901,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
-
-  const slackUserLinkHandled = useRef(false);
-  useEffect(() => {
-    if (!slackLinkToken || slackUserLinkHandled.current) return;
-    slackUserLinkHandled.current = true;
-    clearReturnParams();
-    void request(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/user-links`,
-      {
-        method: "POST",
-        body: JSON.stringify({ linkToken: slackLinkToken }),
-      },
-    )
-      .then(() => {
-        toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke Opengeni again.",
-        });
-      })
-      .catch((error) => {
-        toast.error("Couldn't link your Slack identity", {
-          description: userErrorText(error),
-        });
-      });
-  }, [slackLinkToken, workspaceId, clearReturnParams]);
 
   // Close the page if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A

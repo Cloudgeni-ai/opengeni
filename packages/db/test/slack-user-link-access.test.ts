@@ -19,7 +19,7 @@ import {
   getSlackUserLinkAccessRequestForSubject,
   grantWorkspaceAccess,
   namedSubjectIsActiveOrganizationMember,
-  slackUserLinkOrganizationMemberMayLink,
+  slackUserLinkConfirmationVia,
   prepareSlackUserLinkAccessRequest,
   requestSlackUserLinkWorkspaceAccess,
   SlackUserLinkAccessPersistenceError,
@@ -853,9 +853,64 @@ describe("Slack user-link access migration and lifecycle", () => {
     expect([...memberships]).toEqual([{ subjectId: link!.subjectId }]);
   });
 
-  test("a separately granted canonical membership completes the exact prepared request once", async () => {
+  test("a workspace member's prepared link completes only once they confirm it", async () => {
+    if (!available) return;
+    const fixture = await preparedFixture("member-confirm");
+    await grantWorkspaceAccess(db, {
+      ...fixture.target,
+      subjectId: fixture.subjectId,
+      subjectLabel: "member-confirm@example.test",
+      permissions: ["sessions:create"],
+    });
+    const scope = {
+      workspaceId: fixture.target.workspaceId,
+      requestId: fixture.prepared.id,
+      subjectId: fixture.subjectId,
+    };
+    const links = async () =>
+      await admin<{ subjectId: string }[]>`
+        select subject_id as "subjectId" from slack_bot_user_links
+        where connection_id = ${fixture.connection.id} and slack_user_id = 'U_member-confirm'`;
+    // Holding sessions:create is not consent to link a Slack account someone
+    // else's link names: without a confirmation nothing is linked.
+    expect(await completeSlackUserLinkAccessIfGranted(db, scope)).toMatchObject({
+      status: "prepared",
+      version: 1,
+    });
+    expect([...(await links())]).toEqual([]);
+    expect(await slackUserLinkConfirmationVia(db, { ...scope, identityHome: fixture.target })).toBe(
+      "workspace_membership",
+    );
+    await expect(
+      completeSlackUserLinkAccessIfGranted(db, { ...scope, confirmed: { expectedVersion: 2 } }),
+    ).rejects.toMatchObject({ code: "version_conflict" });
+    expect([...(await links())]).toEqual([]);
+    expect(
+      await completeSlackUserLinkAccessIfGranted(db, {
+        ...scope,
+        confirmed: { expectedVersion: 1 },
+      }),
+    ).toMatchObject({ status: "completed", version: 2 });
+    expect(
+      await completeSlackUserLinkAccessIfGranted(db, {
+        ...scope,
+        confirmed: { expectedVersion: 1 },
+      }),
+    ).toMatchObject({ status: "completed", version: 2 });
+    expect([...(await links())]).toEqual([{ subjectId: fixture.subjectId }]);
+  });
+
+  test("a separately granted canonical membership completes the exact requested access once", async () => {
     if (!available) return;
     const fixture = await preparedFixture("auto-complete");
+    // Asking for access is the person's confirmation.
+    await requestSlackUserLinkWorkspaceAccess(db, {
+      workspaceId: fixture.target.workspaceId,
+      requestId: fixture.prepared.id,
+      actorSubjectId: fixture.subjectId,
+      expectedVersion: 1,
+      idempotencyKey: randomUUID(),
+    });
     await grantWorkspaceAccess(db, {
       ...fixture.target,
       subjectId: fixture.subjectId,
@@ -867,14 +922,14 @@ describe("Slack user-link access migration and lifecycle", () => {
       requestId: fixture.prepared.id,
       subjectId: fixture.subjectId,
     });
-    expect(completed).toMatchObject({ status: "completed", version: 2 });
+    expect(completed).toMatchObject({ status: "completed", version: 3 });
     expect(
       await completeSlackUserLinkAccessIfGranted(db, {
         workspaceId: fixture.target.workspaceId,
         requestId: fixture.prepared.id,
         subjectId: fixture.subjectId,
       }),
-    ).toMatchObject({ status: "completed", version: 2 });
+    ).toMatchObject({ status: "completed", version: 3 });
     expect(
       await getSlackBotUserLink(
         db,
@@ -937,7 +992,7 @@ describe("linking Slack as an organization member, without workspace access", ()
       requestId: fixture.prepared.id,
       subjectId: fixture.subjectId,
       identityHome: fixture.target,
-      linkAsOrganizationMember: { expectedVersion: 1 },
+      confirmed: { expectedVersion: 1 },
     });
     expect(completed).toMatchObject({ status: "completed", version: 2 });
     expect(
@@ -961,7 +1016,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         requestId: fixture.prepared.id,
         subjectId: fixture.subjectId,
         identityHome: fixture.target,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "completed", version: 2 });
   });
@@ -976,7 +1031,7 @@ describe("linking Slack as an organization member, without workspace access", ()
           requestId: fixture.prepared.id,
           subjectId: fixture.subjectId,
           identityHome: fixture.target,
-          linkAsOrganizationMember: { expectedVersion: 1 },
+          confirmed: { expectedVersion: 1 },
         }),
       ).toMatchObject({ status: "completed" });
     }
@@ -998,7 +1053,7 @@ describe("linking Slack as an organization member, without workspace access", ()
           requestId: fixture.prepared.id,
           subjectId: fixture.subjectId,
           identityHome: fixture.target,
-          linkAsOrganizationMember: { expectedVersion: 1 },
+          confirmed: { expectedVersion: 1 },
         }),
       ).toMatchObject({ status: "prepared", version: 1 });
       expect(
@@ -1024,7 +1079,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         requestId: fixture.prepared.id,
         subjectId: fixture.subjectId,
         identityHome: fixture.target,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "prepared" });
   });
@@ -1058,7 +1113,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         requestId: prepared.id,
         subjectId,
         identityHome: home,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "prepared" });
 
@@ -1069,7 +1124,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         workspaceId: own.target.workspaceId,
         requestId: own.prepared.id,
         subjectId: own.subjectId,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "prepared" });
   });
@@ -1098,42 +1153,42 @@ describe("linking Slack as an organization member, without workspace access", ()
       ),
     ).toBeNull();
     // It is offered, to that person only.
-    expect(await slackUserLinkOrganizationMemberMayLink(db, scope)).toBe(true);
+    expect(await slackUserLinkConfirmationVia(db, scope)).toBe("organization_membership");
     expect(
-      await slackUserLinkOrganizationMemberMayLink(db, {
+      await slackUserLinkConfirmationVia(db, {
         ...scope,
         subjectId: `user:${randomUUID()}`,
       }),
-    ).toBe(false);
+    ).toBeNull();
     // A stale confirmation is refused.
     await expect(
       completeSlackUserLinkAccessIfGranted(db, {
         ...scope,
-        linkAsOrganizationMember: { expectedVersion: 2 },
+        confirmed: { expectedVersion: 2 },
       }),
     ).rejects.toMatchObject({ code: "version_conflict" });
     expect(
       await completeSlackUserLinkAccessIfGranted(db, {
         ...scope,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "completed", version: 2 });
     // Once linked, nothing more is offered.
-    expect(await slackUserLinkOrganizationMemberMayLink(db, scope)).toBe(false);
+    expect(await slackUserLinkConfirmationVia(db, scope)).toBeNull();
 
     // Not offered to someone who isn't a member, or after the link expired.
     const outsider = await memberLinkFixture(`org-offer-none-${randomUUID().slice(0, 8)}`, null);
     expect(
-      await slackUserLinkOrganizationMemberMayLink(db, {
+      await slackUserLinkConfirmationVia(db, {
         workspaceId: outsider.target.workspaceId,
         requestId: outsider.prepared.id,
         subjectId: outsider.subjectId,
         identityHome: outsider.target,
       }),
-    ).toBe(false);
+    ).toBeNull();
     const late = await memberLinkFixture(`org-offer-late-${randomUUID().slice(0, 8)}`);
     expect(
-      await slackUserLinkOrganizationMemberMayLink(
+      await slackUserLinkConfirmationVia(
         db,
         {
           workspaceId: late.target.workspaceId,
@@ -1143,7 +1198,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         },
         new Date(Date.now() + 60 * 60_000),
       ),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   test("an identity that is already linked keeps the access request", async () => {
@@ -1166,7 +1221,7 @@ describe("linking Slack as an organization member, without workspace access", ()
         requestId: fixture.prepared.id,
         subjectId: fixture.subjectId,
         identityHome: fixture.target,
-        linkAsOrganizationMember: { expectedVersion: 1 },
+        confirmed: { expectedVersion: 1 },
       }),
     ).toMatchObject({ status: "prepared" });
     const requested = await requestSlackUserLinkWorkspaceAccess(db, {

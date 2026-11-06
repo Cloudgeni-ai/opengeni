@@ -791,7 +791,12 @@ export class BrowserControlServer {
       if (request.method !== "POST") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
-      const sync = BrowserPasskeySyncRequest.safeParse(await readJson(request));
+      // The owner rides in the query, which controllers that predate it ignore.
+      const owner = url.searchParams.get("owner");
+      const body = await readJson(request);
+      const sync = BrowserPasskeySyncRequest.safeParse(
+        owner !== null && isRecord(body) ? { ...body, owner } : body,
+      );
       if (!sync.success) {
         throw new ProtocolError("invalid_action", "passkey sync request is invalid", 400);
       }

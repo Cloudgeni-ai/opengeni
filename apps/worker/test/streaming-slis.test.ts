@@ -304,6 +304,84 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     );
   });
 
+  test("pre-dispatch stages are exclusive and add up to the request's pre-dispatch time", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "codex-subscription",
+      now: () => now,
+    });
+
+    timing.onModelRequestEntry("model_entry");
+    now = 50; // previous response settled
+    timing.enterPreDispatchStage("admission");
+    now = 250;
+    timing.enterPreDispatchStage("request_build");
+    now = 300;
+    timing.enterPreDispatchStage("credential");
+    now = 400;
+    timing.enterPreDispatchStage("request_build");
+    now = 410;
+    timing.enterPreDispatchStage("dispatch_checkpoint");
+    now = 460;
+    timing.enterPreDispatchStage("request_audit");
+    now = 600;
+    timing.enterPreDispatchStage("provider_admission");
+    now = 1_400;
+    timing.enterPreDispatchStage("transport");
+    now = 1_500;
+    timing.onProviderDispatch();
+
+    // After dispatch, a continuation's re-admission belongs to no request.
+    timing.enterPreDispatchStage("provider_admission");
+    now = 9_000;
+    timing.onProviderDispatch();
+
+    const metrics = await observability.prometheusMetrics();
+    const stageSum = (stage: string) =>
+      Number(
+        metrics.match(
+          new RegExp(
+            `opengeni_model_request_pre_dispatch_stage_seconds_sum\\{[^}]*stage="${stage}"[^}]*\\} ([0-9.e-]+)`,
+          ),
+        )?.[1],
+      );
+    expect(stageSum("settlement_wait")).toBeCloseTo(0.05, 6);
+    expect(stageSum("admission")).toBeCloseTo(0.2, 6);
+    // Re-entered stages accumulate within one request.
+    expect(stageSum("request_build")).toBeCloseTo(0.06, 6);
+    expect(stageSum("credential")).toBeCloseTo(0.1, 6);
+    expect(stageSum("dispatch_checkpoint")).toBeCloseTo(0.05, 6);
+    expect(stageSum("request_audit")).toBeCloseTo(0.14, 6);
+    expect(stageSum("provider_admission")).toBeCloseTo(0.8, 6);
+    expect(stageSum("transport")).toBeCloseTo(0.1, 6);
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_stage_seconds_count\{[^}]*provider="codex-subscription"[^}]*stage="provider_admission"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_sum\{[^}]*provider="codex-subscription"[^}]*\} 1\.5\b/,
+    );
+  });
+
+  test("a request without stage marks reports its whole pre-dispatch time as settlement wait", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    // Stage marks before any model entry are ignored.
+    timing.enterPreDispatchStage("admission");
+    timing.onModelRequestEntry("model_entry");
+    now = 300;
+    timing.onProviderDispatch();
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_stage_seconds_sum\{[^}]*stage="settlement_wait"[^}]*\} 0\.3\b/,
+    );
+    expect(metrics).not.toMatch(
+      /opengeni_model_request_pre_dispatch_stage_seconds_count\{[^}]*stage="admission"/,
+    );
+  });
+
   test("provider TTFT survives a lagging structural event and follows the latest dispatch", async () => {
     const observability = worker();
     let now = 0;

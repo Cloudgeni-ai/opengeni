@@ -100,6 +100,7 @@
     "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
     "e2b": "2.56.0",
+    "libheif-js": "1.23.5",
     "modal": "0.9.0",
     "openai": "6.47.0",
     "postal-mime": "2.7.5",

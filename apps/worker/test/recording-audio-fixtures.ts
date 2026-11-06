@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -39,6 +39,37 @@ export function gappedOpusWebm(seconds: number, holes: Array<[number, number]>):
     ["-af", `aselect='${keep}'`, "-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-f", "webm"],
     "webm",
   );
+}
+
+/**
+ * A WebM/Opus tone whose packets from `fromPacket` on are stamped `jumpSeconds`
+ * later: a few kilobytes that claim a far longer timeline than they hold.
+ */
+export function jumpedOpusWebm(seconds: number, fromPacket: number, jumpSeconds: number) {
+  const directory = mkdtempSync(join(tmpdir(), "recording-audio-test-"));
+  try {
+    const source = join(directory, "tone.webm");
+    const output = join(directory, "jumped.webm");
+    writeFileSync(source, opusWebm(seconds));
+    const result = spawnSync(ffmpegPath, [
+      "-nostdin",
+      "-loglevel",
+      "error",
+      "-i",
+      source,
+      "-c",
+      "copy",
+      "-bsf:a",
+      `setts=ts=if(gte(N\\,${fromPacket})\\,TS+${jumpSeconds * 1_000}\\,TS)`,
+      "-f",
+      "webm",
+      output,
+    ]);
+    if (result.status !== 0) throw new Error(String(result.stderr));
+    return new Uint8Array(readFileSync(output));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** Split an ADTS stream at frame boundaries into pieces of about `frames` frames. */

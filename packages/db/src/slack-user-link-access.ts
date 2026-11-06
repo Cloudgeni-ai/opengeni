@@ -408,18 +408,46 @@ export async function approveSlackUserLinkAccessRequest(
 }
 
 /**
- * Complete a prepared/pending link only when the subject's live membership
- * already grants sessions:create (or workspace:admin). This is used both for
- * ordinary already-authorized links and after a separate canonical member grant.
+ * How confirming a request would link its Slack identity, judged live, or null
+ * when confirming would not link it.
  *
- * With `linkAsOrganizationMember` (the person confirmed it), one more case
- * completes it: an active, full member of the organization linking a Slack
- * identity that is not linked yet, from a link for the
+ * `workspace_membership`: the subject's membership grants sessions:create (or
+ * workspace:admin), or it is their own personal workspace.
+ *
+ * `organization_membership`: an active, full member of the organization
+ * linking a Slack identity that is not linked yet, from a link for the
  * installation's own workspace (`identityHome`). That only records who the
- * Slack person is; it grants no workspace membership or permission, and the
- * request stays an ordinary completed link. A link for another (routed)
- * workspace, or for an identity that is already linked, is an access request
- * and keeps the ordinary path.
+ * Slack person is; it grants no workspace membership or permission. A link for
+ * another (routed) workspace, or for an identity that is already linked, is an
+ * access request and keeps the ordinary path.
+ */
+export type SlackUserLinkVia = "workspace_membership" | "organization_membership";
+
+async function slackUserLinkVia(
+  database: Database,
+  row: RequestRow,
+  home: SlackIdentityHome | undefined,
+): Promise<SlackUserLinkVia | null> {
+  if (await membershipAllowsSlackLink(database, row)) return "workspace_membership";
+  if (
+    row.status === "prepared" &&
+    (await organizationMembershipLinksSlackIdentity(database, row, home))
+  ) {
+    return "organization_membership";
+  }
+  return null;
+}
+
+/**
+ * Complete a link request once the person linking has confirmed it.
+ *
+ * Opening a link never links anything: the signed link proves only the Slack
+ * side, so a link someone else sent must not attach the sender's Slack account
+ * to whoever opens it. A `prepared` request therefore completes only with
+ * `confirmed`, naming the version the person saw, and only when
+ * `slackUserLinkVia` allows it. A `pending` request was confirmed when the
+ * person asked for access, so it completes once a separate member grant gives
+ * their live membership sessions:create (or workspace:admin).
  */
 export async function completeSlackUserLinkAccessIfGranted(
   db: Database,
@@ -430,11 +458,10 @@ export async function completeSlackUserLinkAccessIfGranted(
     /** The installation's tenancy, when it differs from the routed request's. */
     identityHome?: SlackIdentityHome;
     /**
-     * The person confirmed linking as an organization member, at this
-     * version of the request. Never implied: opening a link alone must not
-     * link an account someone else sent them.
+     * The person confirmed linking this Slack account, at this version of the
+     * request. Never implied by opening or preparing the link.
      */
-    linkAsOrganizationMember?: { expectedVersion: number };
+    confirmed?: { expectedVersion: number };
   },
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest | null> {
@@ -458,19 +485,13 @@ export async function completeSlackUserLinkAccessIfGranted(
       if (row.status === "completed" || !isActiveStatus(row.status)) {
         return mapRequest(row);
       }
-      if (
-        input.linkAsOrganizationMember &&
-        input.linkAsOrganizationMember.expectedVersion !== row.version
-      ) {
+      if (input.confirmed && input.confirmed.expectedVersion !== row.version) {
         throw new SlackUserLinkAccessPersistenceError("version_conflict");
       }
-      const via = (await membershipAllowsSlackLink(database, row))
-        ? ("workspace_membership" as const)
-        : input.linkAsOrganizationMember &&
-            row.status === "prepared" &&
-            (await organizationMembershipLinksSlackIdentity(database, row, input.identityHome))
-          ? ("organization_membership" as const)
-          : null;
+      if (row.status === "prepared" && !input.confirmed) {
+        return mapRequest(row);
+      }
+      const via = await slackUserLinkVia(database, row, input.identityHome);
       if (!via) {
         return mapRequest(row);
       }
@@ -509,11 +530,12 @@ export async function completeSlackUserLinkAccessIfGranted(
 }
 
 /**
- * Whether the person may link this request's Slack identity as an active,
- * full member of the organization, once they confirm it
- * (`completeSlackUserLinkAccessIfGranted` with `linkAsOrganizationMember`).
+ * How confirming this prepared request would link the Slack account for this
+ * person (`completeSlackUserLinkAccessIfGranted` with `confirmed`), or null
+ * when it would not, so the person is asked to confirm only when confirming
+ * links, and is offered an access request otherwise.
  */
-export async function slackUserLinkOrganizationMemberMayLink(
+export async function slackUserLinkConfirmationVia(
   db: Database,
   input: {
     workspaceId: string;
@@ -522,7 +544,7 @@ export async function slackUserLinkOrganizationMemberMayLink(
     identityHome: SlackIdentityHome;
   },
   now = new Date(),
-): Promise<boolean> {
+): Promise<SlackUserLinkVia | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const database = scopedDb as unknown as Database;
     const [row] = await scopedDb
@@ -537,9 +559,9 @@ export async function slackUserLinkOrganizationMemberMayLink(
       )
       .limit(1);
     if (!row || row.status !== "prepared" || row.expiresAt.getTime() <= now.getTime()) {
-      return false;
+      return null;
     }
-    return await organizationMembershipLinksSlackIdentity(database, row, input.identityHome);
+    return await slackUserLinkVia(database, row, input.identityHome);
   });
 }
 

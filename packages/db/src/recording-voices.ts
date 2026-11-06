@@ -350,6 +350,32 @@ export async function syncSpeakerVoice(
 }
 
 /**
+ * Take a recording's voices out of every voiceprint they taught, and drop
+ * them, as the recording is deleted: a voiceprint only holds the speakers
+ * currently named as the person in recordings that still exist. Nothing is
+ * left to learn from or subtract again, so repeating it changes nothing.
+ */
+export async function releaseRecordingVoices(
+  tx: Database,
+  input: { workspaceId: string; recordingId: string },
+): Promise<void> {
+  const where = and(
+    eq(schema.recordingSpeakerVoices.workspaceId, input.workspaceId),
+    eq(schema.recordingSpeakerVoices.recordingId, input.recordingId),
+  );
+  const voices = await tx
+    .select()
+    .from(schema.recordingSpeakerVoices)
+    .where(where)
+    .orderBy(schema.recordingSpeakerVoices.versionId, schema.recordingSpeakerVoices.speakerLabel)
+    .for("update");
+  for (const voice of voices) {
+    if (voice.learnedPersonId) await adjustVoiceprint(tx, voice, voice.learnedPersonId, -1);
+  }
+  if (voices.length > 0) await tx.delete(schema.recordingSpeakerVoices).where(where);
+}
+
+/**
  * Remember that a suggested person is not this voice, for this recording.
  * Returns whether the label had a suggestion to turn down.
  */

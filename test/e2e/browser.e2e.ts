@@ -35,7 +35,7 @@ describe("browser e2e", () => {
       await services.migrate();
       apiPort = await freePort();
       webPort = await freePort();
-      const env = stackEnv(services, apiPort, "browser-command-control");
+      const env = stackEnv(services, apiPort, webPort, "browser-command-control");
       api = await startProcess(["bun", "apps/api/src/index.ts"], {
         cwd: repoRoot,
         env,
@@ -772,6 +772,7 @@ describe("browser e2e", () => {
 function stackEnv(
   services: TestServices,
   apiPort: number,
+  webPort: number,
   scenario: string,
 ): Record<string, string> {
   // ubs:ignore -- fixed credentials for an isolated disposable object-storage fixture, never a deploy secret.
@@ -784,6 +785,9 @@ function stackEnv(
     OPENGENI_TEMPORAL_TASK_QUEUE: `e2e-${crypto.randomUUID()}`,
     OPENGENI_API_HOST: "127.0.0.1",
     OPENGENI_API_PORT: String(apiPort),
+    // The web app calls the unauthenticated local-mode API from its own
+    // origin, which local mode grants CORS only when configured.
+    OPENGENI_WEB_BASE_URL: `http://127.0.0.1:${webPort}`,
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",
     OPENGENI_SANDBOX_BACKEND: "none",

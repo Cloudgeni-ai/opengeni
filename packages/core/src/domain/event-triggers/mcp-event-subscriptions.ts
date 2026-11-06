@@ -37,6 +37,7 @@ import {
   mcpSourceEventTypes,
   mcpEventTypeUnavailableReason,
   mcpWebhookBaseUrl,
+  type McpEventTypesMemo,
 } from "./mcp-event-types";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
@@ -175,6 +176,8 @@ type StepContext = {
   subscription: McpEventSubscriptionRecord;
   client: McpStreamableHttpClient;
   server: McpServerConfig;
+  /** The event types the kept MCP session already read. */
+  eventTypes?: McpEventTypesMemo;
   now: Date;
 };
 
@@ -319,8 +322,15 @@ async function unsubscribeQuietly(context: StepContext, baseUrl: string | null):
 
 async function liveStep(context: StepContext): Promise<StepOutcome> {
   const { deps, source, subscription, client, server } = context;
-  const types = await mcpSourceEventTypes(client, source, mcpServerDisplayName(server));
-  const type = types.find((candidate) => candidate.name === subscription.eventName);
+  const readTypes = async (fresh: boolean) =>
+    await mcpSourceEventTypes(client, source, mcpServerDisplayName(server), {
+      fresh,
+      ...(context.eventTypes ? { memo: context.eventTypes } : {}),
+    });
+  const named = (types: Awaited<ReturnType<typeof readTypes>>) =>
+    types.find((candidate) => candidate.name === subscription.eventName);
+  // Types read earlier may predate this subscription's type: look again before giving up.
+  const type = named(await readTypes(false)) ?? named(await readTypes(true));
   if (!type) {
     throw new EventSourceBlockedError(
       eventStatusReason(
@@ -454,11 +464,15 @@ export async function runMcpEventSubscriptionStep(
   const now = deps.now?.() ?? new Date();
   if (!claimed.wanted || !source) {
     if (source && subscription.mode === "webhook") {
-      await withMcpEventSourceClient(deps, source, (client, { server }) =>
-        unsubscribeQuietly(
-          { deps, source, subscription, client, server, now },
-          mcpWebhookBaseUrl(deps.settings),
-        ),
+      await withMcpEventSourceClient(
+        deps,
+        source,
+        (client, { server }) =>
+          unsubscribeQuietly(
+            { deps, source, subscription, client, server, now },
+            mcpWebhookBaseUrl(deps.settings),
+          ),
+        { keepSession: true },
       ).catch(() => undefined);
     }
     await deleteMcpEventSubscription(deps.db, workspaceId, subscription.id);
@@ -466,10 +480,24 @@ export async function runMcpEventSubscriptionStep(
   }
   let serverName = source.name;
   try {
-    const outcome = await withMcpEventSourceClient(deps, source, async (client, { server }) => {
-      serverName = mcpServerDisplayName(server);
-      return await liveStep({ deps, source, subscription, client, server, now });
-    });
+    // The MCP session stays open for the next step of any subscription on this source.
+    const outcome = await withMcpEventSourceClient(
+      deps,
+      source,
+      async (client, { server, eventTypes }) => {
+        serverName = mcpServerDisplayName(server);
+        return await liveStep({
+          deps,
+          source,
+          subscription,
+          client,
+          server,
+          now,
+          ...(eventTypes ? { eventTypes } : {}),
+        });
+      },
+      { keepSession: true },
+    );
     await finishMcpEventSubscriptionStep(deps.db, workspaceId, subscription.id, {
       ...outcome,
       outcome: { kind: "success" },

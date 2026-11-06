@@ -30,6 +30,7 @@ import {
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
+  type MintedSandboxCodemodeToken,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
 import type { withFirstPartyTools } from "../goals";
@@ -437,8 +438,12 @@ async function prepareRunCredentialsObserved(
   // in this attempt. SelfhostedSession snapshots it into each exact exec
   // request; it never enters the manifest, argv, filesystem, RunState, or
   // serialized session state. Managed renewal updates the same cell so a
-  // later mid-turn swap sees the fresh bearer too.
-  const codemodeTokenState = sandboxCodemodeToken ? { token: sandboxCodemodeToken } : undefined;
+  // later mid-turn swap sees the fresh bearer too. The cell always holds the
+  // newest bearer this attempt minted, with its signed expiry.
+  const codemodeTokenState =
+    sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt
+      ? { token: sandboxCodemodeToken, expiresAt: sandboxCodemodeTokenExpiresAt }
+      : undefined;
   const transientCodemodeEnvironment = codemodeTokenState
     ? (): Readonly<Record<string, string>> => ({
         OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(runSettings, input.workspaceId),
@@ -598,26 +603,63 @@ async function prepareRunCredentialsObserved(
     renewals.gitCredentialRenewals = controllers;
   };
 
-  const attachCodemodeTokenRenewal = async (
-    tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt = sandboxCodemodeTokenExpiresAt,
-    initialSandbox?: ResumedTurnSandbox,
-  ): Promise<void> => {
-    if (!codemodeTokenState || !initialExpiresAt) return;
+  const mintCodemodeToken = async (): Promise<MintedSandboxCodemodeToken | undefined> =>
+    await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority);
+  const rememberCodemodeToken = (material: MintedSandboxCodemodeToken): void => {
+    if (!codemodeTokenState) return;
+    if (material.expiresAt.getTime() < codemodeTokenState.expiresAt.getTime()) return;
+    codemodeTokenState.token = material.token;
+    codemodeTokenState.expiresAt = material.expiresAt;
+  };
+  const stopCodemodeTokenRenewal = async (): Promise<void> => {
     const previous = renewals.codemodeTokenRenewal;
     renewals.codemodeTokenRenewal = null;
     await previous?.stop();
-    if (renewals.codemodeTokenRenewalClosed) return;
+  };
 
-    const mint = async () => {
-      const material = await mintSandboxCodemodeToken(
-        runSettings,
-        connectionScope,
-        codemodeAuthority,
-      );
-      return material;
-    };
-    const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
+  /**
+   * Choose the bearer a managed setup is about to write into the box's token
+   * file: the newest one this attempt holds, freshly minted when it is close
+   * to expiry. Renewal stops first so it cannot overwrite the file with a
+   * different bearer while the setup runs; the caller restarts it with
+   * `attachCodemodeTokenRenewal(session, seed, sandbox)` once the setup has
+   * written this exact bearer. Connected Machines receive the bearer per exec,
+   * never as a file, so they get no seed.
+   */
+  const prepareCodemodeTokenSeed = async (): Promise<MintedSandboxCodemodeToken | undefined> => {
+    if (!codemodeTokenState || activeSandboxBackend === "selfhosted") return undefined;
+    await stopCodemodeTokenRenewal();
+    if (codemodeTokenState.expiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
+      const fresh = await mintCodemodeToken();
+      if (!fresh) {
+        throw new Error("Codemode token mint became unavailable during sandbox setup");
+      }
+      rememberCodemodeToken(fresh);
+    }
+    return { token: codemodeTokenState.token, expiresAt: codemodeTokenState.expiresAt };
+  };
+
+  /**
+   * Keep the attempt's Codemode bearer alive for the whole attempt. `seeded` is
+   * the bearer the caller just delivered (the token file's current content for
+   * a managed box); it defaults to the one minted at attempt start, which every
+   * agent-built seed carries. Renewal replaces it before it expires.
+   */
+  const attachCodemodeTokenRenewal = async (
+    tokenSession?: CodemodeTokenWriterSession,
+    seeded: MintedSandboxCodemodeToken | undefined = sandboxCodemodeToken &&
+    sandboxCodemodeTokenExpiresAt
+      ? { token: sandboxCodemodeToken, expiresAt: sandboxCodemodeTokenExpiresAt }
+      : undefined,
+    initialSandbox?: ResumedTurnSandbox,
+  ): Promise<void> => {
+    if (!codemodeTokenState || !seeded) return;
+    await stopCodemodeTokenRenewal();
+    if (renewals.codemodeTokenRenewalClosed) return;
+    rememberCodemodeToken(seeded);
+
+    const mint = mintCodemodeToken;
+    const write = async (material: MintedSandboxCodemodeToken) => {
       if (tokenSession) {
         const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
         if (!targetSandbox) {
@@ -644,9 +686,9 @@ async function prepareRunCredentialsObserved(
             }),
         );
       }
-      codemodeTokenState.token = material.token;
+      rememberCodemodeToken(material);
     };
-    let renewalExpiresAt = initialExpiresAt;
+    let renewalExpiresAt = seeded.expiresAt;
     if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
       const fresh = await mint();
       if (!fresh) {
@@ -894,6 +936,7 @@ async function prepareRunCredentialsObserved(
     initialGitCredentials,
     startRunGitCredentialsMint,
     attachGitCredentialRenewal,
+    prepareCodemodeTokenSeed,
     attachCodemodeTokenRenewal,
     attachRunCredentialRenewal,
   };

@@ -22714,7 +22714,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+        "$": "enum=[\"\\\"agent_instructions\\\"\",\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
       }
     },
     "ModelContextInstructionModule": {
@@ -30127,6 +30127,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.canLink": "boolean?",
         "$.completedAt": "string! null",
         "$.createdAt": "string!",
         "$.decidedAt": "string! null",
@@ -30135,6 +30136,7 @@
         "$.organizationMemberLink": "object? null",
         "$.organizationMemberLink.slackAccountLabel": "string! null",
         "$.requestedAt": "string! null",
+        "$.slackAccountLabel": "string? null",
         "$.status": "ref(SlackUserLinkAccessRequestStatus)!",
         "$.subjectLabel": "string! null",
         "$.updatedAt": "string!",
@@ -38252,6 +38254,7 @@
     "@opengeni/sdk/teams": {
       "teamsApi": "value",
       "TeamsBotStatus": "type",
+      "TeamsInstallOptions": "type",
       "TeamsMicrosoftSignInResult": "type",
       "TeamsMicrosoftSignInStart": "type"
     },
@@ -41058,12 +41061,14 @@
     },
     "@opengeni/react/ui/api-error": {
       "apiErrorAdvice": "value",
+      "apiErrorDetailCode": "value",
       "apiErrorDetails": "value",
       "apiErrorFacts": "value",
       "ApiErrorFacts": "type",
       "apiErrorTechnicalFacts": "value",
       "isApiError": "value",
       "isPermissionDenied": "value",
+      "serverRefusalText": "value",
       "userErrorText": "value",
       "userErrorTextWithoutReference": "value",
       "userFacingError": "value"

@@ -5,8 +5,10 @@ import {
   STARTUP_WAIT_TITLES,
 } from "./platform-activity-presentation";
 import { useToolDetails } from "./tool-details";
+import { formatElapsed } from "./turn-summary-model";
 import type { ReasoningItem, SandboxItem, StartupPhaseItem } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
+import { useEffect, useState } from "react";
 
 type RowJsx = typeof import("react/jsx-runtime").jsx;
 type RowJsxs = typeof import("react/jsx-runtime").jsxs;
@@ -32,6 +34,8 @@ export default function PlatformActivityRow({
 }) {
   const msg = useOpenGeniText();
   const plainDetails = useToolDetails() === "plain";
+  // Hooks run for every row kind; only a running startup step ticks.
+  const nowMs = useSecondTick(item.kind === "startup-phase" && item.status === "running");
   if (item.kind === "reasoning") {
     return j(ActivityDisclosure, {
       icon: brainIcon(j, s),
@@ -86,6 +90,16 @@ export default function PlatformActivityRow({
   const failed = item.status === "failed";
   const running = item.status === "running";
   const duration = startupDuration(item.durationMs);
+  const title = item.blockedReason
+    ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
+    : startupPhaseTitle(msg, item.phase, item.status, item.outcome, item.subject);
+  // A running step says how long it has run so far, as the turn header does;
+  // the right edge stays clean until it settles.
+  const startedMs = Date.parse(item.startedAt);
+  const elapsed =
+    running && Number.isFinite(startedMs)
+      ? formatElapsed(msg, Math.max(0, nowMs - startedMs))
+      : null;
   // A failed step's recorded error is diagnostic detail: behind the row, never
   // its title, and absent where the host hides raw technical detail.
   const detail = failed && !plainDetails ? item.detail : undefined;
@@ -96,9 +110,7 @@ export default function PlatformActivityRow({
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
-    title: item.blockedReason
-      ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
-      : startupPhaseTitle(msg, item.phase, item.status, item.outcome),
+    title: elapsed ? `${title} · ${elapsed}` : title,
     preview: note,
     running,
     failed,
@@ -123,6 +135,18 @@ export default function PlatformActivityRow({
         ]
       : undefined,
   });
+}
+
+/** The current time, refreshed once a second while `live`. */
+function useSecondTick(live: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [live]);
+  return nowMs;
 }
 
 function brainIcon(j: RowJsx, s: RowJsxs) {

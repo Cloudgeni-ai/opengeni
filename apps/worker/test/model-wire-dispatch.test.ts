@@ -78,6 +78,7 @@ describe("attempt-local initial wire dispatch clock", () => {
       const activeTurnId = "turn";
       const input = { attemptId: "attempt" };
       const dispatchId = "dispatch";
+      const enterModelRequestStage = () => {};
       let fallbackProviderRequestStartedAt = null;
       let fallbackProviderRequestLifecycleStartedAt = null;
       ${compiled}

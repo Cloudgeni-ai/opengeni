@@ -303,6 +303,8 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  /** The Sandbox Environment a setup step sets up, by name, when its events say. */
+  subject?: string | undefined;
   blockedReason?:
     | "capture_in_progress"
     | "rotation_in_progress"
