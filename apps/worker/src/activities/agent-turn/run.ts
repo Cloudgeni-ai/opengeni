@@ -8,7 +8,7 @@ import {
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
-import { routingEnabled } from "../../sandbox-routing";
+import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
@@ -1874,7 +1874,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeSandboxBackend,
             groupBoxBackend,
             deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({
-              establishPolicy,
+              lazyEnabled: lazyProvisionEnabled(settings),
               machinePrimary,
               groupBoxBackend,
               hasRepositoryResources: turnResources.some(

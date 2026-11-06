@@ -2762,10 +2762,11 @@ export type BuildAgentOptions = {
    */
   turnCancellationSignal?: AbortSignal;
   /**
-   * Leave repository skills unindexed for this turn and tell the model where
-   * to look instead. Set when indexing would be the operation that prepares
-   * the workspace (box, environment setup, clone) before the first model
-   * request; that preparation then starts when a tool first uses it.
+   * Leave repository skills unindexed and tell the model where to look
+   * instead. Set for sessions whose workspace is provisioned lazily, where
+   * indexing would be the operation that prepares it (box, environment setup,
+   * clone) before the first model request; that preparation then starts when
+   * a tool first uses it.
    */
   deferRepositorySkillIndex?: boolean;
   /**

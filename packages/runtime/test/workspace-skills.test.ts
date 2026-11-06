@@ -248,15 +248,20 @@ describe("workspace repository skills", () => {
     expect(instructions).toContain("## Repository skills");
     expect(instructions).toContain("prepared only when a tool first uses the workspace");
     expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
-    expect(instructions).not.toContain("repository:");
+    // No skill is listed, and the notice says how to read one.
+    expect(instructions).not.toContain("repository:.agents");
+    expect(instructions).toContain("repository_skill_read (repository:<skill folder>/SKILL.md)");
 
-    // The reader still discovers live when a tool asks for an exact skill.
+    // The reader still discovers live when a tool asks for an exact skill, and
+    // its description names skills the way the notice does, not by an index.
     const tool = capability
       .tools()
       .find(
         (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
       );
     if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain("repository:<skill folder>/SKILL.md");
+    expect(tool.description).not.toContain("Repository skills index");
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
@@ -304,6 +309,7 @@ describe("workspace repository skills", () => {
       );
     expect(tool).toBeDefined();
     if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain("Use the exact repository: identifier from the Repository skills index.");
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,

@@ -169,6 +169,52 @@ describe("model preparation diagnostics", () => {
     expect(measurements.filter(({ phase }) => phase === "runner_before_mcp_tools")).toHaveLength(1);
   });
 
+  test("repository work a tool waits on after the first model request is not startup", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        markModelPreparationTransportStarted();
+        await Bun.sleep(5);
+        // A deferred index: the first tool call provisions the box, then reads
+        // repository skills on demand.
+        markModelPreparationFirstSandboxOperation(0.001);
+        recordModelPreparationMeasurement({
+          phase: "repository_skill_discovery",
+          outcome: "completed",
+          durationSeconds: 0.001,
+          count: 1,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual([
+      "runner_before_mcp_tools",
+      "mcp_tools_snapshot",
+    ]);
+  });
+
+  test("repository discovery that began before the first model request is still startup", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "repository_skill_discovery",
+          outcome: "completed",
+          durationSeconds: 1,
+          count: 1,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual(["repository_skill_discovery"]);
+  });
+
   test("manifest inventory remains fail-open when iteration throws", () => {
     const measurements: ModelPreparationMeasurement[] = [];
     const manifest = {

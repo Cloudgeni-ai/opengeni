@@ -3510,7 +3510,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("the repository skill index never prepares a lazily provisioned box before the model", async () => {
     const base = {
-      establishPolicy: "on-demand" as const,
+      lazyEnabled: true,
       machinePrimary: false,
       groupBoxBackend: "compute" as const,
       hasRepositoryResources: true,
@@ -3518,8 +3518,8 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldDeferRepositorySkillIndex(base)).toBe(true);
     expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "modal" })).toBe(true);
     expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "docker" })).toBe(true);
-    // An eagerly established box and a Connected Machine are already there.
-    expect(shouldDeferRepositorySkillIndex({ ...base, establishPolicy: "eager" })).toBe(false);
+    // Without lazy provisioning the box is ready first; a Connected Machine is already there.
+    expect(shouldDeferRepositorySkillIndex({ ...base, lazyEnabled: false })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, machinePrimary: true })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "none" })).toBe(false);

@@ -427,8 +427,9 @@ export class WorkspaceSkillsCapability extends Capability {
     return [
       tool({
         name: "repository_skill_read",
-        description:
-          "Read current repository Skill files from the bound workspace. Use the exact repository: identifier from the Repository skills index. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.",
+        description: this.options.deferred
+          ? "Read current repository Skill files from the bound workspace. Name a skill as repository:<skill folder>/SKILL.md, for a skill folder in one of the folders the Repository skills section lists. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines."
+          : "Read current repository Skill files from the bound workspace. Use the exact repository: identifier from the Repository skills index. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.",
         parameters: z.object({
           skill: z.string().min(1),
           paths: z.array(z.string().min(1).max(1024)).min(1).max(SKILL_READ_MAX_PATHS).optional(),
@@ -537,7 +538,7 @@ function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSear
   const folders = searchPaths.map((searchPath) => searchPath.path).join(", ");
   return `## Repository skills
 
-Repository skills are not listed here because the repository is prepared only when a tool first uses the workspace, so that first tool call can take longer. If the task involves the repository, check these folders for skills and read any relevant SKILL.md before acting: ${folders}.`;
+Repository skills are not listed here: the repository is prepared only when a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders}, and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read (repository:<skill folder>/SKILL.md).`;
 }
 
 /** Short, class-specific model notice for an index that could not be built. */

@@ -208,20 +208,26 @@ export function shouldPrefetchManagedSandbox(input: {
  * On a lazily provisioned managed box, indexing a repository's skills would
  * be the turn's first workspace operation: the first model request would wait
  * for the box, its environment setup and the clone, even when the turn needs
- * no tool. Such turns leave the index out and prepare the workspace at the
- * first sandbox tool call instead. Connected Machines and eagerly established
- * boxes are already prepared and keep the live index.
+ * no tool. Such sessions leave the index out and prepare the workspace at the
+ * first sandbox tool call instead. Connected Machines and deployments without
+ * lazy provisioning keep the live index.
+ *
+ * Only inputs that hold for the whole session decide this. A single turn can
+ * be established eagerly for its own reasons (attached files, generated
+ * video); deciding per turn would flip this section of the system prompt
+ * between turns and miss the model's prompt cache on both.
  */
 export function shouldDeferRepositorySkillIndex(input: {
-  establishPolicy: "eager" | "on-demand";
+  lazyEnabled: boolean;
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
   hasRepositoryResources: boolean;
 }): boolean {
   return (
+    input.lazyEnabled &&
     input.hasRepositoryResources &&
     shouldPrefetchManagedSandbox({
-      establishPolicy: input.establishPolicy,
+      establishPolicy: "on-demand",
       machinePrimary: input.machinePrimary,
       groupBoxBackend: input.groupBoxBackend,
       hasRepositoryResources: true,
