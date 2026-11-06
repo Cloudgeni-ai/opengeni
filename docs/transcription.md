@@ -28,6 +28,12 @@ message by itself.
   one can be heard again with a new transcript version. Cancel or Escape keeps
   anything longer than three seconds. Taking the text deletes the dictation
   first, so two tabs never insert it twice.
+- That lookup runs in the background and never fails the composer: a list
+  request that fails, or a success answer that is not a recordings list (a
+  host proxy or test double answering the route with another body), means
+  nothing is offered this time, and the dictation stays saved for the next
+  composer. `OpenGeniRecordingsClient.listRecordings` rejects such an answer
+  with `OpenGeniApiError` code `invalid_response` instead of resolving it.
 
 ## Trust boundary and data flow
 

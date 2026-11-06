@@ -70,6 +70,7 @@ import {
   type LiveWebSocketConstructor,
 } from "./recording-live";
 import { errorMessage } from "@opengeni/contracts/values";
+import { OpenGeniApiError } from "./errors";
 import { ownerNameField } from "./recording-owner";
 import { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
@@ -78,6 +79,46 @@ export { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-a
 
 /** What {@link OpenGeniRecordingsClient} needs from the core client. */
 export type OpenGeniRecordingsTransport = Pick<OpenGeniClient, "requestJson">;
+
+/**
+ * A recordings list, checked only for the shape callers rely on: an array of
+ * recordings with ids. A success answer of any other shape (another route's
+ * body, `{ items }`, `{}`) is a typed `invalid_response` error, never a
+ * resolved value without `recordings`.
+ */
+function recordingsListOf(answer: unknown): ListRecordingsResponse {
+  const body =
+    answer && typeof answer === "object" && !Array.isArray(answer)
+      ? (answer as Record<string, unknown>)
+      : null;
+  const recordings = body?.recordings;
+  const listed =
+    Array.isArray(recordings) &&
+    recordings.every(
+      (recording: unknown) =>
+        recording !== null &&
+        typeof recording === "object" &&
+        typeof (recording as { id?: unknown }).id === "string",
+    );
+  if (!body || !listed) {
+    throw new OpenGeniApiError(200, "Invalid recordings list response.", {
+      code: "invalid_response",
+      retryable: false,
+      displayMessage: "The recordings list could not be read.",
+    });
+  }
+  const nextBefore = body.nextBefore;
+  return {
+    recordings: recordings as ListRecordingsResponse["recordings"],
+    nextBefore:
+      nextBefore &&
+      typeof nextBefore === "object" &&
+      typeof (nextBefore as { startedAt?: unknown }).startedAt === "string" &&
+      typeof (nextBefore as { id?: unknown }).id === "string"
+        ? (nextBefore as NonNullable<ListRecordingsResponse["nextBefore"]>)
+        : null,
+  };
+}
 
 /**
  * Typed client for the recordings API:
@@ -92,7 +133,12 @@ export class OpenGeniRecordingsClient {
   // idempotent, so a client resumes after a lost connection or a reload.
   // RecordingUploader below does all of that from a local-first store.
 
-  /** Recordings the caller can see, newest first. */
+  /**
+   * Recordings the caller can see, newest first. Rejects with an
+   * `OpenGeniApiError` (`code: "invalid_response"`) when a success answer is
+   * not a recordings list, such as a host proxy or test double answering this
+   * route with another route's body; it never resolves without `recordings`.
+   */
   async listRecordings(
     workspaceId: string,
     options: {
@@ -112,7 +158,7 @@ export class OpenGeniRecordingsClient {
       signal?: AbortSignal;
     } = {},
   ): Promise<ListRecordingsResponse> {
-    return await this.client.requestJson<ListRecordingsResponse>(
+    const answer = await this.client.requestJson<unknown>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings`,
       undefined,
@@ -133,6 +179,7 @@ export class OpenGeniRecordingsClient {
       },
       options.signal ? { signal: options.signal } : {},
     );
+    return recordingsListOf(answer);
   }
 
   /**
