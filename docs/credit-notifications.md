@@ -104,6 +104,13 @@ reconcile expired failures against provider evidence, never clear/rekey blindly.
 - Existing `GET /v1/inbox` adds optional `billingNotifications`; these are not
   fabricated chat items. Workspace-filtered reads omit organization notices.
   Existing chat unread/needs-you counts keep their historical meaning.
+- The web Inbox renders these in a separate Billing section for the current
+  organization's authorized owner/admin. Unread billing notices contribute to
+  the rail's attention badge, not chat counts. Manage billing validates an
+  accessible same-organization destination; it and the row's Mark as read menu
+  acknowledge through the billing SDK. Failed acknowledgements stay unread.
+  The workspace-only view omits billing, and identity/credential/grant changes
+  retire the old inbox cache and its pending responses.
 - SDK: `getBillingAlertSettings`, `updateBillingAlertSettings`,
   `listBillingCreditNotifications`, `markBillingCreditNotificationRead`.
 - Contracts are root-exported and available at
