@@ -153,6 +153,7 @@ import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
 export * from "./organization-access";
+export * from "./api-key-delegation";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {

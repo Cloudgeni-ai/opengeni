@@ -193,7 +193,7 @@ import {
   parseSessionRemovedRepositories,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE, WORKSPACE_OWNER_PERMISSIONS } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -2373,37 +2373,8 @@ export async function resolveDocumentIndexAuthority(
   };
 }
 
-export const allWorkspacePermissions: Permission[] = [
-  "workspace:read",
-  "workspace:admin",
-  "members:manage",
-  "sessions:create",
-  "sessions:read",
-  "sessions:control",
-  "files:upload",
-  "files:read",
-  "documents:manage",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "github:manage",
-  "github:use",
-  "api_keys:manage",
-  "connections:read",
-  "connections:write",
-  "connections:personal",
-  "capabilities:manage",
-  "secrets:list",
-  "secrets:read",
-  "secrets:write",
-  "secrets:use",
-  "mcp_servers:attach",
-  "goals:manage",
-  "enrollments:read",
-  "enrollments:manage",
-  "artifacts:read",
-  "artifacts:publish",
-];
+/** A Workspace owner's permissions; shared with the API key creator rule. */
+export const allWorkspacePermissions: Permission[] = [...WORKSPACE_OWNER_PERMISSIONS];
 
 export { managedPersonalWorkspacePermissions };
 

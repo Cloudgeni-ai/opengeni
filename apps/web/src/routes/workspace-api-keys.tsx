@@ -74,6 +74,7 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
+import { workspaceKeyCreator, workspaceKeyCreatorSentence } from "@opengeni/contracts";
 import {
   delegableApiKeyPermissions,
   hasWorkspacePermission,
@@ -725,6 +726,14 @@ function initialCustom(prefill: CreatePrefill | null, delegable: Set<string>): s
   );
 }
 
+/** Who can give a workspace key this permission the viewer can't. */
+function withheldHint(permission: string): string {
+  const creator = workspaceKeyCreator([permission]);
+  if (creator === "workspace_owner") return "only a workspace owner";
+  if (creator === "workspace_admin") return "only a workspace admin or owner";
+  return "beyond your own access";
+}
+
 function CustomPermissions({
   selected,
   delegable,
@@ -753,7 +762,7 @@ function CustomPermissions({
                       <span className="font-mono">
                         {permission}
                         {allowed ? null : (
-                          <span className="font-sans"> · beyond your own access</span>
+                          <span className="font-sans"> · {withheldHint(permission)}</span>
                         )}
                       </span>
                     }
@@ -848,7 +857,8 @@ function CreateKeyPage({
         : {
             disabled: true,
             disabledReason:
-              "Needs permissions your own access doesn't include. A workspace admin can create it.",
+              workspaceKeyCreatorSentence(preset.permissions) ??
+              "Needs permissions your own access doesn't include.",
           }),
     };
   });
