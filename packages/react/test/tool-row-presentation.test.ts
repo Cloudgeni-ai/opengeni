@@ -307,4 +307,26 @@ describe("shared tool row presentation", () => {
     const plain = toolRowPresentation(englishText, call({ name: "tool_invoke", arguments: {} }));
     expect(plain.title).toBe("Used a tool");
   });
+
+  test("a command's settlement receipt reads as its sentence, not JSON", () => {
+    const sentence =
+      "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.";
+    const row = toolRowPresentation(
+      englishText,
+      call({
+        name: "exec_command",
+        arguments: { cmd: "bun test" },
+        status: "failed",
+        output: { isError: true, content: [{ type: "text", text: sentence }] },
+      }),
+    );
+    expect(row.preview).toEqual({ kind: "text", text: sentence });
+    expect(row.body).toMatchObject({ kind: "term", command: "bun test", output: sentence });
+    // Any other object output keeps its JSON.
+    const other = toolRowPresentation(
+      englishText,
+      call({ name: "exec_command", arguments: { cmd: "ls" }, output: { files: 2 } }),
+    );
+    expect(other.body).toMatchObject({ output: '{\n  "files": 2\n}' });
+  });
 });
