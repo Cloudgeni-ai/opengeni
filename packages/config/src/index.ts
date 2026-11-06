@@ -1729,6 +1729,11 @@ const SettingsSchema = z.object({
   // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
   computeImage: z.string().min(1).max(2048).optional(),
   computeDesktopImage: z.string().min(1).max(2048).optional(),
+  // A team template (id) new compute sandboxes boot from instead of the
+  // image: a verified Sandbox Environment's prebuilt disk. Never configured
+  // from the environment; a turn sets it only for fresh creates once that
+  // exact environment content was captured and cold-boot validated.
+  computeTemplate: z.string().min(1).max(128).optional(),
   computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
   computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.

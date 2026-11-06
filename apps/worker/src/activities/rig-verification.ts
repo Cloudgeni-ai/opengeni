@@ -42,6 +42,7 @@ import {
 import {
   buildImmutableProviderImage,
   createTurnToolCancellationController,
+  deleteComputeTemplate,
   deleteModalCheckpointSnapshot,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
@@ -59,7 +60,12 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
-import { rigProviderImageSourceImage } from "@opengeni/core";
+import {
+  rigProviderImageBuildSupported,
+  rigProviderImageContentSourceImage,
+  rigProviderImageSourceImage,
+  settingsWithProviderImageId,
+} from "@opengeni/core";
 import { currentActivityContext } from "./streaming";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -966,15 +972,19 @@ export async function verifyRigProviderImageColdBoot(
   dependencies: RigProviderImageColdBootDependencies = defaultRigProviderImageColdBootDependencies,
 ): Promise<string> {
   const { marker } = rigProviderImageContentMarker(input.contentHash);
+  const backend = input.settings.sandboxBackend as SandboxBackend;
   await dependencies.runOwnedSandbox(
     {
-      settings: {
-        ...input.settings,
-        modalImageId: input.imageId,
-        // The full-machine provider image is the immutable rig base. Any future
-        // workspace recovery must layer /workspace onto it, never replace it.
-        modalWorkspacePersistence: "snapshot_directory",
-      },
+      settings:
+        backend === "modal"
+          ? {
+              ...input.settings,
+              modalImageId: input.imageId,
+              // The full-machine provider image is the immutable rig base. Any future
+              // workspace recovery must layer /workspace onto it, never replace it.
+              modalWorkspacePersistence: "snapshot_directory",
+            }
+          : settingsWithProviderImageId(input.settings, backend, input.imageId),
       db: input.db,
       observability: input.observability,
       accountId: input.accountId,
@@ -1041,8 +1051,10 @@ export async function buildVerifiedRigProviderImage(input: {
   signal: AbortSignal;
 }): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
-  const providerSupportsBuild = providerSupportsImmutableImageBuild(backend);
-  const sourceImage = rigProviderImageSourceImage(input.settings, backend);
+  const providerSupportsBuild =
+    providerSupportsImmutableImageBuild(backend) &&
+    rigProviderImageBuildSupported(input.settings, backend);
+  const sourceImage = rigProviderImageContentSourceImage(input.settings, backend);
   const contentHash = rigProviderImageContentHash({
     backend,
     sourceImage,
@@ -1075,6 +1087,7 @@ export async function buildVerifiedRigProviderImage(input: {
     error: null,
   };
 
+  let replaced: RigProviderImage | null = null;
   if (input.existingVersionId) {
     const claim = await claimRigVersionProviderImageBuild(input.db, {
       workspaceId: input.workspaceId,
@@ -1104,6 +1117,7 @@ export async function buildVerifiedRigProviderImage(input: {
       };
     }
     building = claim.image;
+    replaced = claim.replaced;
   }
 
   const finalize = async (image: RigProviderImage): Promise<RigProviderImage> => {
@@ -1148,7 +1162,10 @@ export async function buildVerifiedRigProviderImage(input: {
       finishedAt: new Date().toISOString(),
       error: {
         code: "provider_image_build_unsupported",
-        message: `sandbox backend ${backend} does not support immutable provider image builds`,
+        message:
+          backend === "compute"
+            ? "compute builds need an explicitly configured compute image to build over"
+            : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
     });
@@ -1221,6 +1238,29 @@ export async function buildVerifiedRigProviderImage(input: {
         checks: input.definition.checks,
         lifecycle: input.lifecycle,
       });
+    } else if (backend === "compute") {
+      if (!built.imageId || !built.providerBindingKey) {
+        throw new Error("compute template build returned incomplete ownership identity");
+      }
+      builtIdentity = {
+        imageId: built.imageId,
+        providerBindingKey: built.providerBindingKey,
+      };
+      // A captured template is not proof that it boots. Start a second,
+      // independently owned sandbox from it before runtime can select it.
+      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
+        settings: input.settings,
+        db: input.db,
+        observability: input.observability,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        rigVersionId: input.target.id,
+        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+        imageId: built.imageId,
+        contentHash,
+        checks: input.definition.checks,
+        lifecycle: input.lifecycle,
+      });
     }
     if (!coldBootValidatedAt) {
       throw new Error(`${backend} provider image build has no independent cold-boot validator`);
@@ -1236,7 +1276,7 @@ export async function buildVerifiedRigProviderImage(input: {
       }
       throw abortReason(input.signal);
     }
-    return await finalize({
+    const published = await finalize({
       ...building,
       provider: built.provider,
       status: "ready",
@@ -1253,8 +1293,33 @@ export async function buildVerifiedRigProviderImage(input: {
       finishedAt: new Date().toISOString(),
       error: null,
     });
+    // A fenced publication keeps its template: a newer claim of the same build
+    // captures under the same name and may be using it.
+    if (backend === "compute" && published.status === "ready") {
+      if (
+        replaced?.backend === "compute" &&
+        replaced.imageId &&
+        replaced.imageId !== published.imageId
+      ) {
+        // Nothing references the template this rebuild replaced. Sandboxes
+        // already started from it keep running; a create racing the delete
+        // boots the plain image and runs setup.
+        await deleteComputeTemplate(input.settings, replaced.imageId).catch((error: unknown) => {
+          input.observability.warn("replaced compute environment template was not deleted", {
+            template: replaced!.imageId,
+            error: errorMessage(error),
+          });
+        });
+      }
+    }
+    return published;
   } catch (error) {
-    if (input.signal.aborted) throw abortReason(input.signal);
+    if (input.signal.aborted) {
+      if (backend === "compute" && builtIdentity) {
+        await deleteComputeTemplate(input.settings, builtIdentity.imageId).catch(() => undefined);
+      }
+      throw abortReason(input.signal);
+    }
     if (artifactId) {
       await markSandboxCheckpointArtifactDeletePending(input.db, {
         accountId: input.accountId,
@@ -1272,6 +1337,8 @@ export async function buildVerifiedRigProviderImage(input: {
         builtIdentity.providerBindingKey,
         builtIdentity.imageId,
       ).catch(() => "not_found" as const);
+    } else if (backend === "compute" && builtIdentity) {
+      await deleteComputeTemplate(input.settings, builtIdentity.imageId).catch(() => undefined);
     }
     const message = errorMessage(error).slice(0, 2000);
     return await finalize({
@@ -1387,7 +1454,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, candidateVersion.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(runSettings, runSettings.sandboxBackend),
             definition: providerImageDefinition,
           });
           return await runWithOwnedRigVerificationSandbox(
@@ -1580,7 +1647,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(runSettings, runSettings.sandboxBackend),
             definition: version,
           });
           return await runWithOwnedRigVerificationSandbox(

@@ -65,7 +65,13 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedSessionDeps,
 } from "../selfhosted/session";
-import { ComputeControlClient, isComputeSandboxGone, type ComputeCreateRequest } from "./control";
+import {
+  ComputeControlClient,
+  isComputeSandboxGone,
+  isComputeTemplateGone,
+  type ComputeCreateRequest,
+  type ComputeSandboxView,
+} from "./control";
 import { COMPUTE_METADATA, UNSEEN_CREATE_SETTLE_MS } from "./orphans";
 import type { ComputeAgentConnection, ComputeAgentPlane } from "./plane";
 
@@ -1003,6 +1009,11 @@ export interface ComputeSandboxClientOptions {
    * it, so the orphan sweep only ever considers this deployment's sandboxes. */
   gateway: string;
   image: string | null;
+  /** A team template to boot new sandboxes from instead of `image`: a
+   * verified, prebuilt Sandbox Environment (its setup already ran on that
+   * disk). A create whose template is gone boots `image` instead, and the
+   * environment's setup then runs as it would without one. */
+  template?: string | null;
   vcpus: number;
   memoryMib: number;
   memoryRequestMib?: number;
@@ -1097,6 +1108,59 @@ export class ComputeSandboxClient {
       ...(await manifest.resolveEnvironment()),
     };
     const plane = this.options.plane();
+    const template = this.options.template ?? null;
+    let created: { view: ComputeSandboxView; enrollmentId: string };
+    try {
+      created = await this.createSandbox(identity, environment, template);
+    } catch (error) {
+      // A template is only an optimization: one deleted since it was chosen
+      // boots the plain image, whose environment setup then runs as usual.
+      if (!template || !isComputeTemplateGone(error)) throw error;
+      created = await this.createSandbox(identity, environment, null);
+    }
+    const { view, enrollmentId } = created;
+    const state: ComputeLiveState = {
+      stateVersion: COMPUTE_STATE_VERSION,
+      sandboxId: view.id,
+      enrollmentId,
+      workspaceId: identity.workspaceId,
+      accountId: identity.accountId,
+      sandboxGroupId: identity.sandboxGroupId,
+      requestId: enrollmentId,
+      image: view.image || this.options.image,
+      manifest,
+      environment,
+      workspacePersistence: "tar",
+      workspaceReady: false,
+      agentId: enrollmentId,
+      instanceId: view.id,
+    };
+    const session = this.session(state, normalized.archiveLimits);
+    try {
+      await session.gate.waitForAgent(Date.now() + this.options.readyTimeoutMs);
+      if (Object.keys(manifest.entries).length > 0) {
+        for (const [path, entry] of Object.entries(manifest.entries)) {
+          await session.materializeEntry({ path, entry });
+        }
+      }
+    } catch (error) {
+      // Nothing durable names this sandbox yet: do not leave it behind. A
+      // failed delete leaves it to the orphan sweep.
+      await deleteComputeBox(this.options.control, plane, state).catch(() => undefined);
+      throw error;
+    }
+    return session;
+  }
+
+  /** Make one enrollment and ask the control service for its sandbox, from
+   * `template` when given, else from the image. A failed create is undone
+   * before the error is thrown. */
+  private async createSandbox(
+    identity: ComputeCreateIdentity,
+    environment: Record<string, string>,
+    template: string | null,
+  ): Promise<{ view: ComputeSandboxView; enrollmentId: string }> {
+    const plane = this.options.plane();
     const enrollmentId = randomUUID();
     const requestId = enrollmentId;
     await plane.createEnrollment({
@@ -1109,7 +1173,7 @@ export class ComputeSandboxClient {
     });
     const body: ComputeCreateRequest = {
       request_id: requestId,
-      ...(this.options.image ? { image: this.options.image } : {}),
+      ...(template ? { template } : this.options.image ? { image: this.options.image } : {}),
       vcpus: this.options.vcpus,
       memory_mib: this.options.memoryMib,
       ...(this.options.memoryRequestMib !== undefined
@@ -1137,9 +1201,8 @@ export class ComputeSandboxClient {
         },
       },
     };
-    let view;
     try {
-      view = await this.options.control.create(body);
+      return { view: await this.options.control.create(body), enrollmentId };
     } catch (error) {
       // The create may have taken effect without its answer reaching us. If
       // the control service cannot yet prove there is no sandbox, the orphan sweep
@@ -1151,37 +1214,6 @@ export class ComputeSandboxClient {
       }).catch(() => false);
       throw error;
     }
-    const state: ComputeLiveState = {
-      stateVersion: COMPUTE_STATE_VERSION,
-      sandboxId: view.id,
-      enrollmentId,
-      workspaceId: identity.workspaceId,
-      accountId: identity.accountId,
-      sandboxGroupId: identity.sandboxGroupId,
-      requestId,
-      image: view.image || this.options.image,
-      manifest,
-      environment,
-      workspacePersistence: "tar",
-      workspaceReady: false,
-      agentId: enrollmentId,
-      instanceId: view.id,
-    };
-    const session = this.session(state, normalized.archiveLimits);
-    try {
-      await session.gate.waitForAgent(Date.now() + this.options.readyTimeoutMs);
-      if (Object.keys(manifest.entries).length > 0) {
-        for (const [path, entry] of Object.entries(manifest.entries)) {
-          await session.materializeEntry({ path, entry });
-        }
-      }
-    } catch (error) {
-      // Nothing durable names this sandbox yet: do not leave it behind. A
-      // failed delete leaves it to the orphan sweep.
-      await deleteComputeBox(this.options.control, plane, state).catch(() => undefined);
-      throw error;
-    }
-    return session;
   }
 
   async resume(

@@ -20,7 +20,11 @@ import {
   nestedPostgresSqlState,
   type Database,
 } from "@opengeni/db";
-import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
+import {
+  computeSourceImage,
+  resolveComputeProviderBinding,
+  resolveModalCheckpointProviderBinding,
+} from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
@@ -125,9 +129,58 @@ export function rigProviderImageSourceImage(
   return null;
 }
 
+/**
+ * The base image a prebuilt Sandbox Environment is defined over, for its
+ * content identity. It equals the lease's logical image except on compute,
+ * whose lease keeps no image: there a template is captured over the image new
+ * sandboxes boot, so a change of that image makes the template stale.
+ */
+export function rigProviderImageContentSourceImage(
+  settings: Settings,
+  backend: SandboxBackend,
+): string | null {
+  if (backend === "compute") return computeSourceImage(settings);
+  return rigProviderImageSourceImage(settings, backend);
+}
+
+/**
+ * Whether this deployment can prebuild a verified Sandbox Environment for
+ * `backend`. A compute template keeps the guest it was captured on and does
+ * not follow the control service's default image, so compute needs an
+ * explicitly configured image whose change is noticed and rebuilt over.
+ */
+export function rigProviderImageBuildSupported(
+  settings: Settings,
+  backend: SandboxBackend,
+): boolean {
+  if (backend === "modal") return true;
+  if (backend === "compute") return computeSourceImage(settings) !== null;
+  return false;
+}
+
+/** Settings that boot fresh sandboxes from one verified prebuilt image. */
+export function settingsWithProviderImageId(
+  settings: Settings,
+  backend: SandboxBackend,
+  imageId: string,
+): Settings {
+  if (backend === "compute") return { ...settings, computeTemplate: imageId };
+  return { ...settings, modalImageId: imageId };
+}
+
+/** The provider namespace a prebuilt image lives in, for the backend. */
+export async function resolveRigProviderImageBinding(
+  settings: Settings,
+  backend: SandboxBackend,
+): Promise<{ key: string }> {
+  if (backend === "compute") return await resolveComputeProviderBinding(settings);
+  return await resolveModalCheckpointProviderBinding(settings);
+}
+
 export type RigProviderImageSelectionReason =
   | "selected"
   | "missing"
+  | "unbuilt"
   | "provider_unsupported"
   | "not_ready"
   | "not_cold_boot_validated"
@@ -147,11 +200,23 @@ export function resolveRigProviderImageSelection(
   imageId: string | null;
 } {
   if (!version) return { settings, reason: "missing", contentHash: null, imageId: null };
-  if (backend !== "modal") {
+  if (!rigProviderImageBuildSupported(settings, backend)) {
     return { settings, reason: "provider_unsupported", contentHash: null, imageId: null };
   }
+  const sourceImage = rigProviderImageContentSourceImage(settings, backend);
+  const expectedContentHash = rigProviderImageContentHash({
+    backend,
+    sourceImage,
+    definition: version,
+  });
   const image = version.providerImages[backend];
-  if (!image) return { settings, reason: "missing", contentHash: null, imageId: null };
+  if (!image || image.status === "unsupported") {
+    // Never built for this backend, or recorded before the backend could
+    // build: worth building once when there is setup to skip.
+    return (version.setupScript ?? "").trim()
+      ? { settings, reason: "unbuilt", contentHash: expectedContentHash, imageId: null }
+      : { settings, reason: "missing", contentHash: null, imageId: null };
+  }
   if (image.status !== "ready" || !image.imageId) {
     return {
       settings,
@@ -168,12 +233,6 @@ export function resolveRigProviderImageSelection(
       imageId: null,
     };
   }
-  const sourceImage = rigProviderImageSourceImage(settings, backend);
-  const expectedContentHash = rigProviderImageContentHash({
-    backend,
-    sourceImage,
-    definition: version,
-  });
   if (
     image.sourceImage !== sourceImage ||
     image.contentHash !== expectedContentHash ||
@@ -203,7 +262,7 @@ export function resolveRigProviderImageSelection(
     };
   }
   return {
-    settings: { ...settings, modalImageId: image.imageId },
+    settings: settingsWithProviderImageId(settings, backend, image.imageId),
     reason: "selected",
     contentHash: expectedContentHash,
     imageId: image.imageId,
@@ -214,9 +273,11 @@ export async function resolveRigProviderImageForRun(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
-  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+  resolveBinding: RigProviderImageBindingResolver = resolveRigProviderImageBinding,
 ): Promise<ReturnType<typeof resolveRigProviderImageSelection>> {
-  const image = backend === "modal" ? version?.providerImages.modal : null;
+  const image = rigProviderImageBuildSupported(settings, backend)
+    ? version?.providerImages[backend]
+    : null;
   if (image?.status !== "ready" || !image.providerBindingKeyHash) {
     return resolveRigProviderImageSelection(settings, version, backend, null);
   }
@@ -229,7 +290,7 @@ export async function resolveRigProviderImageForRun(
   if (structural.reason !== "selected") return structural;
   let currentProviderBindingKeyHash: string | null = null;
   try {
-    const binding = await resolveBinding(settings);
+    const binding = await resolveBinding(settings, backend);
     currentProviderBindingKeyHash = rigProviderImageProviderBindingKeyHash(binding.key);
   } catch {
     // A provider-native image is an optimization. The exact logical image is
@@ -247,10 +308,15 @@ export async function settingsWithRigProviderImage(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
-  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+  resolveBinding: RigProviderImageBindingResolver = resolveRigProviderImageBinding,
 ): Promise<Settings> {
   return (await resolveRigProviderImageForRun(settings, version, backend, resolveBinding)).settings;
 }
+
+export type RigProviderImageBindingResolver = (
+  settings: Settings,
+  backend: SandboxBackend,
+) => Promise<{ key: string }>;
 
 export type SessionSandboxRuntime = {
   /** Exact logical image/rig settings used to fence the durable group lease. */

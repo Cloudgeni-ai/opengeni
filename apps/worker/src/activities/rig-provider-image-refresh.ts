@@ -19,9 +19,11 @@ export function rigProviderImageRefreshWorkflowId(input: {
 /**
  * A ready, cold-boot-proven provider image whose content no longer matches is
  * stale: the deployment base image (or the content identity protocol) moved
- * after it was built. The turn still uses the ordinary setup path, and asks
- * once in the background for a rebuild on the current base so later fresh
- * sandboxes start from a prebuilt image again. Never awaited by the turn.
+ * after it was built. A version with setup that was never built for this
+ * backend (built before the backend could build, or before builds existed) is
+ * unbuilt. Either way the turn uses the ordinary setup path, and asks once in
+ * the background for a build on the current base so later fresh sandboxes
+ * start from a prebuilt image. Never awaited by the turn.
  */
 export function requestStaleRigProviderImageRefresh(input: {
   selection: { reason: RigProviderImageSelectionReason; contentHash: string | null };
@@ -35,7 +37,12 @@ export function requestStaleRigProviderImageRefresh(input: {
   start: StartRigProviderImageRefresh | null | undefined;
   warn: (message: string, context: { versionId: string; error: string }) => void;
 }): boolean {
-  if (input.selection.reason !== "content_mismatch" || !input.turnUsesDeploymentBase) return false;
+  if (
+    (input.selection.reason !== "content_mismatch" && input.selection.reason !== "unbuilt") ||
+    !input.turnUsesDeploymentBase
+  ) {
+    return false;
+  }
   if (!input.versionId || !input.selection.contentHash || !input.start) return false;
   const versionId = input.versionId;
   void Promise.resolve()
