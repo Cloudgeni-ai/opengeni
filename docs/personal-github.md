@@ -293,13 +293,18 @@ The gateway (`/v1/github/personal/gateway/{api,uploads,git}/...`) checks, for
 every request: the bearer, its turn, the delegation's credential binding and
 connection generation, the connection itself, the live repository allowlist,
 and repositories removed from the chat. Repository requests outside the
-allowlist are refused with a 403. Account and organization reads (`gh api
-user`, `gh repo list <org>`), search and GraphQL reads pass as the person.
-GraphQL mutations are checked against the repositories of the node IDs they
-name; when those can't be resolved, the request asks. The gateway replaces
+allowlist are refused with a 403, and any write (including a comment or a
+fork) needs the repository chosen with write access. Account and organization reads (`gh api
+user`, `gh repo list <org>`) and search pass as the person. GraphQL
+`repository(...)` reads are checked like REST ones, also under
+`organization`, `user`, `repositoryOwner` and `viewer`; `node(id:)` reads are
+not. GraphQL mutations are checked against the repositories their input names
+(node IDs, `repositoryNameWithOwner`, github.com URLs); when those can't be
+found, the request asks. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not
-follow redirects, buffers API bodies up to 32 MiB (larger ones get 413),
-streams uploads and responses, and passes only safe response headers back.
+follow redirects, forwards only the request headers GitHub needs, buffers
+API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,
+and passes only safe response headers back.
 
 ### Approvals
 
@@ -316,14 +321,14 @@ tools use, so one setting covers both:
   branches, tags, releases, comments or other data; force-updating a branch;
   repository settings, collaborators and teams, secrets and variables,
   webhooks and deploy keys, branch protection, transfer, archive and
-  visibility. So do REST writes and GraphQL mutations the gateway doesn't
-  recognise.
+  visibility, approving deployments or fork workflow runs. So do REST writes
+  and GraphQL mutations the gateway doesn't recognise.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for your
 approval in Opengeni: <title>…`, the response carries `x-opengeni-approval:
 pending`, and the turn ends with the normal approval card. The approval is
-bound to a digest of the exact request (method, path, query and body); after
+bound to a digest of the exact request (method, path, query and body bytes); after
 approval, running the same command again sends it once. A declined request
 answers `Declined in Opengeni`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
@@ -336,7 +341,8 @@ GitHub. A push that deletes a branch or tag, or moves a branch to a commit
 that does not descend from its current tip, asks the person; the approval is
 bound to the exact ref updates. Git reports a waiting push as a rejected ref
 with the same message. When the gateway can't tell whether an update is a
-fast-forward (for example a push over 64 MiB), it asks.
+fast-forward (for example a push over 64 MiB), or can't read the push at all,
+it asks.
 Ordinary fast-forward pushes and new branches follow the existing write
 access.
 

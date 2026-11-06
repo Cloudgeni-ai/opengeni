@@ -226,6 +226,46 @@ describe("push approvals", () => {
   });
 });
 
+describe("pushes the gateway cannot read", () => {
+  test("ask instead of going through unchecked", async () => {
+    const { calls, decide } = recordingDecider({
+      kind: "refuse",
+      status: 403,
+      waiting: true,
+      message: "Waiting for your approval in Opengeni: Push to acme/widgets.",
+    });
+    const result = await inspectPersonalGitHubPush({
+      body: stream(Buffer.from("not a receive-pack request")),
+      gzip: false,
+      repositoryFullName: "acme/widgets",
+      isAncestor: async () => null,
+      identity,
+      decide,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(result.kind).toBe("respond");
+    if (result.kind === "respond") {
+      expect(result.response.status).toBe(403);
+      expect(await result.response.text()).toContain("Waiting for your approval");
+    }
+  });
+
+  test("a flush with nothing to push goes on", async () => {
+    const { calls, decide } = recordingDecider({ kind: "allow" });
+    const result = await inspectPersonalGitHubPush({
+      body: stream(Buffer.from("0000")),
+      gzip: false,
+      repositoryFullName: "acme/widgets",
+      isAncestor: async () => null,
+      identity,
+      decide,
+    });
+    expect(result.kind).toBe("forward");
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("request digests", () => {
   test("ignore key order and differ by content", () => {
     expect(canonicalJson({ b: 1, a: [2, { d: 1, c: 2 }] })).toBe('{"a":[2,{"c":2,"d":1}],"b":1}');

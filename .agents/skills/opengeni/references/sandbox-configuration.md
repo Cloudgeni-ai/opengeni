@@ -194,10 +194,12 @@ Current guidance:
 
 ## GitHub Credentials
 
-There are two GitHub credential paths:
+There are three GitHub credential paths:
 
 1. The `github` sandbox preparation profile may copy existing local `GH_TOKEN`/`GITHUB_TOKEN` and raw host git identity vars.
 2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, Opengeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub. This entire GitHub-App path is SKIPPED when the turn's effective backend is a Connected Machine (`selfhosted`): `sandboxEnvironmentForRun` runs with `skipGitHubToken` (no installation token is minted, no git auth env is injected) and `repositoryUsesSandboxClone` returns false (no clone hook). The machine uses its own git credentials and already holds its own checkout — the platform must not clone onto or authenticate on the user's real disk (see the Connected Machine section).
+
+3. Repositories mounted as the person (Your GitHub, `connectionType: "github_personal"`) never put the person's token in the sandbox. Git goes through the personal smart-HTTP broker (`apps/api/src/routes/personal-github-git-broker.ts`) with a short-lived pass, and `gh` in a managed sandbox goes through the personal GitHub gateway (`apps/api/src/routes/personal-github-gateway.ts`): the sandbox `gh` wrapper runs a per-command local proxy that sends GitHub API requests to the gateway with the same pass. See `docs/personal-github.md`.
 
 Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity independently of ambient host env. Raw host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` values should only enter through the `github` preparation profile or `OPENGENI_SANDBOX_ENV_ALLOWLIST`.
 

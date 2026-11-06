@@ -265,22 +265,48 @@ export async function inspectPersonalGitHubPush(input: {
 }): Promise<PushInspection> {
   const prefix = await readBodyPrefix(input.body, PUSH_INSPECTION_MAX_BYTES);
   const forwardBody = prefix.stream ?? prefix.bytes;
-  let raw = prefix.bytes;
+  let raw: Uint8Array | null = prefix.bytes;
   if (input.gzip) {
-    if (!prefix.complete) {
-      return { kind: "forward", body: forwardBody, requestId: null };
-    }
     try {
-      raw = (await import("node:zlib")).gunzipSync(prefix.bytes);
+      raw = prefix.complete ? (await import("node:zlib")).gunzipSync(prefix.bytes) : null;
     } catch {
-      return { kind: "forward", body: forwardBody, requestId: null };
+      raw = null;
     }
   }
-  const request = parseReceivePackRequest(raw);
-  // Not a push this reader understands (a probe, a push certificate): Git
-  // and GitHub handle it as before.
-  if (!request || request.commands.length === 0) {
+  const request = raw ? parseReceivePackRequest(raw) : null;
+  // A body with nothing to push (a flush) goes on as before.
+  if (request && request.commands.length === 0) {
     return { kind: "forward", body: forwardBody, requestId: null };
+  }
+  // A push this reader cannot read (compressed past the inspection limit, a
+  // push certificate, ...): the person decides.
+  if (!request || !raw) {
+    if (prefix.bytes.byteLength === 0) {
+      return { kind: "forward", body: forwardBody, requestId: null };
+    }
+    const title = `Push to ${input.repositoryFullName}`.slice(0, 240);
+    const decision = await input.decide(input.identity, {
+      action: { kind: "write", tools: ["ref_create"], alwaysAsk: true, title },
+      digest: requestDigest(["git-push-raw", input.repositoryFullName.toLowerCase(), prefix.bytes]),
+      reviewArguments: { repository: input.repositoryFullName, bytes: prefix.bytes.byteLength },
+      title,
+    });
+    if (decision.kind === "allow") return { kind: "forward", body: forwardBody, requestId: null };
+    if (decision.kind === "run") {
+      return { kind: "forward", body: forwardBody, requestId: decision.requestId };
+    }
+    await prefix.stream?.cancel().catch(() => undefined);
+    return {
+      kind: "respond",
+      response: new Response(`Opengeni: ${decision.message}\n`, {
+        status: 403,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "text/plain; charset=utf-8",
+          "x-content-type-options": "nosniff",
+        },
+      }),
+    };
   }
   const deletions: ReceivePackCommand[] = [];
   const updates: ReceivePackCommand[] = [];

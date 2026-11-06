@@ -1,5 +1,6 @@
 ---
 "@opengeni/api-router": minor
+"@opengeni/config": patch
 "@opengeni/db": patch
 "@opengeni/runtime": minor
 "@opengeni/worker-bundle": patch

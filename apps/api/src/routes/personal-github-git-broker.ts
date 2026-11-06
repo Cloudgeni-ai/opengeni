@@ -234,18 +234,34 @@ export async function handlePersonalGitHubGitBrokerRequest(
   let body: ReadableStream<Uint8Array> | Uint8Array | null | undefined =
     operation === "info_refs" ? undefined : request.body;
   let pushRequestId: string | null = null;
+  const controller = new AbortController();
+  const deadline = idleDeadline(controller, services.idleTimeoutMs ?? GIT_BROKER_IDLE_TIMEOUT_MS);
   if (operation === "receive_pack" && services.inspectPush) {
     let inspection: PushInspection;
     try {
+      // The idle deadline covers reading the push for inspection too.
+      const inspected = request.body
+        ? streamWithActivity(
+            abortableStream(request.body, controller.signal),
+            deadline.activity,
+            () => undefined,
+            () => controller.abort(),
+          )
+        : null;
       inspection = await services.inspectPush(
         authority,
-        request.body,
+        inspected,
         request.headers.get("content-encoding")?.trim().toLowerCase() === "gzip",
       );
     } catch (error) {
+      deadline.clear();
+      if (controller.signal.aborted) return brokerError(502, "The Git client stopped sending.");
       return brokerAuthorityError(error);
     }
-    if (inspection.kind === "respond") return inspection.response;
+    if (inspection.kind === "respond") {
+      deadline.clear();
+      return inspection.response;
+    }
     body =
       inspection.body instanceof Uint8Array ? bytesStream(inspection.body) : inspection.body;
     pushRequestId = inspection.requestId;
@@ -257,8 +273,6 @@ export async function handlePersonalGitHubGitBrokerRequest(
     await services.completePush(authority, requestId, outcome).catch(() => undefined);
   };
 
-  const controller = new AbortController();
-  const deadline = idleDeadline(controller, services.idleTimeoutMs ?? GIT_BROKER_IDLE_TIMEOUT_MS);
   const streamedBody = body instanceof ReadableStream
     ? streamWithActivity(
         body,
@@ -965,6 +979,35 @@ function bearerToken(authorization: string): string | null {
   return authorization.startsWith("Bearer ")
     ? authorization.slice("Bearer ".length).trim() || null
     : null;
+}
+
+/** `source`, ending with an error once `signal` aborts (a stalled client). */
+function abortableStream(
+  source: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  const aborted = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("Git client stopped sending"));
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+  aborted.catch(() => undefined);
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await Promise.race([reader.read(), aborted]);
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
 }
 
 function idleDeadline(

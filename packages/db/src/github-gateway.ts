@@ -5,7 +5,7 @@ import {
   sessionMetadataUnattended,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import { and, desc, eq, like, or } from "drizzle-orm";
+import { and, desc, eq, inArray, like, or } from "drizzle-orm";
 import { type Database, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
 
@@ -132,11 +132,13 @@ export async function listTurnGitHubGatewayApprovals(
           eq(schema.connectorActionRequests.sessionId, input.sessionId),
           eq(schema.connectorActionRequests.turnId, input.turnId),
           like(schema.connectorActionRequests.approvalId, `${GITHUB_GATEWAY_APPROVAL_PREFIX}%`),
+          inArray(schema.connectorActionRequests.status, ["pending", "approved", "rejected"]),
         ),
       )
-      .orderBy(schema.connectorActionRequests.createdAt)
-      .limit(129);
-    if (rows.length > 128) throw new Error("Too many GitHub gateway approvals in one turn");
+      // The newest 128 that still wait for or carry a decision.
+      .orderBy(desc(schema.connectorActionRequests.createdAt))
+      .limit(128);
+    rows.reverse();
     return rows.map((row) => {
       const context = row.reviewContext as { title?: unknown } | null;
       return {

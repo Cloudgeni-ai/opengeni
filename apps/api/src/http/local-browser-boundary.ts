@@ -27,7 +27,7 @@ import {
  * - Sandbox hosts: names only sandboxes and the worker use to reach the API
  *   (`host.docker.internal` with the Docker sandbox, and the hosts of
  *   `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`). They serve only the
- *   sandbox routes (Codemode, first-party MCP, and the Git broker) and refuse
+ *   sandbox routes (Codemode, first-party MCP, the Git broker and GitHub gateway) and refuse
  *   any request that carries browser metadata. A browser cannot tell a
  *   sandbox name from an attacker's, so a rebinding page on one of these
  *   names can neither send an accepted `Origin` nor reach the rest of the API.
@@ -113,7 +113,7 @@ const ORIGIN_NOT_ALLOWED_MESSAGE =
   "from this stack's web app. Add other trusted origins to OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 const SANDBOX_ROUTE_ONLY_MESSAGE =
   "This address is the local Opengeni API's sandbox route. It serves only sandbox calls " +
-  "(Codemode, first-party MCP, and the Git broker), never browsers. Open the web app at " +
+  "(Codemode, first-party MCP, the Git broker and GitHub gateway), never browsers. Open the web app at " +
   "its own address, or list this address in OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 
 const WARNINGS: Record<LocalBrowserBoundaryRejectionCode, { message: string; setting: string }> = {

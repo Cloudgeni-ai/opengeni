@@ -138,7 +138,7 @@ export function isPersonalGitHubGatewayRequest(pathname: string): boolean {
 }
 
 function gatewayError(
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 502,
+  status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 502,
   message: string,
   extra: Record<string, string> = {},
 ): Response {
@@ -219,20 +219,27 @@ export function gatewayRepositoryDecision(
   access: PersonalGitHubRepositoryAccess,
 ): { allowed: true } | { allowed: false; message: string } {
   const label = repositoryLabel(repository);
-  if (
-    repository.kind === "name" &&
-    findSessionRemovedRepository(
-      authority.removedRepositories,
-      `https://github.com/${repository.owner}/${repository.name}`,
-    )
-  ) {
-    return { allowed: false, message: `${label} was removed from this chat.` };
-  }
   const selected = authority.selection.repositories.find((candidate) =>
     repository.kind === "id"
       ? candidate.repositoryId === repository.id
       : candidate.fullName.toLowerCase() === `${repository.owner}/${repository.name}`.toLowerCase(),
   );
+  const removed =
+    repository.kind === "name"
+      ? findSessionRemovedRepository(
+          authority.removedRepositories,
+          `https://github.com/${repository.owner}/${repository.name}`,
+        )
+      : selected
+        ? findSessionRemovedRepository(authority.removedRepositories, selected.canonicalUrl) ??
+          findSessionRemovedRepository(
+            authority.removedRepositories,
+            `https://github.com/${selected.fullName}`,
+          )
+        : null;
+  if (removed) {
+    return { allowed: false, message: `${label} was removed from this chat.` };
+  }
   const allRepositoriesAccess = (authority.selection as { allRepositoriesAccess?: unknown })
     .allRepositoriesAccess;
   if (allRepositoriesAccess === "read" || allRepositoriesAccess === "write") {
@@ -257,6 +264,62 @@ export function gatewayRepositoryDecision(
   return { allowed: true };
 }
 
+/**
+ * Name the repositories a request addresses by ID (`/repositories/{id}`), so
+ * the removed-from-chat check sees them. A selected repository is named from
+ * the selection; with All my repositories GitHub names it.
+ */
+async function nameRepositoryIds(
+  services: PersonalGitHubGatewayServices,
+  authority: PersonalGitHubGatewayAuthority,
+  checks: GatewayRepositoryCheck[],
+): Promise<GatewayRepositoryCheck[]> {
+  const named: GatewayRepositoryCheck[] = [];
+  for (const check of checks) {
+    const { repository } = check;
+    if (repository.kind !== "id") {
+      named.push(check);
+      continue;
+    }
+    const selected = authority.selection.repositories.find(
+      (candidate) => candidate.repositoryId === repository.id,
+    );
+    const fullName = selected?.fullName ?? (await githubRepositoryName(services, authority, repository.id));
+    const [owner, name] = fullName?.split("/", 2) ?? [];
+    named.push(
+      owner && name ? { ...check, repository: { kind: "name", owner, name } } : check,
+    );
+  }
+  return named;
+}
+
+async function githubRepositoryName(
+  services: PersonalGitHubGatewayServices,
+  authority: PersonalGitHubGatewayAuthority,
+  repositoryId: string,
+): Promise<string | null> {
+  const all = (authority.selection as { allRepositoriesAccess?: unknown }).allRepositoriesAccess;
+  if (all !== "read" && all !== "write") return null;
+  const url = new URL(`/repositories/${repositoryId}`, PERSONAL_GITHUB_API_ORIGIN);
+  try {
+    const authorization = await services.authorizeProviderRequest(
+      authority,
+      url.toString(),
+      "github_read",
+      [],
+    );
+    const payload = await fetchLiveGitHubJson(services.fetch, url, authorization);
+    if (payload && typeof payload.full_name === "string" && payload.full_name.includes("/")) {
+      return payload.full_name;
+    }
+  } catch {
+    // Unnamed: refused below.
+  }
+  throw new GatewayRepositoryDeniedError(
+    `Opengeni could not check repository ${repositoryId} on GitHub. Use its owner/name instead.`,
+  );
+}
+
 function assertRepositories(
   authority: PersonalGitHubGatewayAuthority,
   checks: GatewayRepositoryCheck[],
@@ -271,22 +334,20 @@ function assertRepositories(
 // REST and GraphQL
 // ---------------------------------------------------------------------------
 
-const DROPPED_REQUEST_HEADERS = new Set([
-  "host",
-  "authorization",
-  "cookie",
-  "connection",
-  "keep-alive",
-  "proxy-authorization",
-  "proxy-connection",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "content-length",
-  "accept-encoding",
-  "forwarded",
-  "via",
+/** Request headers `gh` sends that GitHub needs; nothing else is forwarded. */
+const FORWARDED_REQUEST_HEADERS = new Set([
+  "accept",
+  "accept-language",
+  "content-type",
+  "user-agent",
+  "x-github-api-version",
+  "graphql-features",
+  "time-zone",
+  "if-match",
+  "if-none-match",
+  "if-modified-since",
+  "if-unmodified-since",
+  "range",
 ]);
 
 const DROPPED_RESPONSE_HEADERS = new Set([
@@ -306,16 +367,7 @@ function upstreamHeaders(
 ): Headers {
   const headers = new Headers();
   for (const [name, value] of request.headers) {
-    const lower = name.toLowerCase();
-    if (
-      DROPPED_REQUEST_HEADERS.has(lower) ||
-      lower.startsWith("x-forwarded-") ||
-      lower.startsWith("cf-") ||
-      lower.startsWith("x-opengeni-")
-    ) {
-      continue;
-    }
-    headers.set(name, value);
+    if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
   headers.set("authorization", authorization);
   headers.set("accept-encoding", "identity");
@@ -520,22 +572,35 @@ export async function handlePersonalGitHubGatewayRequest(
   const parsedBody = bodyBytes ? parseJsonBody(bodyBytes) : null;
 
   let action: GitHubGatewayAction;
-  const checks: GatewayRepositoryCheck[] = [];
+  let checks: GatewayRepositoryCheck[] = [];
   let reviewExtra: Record<string, unknown> = {};
-  if (target === "api" && pathname === "/graphql" && method === "POST") {
+  if (target === "api" && pathname === "/graphql" && method !== "POST") {
+    return gatewayError(405, "GitHub GraphQL takes POST requests.");
+  }
+  if (target === "api" && pathname === "/graphql") {
     const graphql = classifyGitHubGraphqlRequest(parsedBody);
     action = graphql.action;
     for (const repository of graphql.repositories) {
-      checks.push({ repository: { kind: "name", ...repository }, access: "read" });
+      // `viewer { repository(name:) }`: the person's own repository.
+      const owner = repository.owner ?? authority.metadata.githubLogin;
+      checks.push({ repository: { kind: "name", owner, name: repository.name }, access: "read" });
     }
     if (action.kind === "write") {
       reviewExtra = { mutations: graphql.mutations };
+      let writeTargets = graphql.mutationRepositories.length;
+      for (const repository of graphql.mutationRepositories) {
+        checks.push({ repository: { kind: "name", ...repository }, access: "write" });
+      }
       const nodeRepositories = await resolveNodeRepositories(services, authority, graphql.nodeIds);
       if (nodeRepositories === null) {
         action = { ...action, alwaysAsk: true };
       } else {
+        writeTargets += nodeRepositories.length;
         for (const repository of nodeRepositories) checks.push({ repository, access: "write" });
       }
+      // A repository mutation whose repository the gateway could not find
+      // (an input shape it does not know) asks.
+      if (writeTargets === 0 && !graphql.accountLevel) action = { ...action, alwaysAsk: true };
     }
   } else {
     const rest = classifyGitHubRestRequest(method, pathname, parsedBody ?? null);
@@ -548,6 +613,7 @@ export async function handlePersonalGitHubGatewayRequest(
     }
   }
   try {
+    checks = await nameRepositoryIds(services, authority, checks);
     assertRepositories(authority, checks);
   } catch (error) {
     return authorityError(error);
@@ -567,7 +633,7 @@ export async function handlePersonalGitHubGatewayRequest(
           target,
           method,
           path,
-          bodyBytes ? (parsedBody !== undefined ? parsedBody : bodyBytes) : null,
+          bodyBytes,
           bodyStream ? { contentLength, contentType: request.headers.get("content-type") } : null,
         ]),
         reviewArguments: reviewArgumentsFor(method, path, parsedBody ?? null, {

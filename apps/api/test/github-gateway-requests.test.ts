@@ -160,3 +160,67 @@ describe("GitHub gateway GraphQL classification", () => {
     expect(classifyGitHubGraphqlRequest("not json").action).toMatchObject({ alwaysAsk: true });
   });
 });
+
+describe("GitHub gateway review fixes", () => {
+  test("only reruns and cancels are routine on a workflow run", () => {
+    expect(rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action).toMatchObject({
+      alwaysAsk: false,
+    });
+    expect(rest("POST", "/repos/acme/widgets/actions/runs/9/cancel").action).toMatchObject({
+      alwaysAsk: false,
+    });
+    for (const sub of ["pending_deployments", "approve", "deployment_protection_rule"]) {
+      expect(rest("POST", `/repos/acme/widgets/actions/runs/9/${sub}`).action).toMatchObject({
+        alwaysAsk: true,
+      });
+    }
+  });
+
+  test("updateRefs with a zero afterOid deletes, so it asks", () => {
+    const classify = (afterOid: string) =>
+      classifyGitHubGraphqlRequest({
+        query: "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
+        variables: {
+          input: {
+            repositoryId: "R_kgDOWidgets",
+            refUpdates: [{ name: "refs/heads/x", beforeOid: "a".repeat(40), afterOid }],
+          },
+        },
+      }).action;
+    expect(classify("0".repeat(40))).toMatchObject({ title: "Delete branch or tag", alwaysAsk: true });
+    expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", alwaysAsk: false });
+  });
+
+  test("repositories named in mutation input are collected", () => {
+    const result = classifyGitHubGraphqlRequest({
+      query:
+        "mutation($a: CreateCommitOnBranchInput!, $b: AddSubIssueInput!) { createCommitOnBranch(input: $a) { clientMutationId } addSubIssue(input: $b) { clientMutationId } }",
+      variables: {
+        a: { branch: { repositoryNameWithOwner: "acme/widgets", branchName: "main" } },
+        b: { issueId: "I_kwDOAbcdefgh", subIssueUrl: "https://github.com/other/secret/issues/3" },
+      },
+    });
+    expect(result.mutationRepositories).toEqual([
+      { owner: "acme", name: "widgets" },
+      { owner: "other", name: "secret" },
+    ]);
+    expect(result.accountLevel).toBe(false);
+  });
+
+  test("account-level mutations and owner-scoped reads", () => {
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: 'mutation { addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId } }',
+      }).accountLevel,
+    ).toBe(true);
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'query { repositoryOwner(login: "acme") { repository(name: "widgets") { id } } viewer { repository(name: "mine") { id } } }',
+      }).repositories,
+    ).toEqual([
+      { owner: "acme", name: "widgets" },
+      { owner: null, name: "mine" },
+    ]);
+  });
+});

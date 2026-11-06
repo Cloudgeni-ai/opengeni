@@ -201,7 +201,7 @@ describe("personal GitHub gateway", () => {
   test("the same request has the same digest, a different one does not", async () => {
     const { send, decisions } = harness();
     await send("/repos/acme/widgets/issues", { method: "POST", body: '{"title":"A","body":"b"}' });
-    await send("/repos/acme/widgets/issues", { method: "POST", body: '{"body":"b","title":"A"}' });
+    await send("/repos/acme/widgets/issues", { method: "POST", body: '{"title":"A","body":"b"}' });
     await send("/repos/acme/widgets/issues", { method: "POST", body: '{"title":"B"}' });
     expect(decisions[0]!.digest).toBe(decisions[1]!.digest);
     expect(decisions[2]!.digest).not.toBe(decisions[0]!.digest);
@@ -307,6 +307,111 @@ describe("personal GitHub gateway", () => {
       }),
     });
     expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+  });
+});
+
+describe("personal GitHub gateway review fixes", () => {
+  const removedWidgets = [
+    {
+      resource: { kind: "repository", uri: "https://github.com/acme/widgets", ref: "main" },
+    } as unknown as PersonalGitHubGatewayAuthority["removedRepositories"][number],
+  ];
+
+  test("a removed repository addressed by ID is refused too", async () => {
+    const { send, upstream } = harness({ authority: authority({ removedRepositories: removedWidgets }) });
+    const response = await send("/repositories/11/issues", {
+      method: "POST",
+      body: JSON.stringify({ title: "x" }),
+    });
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { message: string }).message).toContain("removed from this chat");
+    expect(upstream).toEqual([]);
+  });
+
+  test("with All my repositories, GitHub names a repository addressed by ID", async () => {
+    const all = authority({
+      removedRepositories: removedWidgets,
+      selection: {
+        ...authority().selection,
+        repositories: [],
+        allRepositoriesAccess: "write",
+      } as unknown as PersonalGitHubGatewayAuthority["selection"],
+    });
+    const { send, upstream } = harness({
+      authority: all,
+      respond: (url) =>
+        url.endsWith("/repositories/77")
+          ? Response.json({ id: 77, full_name: "acme/widgets" })
+          : Response.json({ ok: true }),
+    });
+    const response = await send("/repositories/77/issues", {
+      method: "POST",
+      body: JSON.stringify({ title: "x" }),
+    });
+    expect(response.status).toBe(403);
+    expect(upstream.map((call) => call.url)).toEqual(["https://api.github.com/repositories/77"]);
+  });
+
+  test("a mutation naming its repository by name is checked against the allowlist", async () => {
+    const { send, upstream } = harness();
+    const commit = (repository: string) =>
+      JSON.stringify({
+        query:
+          "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+        variables: {
+          input: {
+            branch: { repositoryNameWithOwner: repository, branchName: "main" },
+            expectedHeadOid: "a".repeat(40),
+            message: { headline: "x" },
+          },
+        },
+      });
+    expect((await send("/graphql", { method: "POST", body: commit("other/secret") })).status).toBe(403);
+    expect((await send("/graphql", { method: "POST", body: commit("acme/docs") })).status).toBe(403);
+    expect(upstream).toEqual([]);
+    expect((await send("/graphql", { method: "POST", body: commit("acme/widgets") })).status).toBe(200);
+  });
+
+  test("a repository mutation whose repository can't be found asks", async () => {
+    const { send, decisions } = harness();
+    await send("/graphql", {
+      method: "POST",
+      body: JSON.stringify({ query: "mutation { createIssue(input: {title: \"x\"}) { issue { id } } }" }),
+    });
+    expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+  });
+
+  test("GraphQL reads under an owner login are scoped", async () => {
+    const { send } = harness();
+    const query = (login: string) =>
+      JSON.stringify({
+        query: `query { organization(login: "${login}") { repository(name: "secret") { id } } }`,
+      });
+    expect((await send("/graphql", { method: "POST", body: query("other") })).status).toBe(403);
+    const viewer = harness({
+      authority: authority({ metadata: { githubLogin: "acme" } as PersonalGitHubGatewayAuthority["metadata"] }),
+    });
+    const own = JSON.stringify({ query: 'query { viewer { repository(name: "widgets") { id } } }' });
+    expect((await viewer.send("/graphql", { method: "POST", body: own })).status).toBe(200);
+  });
+
+  test("GraphQL needs POST, and only GitHub's own headers are forwarded", async () => {
+    const { send, upstream } = harness();
+    expect((await send("/graphql")).status).toBe(405);
+    await send("/user", {
+      headers: { "x-http-method-override": "DELETE", "x-real-ip": "1.2.3.4", "x-github-api-version": "2022-11-28" },
+    });
+    const headers = new Headers(upstream[0]!.init.headers);
+    expect(headers.get("x-http-method-override")).toBeNull();
+    expect(headers.get("x-real-ip")).toBeNull();
+    expect(headers.get("x-github-api-version")).toBe("2022-11-28");
+  });
+
+  test("approvals bind the exact body bytes", async () => {
+    const { send, decisions } = harness();
+    await send("/repos/acme/widgets/issues", { method: "POST", body: '{"title":"a","body":"b"}' });
+    await send("/repos/acme/widgets/issues", { method: "POST", body: '{"body":"b","title":"a"}' });
+    expect(decisions[0]!.digest).not.toBe(decisions[1]!.digest);
   });
 });
 

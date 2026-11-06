@@ -135,8 +135,15 @@ function classifyRepositoryWrite(
     // actions/{secrets,variables,permissions,runners,...} are settings.
     if (id === "runs" && sub) {
       if (method === "DELETE") return sensitive("Delete workflow run data");
-      return routine(
-        subId === "cancel" || subId === "force-cancel" ? "Cancel workflow run" : "Rerun workflow",
+      if (method === "POST" && (subId === "cancel" || subId === "force-cancel")) {
+        return routine("Cancel workflow run");
+      }
+      if (method === "POST" && (subId === "rerun" || subId === "rerun-failed-jobs")) {
+        return routine("Rerun workflow");
+      }
+      // Approving deployments or fork runs, protection rules: human gates.
+      return sensitive(
+        subId === "pending_deployments" ? "Approve deployment" : "Change workflow run",
       );
     }
     if (id === "jobs" && subId === "rerun" && method === "POST") {
@@ -665,6 +672,52 @@ function resolveValue(value: GraphqlValue, variables: Record<string, unknown>): 
   }
 }
 
+const GITHUB_REPOSITORY_URL =
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
+
+/**
+ * Repositories a mutation's input names directly rather than by node ID:
+ * `repositoryNameWithOwner` (createCommitOnBranch) and github.com URLs
+ * (addSubIssue's `subIssueUrl`, ...).
+ */
+function collectNamedRepositories(
+  value: unknown,
+  into: Map<string, { owner: string; name: string }>,
+  key: string | null = null,
+  depth = 0,
+): void {
+  if (depth > GRAPHQL_MAX_DEPTH || into.size > GRAPHQL_NODE_IDS_MAX) return;
+  if (typeof value === "string") {
+    let owner: string | undefined;
+    let name: string | undefined;
+    if (key === "repositoryNameWithOwner" && /^[^/\s]+\/[^/\s]+$/u.test(value)) {
+      [owner, name] = value.split("/") as [string, string];
+    } else {
+      const match = GITHUB_REPOSITORY_URL.exec(value);
+      if (match) [owner, name] = [match[1]!, match[2]!.replace(/\.git$/iu, "")];
+    }
+    if (owner && name) into.set(`${owner}/${name}`.toLowerCase(), { owner, name });
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNamedRepositories(item, into, key, depth + 1);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [childKey, item] of Object.entries(value)) {
+      collectNamedRepositories(item, into, childKey, depth + 1);
+    }
+  }
+}
+
+/** Mutations that act on the person's own account, not on a repository. */
+const ACCOUNT_LEVEL_MUTATIONS = new Set([
+  "addStar",
+  "removeStar",
+  "markNotificationAsDone",
+  "updateSubscription",
+]);
+
 /**
  * Strings in a mutation's input that look like GitHub global node IDs
  * (`PR_kwDO…`, `I_kwDO…`, legacy base64 `MDEx…`). The gateway resolves them
@@ -698,8 +751,16 @@ export function looksLikeGitHubNodeId(value: string): boolean {
 
 export type GitHubGraphqlClassification = {
   action: GitHubGatewayAction;
-  /** `repository(owner:, name:)` references found anywhere in the operation. */
-  repositories: Array<{ owner: string; name: string }>;
+  /**
+   * `repository(owner:, name:)` references found anywhere in the operation,
+   * also under `organization`/`user`/`repositoryOwner(login:)`. A null owner
+   * means the signed-in person (`viewer { repository(name:) }`).
+   */
+  repositories: Array<{ owner: string | null; name: string }>;
+  /** Repositories a mutation's input names directly; checked for write. */
+  mutationRepositories: Array<{ owner: string; name: string }>;
+  /** Every mutation acts on the person's account only (stars, notifications). */
+  accountLevel: boolean;
   /** Node IDs a mutation acts on; resolved to repositories before it runs. */
   nodeIds: string[];
   /** Top-level mutation fields, for the approval card. */
@@ -714,6 +775,8 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   const unknown = (title: string): GitHubGraphqlClassification => ({
     action: sensitive(title),
     repositories: [],
+    mutationRepositories: [],
+    accountLevel: false,
     nodeIds: [],
     mutations: [],
   });
@@ -743,38 +806,55 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       : undefined;
   if (!operation) return unknown("Unrecognised GitHub GraphQL request");
 
-  const repositories: Array<{ owner: string; name: string }> = [];
+  const repositories: Array<{ owner: string | null; name: string }> = [];
+  // `owner` is the login of an enclosing organization/user/repositoryOwner
+  // (null for viewer), so `repository(name:)` under it is scoped too. A
+  // fragment is visited once per owner context.
   const visitedFragments = new Set<string>();
-  const visit = (selections: GraphqlSelection[], depth: number) => {
+  const visit = (selections: GraphqlSelection[], depth: number, owner: string | null | undefined) => {
     if (depth > GRAPHQL_MAX_DEPTH) return;
     for (const selection of selections) {
       if (selection.kind === "spread") {
-        if (visitedFragments.has(selection.name)) continue;
-        visitedFragments.add(selection.name);
-        visit(document.fragments.get(selection.name) ?? [], depth + 1);
+        const key = `${selection.name}\u0000${owner === undefined ? "" : (owner ?? "@viewer")}`;
+        if (visitedFragments.has(key)) continue;
+        visitedFragments.add(key);
+        visit(document.fragments.get(selection.name) ?? [], depth + 1, owner);
         continue;
       }
       if (selection.kind === "inline") {
-        visit(selection.selections, depth + 1);
+        visit(selection.selections, depth + 1, owner);
         continue;
       }
       const { field } = selection;
-      if (field.name === "repository" && field.args.owner && field.args.name) {
-        const owner = resolveValue(field.args.owner, variables);
+      let childOwner = owner;
+      if (
+        (field.name === "organization" || field.name === "user" || field.name === "repositoryOwner") &&
+        field.args.login
+      ) {
+        const login = resolveValue(field.args.login, variables);
+        childOwner = typeof login === "string" ? login : undefined;
+      } else if (field.name === "viewer") {
+        childOwner = null;
+      } else if (field.name === "repository" && field.args.name) {
         const name = resolveValue(field.args.name, variables);
-        if (typeof owner === "string" && typeof name === "string") {
-          repositories.push({ owner, name });
+        const explicitOwner = field.args.owner ? resolveValue(field.args.owner, variables) : undefined;
+        const repositoryOwner = typeof explicitOwner === "string" ? explicitOwner : owner;
+        if (typeof name === "string" && repositoryOwner !== undefined) {
+          repositories.push({ owner: repositoryOwner, name });
         }
+        childOwner = undefined;
       }
-      visit(field.selections, depth + 1);
+      visit(field.selections, depth + 1, childOwner);
     }
   };
-  visit(operation.selections, 0);
+  visit(operation.selections, 0, undefined);
 
   if (operation.type !== "mutation") {
     return {
       action: { kind: "read", title: "Read" },
       repositories,
+      mutationRepositories: [],
+      accountLevel: false,
       nodeIds: [],
       mutations: [],
     };
@@ -801,25 +881,33 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   let alwaysAsk = false;
   const titles: string[] = [];
   const nodeIds = new Set<string>();
+  const named = new Map<string, { owner: string; name: string }>();
   for (const field of topLevel) {
     if (field.name === "__typename") continue;
     const args = Object.fromEntries(
       Object.entries(field.args).map(([key, value]) => [key, resolveValue(value, variables)]),
     );
     collectNodeIds(args, nodeIds);
+    collectNamedRepositories(args, named);
     let mapped = GRAPHQL_MUTATIONS[field.name];
     if (field.name === "updateRef" || field.name === "updateRefs") {
       const input = args.input as Record<string, unknown> | undefined;
       const updates = Array.isArray(input?.refUpdates) ? input.refUpdates : [input];
-      const force = updates.some(
-        (update) =>
-          update !== null &&
-          typeof update === "object" &&
-          (update as Record<string, unknown>).force === true,
+      const records = updates.map((update) =>
+        update !== null && typeof update === "object" ? (update as Record<string, unknown>) : {},
       );
-      mapped = force
-        ? { tools: ["ref_create"], title: "Force-update branch", alwaysAsk: true }
-        : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
+      // `updateRefs` deletes a ref whose `afterOid` is all zeros.
+      const deletes = records.some(
+        (update) =>
+          field.name === "updateRefs" &&
+          (typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid)),
+      );
+      const force = records.some((update) => update.force === true);
+      mapped = deletes
+        ? { tools: ["ref_create"], title: "Delete branch or tag", alwaysAsk: true }
+        : force
+          ? { tools: ["ref_create"], title: "Force-update branch", alwaysAsk: true }
+          : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
     }
     if (!mapped) {
       alwaysAsk = true;
@@ -830,9 +918,13 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     if (mapped.alwaysAsk) alwaysAsk = true;
     titles.push(mapped.title);
   }
+  // Too many named repositories to check: ask.
+  if (named.size > GRAPHQL_NODE_IDS_MAX) alwaysAsk = true;
   return {
     action: write([...tools], [...new Set(titles)].join(", ").slice(0, 200), alwaysAsk),
     repositories,
+    mutationRepositories: [...named.values()],
+    accountLevel: mutations.every((name) => ACCOUNT_LEVEL_MUTATIONS.has(name)),
     nodeIds: [...nodeIds],
     mutations,
   };
