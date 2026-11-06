@@ -85,7 +85,6 @@ const HOUR_MS = 60 * 60_000;
 
 type Window = { start: number; count: number; last: number };
 
-/** One kind of onboarding reply's budget. */
 /** A reserved reply, which can be given back if Teams clearly never received it. */
 export type TeamsOnboardingReservation = { release(): Promise<void> };
 /** One kind of onboarding reply's budget. */

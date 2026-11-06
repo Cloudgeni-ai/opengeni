@@ -241,8 +241,8 @@ replica, in separate budgets so one kind can't use up another:
   overall. They carry no card or identity proof and point to `help`, which
   always answers with the Connect your organization card. The work or school
   account notice for personal Microsoft accounts uses the card budget, then
-  this one, and so does the reply to a 1:1 message with only a file, an image
-  or no text.
+  this one. The reply to a 1:1 message with only a file, an image or no text
+  uses only this one.
 - Short text replies in group chats and channels (connect first, or this
   conversation isn't turned on): one per person per minute, 10 per person and
   200 per tenant per day, 2,000 per hour overall, because everyone there sees
@@ -258,10 +258,9 @@ The counts are kept in the database (`teams_bot_onboarding_limits`, migration
 `1296_teams_bot_onboarding_limits.sql`): content-free rows keyed by a hash of
 the budget and the person, tenant or deployment, using the database clock, and
 removed once both the window's start and the last reply are two days old. A
-refused reply writes nothing, and a window starts with its first reply. A
-replica that can't reach the database
-counts in its own memory until it can, so replies stay bounded and still go
-out. A reply Teams clearly never received (refused, throttled or unreachable)
+refused reply changes no existing row, and a window starts with its first
+reply. A replica that can't reach the database counts in its own memory until
+it can, so replies stay bounded and still go out. A reply Teams clearly never received (refused, throttled or unreachable)
 doesn't count. An install's welcome is also claimed once in the database (see
 [In-Teams experience](#in-teams-experience)).
 
