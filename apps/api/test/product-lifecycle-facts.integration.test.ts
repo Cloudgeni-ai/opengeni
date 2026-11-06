@@ -150,13 +150,11 @@ describe("product lifecycle facts from managed auth", () => {
     });
     expect(await factsFor(subjectId)).toHaveLength(1);
 
-    const verification = messages.find((message) => message.kind === "email_verification");
+    // Only the newest sign-up's link verifies the address.
+    const verification = messages.findLast((message) => message.kind === "email_verification");
     const link = new URL(verification!.text.match(/https?:\/\/\S+/)![0]);
     const verificationPath = `${link.pathname}${link.search}`;
-    // Followed in the browser that signed up, so its password stays usable.
-    const verified = await app.request(verificationPath, {
-      headers: requestHeaders(cookiePairs(signUp)),
-    });
+    const verified = await app.request(verificationPath, { headers: requestHeaders() });
     expect(verified.status).toBeLessThan(400);
     // Legacy mode signs the new user in from the first verification click.
     expect(summary(await factsFor(subjectId))).toEqual([

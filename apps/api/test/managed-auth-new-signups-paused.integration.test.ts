@@ -165,9 +165,8 @@ async function verifiedEmailUser(h: Harness, email: string, password: string): P
   const verification = linkIn(
     mail.findLast((message) => message.kind === "email_verification" && message.to === email),
   );
-  // Verified in the browser that signed up, so its password stays usable.
   const verified = await h.app.request(`${verification.pathname}${verification.search}`, {
-    headers: requestHeaders(cookiePairs(signUp)),
+    headers: requestHeaders(),
   });
   expect(verified.status).toBeLessThan(400);
   const signIn = await h.app.request("/v1/auth/sign-in/email", {
