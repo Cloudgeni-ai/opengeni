@@ -96,6 +96,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     billingAutoTopUpEnabled: false,
     // Off in fixtures; bring-your-own-key fee tests opt in.
     byokPlatformFeeBps: 0,
+    apiConnectedSubscriptionsEnabled: false,
     verifiedSignupTrialCreditsEnabled: false,
     creditPromotionPolicy: { offers: {} },
     sandboxWarmBillingMode: "usage_only",

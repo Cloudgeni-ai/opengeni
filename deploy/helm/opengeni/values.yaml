@@ -133,6 +133,11 @@ config:
   # cost credit on turns whose model Opengeni pays for. Set "false" to restore
   # free hosted search and images, for example without the Gateway image
   # credential. See docs/web-search.md.
+  # OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED (default "false", unset here):
+  # set "true" to let API-origin work (organization access keys, embedded
+  # products) use the organization's own connected subscriptions. Only for an
+  # operator who owns the subscriptions it connects and accepts its provider's
+  # terms. See docs/deployment.md.
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
   OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only

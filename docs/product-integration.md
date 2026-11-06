@@ -17,6 +17,13 @@ supported. Their platform fee is configuration-driven; at
 requirement for it. See [billing-origin.md](billing-origin.md) for funding and
 the existing internal-account legacy terms.
 
+A self-hosted operator that owns the subscriptions it connects can let its own
+product's API requests use them by setting
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` on the deployment (default
+`false`); the operator is responsible for its provider's terms. See
+[deployment.md](deployment.md) and
+[billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;

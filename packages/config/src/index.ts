@@ -2420,6 +2420,15 @@ const SettingsSchema = z.object({
    * credit. 0 turns the fee off.
    */
   byokPlatformFeeBps: z.coerce.number().int().min(0).max(10_000).default(500),
+  /**
+   * Operator opt-in for API-origin work (organization access keys, embedded
+   * products) to use the organization's own connected subscriptions (Claude,
+   * Codex, SuperGrok). Off by default: connected subscriptions are only for
+   * app work. A self-hosted operator that owns the subscriptions it connects
+   * may turn it on; they are responsible for their provider's terms. Paid-plan
+   * requirements still apply where credit billing is active.
+   */
+  apiConnectedSubscriptionsEnabled: EnvBoolean.default(false),
   // On turns whose model Opengeni pays for while credit billing is active,
   // paid tools the model provider hosts cost credit: Opengeni's billed web
   // tools replace hosted search (or reported hosted searches are charged) and
@@ -6604,6 +6613,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
     byokPlatformFeeBps: optional("OPENGENI_BYOK_PLATFORM_FEE_BPS"),
+    apiConnectedSubscriptionsEnabled: optional("OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED"),
     paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };

@@ -23,6 +23,7 @@ import {
   isWorkspaceModelAdmissible,
   ModelCallError,
   ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
@@ -160,7 +161,10 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           (entry) =>
             isWorkspaceModelAdmissible(entry) &&
             servedBySingleModelCalls(entry) &&
-            !(origin === "api" && ownModelFunding(entry.model) === "subscription"),
+            !(
+              connectedSubscriptionsRefusedForOrigin(deps.settings, origin) &&
+              ownModelFunding(entry.model) === "subscription"
+            ),
         )
         .map(({ model }) => ({
           id: model.id,

@@ -44,13 +44,17 @@ const settings = testSettings({
 });
 
 async function organization() {
+  return (await organizationWithWorkspace()).accountId;
+}
+
+async function organizationWithWorkspace() {
   const userId = crypto.randomUUID();
   const access = await ensureManagedAccessForUser(client!.db, {
     userId,
     email: `${userId}@example.test`,
     name: "Subscription owner",
   });
-  return access.defaultAccountId!;
+  return { accountId: access.defaultAccountId!, workspaceId: access.defaultWorkspaceId! };
 }
 
 async function onPlan(
@@ -135,3 +139,40 @@ test("internal accounts on legacy billing are never refused, even without a plan
     allowed: true,
   });
 });
+
+test("the operator opt-in lets API work use a subscription on a paid plan; Free still needs Pro", async () => {
+  if (!client) return;
+  const optedIn = { ...settings, apiConnectedSubscriptionsEnabled: true };
+  const call = async ({ accountId, workspaceId }: { accountId: string; workspaceId: string }) =>
+    await admitModelCall(
+      { db: client!.db, settings: optedIn },
+      {
+        accountId,
+        workspaceId,
+        model: "codex/gpt-6-luna",
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        subjectId: null,
+        billingOrigin: "api",
+        ownSubscription: true,
+      },
+    );
+  const pro = await organizationWithWorkspace();
+  await onPlan(pro.accountId, "pro");
+  // Titles, transcription and realtime voice share this plan check.
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings: optedIn }, pro.accountId, "api"),
+  ).toEqual({ allowed: true });
+  expect(await call(pro)).toMatchObject({ allowed: true });
+  // Default off: the same account is refused for API work.
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings }, pro.accountId, "api"),
+  ).toMatchObject({ allowed: false, code: "subscription_api_unavailable" });
+
+  const free = await organizationWithWorkspace();
+  await onPlan(free.accountId, "free");
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings: optedIn }, free.accountId, "api"),
+  ).toMatchObject({ allowed: false, code: SUBSCRIPTION_PLAN_REQUIRED_CODE });
+  expect(await call(free)).toMatchObject({ allowed: false, subscriptionPlanRequired: true });
+}, 120_000);

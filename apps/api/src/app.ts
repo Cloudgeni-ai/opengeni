@@ -201,6 +201,7 @@ import {
   configureBillingLegacyAccounts,
   fundedBillingOrigin,
   ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -1639,7 +1640,7 @@ export function createAppComposition(deps: AppDependencies): {
             { observeAvailability: true },
           );
           const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
-          if (billingOrigin === "api") {
+          if (connectedSubscriptionsRefusedForOrigin(deps.settings, billingOrigin)) {
             selections = selections.filter(
               ({ model }) => ownModelFunding(model) !== "subscription",
             );
