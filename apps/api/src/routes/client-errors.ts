@@ -29,6 +29,7 @@ import type { Settings } from "@opengeni/config";
 import {
   CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_DESKTOP_PLATFORMS,
+  CLIENT_ERROR_DETAIL_MAX_BYTES,
   CLIENT_ERROR_KINDS,
   CLIENT_ERROR_REPORT_MAX_BYTES,
   CLIENT_ERROR_REVISION_PATTERN,
@@ -43,6 +44,7 @@ import {
   CLIENT_WEB_VITAL_MAX_VALUE,
   CLIENT_WEB_VITAL_METRICS,
   projectClientErrorDetail,
+  type ClientErrorDetailField,
   type ClientErrorDetail,
   type ClientErrorKind,
   type ClientSignal,
@@ -65,14 +67,17 @@ export {
 const CLIENT_ERROR_REJECTION_REASONS = ["invalid", "too_large", "origin", "rate_limited"] as const;
 type ClientErrorRejectionReason = (typeof CLIENT_ERROR_REJECTION_REASONS)[number];
 
-// Field lengths are bounded by the body limit; the projection below scrubs and
-// cuts each one to its own bound.
+// The browser sends each field already projected to its byte bound, so a raw
+// field longer than twice that bound is refused before any scrubbing work;
+// the projection below scrubs and cuts each accepted field to its own bound.
+const rawDetailField = (field: ClientErrorDetailField) =>
+  z.string().max(CLIENT_ERROR_DETAIL_MAX_BYTES[field] * 2);
 const ClientErrorDetailInput = z
   .object({
-    name: z.string().optional(),
-    message: z.string().optional(),
-    stack: z.string().optional(),
-    componentStack: z.string().optional(),
+    name: rawDetailField("name").optional(),
+    message: rawDetailField("message").optional(),
+    stack: rawDetailField("stack").optional(),
+    componentStack: rawDetailField("componentStack").optional(),
   })
   .strict();
 
