@@ -3328,6 +3328,19 @@ The runtime secret must provide values such as:
   paid plan of at least $20/month and are for app-origin work, never customer
   API-origin work. Existing internal legacy billing terms are unchanged. See
   [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
+- `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED` (default `false`): a
+  deployment-wide operator opt-in that lets API-origin work (organization
+  access keys, embedded products) use the organization's own connected
+  subscriptions. Off, API selections of a subscription fail with `403`
+  `subscription_api_unavailable` and API model lists and defaults skip them.
+  On, every path that refuses API use of a subscription (agent, goal,
+  scheduled, stateless, transcription, realtime voice, titles, model lists and
+  defaults) treats API work like app work; paid-plan requirements still apply
+  where credit billing is active. Set it on both API and worker processes. It
+  is meant for a self-hosted operator who owns the subscriptions it connects;
+  the operator is responsible for its provider's terms. Hosted multi-tenant
+  deployments should leave it off. See
+  [billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
   OpenAI hosted image generation cost credit. Billed provider search replaces

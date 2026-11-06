@@ -8,7 +8,7 @@ Opengeni's public API is a workspace-scoped HTTP API. Most integrations should u
 
 ## Billing
 
-API and embedded-product usage spends credits, not plan credit. Connected AI subscriptions are available only in the Opengeni apps on Pro ($20/month), Max, or Enterprise; API requests that explicitly select one return `403` with `subscription_api_unavailable`. See [Going to production](/integrate/production) for billing and model selection.
+API and embedded-product usage spends credits, not plan credit. Connected AI subscriptions are available only in the Opengeni apps on Pro ($20/month), Max, or Enterprise; API requests that explicitly select one return `403` with `subscription_api_unavailable`. A self-hosted deployment can allow them for API requests with `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true`; see [Self-host](/guides/self-host#connected-subscriptions-over-the-api). See [Going to production](/integrate/production) for billing and model selection.
 
 ## Discovery
 

@@ -72,6 +72,20 @@ describe(".env.example", () => {
   });
 });
 
+describe("API use of connected subscriptions", () => {
+  test("is off unless the operator sets OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED", () => {
+    expect(withEnv({}, () => getSettings()).apiConnectedSubscriptionsEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED: "true" }, () => getSettings())
+        .apiConnectedSubscriptionsEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED: "false" }, () => getSettings())
+        .apiConnectedSubscriptionsEnabled,
+    ).toBe(false);
+  });
+});
+
 describe("recording transcription settings", () => {
   const endpoint = "https://speech.example.cognitiveservices.azure.com";
 
