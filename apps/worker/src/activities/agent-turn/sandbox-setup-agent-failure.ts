@@ -666,9 +666,17 @@ export async function recoverSandboxSetupFailure(
  */
 export async function recoverUnresponsiveComputeAgent(
   machine: UnresponsiveComputeMachine,
-  recovery: Pick<SandboxProcessStartRecovery, "restartsThisTurn" | "publish" | "operationName">,
+  recovery: Pick<SandboxProcessStartRecovery, "restartsThisTurn" | "publish" | "operationName"> & {
+    /** Whether the box's host is busy with it, as handing it off, and so
+     * refuses to wake it for a short while. Its agent is not at fault then,
+     * and a restart would only wait on the same host. */
+    hostBusy?: () => Promise<boolean>;
+  },
 ): Promise<UnresponsiveAgentRecovery> {
   if (await machine.agentAnswers().catch(() => false)) return "answering";
+  if (await (recovery.hostBusy?.() ?? Promise.resolve(false)).catch(() => false)) {
+    return "host_busy";
+  }
   let restarts: { started: number; completed: number };
   try {
     restarts = await recovery.restartsThisTurn();

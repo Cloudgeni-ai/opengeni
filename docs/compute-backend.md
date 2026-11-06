@@ -196,7 +196,14 @@ skips sandbox enrollments, and machine routes list machines only.
   reconciler's claim settles it by runner retirement.
 - **Restart**: when a sandbox's VM dies, the host boots it fresh on its disk
   (programs lost, files kept), and its agent comes back on a new connection
-  instance. A request still bound to the old instance ends as soon as the new
+  instance. A restart the server asks for because the agent stopped
+  answering is the same: the host ends the VM where it is, forgets any saved
+  memory image and boots it fresh on its disk, with no archive first (ADR
+  33). While a host hands a sandbox off it tells the gateway so over the
+  agent link (`busy: "handing_off"`); the server then reports the host as
+  busy instead of restarting the agent, and a wake that comes after the
+  hand-off has stored for two minutes cancels it, so the sandbox runs on from
+  its local copy. A request still bound to the old instance ends as soon as the new
   one is live, as on a Connected Machine ("Control transport recovery" in
   `docs/connected-machines.md`): a command that started, or may have, is
   handed to the session's command ledger with a stop request and reported

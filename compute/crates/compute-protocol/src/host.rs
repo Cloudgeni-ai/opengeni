@@ -694,6 +694,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         awake: bool,
     },
+    /// Boot a sandbox afresh from its disk where it is, keeping its files:
+    /// any step under way that would keep its running programs is
+    /// cancelled, its VM ends without being saved, and its saved memory
+    /// image is deleted here and from the store's copy, so its next wake,
+    /// on this host, boots it from its files. Nothing is stored first, so
+    /// it takes as long as ending a VM, however slow the store is; the
+    /// files here, its newest copy, stay. Answered once the VM has ended
+    /// and the image is gone; a wake asked meanwhile waits for that, then
+    /// boots it. Refused with [`ErrorCode::Busy`] while the sandbox is
+    /// being created, removed or handed off, with [`ErrorCode::Broken`]
+    /// for a broken sandbox, and by a host from before this request with
+    /// [`ErrorCode::Invalid`].
+    Restart {
+        /// Its id.
+        id: Id,
+    },
     /// Report every sandbox and host counters.
     Status,
     /// Build a sandbox image (ADR 19) from the OCI image `image` with this
