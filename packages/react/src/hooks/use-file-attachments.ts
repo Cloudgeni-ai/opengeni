@@ -5,6 +5,7 @@ import {
   type EmbeddedFileAttachmentClientOverride,
 } from "../session-context";
 import { useErrorMessage } from "../lib/error-message";
+import { readStoredFilePreviewUrl } from "../stored-file-preview";
 
 export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
   /**
@@ -74,9 +75,10 @@ export type UseFileAttachmentsResult = {
   /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /**
-   * Resolve a ready image's short-lived server preview URL on demand. Optional
-   * for upload-only embedded clients; local object-URL previews remain usable
-   * without it.
+   * Resolve a ready image's short-lived server preview URL on demand: how a
+   * restored draft, another device or a broken local preview still shows the
+   * picture. Optional for upload-only embedded clients; local object-URL
+   * previews remain usable without it.
    */
   loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /**
@@ -436,23 +438,24 @@ export function useFileAttachments(
     async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
       const generation = scopeGeneration.current;
       const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
-      const createDownloadUrl = client.createFileDownloadUrl;
       if (
         !attachment ||
         attachment.status !== "ready" ||
         !attachment.file ||
         !attachment.contentType.startsWith("image/") ||
-        typeof createDownloadUrl !== "function" ||
+        typeof client.createFileDownloadUrl !== "function" ||
         signal?.aborted
       ) {
         return undefined;
       }
       const fileId = attachment.file.id;
-      const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
+      // One shared, cached read for every surface showing this file; an abort
+      // only discards this caller's result.
+      const url = await readStoredFilePreviewUrl({ client, workspaceId }, fileId);
       if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
       const current = attachmentsRef.current.find((candidate) => candidate.id === id);
       if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
-      return signed.url;
+      return url;
     },
     [client, workspaceId],
   );

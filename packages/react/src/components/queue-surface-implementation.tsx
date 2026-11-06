@@ -60,6 +60,7 @@ import {
 } from "../queue-presentation-model";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
+import { StoredFileThumbnails } from "./stored-file-thumbnails";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -703,6 +704,12 @@ function ReadOnlyQueueRow({
         {attachedInputs.length > 0 ? (
           <PendingMachineInputs inputs={attachedInputs} attached />
         ) : null}
+        <StoredFileThumbnails
+          className="mt-1.5"
+          workspaceId={turn.workspaceId}
+          sessionId={turn.sessionId}
+          resources={turn.resources}
+        />
         <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
@@ -804,6 +811,12 @@ function SortableQueueRow({
           {attachedInputs.length > 0 ? (
             <PendingMachineInputs inputs={attachedInputs} attached />
           ) : null}
+          <StoredFileThumbnails
+            className="mt-1.5"
+            workspaceId={turn.workspaceId}
+            sessionId={turn.sessionId}
+            resources={turn.resources}
+          />
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">
