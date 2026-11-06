@@ -6,6 +6,7 @@ import {
   workspaceAdminDelegates,
   workspaceKeyCreator,
   workspaceKeyCreatorSentence,
+  workspaceKeyLiteralRefusal,
 } from "../src/api-key-delegation";
 
 describe("who can create a workspace API key", () => {
@@ -33,6 +34,15 @@ describe("who can create a workspace API key", () => {
       "Only a workspace owner can create a key that reads secret values.",
     );
     expect(workspaceKeyCreatorSentence(["account:admin"])).toBeNull();
+  });
+
+  test("the API's refusal keeps its prefix and names who can create the key", () => {
+    expect(workspaceKeyLiteralRefusal(["secrets:read"], ["sessions:read", "secrets:read"])).toBe(
+      "cannot delegate missing literal permissions: secrets:read. Only a workspace owner can create a key that reads secret values.",
+    );
+    expect(workspaceKeyLiteralRefusal(["billing:manage"], ["billing:manage"])).toBe(
+      "cannot delegate missing literal permissions: billing:manage",
+    );
   });
 
   test("a Workspace owner holds every workspace-literal power", () => {

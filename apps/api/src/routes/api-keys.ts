@@ -13,7 +13,7 @@ import {
   serviceAccountAllowsPermission,
   OWNER_LEVEL_API_KEY_MESSAGE,
   workspaceAdminDelegates,
-  workspaceKeyCreatorSentence,
+  workspaceKeyLiteralRefusal,
 } from "@opengeni/contracts";
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
@@ -350,9 +350,8 @@ function ensureDelegablePermissions(
         ),
     );
     if (highTrustMissing.length === 0) return;
-    const creator = workspaceKeyCreatorSentence(requested);
     throw new HTTPException(403, {
-      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}${creator ? `. ${creator}` : ""}`,
+      message: workspaceKeyLiteralRefusal(highTrustMissing, requested),
     });
   }
   const missing = requested.filter(

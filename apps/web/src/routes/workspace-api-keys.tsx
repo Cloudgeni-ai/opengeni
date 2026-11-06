@@ -730,7 +730,7 @@ function initialCustom(prefill: CreatePrefill | null, delegable: Set<string>): s
 function withheldHint(permission: string): string {
   const creator = workspaceKeyCreator([permission]);
   if (creator === "workspace_owner") return "only a workspace owner";
-  if (creator === "workspace_admin") return "a workspace admin can give it";
+  if (creator === "workspace_admin") return "only a workspace admin or owner";
   return "beyond your own access";
 }
 

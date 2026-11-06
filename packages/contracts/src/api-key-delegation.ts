@@ -163,6 +163,18 @@ export function workspaceKeyCreatorSentence(permissions: readonly string[]): str
 }
 
 /**
+ * The API's refusal when `workspace:admin` can't delegate some literal powers
+ * to a workspace key: the missing permissions, then who can create it.
+ */
+export function workspaceKeyLiteralRefusal(
+  missing: readonly string[],
+  requested: readonly string[],
+): string {
+  const creator = workspaceKeyCreatorSentence(requested);
+  return `cannot delegate missing literal permissions: ${missing.join(", ")}${creator ? `. ${creator}` : ""}`;
+}
+
+/**
  * Why an organization admin who isn't the owner can't create an organization
  * key: keys holding people, key or billing administration are the owner's.
  */

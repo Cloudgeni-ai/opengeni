@@ -322,7 +322,7 @@ describe("workspace API keys", () => {
         "All permissions": "Only a workspace owner can create a key that reads secret values.",
       },
       checkbox: {
-        "sessions:create": "a workspace admin can give it",
+        "sessions:create": "only a workspace admin or owner",
         "secrets:read": "only a workspace owner",
       },
     },
@@ -332,8 +332,13 @@ describe("workspace API keys", () => {
       disabled: {},
       checkbox: {},
     },
-  ])("a $who sees who can create what they can't", async ({ grants, disabled, checkbox }) => {
-    permissions = grants;
+  ] as {
+    who: string;
+    grants: string[];
+    disabled: Record<string, string>;
+    checkbox: Record<string, string>;
+  }[])("a $who sees who can create what they can't", async ({ grants, disabled, checkbox }) => {
+    permissions = [...grants];
     const view = await render("new");
     await act(async () =>
       view.container.querySelector<HTMLButtonElement>("button[role=combobox]")!.click(),
@@ -342,7 +347,7 @@ describe("workspace API keys", () => {
       const label = Object.keys(disabled).find((each) => option.textContent?.startsWith(each));
       if (label) {
         expect(option.getAttribute("aria-disabled")).toBe("true");
-        expect(option.textContent).toContain(disabled[label as keyof typeof disabled]);
+        expect(option.textContent).toContain(disabled[label]!);
       } else {
         expect(option.getAttribute("aria-disabled")).not.toBe("true");
       }
