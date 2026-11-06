@@ -19,7 +19,7 @@ import { OPENGENI_CALLING_WORKSPACE_HEADER, signCallingWorkspaceProof } from "@o
 export class CallingWorkspaceProofUnavailableError extends Error {
   constructor() {
     super(
-      "Nothing was sent: this MCP server is Opengeni itself, and Opengeni couldn't name the calling workspace.",
+      "Nothing was sent: this MCP server is this deployment's own, and the calling workspace couldn't be named.",
     );
     this.name = "CallingWorkspaceProofUnavailableError";
   }

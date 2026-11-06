@@ -6925,6 +6925,42 @@ export const imageGenerationOperations = pgTable(
   }),
 );
 
+/**
+ * The maximum priced cost of a stateless Opengeni-credit model call that is
+ * still in its provider request, reserved at admission and deleted when the
+ * call settles or fails. An expired hold (its process stopped mid-call) no
+ * longer counts.
+ */
+export const modelCallCreditHolds = pgTable(
+  "model_call_credit_holds",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    /** The call's server-generated request id. */
+    requestId: uuid("request_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`statement_timestamp()`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.requestId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "model_call_credit_holds_workspace_account_fk",
+    }).onDelete("cascade"),
+    amountValid: check("model_call_credit_holds_amount_chk", sql`${table.amountMicros} > 0`),
+    expiryValid: check(
+      "model_call_credit_holds_expiry_chk",
+      sql`${table.expiresAt} > ${table.createdAt}`,
+    ),
+  }),
+);
+
 /** Workspace policy for provider-neutral video generation. Disabled by default. */
 export const workspaceVideoGenerationPolicies = pgTable(
   "workspace_video_generation_policies",

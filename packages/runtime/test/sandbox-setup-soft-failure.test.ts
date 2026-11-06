@@ -68,10 +68,10 @@ describe("platform setup on a damaged box", () => {
     expect(box.commands.length).toBeGreaterThan(0);
     expect(preparedInput.input).toStartWith("hello\n\nPlatform setup notice:");
     expect(preparedInput.input).toContain(
-      "- Opengeni tools in the shell (ogtool and the Codemode client) were not installed. No space left on the workspace machine's disk. Free space in /workspace or /tmp",
+      "- The workspace tools in the shell (ogtool and the Codemode client) were not installed. No space left on the workspace machine's disk. Free space in /workspace or /tmp",
     );
     expect(preparedInput.input).toContain(
-      "- The Opengeni tools sign-in for the shell was not saved, so ogtool calls can fail. No space left on the workspace machine's disk.",
+      "- The workspace tools sign-in for the shell was not saved, so ogtool calls can fail. No space left on the workspace machine's disk.",
     );
   });
 
@@ -123,7 +123,7 @@ describe("platform setup on a damaged box", () => {
       preparedInput: preparedInput as never,
     });
     expect(preparedInput.input).toContain(
-      "- Opengeni tools in the shell (ogtool and the Codemode client) were not installed. A path is blocked by a file or folder of the wrong kind.",
+      "- The workspace tools in the shell (ogtool and the Codemode client) were not installed. A path is blocked by a file or folder of the wrong kind.",
     );
     // A probe that timed out or was killed is no such proof.
     const { softSetupFailureCause } = await softFailure();

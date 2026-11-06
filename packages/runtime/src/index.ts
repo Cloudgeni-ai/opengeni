@@ -3446,7 +3446,7 @@ export function secretApprovalQuestionRejection(input: RequestHumanInputToolInpu
   ) {
     return null;
   }
-  return "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
+  return "Nothing was asked. The person was already asked, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
 }
 
 /**
@@ -15456,7 +15456,7 @@ function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
 export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
   if (folders.length === 0) return "";
   return [
-    "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+    "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
     ...folders.map(
       (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
     ),

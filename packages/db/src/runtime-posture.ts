@@ -2152,6 +2152,7 @@ export const FORCE_RLS_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2621,6 +2622,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  // 1295_model_call_credit_holds: in-flight model call holds, deleted at settlement.
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -3288,6 +3291,12 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
+  /**
+   * Only for checking a database migrated to an earlier point of the migration ledger, such as a
+   * migration test's predecessor state. Contract tables named here may be absent because a later
+   * migration creates them; when one is present it is checked like every other contract table.
+   */
+  tablesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4373,14 +4382,15 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
+  const notYetCreatedTables = new Set(options.tablesCreatedByLaterMigrations ?? []);
   const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
   const missingTables = difference(protectedTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);

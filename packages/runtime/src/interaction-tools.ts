@@ -3111,7 +3111,7 @@ export function createInteractionAttemptToolDefinitions(
                 ? [
                     {
                       type: "text" as const,
-                      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+                      text: "Not zoomed: this server does not support region, so this is the full screenshot of the target.",
                     },
                   ]
                 : []),

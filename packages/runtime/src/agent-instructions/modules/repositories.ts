@@ -22,12 +22,12 @@ function repositoryIdentityBlock(context: AgentPromptContext): string | null {
       ...identities.map((repository) =>
         repository.identity === "personal"
           ? `\`${repository.path}\`: as the person${repository.login ? ` (@${repository.login})` : ""}, through Your GitHub. Commits, branches, pull requests and reviews appear under their name.`
-          : `\`${repository.path}\`: as the Opengeni app. Work appears as the Opengeni bot.`,
+          : `\`${repository.path}\`: as the workspace's GitHub app. Work appears as its bot.`,
       ),
     ),
     sentences(
       "On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.",
-      app && "On Opengeni app repositories, use the github_app__* tools.",
+      app && "On GitHub app repositories, use the github_app__* tools.",
     ),
   );
 }

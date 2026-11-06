@@ -91,7 +91,7 @@ export function scheduledTaskEventsToolInput() {
         "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>. contains ignores case.",
       ),
       includeOwnEvents: EventTriggerInput.shape.includeOwnEvents.describe(
-        "Also fire on events Opengeni's own bots made. Off by default, which prevents loops.",
+        "Also fire on events this deployment's own bots made. Off by default, which prevents loops.",
       ),
       arguments: EventTriggerInput.shape.arguments.describe(
         "MCP sources: subscription arguments that match the event type's argumentsSchema.",
