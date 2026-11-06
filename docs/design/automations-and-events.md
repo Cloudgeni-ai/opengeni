@@ -379,7 +379,15 @@ are the facts workspace webhooks already send, by the same type names.
 - **Mode.** Webhook when the event type offers it and the deployment has a
   public https webhook address and an encryption key; otherwise poll. If the server
   can't reach the webhook address or refuses webhook delivery, the step falls
-  back to polling at once when the type offers it, and polling then sticks.
+  back to polling at once when the type offers it. The row records why it
+  polls (`poll_reason`, with `poll_reason_at`): `not_offered` when no webhook
+  was on offer, `callback_failed` after a failed webhook. A polling row moves
+  to webhook as soon as the type offers it (event types are read again at
+  least hourly), except within a day of a failed webhook, when it keeps
+  polling and then tries again. The move subscribes with the last poll cursor,
+  so the server replays what came after it (deduplicated on `eventId`), and
+  stops polling only once the subscribe succeeds; any failure keeps the row
+  polling in the same step and records `callback_failed`.
   Push needs a held-open connection per subscription, which Opengeni does not
   keep; types that offer only push are shown as unavailable.
 - **Webhook mode.** The callback URL is the subscription's own ingress route,
