@@ -116,9 +116,9 @@ function slackAgentHandoffRule(input: {
   return [
     ...(how ? [how] : []),
     "Answer yourself by default.",
-    'Call slack_agent_handoff only when the person asks for one of the agents below by name (typos and a dropped word like "team" are fine); if it returns passed_on, make your entire final response exactly NO_REPLY.',
+    "Call slack_agent_handoff only when the person asks for one of the agents below by name; if it returns passed_on, make your entire final response exactly NO_REPLY.",
     "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or words that merely match an agent's name.",
-    "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name; don't mention the suggestion.",
+    "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name.",
   ].join(" ");
 }
 
@@ -139,7 +139,7 @@ export function slackAgentSessionInstructions(input: {
   if (agent) {
     const description = slackAgentDescriptionSentence(agent.description);
     lines.push(
-      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}", and your Slack messages post as ${agent.name}. You may be in several chats at once; keep your answers consistent across them.`,
+      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}"; your messages post as ${agent.name}.`,
     );
     const adminInstructions = agent.instructions.trim();
     if (adminInstructions.length > 0) {

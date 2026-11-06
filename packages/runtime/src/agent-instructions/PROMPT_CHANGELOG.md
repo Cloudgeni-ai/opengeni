@@ -1,5 +1,20 @@
 # Modular prompt changelog
 
+Agent text is shorter again, with the same rules. A Slack agent's identity
+line drops "keep your answers consistent across chats". The hand-off rule drops
+the typo example (the server matches names) and "don't mention the
+suggestion" (the `slack_agent_suggest` description and result say it). The
+`slack_agent_handoff`, `slack_agent_suggest`, `slack_agent_chats` and
+`slack_agent_propose` descriptions drop repeated rules, rationale, the name
+example and the 2500-character limit (the server refuses longer instructions).
+An open agent's text drops what the Unattended module, the core prompt and its
+permissions already cover (nobody approves or answers, never reveal
+credentials, never personal accounts). `SESSION_PROFILE_TOOL_GUIDANCE` (in
+`set_session_title` and the other-chat title tool) drops "publish the image
+first" (the server refuses an Only me image with that instruction) and most
+art direction. `bot_template_save` drops the field list and the per-person
+setup branch. No session rendered without Slack agents or these tools changes.
+
 Three pieces of text now follow state the session actually has. Compositions
 with the state keep their bytes (`modular-parity-lock.test.ts`; its
 "none-with-features" cases now include workspace connectors, a setup-card

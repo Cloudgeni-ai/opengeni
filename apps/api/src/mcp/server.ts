@@ -2959,7 +2959,7 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass this Slack request to the agent the person asked for by name; it answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4
@@ -2981,7 +2981,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
+        "After answering yourself, name the agent that handles requests like this one; Opengeni adds a button under your answer to ask it. Don't mention the suggestion.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2995,7 +2995,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
+        "List this Slack agent's other recent chats, newest first. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
