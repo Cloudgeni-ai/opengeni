@@ -365,6 +365,10 @@ test("an install Teams redelivers to another replica is welcomed once, and a car
   expect(await replicaB(f.message("hello", stranger))).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(4);
   expect(cardActions(f.calls[3]!.activity)).toHaveLength(1);
+  // So does a command reply with a button (staging sent "unlink" twice too).
+  expect(await f.handle(f.message("unlink"))).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(5);
+  expect((cardActions(f.calls[4]!.activity)[0] as { title: string }).title).toBe("Unlink account");
 
   expect(f.outcomes.slice(0, 5)).toEqual([
     "welcome_sent",
@@ -378,6 +382,7 @@ test("an install Teams redelivers to another replica is welcomed once, and a car
     "welcome_duplicate",
     "welcome_sent",
   ]);
+  expect(f.outcomes.slice(8)).toEqual(["unlink_confirmation_sent"]);
   // Only content-free claims are stored.
   const claims = await shared.admin<Array<{ scope_hash: string }>>`
     select scope_hash from teams_bot_welcomes`;
