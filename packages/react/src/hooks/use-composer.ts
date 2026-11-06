@@ -944,6 +944,17 @@ export function useComposer(
   }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
+  // A model, effort or speed pick is one deliberate click, not typing: it is
+  // saved without the typing pause, so clicking another chat right after it
+  // still keeps it.
+  const savePickPromptlyRef = useRef(false);
+  // The edit autosave has not saved yet (it waits for the typing pause).
+  // Leaving the chat, for another chat or by unmounting, saves it instead of
+  // dropping it.
+  const unsavedDraftRef = useRef<UnsavedComposerDraft | null>(null);
+  // This composer's latest accepted save per chat, so a save on leaving can
+  // follow one still under way.
+  const settledWritesRef = useRef(new Map<string, SettledDraftWrite>());
   const onSent = useCallback(
     (text: string, input: SendMessageInput) => {
       notifyComposerObserver(options.onSent, text, input);
@@ -987,6 +998,7 @@ export function useComposer(
   const targetKeyRef = useRef(targetKey);
   useLayoutEffect(() => {
     if (targetKeyRef.current === targetKey) return;
+    saveLeftDraft(unsavedDraftRef, settledWritesRef.current, saveChain.current);
     if (draftReadRetryRef.current.timer !== null) {
       clearTimeout(draftReadRetryRef.current.timer);
     }
@@ -1024,6 +1036,7 @@ export function useComposer(
     draftRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
+    savePickPromptlyRef.current = false;
     // Old saves may still be awaiting the network. Their generation fence
     // prevents settlement, and a fresh chain avoids blocking this target.
     saveChain.current = Promise.resolve();
@@ -1069,6 +1082,7 @@ export function useComposer(
   ]);
   useEffect(
     () => () => {
+      saveLeftDraft(unsavedDraftRef, settledWritesRef.current, saveChain.current);
       if (draftReadRetryRef.current.timer !== null) {
         clearTimeout(draftReadRetryRef.current.timer);
       }
@@ -1253,6 +1267,10 @@ export function useComposer(
         setDraftLoading(true);
       }
       try {
+        // A save from the composer that just left this chat goes first, so
+        // coming straight back reads the edit it carries.
+        const leftSave = leftDraftSaves.get(`${workspaceId}\u0000${sessionId}`);
+        if (leftSave) await Promise.race([leftSave, delay(LEFT_DRAFT_SAVE_WAIT_MS)]);
         const fetched = await client.getComposerDraft(workspaceId, sessionId, {
           signal: requestAbort.signal,
         });
@@ -1512,6 +1530,8 @@ export function useComposer(
     const base = draftRef.current;
     const currentPolicy = policyRef.current;
     if (!base || !currentPolicy) return null;
+    // The pick comes from the refs, so a Send in the same tick as a pick
+    // saves and submits that pick.
     return composerDraftPayload(
       base,
       value,
@@ -1596,6 +1616,13 @@ export function useComposer(
       if (!sessionId || !durableDrafts || !owned()) return false;
       const current = draftRef.current;
       if (!current) return false;
+      // This content is being saved now, so leaving the chat has nothing
+      // left to save for it. Until here (for example while it waits for the
+      // slot) leaving still saves it.
+      const unsaved = unsavedDraftRef.current;
+      if (unsaved && draftContentKey(unsaved.payload) === draftContentKey(payload)) {
+        unsavedDraftRef.current = null;
+      }
       let request = { ...payload, expectedRevision: current.revision };
       if (draftSignature(request) === lastSavedSignature.current) return true;
       const writesKey = `${workspaceId}\u0000${sessionId}`;
@@ -1616,6 +1643,10 @@ export function useComposer(
           try {
             rememberDraftWrite(writesKey, draftContentKey(request));
             const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+            settledWritesRef.current.set(writesKey, {
+              revision: saved.revision,
+              content: draftContentKey(request),
+            });
             if (!owned()) return false;
             adoptDraftBase(saved);
             return true;
@@ -2123,6 +2154,11 @@ export function useComposer(
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
   useEffect(() => {
+    // Only an edit this run schedules below is left to save on leaving, and
+    // only a pick it schedules skips the typing pause.
+    const savePromptly = savePickPromptlyRef.current;
+    savePickPromptlyRef.current = false;
+    unsavedDraftRef.current = null;
     const pending = pendingOperationRef.current;
     if (pending) {
       const shadow = {
@@ -2186,20 +2222,37 @@ export function useComposer(
       return;
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
-    const timer = window.setTimeout(() => void persistPayload(payload), 500);
+    unsavedDraftRef.current = { client, workspaceId, sessionId, payload };
+    savePickPromptlyRef.current = savePromptly;
+    const timer = window.setTimeout(
+      () => {
+        savePickPromptlyRef.current = false;
+        void persistPayload(payload);
+      },
+      savePromptly ? 0 : 500,
+    );
     return () => window.clearTimeout(timer);
   }, [
     autosaveRetry,
+    client,
     currentDraftPayload,
     durableDrafts,
     draftConflict,
     draftLoading,
     liveExtrasVersion,
+    // A send settling lets an edit made while it ran be saved.
+    optimisticSends,
     pendingOperationKey,
     persistPayload,
+    // The pick is part of the draft like its text: a model, effort or speed
+    // chosen without typing is saved too, so it survives opening another
+    // chat or reloading before the next Send.
+    policy,
+    policyPicked,
     setOptimisticDraftShadow,
     sending,
     sessionId,
+    workspaceId,
   ]);
 
   // An update or brief outage left a draft save error on the composer. Check
@@ -3116,6 +3169,7 @@ export function useComposer(
       localEditRevision.current += 1;
       policyRef.current = next;
       policyPickedRef.current = true;
+      savePickPromptlyRef.current = true;
       setPolicyPicked(policyPickedRef.current);
       const shadow = {
         text: valueRef.current,
@@ -3616,6 +3670,65 @@ const DRAFT_CONFLICT_REREADS = 3;
  * draft is still recognised as this page's own write.
  */
 const recentDraftWrites = new Map<string, string[]>();
+
+/** The revision and content of a composer's latest accepted save. */
+type SettledDraftWrite = { revision: number; content: string };
+
+/** Saves of an edit whose composer left the chat, per chat, while they run. */
+const leftDraftSaves = new Map<string, Promise<void>>();
+
+/** How long reading a chat's draft waits for such a save before reading anyway. */
+const LEFT_DRAFT_SAVE_WAIT_MS = 3_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type UnsavedComposerDraft = {
+  client: Pick<ReturnType<typeof useEmbeddedSession>["client"], "saveComposerDraft">;
+  workspaceId: string;
+  sessionId: string;
+  payload: SaveComposerDraftRequest;
+};
+
+/**
+ * Save the edit a composer had not saved yet as it leaves a chat. It runs
+ * after the saves already under way, on the revision the last of them left,
+ * so it never needs to overwrite anything: a draft that moved on meanwhile
+ * (a Send, another tab) keeps what it has.
+ */
+function saveLeftDraft(
+  unsaved: { current: UnsavedComposerDraft | null },
+  settledWrites: Map<string, SettledDraftWrite>,
+  previousSaves: Promise<void>,
+): void {
+  const left = unsaved.current;
+  unsaved.current = null;
+  if (!left) return;
+  const chatKey = `${left.workspaceId}\u0000${left.sessionId}`;
+  const content = draftContentKey(left.payload);
+  const save = previousSaves
+    .catch(() => undefined)
+    .then(async () => {
+      // Revisions only grow: a newer one here is this composer's own save
+      // that landed after the edit was made.
+      const settled = settledWrites.get(chatKey);
+      const base = left.payload.expectedRevision;
+      if (settled && settled.revision >= base && settled.content === content) return;
+      const request = {
+        ...left.payload,
+        expectedRevision: Math.max(settled?.revision ?? base, base),
+      };
+      rememberDraftWrite(chatKey, content);
+      const saved = await left.client.saveComposerDraft(left.workspaceId, left.sessionId, request);
+      settledWrites.set(chatKey, { revision: saved.revision, content });
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (leftDraftSaves.get(chatKey) === save) leftDraftSaves.delete(chatKey);
+    });
+  leftDraftSaves.set(chatKey, save);
+}
 
 function rememberDraftWrite(chatKey: string, content: string): void {
   const writes = (recentDraftWrites.get(chatKey) ?? []).filter((entry) => entry !== content);
