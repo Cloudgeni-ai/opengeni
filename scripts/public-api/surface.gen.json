@@ -39846,6 +39846,7 @@
       "ConnectAttempt": "type",
       "ConnectAttemptHints": "type",
       "ConnectController": "type",
+      "connectionCardSubtitle": "value",
       "ConnectNavigation": "type",
       "ConnectSetupFlow": "type",
       "ConnectSetupFlowOptions": "type",
