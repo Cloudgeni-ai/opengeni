@@ -74,6 +74,16 @@ export {
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
+import { withViewableHeifImages } from "./heif-image";
+export {
+  HeifDecodeError,
+  heifToJpeg,
+  sniffHeifImage,
+  withViewableHeifImages,
+  type HeifImageKind,
+  type HeifJpegOptions,
+  type HeifJpegRendition,
+} from "./heif-image";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -284,7 +294,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
-import { uniqueListedMcpTools } from "./mcp-listed-tools";
+import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -5283,6 +5293,27 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 }
 
 /**
+ * Bind the filesystem capability to a view of its session whose `view_image`
+ * shows HEIC/HEIF photos as a JPEG, the format attached photos reach the model
+ * in, so a photo looks the same whether it was attached or found in the
+ * sandbox. Like {@link neutralizeStructuredToolTransport}, this is an own
+ * property that `Capability.clone()` carries onto each per-run instance, and it
+ * must bind and return `this`.
+ */
+function showHeifImagesAsJpeg(capability: ReturnType<typeof filesystem>): void {
+  const bind = capability.bind;
+  const bindViewingHeif = function (this: typeof capability, session: unknown): unknown {
+    return bind.call(
+      this,
+      (session && typeof session === "object"
+        ? withViewableHeifImages(session)
+        : session) as Parameters<typeof bind>[0],
+    );
+  };
+  (capability as unknown as { bind: typeof bindViewingHeif }).bind = bindViewingHeif;
+}
+
+/**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
  * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
@@ -5587,6 +5618,7 @@ function buildAgentCapabilitiesFromComposition(
   const filesystemCapability = filesystem({
     configureTools: configureFilesystemTools,
   });
+  showHeifImagesAsJpeg(filesystemCapability);
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
@@ -10330,6 +10362,11 @@ export class PrefixedMcpServer implements MCPServer {
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // Opengeni's own server validates every UUID itself; the model needs
+          // only `format: "uuid"`, not the regular expression repeating it.
+          if (this.firstPartyCatalog) {
+            tool = { ...tool, inputSchema: withoutRedundantUuidPatterns(tool.inputSchema) };
+          }
           // A recoverable operation is never filled, so it keeps its own schema.
           const defaults = configuredMcpOperationRecovery(this, tool.name)
             ? { inputSchema: tool.inputSchema, filled: [] }

@@ -65,7 +65,7 @@ ${sentences(
   monitoring &&
     "Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it.",
   waitForInput
-    ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input`: its reason is the status. When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call."
+    ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input`: its reason is the status."
     : (skillsReadable(context) || hasSandbox(context)) && "Do not narrate Skill reads or waits.",
 )}
 

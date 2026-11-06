@@ -8,7 +8,7 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { MICROSOFT_TEAMS_LOGO_URL } from "./use-microsoft-teams-integration";
-import { clearTeamsFragment, teamsFragmentToken } from "@/lib/teams-connect";
+import { clearTeamsFragment, teamsErrorText, teamsFragmentToken } from "@/lib/teams-connect";
 
 export function useTeamsBotIntegration({
   workspaceId,
@@ -238,7 +238,7 @@ export function useTeamsBotIntegration({
               toast.success("Teams account linked. Return to Teams to continue.");
             } catch (caught) {
               setLinkError(
-                userErrorText(
+                teamsErrorText(
                   caught,
                   "Get a new account link from Opengeni in Teams, then try again.",
                 ),

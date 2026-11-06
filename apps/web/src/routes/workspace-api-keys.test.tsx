@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import type { ApiKey } from "@opengeni/react/app/types";
 import { presetById, workspaceKeyPermissions } from "@/lib/api-key-presets";
 import { defaultApiKeyPermissions } from "@opengeni/react/app/lib/permissions";
+import { WORKSPACE_ADMIN_ROLE_PERMISSIONS, WORKSPACE_OWNER_PERMISSIONS } from "@opengeni/contracts";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const accountId = "44444444-4444-4444-8444-444444444444";
@@ -300,6 +301,75 @@ describe("workspace API keys", () => {
       await view.unmount();
     },
   );
+
+  // The hint names who can actually create the key, by the server's own rule.
+  test.each([
+    {
+      who: "workspace admin",
+      grants: [...WORKSPACE_ADMIN_ROLE_PERMISSIONS],
+      disabled: {
+        "All permissions": "Only a workspace owner can create a key that reads secret values.",
+      },
+      checkbox: { "secrets:read": "only a workspace owner" },
+    },
+    {
+      who: "member who manages keys",
+      grants: ["api_keys:manage", "workspace:read", "sessions:read"],
+      disabled: {
+        "Read only": "A workspace admin can create it.",
+        "Run sessions": "A workspace admin can create it.",
+        "Full workspace automation": "A workspace admin can create it.",
+        "All permissions": "Only a workspace owner can create a key that reads secret values.",
+      },
+      checkbox: {
+        "sessions:create": "only a workspace admin or owner",
+        "secrets:read": "only a workspace owner",
+      },
+    },
+    {
+      who: "workspace owner",
+      grants: [...WORKSPACE_OWNER_PERMISSIONS],
+      disabled: {},
+      checkbox: {},
+    },
+  ] as {
+    who: string;
+    grants: string[];
+    disabled: Record<string, string>;
+    checkbox: Record<string, string>;
+  }[])("a $who sees who can create what they can't", async ({ grants, disabled, checkbox }) => {
+    permissions = [...grants];
+    const view = await render("new");
+    await act(async () =>
+      view.container.querySelector<HTMLButtonElement>("button[role=combobox]")!.click(),
+    );
+    for (const option of document.querySelectorAll<HTMLElement>("[role=option]")) {
+      const label = Object.keys(disabled).find((each) => option.textContent?.startsWith(each));
+      if (label) {
+        expect(option.getAttribute("aria-disabled")).toBe("true");
+        expect(option.textContent).toContain(disabled[label]!);
+      } else {
+        expect(option.getAttribute("aria-disabled")).not.toBe("true");
+      }
+    }
+    expect(document.body.textContent).not.toContain("your own access doesn't include");
+    await act(async () =>
+      view.container.querySelector<HTMLButtonElement>("button[role=combobox]")!.click(),
+    );
+    await selectAccess(view.container, "Custom");
+    // Each checkbox's description: the scope, then why it's off.
+    const field = (permission: string) =>
+      Array.from(view.container.querySelectorAll<HTMLElement>("span.font-mono")).find(
+        (each) => each.firstChild?.textContent === permission,
+      );
+    for (const [permission, hint] of Object.entries(checkbox)) {
+      expect(field(permission)?.textContent).toContain(hint);
+    }
+    if (Object.keys(checkbox).length === 0) {
+      expect(view.container.textContent).not.toContain(" · ");
+    }
+    await view.unmount();
+  });
 
   test.each([false, true])(
     "live authority loss filters the actual payload (Custom: %s)",

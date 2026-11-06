@@ -27,8 +27,6 @@ function newMessages(context: AgentPromptContext): string {
     "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
     waitForInput &&
       `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` when available with the answer in its \`reply\`, so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
-    waitForInput &&
-      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
     goals
       ? "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains."
       : "If nothing is in flight, the answer is your final response; offer to continue when work remains.",
@@ -37,16 +35,16 @@ function newMessages(context: AgentPromptContext): string {
   );
 }
 
-const WAITING = `If an existing wait's remaining time is below the tool's minimum or its deadline has passed, do not send an invalid timeout or round up and silently extend it. A question-only human/API turn that has not consumed immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Otherwise, do not assume the old wait remains armed: register a valid wait if still needed and make any unavoidable deadline adjustment explicit.
+/**
+ * When to end a turn on a wait. How the wait itself behaves (when to call it,
+ * `reply`, the deadline, what wakes it) is stated once, in the
+ * `wait_for_input` tool description, so it is not repeated here.
+ */
+const WAITING =
+  "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation to rediscover the same wait: either keep advancing substantive work in this turn or, when further progress genuinely depends on work already in flight or a meaningful timed recheck, call `wait_for_input` when available before ending. A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.";
 
-Outside a question or status turn, do not end with only a status reply and leave an immediate continuation to rediscover the same wait: either keep advancing substantive work in this turn or, when further progress genuinely depends on work already in flight or a meaningful timed recheck, call \`wait_for_input\` when available before ending. Do not use \`wait_for_input\` for work you can still advance or for a blocker that requires a human decision. A continuation that only confirms the same unchanged wait calls \`wait_for_input\` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.
-
-Avoid holding execution open with long sleeps or repeated blocking waits when an out-of-turn wait is available. Respect each tool's actual execution-wait limits; those limits do not cap \`wait_for_input\`, which may span hours or days within its own limits.
-
-No short execution wait or preliminary status recheck is required before \`wait_for_input\`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate. When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling. This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.`;
-
-/** The tool-neutral Waiting guidance kept when `wait_for_input` is proven absent. */
-const WAITING_WITHOUT_WAIT_FOR_INPUT =
+/** Names automations and session waits, so it renders only where one exists. */
+const WAITING_MONITORING =
   "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.";
 
 const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates.`;
@@ -133,12 +131,9 @@ function backgroundCommands(context: AgentPromptContext): string {
 export function renderRuntimeMechanics(context: AgentPromptContext): string {
   const waitForInput = toolAvailable(context, "wait_for_input");
   const toolSearch = toolSearchAvailable(context);
-  // Without wait_for_input, the tool-neutral line names automations and
-  // session waits, so it renders only where one of them exists.
-  const waiting = waitForInput
-    ? WAITING
-    : (context.capabilities.schedules || context.capabilities.subagents) &&
-      WAITING_WITHOUT_WAIT_FOR_INPUT;
+  const monitoring =
+    (context.capabilities.schedules || context.capabilities.subagents) && WAITING_MONITORING;
+  const waiting = waitForInput ? sentences(WAITING, monitoring) : monitoring;
   return blocks(
     "# Runtime mechanics",
     toolSearch && "## Tool discovery",

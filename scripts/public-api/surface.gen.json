@@ -38254,6 +38254,7 @@
     "@opengeni/sdk/teams": {
       "teamsApi": "value",
       "TeamsBotStatus": "type",
+      "TeamsInstallOptions": "type",
       "TeamsMicrosoftSignInResult": "type",
       "TeamsMicrosoftSignInStart": "type"
     },
@@ -41060,12 +41061,14 @@
     },
     "@opengeni/react/ui/api-error": {
       "apiErrorAdvice": "value",
+      "apiErrorDetailCode": "value",
       "apiErrorDetails": "value",
       "apiErrorFacts": "value",
       "ApiErrorFacts": "type",
       "apiErrorTechnicalFacts": "value",
       "isApiError": "value",
       "isPermissionDenied": "value",
+      "serverRefusalText": "value",
       "userErrorText": "value",
       "userErrorTextWithoutReference": "value",
       "userFacingError": "value"

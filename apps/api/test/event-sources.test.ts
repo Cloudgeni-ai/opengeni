@@ -2000,7 +2000,215 @@ describe("MCP event sources", () => {
     await f.pump();
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("blocked");
   });
+
+  test("polling keeps one MCP session: one handshake and one events/list, then only polls", async () => {
+    const stub = startSessionfulMcpEventsStub({ nextPollMs: 30_000 });
+    try {
+      const f = await fixture({
+        enabled: true,
+        mcpServers: [{ id: "session-stub", name: "Session Stub", url: stub.url }],
+      });
+      const created = await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "mcp", serverId: "session-stub" }),
+      });
+      expect(created.status).toBe(201);
+      const source = (await f.json(created)).source as { id: string };
+      for (const queue of ["billing", "support"]) {
+        const automation = await f.createAutomation(f.owner.headers, {
+          triggers: [{ sourceId: source.id, eventTypes: ["ticket.created"], arguments: { queue } }],
+        });
+        expect(automation.status).toBe(201);
+      }
+      // Setting up the source and its triggers connects on its own; count the polling alone.
+      stub.reset();
+      let clock = Date.now();
+      const pump = async () => {
+        await shared.admin`update mcp_event_subscriptions
+          set next_action_at = now() - interval '1 second', lease_until = null
+          where workspace_id = ${f.workspace.id}`;
+        await pumpDueMcpEventSubscriptions({
+          db: db.db,
+          settings: f.settings,
+          bus: f.bus,
+          now: () => new Date(clock),
+        });
+        clock += 30_000;
+      };
+      const polls = 5;
+      for (let step = 0; step < polls; step += 1) await pump();
+      // Two subscriptions to one server with one sign-in share a session. Its
+      // handshake is the era probe (`server/discover`, which this 2025-era
+      // server doesn't know), `initialize` and `notifications/initialized`.
+      expect(stub.counts()).toEqual({
+        "server/discover": 1,
+        initialize: 1,
+        "notifications/initialized": 1,
+        "events/list": 1,
+        "events/poll": polls * 2,
+      });
+      expect(stub.sessionsOpened).toBe(1);
+
+      // The server forgets the session: a poll on it is refused with 404, and
+      // the step starts one new session and polls again on it. Both steps run
+      // at once, so either one or both may meet the old session first. The
+      // server is known to be 2025-era by now, so the new session skips the probe.
+      stub.expireSessions();
+      await pump();
+      const rejected = stub.rejectedForExpiredSession;
+      expect([1, 2]).toContain(rejected);
+      expect(stub.counts()).toEqual({
+        "server/discover": 1,
+        initialize: 2,
+        "notifications/initialized": 2,
+        "events/list": 2,
+        "events/poll": polls * 2 + 2 + rejected,
+      });
+      const rows = await shared.admin`select failures, cursor from mcp_event_subscriptions
+        where workspace_id = ${f.workspace.id}`;
+      expect(rows.map((row) => row.failures)).toEqual([0, 0]);
+
+      // Polling carries on in the new session.
+      await pump();
+      expect(stub.counts()).toMatchObject({
+        initialize: 2,
+        "events/list": 2,
+        "events/poll": polls * 2 + 4 + rejected,
+      });
+    } finally {
+      await stub.stop();
+    }
+  });
 });
+
+/**
+ * A 2025-era MCP server that keeps sessions, as most deployed servers do: it
+ * answers `initialize` with an `Mcp-Session-Id`, refuses requests without a
+ * session, answers 404 to a session it no longer knows, and counts every
+ * JSON-RPC message it receives by method.
+ */
+function startSessionfulMcpEventsStub(options: { nextPollMs: number }) {
+  const sessions = new Set<string>();
+  let counts: Record<string, number> = {};
+  let sessionsOpened = 0;
+  let rejectedForExpiredSession = 0;
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json", ...headers },
+    });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const sessionId = request.headers.get("mcp-session-id");
+      if (request.method === "DELETE") {
+        if (sessionId) sessions.delete(sessionId);
+        return new Response(null, { status: 200 });
+      }
+      // No server-to-client stream.
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      const message = (await request.json()) as {
+        id?: number | string;
+        method: string;
+        params?: Record<string, any>;
+      };
+      counts[message.method] = (counts[message.method] ?? 0) + 1;
+      // A 2025-era server: it doesn't know the 2026 era probe.
+      if (message.method === "server/discover") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32_601, message: "Method not found" },
+        });
+      }
+      if (message.method === "initialize" && !sessionId) {
+        const id = crypto.randomUUID();
+        sessions.add(id);
+        sessionsOpened += 1;
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              protocolVersion: message.params?.protocolVersion,
+              capabilities: { extensions: { "io.modelcontextprotocol/events": {} } },
+              serverInfo: { name: "session-stub", version: "1.0.0" },
+            },
+          },
+          200,
+          { "mcp-session-id": id },
+        );
+      }
+      if (!sessionId) {
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id ?? null,
+            error: { code: -32_000, message: "Bad Request: No valid session ID provided" },
+          },
+          400,
+        );
+      }
+      if (!sessions.has(sessionId)) {
+        rejectedForExpiredSession += 1;
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id ?? null,
+            error: { code: -32_001, message: "Session not found" },
+          },
+          404,
+        );
+      }
+      if (message.id === undefined) return new Response(null, { status: 202 });
+      if (message.method === "events/list") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { events: [TICKET_CREATED] },
+        });
+      }
+      if (message.method === "events/poll") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            events: [],
+            cursor: "c0",
+            hasMore: false,
+            nextPollMs: options.nextPollMs,
+          },
+        });
+      }
+      return json({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32_601, message: "Method not found" },
+      });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/mcp`,
+    counts: () => ({ ...counts }),
+    get sessionsOpened() {
+      return sessionsOpened;
+    },
+    get rejectedForExpiredSession() {
+      return rejectedForExpiredSession;
+    },
+    reset() {
+      counts = {};
+      sessionsOpened = 0;
+      rejectedForExpiredSession = 0;
+    },
+    expireSessions() {
+      sessions.clear();
+    },
+    stop: async () => await server.stop(true),
+  };
+}
 
 describe("GitHub event sources", () => {
   const webhookSecret = "github-hook-secret";

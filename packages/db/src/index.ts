@@ -193,7 +193,7 @@ import {
   parseSessionRemovedRepositories,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE, WORKSPACE_OWNER_PERMISSIONS } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -987,6 +987,8 @@ import {
   type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
@@ -2371,37 +2373,8 @@ export async function resolveDocumentIndexAuthority(
   };
 }
 
-export const allWorkspacePermissions: Permission[] = [
-  "workspace:read",
-  "workspace:admin",
-  "members:manage",
-  "sessions:create",
-  "sessions:read",
-  "sessions:control",
-  "files:upload",
-  "files:read",
-  "documents:manage",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "github:manage",
-  "github:use",
-  "api_keys:manage",
-  "connections:read",
-  "connections:write",
-  "connections:personal",
-  "capabilities:manage",
-  "secrets:list",
-  "secrets:read",
-  "secrets:write",
-  "secrets:use",
-  "mcp_servers:attach",
-  "goals:manage",
-  "enrollments:read",
-  "enrollments:manage",
-  "artifacts:read",
-  "artifacts:publish",
-];
+/** A Workspace owner's permissions; shared with the API key creator rule. */
+export const allWorkspacePermissions: Permission[] = [...WORKSPACE_OWNER_PERMISSIONS];
 
 export { managedPersonalWorkspacePermissions };
 
@@ -9341,6 +9314,9 @@ export function durableUserHistoryItem(
       ? {
           [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
           [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+          [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: [
+            ...MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS,
+          ],
         }
       : {}),
     ...(annotations.length > 0
@@ -25229,7 +25205,13 @@ export async function getRigVersionById(
 }
 
 export type RigProviderImageBuildClaim =
-  | { status: "claimed"; image: RigProviderImage }
+  | {
+      status: "claimed";
+      image: RigProviderImage;
+      /** The record this claim replaced, if any: a provider image it named is
+       * no longer referenced once the new build is published. */
+      replaced: RigProviderImage | null;
+    }
   | {
       status: "ready" | "in_progress" | "unsupported" | "conflict";
       image: RigProviderImage;
@@ -25373,7 +25355,7 @@ export async function claimRigVersionProviderImageBuild(
           eq(schema.rigVersions.id, input.versionId),
         ),
       );
-    return { status: "claimed", image: claimed };
+    return { status: "claimed", image: claimed, replaced: existing ?? null };
   });
 }
 
@@ -97271,6 +97253,7 @@ export {
 } from "./codex-token-resolver";
 
 export {
+  ConnectionNotRefreshableError,
   ConnectionRefreshHttpError,
   isPrivateAddress,
   normalizeBearerScheme,

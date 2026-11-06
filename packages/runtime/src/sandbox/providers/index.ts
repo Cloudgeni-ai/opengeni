@@ -267,6 +267,7 @@ export async function buildImmutableProviderImage(input: {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<ProviderImmutableImageBuildResult | null> {
   const build = PROVIDER_REGISTRY[input.backend].buildImmutableImage;
   if (!build) return null;
@@ -275,6 +276,7 @@ export async function buildImmutableProviderImage(input: {
     session: input.session,
     requestId: input.requestId,
     timeoutMs: input.timeoutMs,
+    ...(input.signal ? { signal: input.signal } : {}),
   });
 }
 

@@ -26,6 +26,7 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   agentInstructionsContextItem,
@@ -1978,6 +1979,7 @@ function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): Comp
     const stripped: CompactionItem = { ...item };
     delete stripped[MODEL_ATTACHMENT_REFS_FIELD];
     delete stripped[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+    delete stripped[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD];
     return stripped;
   });
 }

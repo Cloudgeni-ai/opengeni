@@ -11,6 +11,7 @@ import {
   buildConnectionTokenResolver,
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
+  ConnectionNotRefreshableError,
   ConnectionRefreshHttpError,
   normalizeBearerScheme,
   createConnection,
@@ -2097,6 +2098,46 @@ describe("buildConnectionTokenResolver", () => {
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
     expect(counts.status).toBe(0);
   });
+
+  test.each([
+    ["the token endpoint is down", true, new ConnectionRefreshHttpError(503)],
+    ["the token endpoint is unreachable", true, new TypeError("fetch failed")],
+    ["the grant is rejected", false, new ConnectionRefreshHttpError(400, "invalid_grant")],
+    [
+      "there is nothing to refresh with",
+      false,
+      new ConnectionNotRefreshableError("connection has no refresh token endpoint"),
+    ],
+  ] as const)(
+    "a forced refresh failing because %s is transient: %p",
+    async (_, transient, error) => {
+      const stale = brokerCredential({
+        id: "conn_oauth",
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+        version: 3,
+      });
+      const { deps } = resolverDeps({
+        loadCredential: async () => stale,
+        refresh: async () => {
+          throw error;
+        },
+      });
+      const reported: string[] = [];
+      const result = await buildConnectionTokenResolver({} as Database, settings, deps, {
+        onTransientRefreshFailure: ({ connectionId }) => reported.push(connectionId),
+      })({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+        forceRefresh: true,
+      });
+      expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+      expect(reported).toEqual(transient ? ["conn_oauth"] : []);
+    },
+  );
 
   test("refresh token POST rejects redirects without marking needs_reauth", async () => {
     let redirectTargetHits = 0;
