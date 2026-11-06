@@ -152,6 +152,11 @@ export function hasSearchTerms(text: string): boolean {
   return words(text).length > 0;
 }
 
+/** How many searchable words a text has: stopwords and digests do not count. */
+export function searchTermCount(text: string): number {
+  return words(text).length;
+}
+
 type Field = { frequencies: Map<string, number>; length: number };
 type Document = {
   tool: Tool;

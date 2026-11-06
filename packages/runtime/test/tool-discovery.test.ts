@@ -70,6 +70,19 @@ function candidate(
   }) as Tool;
 }
 const names = (tools: Tool[]) => tools.map((t) => (t as Tool & { name: string }).name);
+/** A typed choice answer: `p` for the query's one request, the rest not needed. */
+const picked = (p: number, prerequisite = 0) => ({
+  type: "choice",
+  choice: p >= 0.5 ? "request" : "none",
+  probabilities: { none: 1 - p - prerequisite, request: p, prerequisite },
+});
+/** The judgment a one-request choice answer gives. */
+const judged = (name: string, p: number, prerequisite = 0) => ({
+  name,
+  probability: p + prerequisite,
+  requests: [p],
+  prerequisite,
+});
 /** A selector that judges every candidate from a fixed table (default 0). */
 const judge =
   (table: Record<string, number>, seen?: ToolDecisionInput[]): ToolSelector =>
@@ -660,6 +673,7 @@ describe("decision selection", () => {
     expect(selectFromJudgments(j(0.1, 0.92, 0.05))).toEqual({
       load: ["t1"],
       rest: ["t0", "t2"],
+      unserved: [],
       clear: true,
     });
     // Nothing above the threshold: the most probable still loads, unsure.
@@ -690,7 +704,12 @@ describe("decision selection", () => {
       { name: "b", probability: 0, answered: false as const },
       { name: "c", probability: 0.05 },
     ];
-    expect(selectFromJudgments(judgments)).toEqual({ load: ["a"], rest: ["b", "c"], clear: false });
+    expect(selectFromJudgments(judgments)).toEqual({
+      load: ["a"],
+      rest: ["b", "c"],
+      unserved: [],
+      clear: false,
+    });
     // With nothing judged above the threshold, a judged candidate loads first.
     expect(selectFromJudgments([judgments[1]!, judgments[2]!]).load).toEqual(["c"]);
   });
@@ -710,12 +729,12 @@ describe("decision selection", () => {
       inputFields: [],
     }));
     expect(
-      await answering({ 0: { type: "noul", noul: 0.9 }, 1: { type: "refusal" } })({
+      await answering({ 0: picked(0.9), 1: { type: "refusal" } })({
         query: "get task",
         candidates,
       }),
     ).toEqual([
-      { name: "tasks__get", probability: 0.9 },
+      judged("tasks__get", 0.9),
       { name: "tasks__list", probability: 0, answered: false },
     ]);
     await expect(
@@ -726,7 +745,7 @@ describe("decision selection", () => {
     ).rejects.toThrow();
     // An incomplete answer set is still invalid.
     await expect(
-      answering({ 0: { type: "noul", noul: 0.9 } })({ query: "get task", candidates }),
+      answering({ 0: picked(0.9) })({ query: "get task", candidates }),
     ).rejects.toThrow();
   });
   test("a provider blip gets one quick retry; a refusal or a second failure does not", async () => {
@@ -735,7 +754,7 @@ describe("decision selection", () => {
       description: name,
       inputFields: [],
     }));
-    const answers = { 0: { type: "noul", noul: 0.9 }, 1: { type: "noul", noul: 0.1 } };
+    const answers = { 0: picked(0.9), 1: picked(0.1) };
     const replying = (...statuses: number[]) => {
       let calls = 0;
       const select = createToolSelector(
@@ -757,8 +776,8 @@ describe("decision selection", () => {
     for (const status of [429, 503]) {
       const blip = replying(status);
       expect(await blip.select({ query: "get task", candidates })).toEqual([
-        { name: "tasks__get", probability: 0.9 },
-        { name: "tasks__list", probability: 0.1 },
+        judged("tasks__get", 0.9),
+        judged("tasks__list", 0.1),
       ]);
       expect(blip.calls()).toBe(2);
     }
@@ -910,7 +929,7 @@ describe("decision selection", () => {
       apiKey: "test-only",
       fetch: (async () =>
         Response.json({
-          answers: { 99: { type: "noul", noul: 0.9 } },
+          answers: { 99: picked(0.9) },
           usage: { input_tokens: 100 },
         })) as typeof fetch,
     });

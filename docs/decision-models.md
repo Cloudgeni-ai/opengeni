@@ -69,8 +69,9 @@ in again. Without a usable identity, the decision model is not configured. The
 default, `api_key`, sends `OPENGENI_DECISION_MODEL_API_KEY` as before.
 
 Give the selector its own deployment rather than sharing one that serves the
-agents' own model calls: a tool-search selection with 40 candidates is roughly
-10 to 20 thousand input tokens, so its rate limit should be sized for that.
+agents' own model calls: a tool-search selection with 40 to 60 candidates is
+roughly 6 to 20 thousand input tokens, and a selection slower than 2.5 seconds
+sends a second identical request, so its rate limit should be sized for that.
 
 Legacy `OPENGENI_JEV_API_KEY/BASE_URL/MODEL/REQUEST_TIMEOUT_MS` still serve existing
 code-search deployments when **no** shared category setting is present. They never

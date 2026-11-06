@@ -29,8 +29,14 @@ import {
   shortNameAlternatives,
   toolsWithExactName,
   unresolvedToolNames,
+  MAX_SEARCH_LIMIT,
 } from "./codex-tool-search";
-import { hasSearchTerms, isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
+import {
+  hasSearchTerms,
+  isOperationWord,
+  searchTermCount,
+  ToolSearchIndex,
+} from "./tool-discovery-ranking";
 import {
   decisionCandidate,
   selectFromJudgments,
@@ -42,7 +48,16 @@ import {
   TOOL_MEANING_POLICY,
   type ToolMeaningRanker,
 } from "./tool-discovery-meaning";
-import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
+import {
+  familyMembers,
+  familyPrefix,
+  TOOL_FAMILY_POLICY,
+  toolDescriptor,
+  toolFamilies,
+  toolGroup,
+  toolGroups,
+  type ToolFamilyMember,
+} from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
@@ -73,22 +88,108 @@ const TOOL_INVOKE_NAME = "tool_invoke";
 /** How deep each keyword ranking reaches when it is fused with a meaning ranking. */
 const FUSION_DEPTH = 300;
 
-/** A search's independent requests: semicolon- or line-separated clauses with search words. */
-function searchClauses(query: string): string[] {
-  const clauses = query.split(/[;\n]+/).filter((part) => hasSearchTerms(part));
-  return clauses.length ? clauses : [query];
+/**
+ * Where a sentence that asks for several things moves on to the next: a
+ * comma, or "and" or "then" (or the Norwegian "og", "så"), where the words
+ * on both sides could make a request of their own.
+ */
+const NEED_BOUNDARY = /\s*,\s*(?:(?:and|then|og|så)\s+)?|\s+(?:and then|and|then|og|så)\s+/giu;
+/** The fewest search words a part of a sentence needs to count as its own request. */
+const NEED_WORDS = 2;
+
+/** One sentence's requests: its parts between boundaries that each have enough search words. */
+function sentenceNeeds(sentence: string): string[] {
+  const parts: { text: string; glue: string }[] = [];
+  let start = 0;
+  let glue = "";
+  for (const boundary of sentence.matchAll(NEED_BOUNDARY)) {
+    parts.push({ text: sentence.slice(start, boundary.index), glue });
+    glue = boundary[0];
+    start = boundary.index + boundary[0].length;
+  }
+  parts.push({ text: sentence.slice(start), glue });
+  const needs: string[] = [];
+  // A part too short to stand alone ("photos" in "files, photos and
+  // invoices") stays with the request before it, or else the one after.
+  let carry = "";
+  for (const part of parts) {
+    if (searchTermCount(part.text) < NEED_WORDS) {
+      if (needs.length) needs[needs.length - 1] += part.glue + part.text;
+      else carry += (carry ? part.glue : "") + part.text;
+      continue;
+    }
+    needs.push(carry ? carry + part.glue + part.text : part.text);
+    carry = "";
+  }
+  if (carry) needs.push(carry);
+  return needs.map((need) => need.trim()).filter((need) => hasSearchTerms(need));
 }
 
 /**
- * What candidates are gathered for: each request's sentences, since an agent
- * often writes several asks as prose in one request. Loading still follows
- * the requests themselves.
+ * A search's separate requests: its semicolon- or line-separated clauses,
+ * their sentences, and the parts of a sentence that asks for several things
+ * ("open a pull request, ask Kari to review it and tell me when CI is
+ * green"). Each request gets its own candidates and, without a selector, its
+ * own best match. At most {@link TOOL_SELECTION_POLICY.maxRequests}; later
+ * ones join the last.
  */
-function searchUnits(query: string): { clause: number; text: string }[] {
-  return searchClauses(query).flatMap((clause, index) => {
-    const sentences = clause.split(/(?<=[.!?])\s+/).filter((part) => hasSearchTerms(part));
-    return (sentences.length > 1 ? sentences : [clause]).map((text) => ({ clause: index, text }));
-  });
+export function searchNeeds(query: string): string[] {
+  const needs = query
+    .split(/[;\n]+/)
+    .filter((clause) => hasSearchTerms(clause))
+    .flatMap((clause) => {
+      const sentences = clause.split(/(?<=[.!?])\s+/).filter((part) => hasSearchTerms(part));
+      return sentences.flatMap((sentence) => {
+        const parts = sentenceNeeds(sentence);
+        return parts.length ? parts : [sentence.trim()];
+      });
+    });
+  if (!needs.length) return [query];
+  const max = TOOL_SELECTION_POLICY.maxRequests;
+  return needs.length > max ? [...needs.slice(0, max - 1), needs.slice(max - 1).join("; ")] : needs;
+}
+
+/** Operation words of tools that find what an id identifies. */
+const FINDER_OPERATIONS: ReadonlySet<string> = new Set(["list", "search", "find"]);
+/** The most finder tools one required id field points to. */
+const ID_FINDERS_PER_FIELD = 2;
+
+/** A tool name's lowercase words: `job_safety_analyses.list` is job, safety, analyses, list. */
+const toolNameWords = (name: string) =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+/** What a required id field identifies, as words: `jobSafetyAnalysisId` is job, safety, analysis. */
+function idFieldResource(field: string): string[] | undefined {
+  const words = toolNameWords(field);
+  if (words.length < 2 || words.at(-1) !== "id") return undefined;
+  return words.slice(0, -1);
+}
+
+/** Whether one word is the other, or its plural (`analysis`, `analyses`; `entry`, `entries`). */
+const sameWord = (a: string, b: string) => {
+  if (a === b) return true;
+  const stem = (word: string) => word.replace(/(?:ies|y)$/, "y").replace(/(?:es|is|s)$/, "");
+  return stem(a) === stem(b) && stem(a).length >= 3;
+};
+
+/** Whether a finder tool's name words name the resource, in order. */
+function namesResource(words: readonly string[], resource: readonly string[]): boolean {
+  for (let start = 0; start + resource.length <= words.length; start++)
+    if (resource.every((word, i) => sameWord(words[start + i]!, word))) {
+      // The resource must be the finder's own subject, not one it is scoped
+      // by or a part of it: `customers.list` or `customers.list_by_region`,
+      // not `customers.list_contacts`.
+      const rest = words.slice(start + resource.length);
+      return (
+        rest.length === 0 ||
+        (FINDER_OPERATIONS.has(rest[0]!) && (rest.length === 1 || rest[1] === "by"))
+      );
+    }
+  return false;
 }
 
 /** Round-robin over the requests' rankings, so every request is represented near the top. */
@@ -407,6 +508,25 @@ export function searchCandidatesNotice(
   return lines.join("\n");
 }
 
+/** The sentence a search result carries about the tool families of what it found. */
+export function toolFamiliesNotice(
+  families: readonly { family: string; tools: number }[],
+  explain: boolean,
+): string {
+  const list = families.map(({ family, tools }) => `${family} (${tools} tools)`).join(", ");
+  return explain
+    ? `Tool families here: ${list}. To load a whole family, use tool_search names:["<family>"] and query:"" (at most ${TOOL_FAMILY_POLICY.maxLoad} tools at once).`
+    : `Tool families here: ${list}.`;
+}
+
+/** The sentence an exact-name load carries for families too large to load at once. */
+export function familiesTooLargeNotice(
+  families: readonly { family: string; tools: number }[],
+): string {
+  const list = families.map(({ family, tools }) => `${family} has ${tools} tools`).join("; ");
+  return `Not loaded: ${list}, more than the ${TOOL_FAMILY_POLICY.maxLoad} one search loads. Load the ones you need by exact name, or a narrower family; tool_list with namePrefix shows them all.`;
+}
+
 /** The plain sentence a search result carries about the person's other connected accounts. */
 export function connectedAccountsNotice(
   reached: readonly string[],
@@ -641,6 +761,11 @@ export class LazyToolRuntime {
    * already loaded and shows alternatives the agent has not seen yet.
    */
   private readonly loadedThisTurn = new Set<string>();
+  /** Whether a result this turn already said how to load a tool family. */
+  private familyLoadExplained = false;
+  private familyIndex:
+    | { tools: readonly Tool[]; members: ToolFamilyMember[]; families: Map<string, string> }
+    | undefined;
   private readonly shownThisTurn = new Set<string>();
   /** Tools a new session's opening context is for (see openingToolLoad). */
   private openingToolNames: readonly string[] = [];
@@ -1026,6 +1151,81 @@ export class LazyToolRuntime {
     return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
   }
 
+  /** The searchable tools' families ({@link toolFamilies}), kept until the tools change. */
+  private toolFamilyIndex(): { members: ToolFamilyMember[]; families: Map<string, string> } {
+    if (this.familyIndex?.tools === this.currentTools) return this.familyIndex;
+    const servers = this.modelMcpServerIds();
+    const published = this.mcpToolNames();
+    const members = this.searchableTools(this.currentTools)
+      .filter(isFunctionTool)
+      .map((tool) => {
+        const server = servers.get(tool.name);
+        const name = published.get(tool.name);
+        return {
+          name: tool.name,
+          ...(server ? { server } : {}),
+          ...(name ? { published: name } : {}),
+        };
+      });
+    this.familyIndex = { tools: this.currentTools, members, families: toolFamilies(members) };
+    return this.familyIndex;
+  }
+
+  /**
+   * The families of the tools a result names, with their sizes, so the agent
+   * can see the rest of a family and load it whole. Families it loaded
+   * completely are left out.
+   */
+  private resultFamilies(
+    names: readonly string[],
+    loaded: readonly string[],
+  ): { family: string; tools: number }[] {
+    const { members, families } = this.toolFamilyIndex();
+    const out: { family: string; tools: number }[] = [];
+    for (const name of names) {
+      const family = families.get(name);
+      if (!family || out.some((entry) => entry.family === family)) continue;
+      const tools = familyMembers(members, familyPrefix(family)!);
+      if (
+        tools.length < TOOL_FAMILY_POLICY.listFrom ||
+        tools.every((tool) => loaded.includes(tool.name))
+      )
+        continue;
+      out.push({ family, tools: tools.length });
+      if (out.length >= TOOL_FAMILY_POLICY.maxListed) break;
+    }
+    return out;
+  }
+
+  /**
+   * Exact names with family patterns (`checklists.*`) replaced by the
+   * family's tools, up to {@link TOOL_FAMILY_POLICY.maxLoad} in all. A family
+   * that does not fit stays unloaded and is reported with its size.
+   */
+  private withFamiliesExpanded(names: readonly string[]): {
+    names: string[];
+    tooLarge: { family: string; tools: number }[];
+  } {
+    if (!names.some((name) => familyPrefix(name) !== undefined))
+      return { names: [...names], tooLarge: [] };
+    const { members } = this.toolFamilyIndex();
+    const out: string[] = [];
+    const tooLarge: { family: string; tools: number }[] = [];
+    for (const name of names) {
+      const prefix = familyPrefix(name);
+      const tools = prefix ? familyMembers(members, prefix).map((tool) => tool.name) : [];
+      if (!tools.length) {
+        out.push(name);
+        continue;
+      }
+      const added = tools.filter((tool) => !out.includes(tool));
+      if (out.length + added.length > TOOL_FAMILY_POLICY.maxLoad)
+        tooLarge.push({ family: name, tools: tools.length });
+      else out.push(...added);
+    }
+    return { names: out, tooLarge };
+  }
+
   /**
    * Integrations selected for this turn whose tools could not be loaded, so a
    * search that finds nothing is not read as "this integration has no such
@@ -1155,12 +1355,17 @@ export class LazyToolRuntime {
     const { query, limit } = parsed;
     if (parsed.names !== undefined) {
       const resolve = this.exactMcpNameResolver();
-      const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
-      const loaded = this.withCandidatesNotice({
+      // A family pattern (`checklists.*`) stands for its tools.
+      const expanded = this.withFamiliesExpanded(parsed.names);
+      const exact = { ...parsed, names: expanded.names.map((name) => resolve(name) ?? name) };
+      const disclosed = this.withCandidatesNotice({
         version: 2,
         output: this.genericSearchOutput(exact),
         tools: structuredClone(this.searchDisclosure(exact)),
       });
+      const loaded = expanded.tooLarge.length
+        ? this.withNotice(disclosed, "familiesNotLoaded", familiesTooLargeNotice(expanded.tooLarge))
+        : disclosed;
       // Loading one account's tools by exact name (after browsing a group,
       // say) names the person's other accounts once per turn, as a ranked
       // search reaching that account does.
@@ -1226,10 +1431,11 @@ export class LazyToolRuntime {
     // ranking) clearly matches one by keywords, needs no alternatives.
     // Otherwise the alternatives a result lists must reach the model on every
     // route.
-    const result =
+    const result = this.withFamilies(
       onlyNames || (!this.decisionModel && !meaning && strong.length)
         ? ranked
-        : this.withCandidatesNotice(ranked);
+        : this.withCandidatesNotice(ranked),
+    );
     const connectable = await lookup;
     const withConnectable = connectable.length
       ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
@@ -1244,6 +1450,27 @@ export class LazyToolRuntime {
         undefined,
       ),
     );
+  }
+
+  /**
+   * Names the tool families of what a ranked result loaded or showed, with
+   * their sizes, so a job that needs more of a family can load it whole.
+   */
+  private withFamilies(result: GenericSearchMarker): GenericSearchMarker {
+    const output = JSON.parse(result.output) as {
+      tools?: { name?: unknown }[];
+      suggestions?: { name?: unknown }[];
+    };
+    const loaded = (result.tools ?? []).map((tool) => String(tool.name));
+    const names = [
+      ...loaded,
+      ...[...(output.tools ?? []), ...(output.suggestions ?? [])].map((tool) => String(tool.name)),
+    ];
+    const families = this.resultFamilies(names, loaded);
+    if (!families.length) return result;
+    const explain = !this.familyLoadExplained;
+    this.familyLoadExplained = true;
+    return this.withNotice(result, "families", toolFamiliesNotice(families, explain));
   }
 
   /** Records what a decided search loaded and showed, for later searches this turn. */
@@ -1339,27 +1566,80 @@ export class LazyToolRuntime {
     candidates: readonly Tool[],
     max: number,
   ): Tool[] {
-    const resolve = this.exactMcpNameResolver();
+    const named = this.toolsPointedTo(pool);
     const present = new Set(candidates.map((tool) => (tool as { name: string }).name));
     const byName = new Map(pool.map((tool) => [tool.name, tool]));
     const added: Tool[] = [];
     for (const candidate of candidates) {
       if (added.length >= max) break;
-      const description = candidate.type === "function" ? (candidate.description ?? "") : "";
+      for (const name of named(candidate)) {
+        const tool = byName.get(name);
+        if (!tool || present.has(name) || added.length >= max) continue;
+        present.add(name);
+        added.push(tool);
+      }
+    }
+    return added;
+  }
+
+  /**
+   * The pool's tools a tool points to as what to call first: those its own
+   * description names, in the order it names them, then those that list or
+   * search what an id its input requires identifies (`customers.list` for a
+   * required `customerId`), on its own server.
+   */
+  private toolsPointedTo(pool: (Tool & { name: string })[]): (tool: Tool) => string[] {
+    const named = this.toolsNamedInDescription(pool);
+    const servers = this.modelMcpServerIds();
+    const published = this.mcpToolNames();
+    const serverOf = (name: string) =>
+      servers.get(name) ?? (name.includes("__") ? name.slice(0, name.lastIndexOf("__")) : "");
+    const finders = new Map<string, { name: string; words: string[] }[]>();
+    for (const tool of pool) {
+      const words = toolNameWords(published.get(tool.name) ?? shortToolName(tool.name));
+      if (!words.some((word) => FINDER_OPERATIONS.has(word))) continue;
+      const server = serverOf(tool.name);
+      finders.set(server, [...(finders.get(server) ?? []), { name: tool.name, words }]);
+    }
+    for (const list of finders.values()) list.sort((a, b) => a.words.length - b.words.length);
+    return (tool) => {
+      const out = named(tool);
+      const own = (tool as { name: string }).name;
+      const required = (
+        tool.type === "function" ? ((tool.parameters as { required?: unknown }).required ?? []) : []
+      ) as unknown[];
+      for (const field of required) {
+        const resource = typeof field === "string" ? idFieldResource(field) : undefined;
+        if (!resource) continue;
+        let added = 0;
+        for (const finder of finders.get(serverOf(own)) ?? []) {
+          if (added >= ID_FINDERS_PER_FIELD) break;
+          if (finder.name === own || !namesResource(finder.words, resource)) continue;
+          if (!out.includes(finder.name)) out.push(finder.name);
+          added++;
+        }
+      }
+      return out;
+    };
+  }
+
+  /** The pool's tools a tool's own description names, in the order it names them. */
+  private toolsNamedInDescription(pool: (Tool & { name: string })[]): (tool: Tool) => string[] {
+    const resolve = this.exactMcpNameResolver();
+    return (tool) => {
+      const description = tool.type === "function" ? (tool.description ?? "") : "";
+      const out: string[] = [];
       for (const raw of description.split(/[^A-Za-z0-9_.\-/:]+/)) {
         const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
         if (!/[_.]/.test(token) || !/[a-z]/i.test(token)) continue;
         const exact = resolve(token);
-        const names = exact ? [exact] : toolsWithExactName(pool, token).map((tool) => tool.name);
-        for (const name of names) {
-          const tool = byName.get(name);
-          if (!tool || present.has(name) || added.length >= max) continue;
-          present.add(name);
-          added.push(tool);
-        }
+        for (const name of exact
+          ? [exact]
+          : toolsWithExactName(pool, token).map((found) => found.name))
+          if (name !== (tool as { name?: string }).name && !out.includes(name)) out.push(name);
       }
-    }
-    return added;
+      return out;
+    };
   }
 
   /**
@@ -1543,7 +1823,7 @@ export class LazyToolRuntime {
   }
 
   /**
-   * Each of the search's units ({@link searchUnits}) ranked by meaning over
+   * Each of the search's requests ({@link searchNeeds}) ranked by meaning over
    * the authorized pool, or undefined (keywords alone) when there is no
    * meaning ranker or it does not answer in time. The turn's own cancellation
    * still wins.
@@ -1554,15 +1834,15 @@ export class LazyToolRuntime {
     signal?: AbortSignal,
   ): Promise<string[][] | undefined> {
     if (!this.meaningRanker || !pool.length) return undefined;
-    const units = searchUnits(query);
+    const needs = searchNeeds(query);
     const deadline = AbortSignal.timeout(TOOL_MEANING_POLICY.deadlineMs);
     const rankings = await this.meaningRanker({
-      queries: units.map((unit) => unit.text),
+      queries: needs,
       tools: pool,
       signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
     }).catch(() => undefined);
     signal?.throwIfAborted();
-    if (!Array.isArray(rankings) || rankings.length !== units.length) return undefined;
+    if (!Array.isArray(rankings) || rankings.length !== needs.length) return undefined;
     // Only this pool's tools can be ranked, whatever the ranker returned.
     const names = new Set(pool.map((tool) => (tool as { name: string }).name));
     return rankings.map((ranking) =>
@@ -1580,38 +1860,27 @@ export class LazyToolRuntime {
       near: readonly string[];
       onlyNames: boolean;
       strongest: readonly string[];
-      /** Each unit's meaning ranking, when one answered in time. */
+      /** Each request's meaning ranking, when one answered in time. */
       meaning: readonly (readonly string[])[] | undefined;
     },
     setupFor: (chosen: readonly string[]) => Promise<string[]>,
     signal?: AbortSignal,
   ): Promise<GenericSearchMarker> {
     const { query, limit, named, near, onlyNames, strongest, meaning } = search;
-    const clauses = searchClauses(query);
-    const units = searchUnits(query);
-    const keywordRanking = (clause: string, depth: number) =>
-      this.searchIndex!.rank(clause, depth)
+    const needs = searchNeeds(query);
+    const keywordRanking = (need: string, depth: number) =>
+      this.searchIndex!.rank(need, depth)
         .filter(isFunctionTool)
         .map((t) => t.name);
-    // Each request's keyword ranking fused with its sentences' meaning
-    // rankings, when meaning answered: what is loaded without a selector.
+    // Each request's keyword ranking fused with its meaning ranking, when
+    // meaning answered: what is loaded without a selector.
     const fused = meaning
-      ? clauses.map((clause, i) =>
-          fuseRankings([
-            keywordRanking(clause, FUSION_DEPTH),
-            ...units.flatMap((unit, u) => (unit.clause === i ? [meaning[u]!] : [])),
-          ]),
-        )
+      ? needs.map((need, i) => fuseRankings([keywordRanking(need, FUSION_DEPTH), meaning[i]!]))
       : undefined;
-    // Each sentence's own ranking: where candidates and alternatives come from.
+    // Each request's own ranking, round-robin: where candidates and
+    // alternatives come from, so every request is represented.
     const recall = (depth: number) =>
-      interleave(
-        units.map((unit, u) =>
-          meaning
-            ? fuseRankings([keywordRanking(unit.text, FUSION_DEPTH), meaning[u]!])
-            : keywordRanking(unit.text, depth),
-        ),
-      );
+      interleave(fused ?? needs.map((need) => keywordRanking(need, depth)));
     // Without a selector, the best match for each request is loaded: the top
     // of its fused ranking, else the best keyword match. When keyword ranking
     // cannot tell (a tie, or a clause without resource words) the top-ranked
@@ -1648,7 +1917,11 @@ export class LazyToolRuntime {
     // tools those candidates' own descriptions point to.
     const pool = this.searchableTools(this.currentTools).filter(isFunctionTool);
     const byName = new Map(pool.map((tool) => [tool.name, tool]));
-    const depth = Math.max(TOOL_SELECTION_POLICY.candidates, limit);
+    const depth = Math.max(
+      TOOL_SELECTION_POLICY.candidates,
+      limit,
+      needs.length > 1 ? needs.length * TOOL_SELECTION_POLICY.candidatesPerRequest : 0,
+    );
     const ranked = recall(depth)
       .slice(0, depth)
       .flatMap((name) => byName.get(name) ?? []);
@@ -1682,7 +1955,7 @@ export class LazyToolRuntime {
       const published = this.mcpToolNames();
       const judgments = await this.decisionModel({
         query,
-        ...(units.length > 1 ? { requests: units.map((unit) => unit.text.trim()) } : {}),
+        ...(needs.length > 1 ? { requests: needs } : {}),
         candidates: candidates.map((tool) =>
           decisionCandidate(
             tool,
@@ -1706,15 +1979,30 @@ export class LazyToolRuntime {
         new Set(judgments.map((judgment) => judgment.name)).size !== judgments.length
       )
         throw new Error("Invalid decision model selection");
-      const selection = selectFromJudgments(judgments, limit);
+      // A prerequisite loads only when a loaded tool points to it: its own
+      // description names it, or it finds an id the loaded tool requires.
+      const namedIn = this.toolsPointedTo(pool);
+      const selection = selectFromJudgments(judgments, limit, {
+        named: (name) => {
+          const tool = byName.get(name);
+          return tool ? namedIn(tool) : [];
+        },
+      });
       // Named tools are loaded whatever the judgments say; the selector
       // covers the query's other needs.
       chosen = [...new Set([...named, ...selection.load])];
+      // Each request left without a tool shows its best candidates first.
+      const fresh = (name: string) => !chosen.includes(name) && !this.shownThisTurn.has(name);
+      const unserved = selection.unserved.filter(fresh);
       alternatives = selection.clear
         ? []
-        : selection.rest
-            .filter((name) => !chosen.includes(name) && !this.shownThisTurn.has(name))
-            .slice(0, TOOL_SELECTION_POLICY.maxAlternatives);
+        : [...new Set([...unserved, ...selection.rest.filter(fresh)])].slice(
+            0,
+            Math.min(
+              MAX_SEARCH_LIMIT / 2,
+              Math.max(TOOL_SELECTION_POLICY.maxAlternatives, unserved.length),
+            ),
+          );
     } catch {
       // Cancellation belongs to the owning turn, not the recovery path.
       signal?.throwIfAborted();
@@ -1761,8 +2049,13 @@ export class LazyToolRuntime {
     const resolved = this.search({ query: "", names: [...chosen, ...companions], limit }).filter(
       isFunctionTool,
     );
+    // The selection already bounds what it chose; the result limit only
+    // bounded its extra tools (see selectFromJudgments).
     const selected = [
-      ...resolved.filter((t) => chosen.includes(t.name)).slice(0, limit),
+      ...resolved
+        .filter((t) => chosen.includes(t.name))
+        .sort((a, b) => chosen.indexOf(a.name) - chosen.indexOf(b.name))
+        .slice(0, MAX_SEARCH_LIMIT),
       ...resolved.filter((t) => companions.includes(t.name) && !chosen.includes(t.name)),
     ];
     const isSelected = (tool: Tool) =>
@@ -1881,13 +2174,44 @@ export class LazyToolRuntime {
           (shortPrefix !== null &&
             name.includes("__") &&
             name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
+        // A large opaque connection lists its tool families as groups of
+        // their own, so its directory names what it holds.
+        const connectionSizes = new Map<string, number>();
+        for (const tool of authorizedTools) {
+          const key = toolGroup(tool.name, serverIds);
+          connectionSizes.set(key, (connectionSizes.get(key) ?? 0) + 1);
+        }
+        const { families } = this.toolFamilyIndex();
+        // Only a connection whose families hold most of its tools splits.
+        const familyShares = new Map<string, number>();
+        for (const tool of authorizedTools)
+          if (families.has(tool.name)) {
+            const key = toolGroup(tool.name, serverIds);
+            familyShares.set(key, (familyShares.get(key) ?? 0) + 1);
+          }
+        const groupOf = (name: string) => {
+          const key = toolGroup(name, serverIds);
+          const size = connectionSizes.get(key) ?? 0;
+          if (
+            !key.startsWith("connection/") ||
+            size <= TOOL_FAMILY_POLICY.groupAbove ||
+            (familyShares.get(key) ?? 0) * 2 < size
+          )
+            return key;
+          const family = families.get(name);
+          return `${key}/${family ? family.slice(0, -1).replace(/[._]$/, "") : "other"}`;
+        };
         const tools = authorizedTools.filter(
           (tool) =>
             hasPrefix(tool.name) &&
-            (group === undefined || toolGroup(tool.name, serverIds) === group),
+            // A whole connection's key still filters it, as it did before
+            // its families had groups of their own.
+            (group === undefined ||
+              groupOf(tool.name) === group ||
+              toolGroup(tool.name, serverIds) === group),
         );
         if (args.view === "groups") {
-          const groups = toolGroups(tools, serverIds);
+          const groups = toolGroups(tools, groupOf);
           const cursorIndex =
             cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
           if (cursor !== undefined && cursorIndex === -1)

@@ -1,0 +1,10 @@
+---
+"@opengeni/runtime": patch
+"@opengeni/worker-bundle": patch
+---
+
+One `tool_search` now loads a tool for every need a search asks for. Before, the decision model's picks were cut to the search's `limit`, so an agent that asked for four things with `limit: 2` got two of them; a sentence such as "open a pull request, ask Kari to review it and tell me when CI is green" counted as one request; and the selector was told to leave out the tool a chosen tool needs first (the template lister for "create a checklist from a template"). Now the query is split into its requests at semicolons, lines, sentences and the clauses of a sentence; each request brings its own candidates; and the decision model answers one choice per candidate (not needed, the tool for request k, or a prerequisite). Each request's best tool loads whatever the limit, prerequisites load when a loaded tool's description names them or they list what an id it requires identifies (at most three), and `limit` only bounds the other tools. A request left without a tool shows its three best candidates by name.
+
+Tool families: tools of one server that share a resource prefix (`checklists.*`, `job_safety_analyses_*`) are named with their sizes beside a ranked result, `names: ["checklists.*"]` loads a family of up to 20 tools (a larger one is reported, not loaded), and `tool_list view: "groups"` splits a connection of more than 40 tools into its families instead of one unnamed group. The connection's own group key still filters it.
+
+Selection fallbacks: a selection still unanswered after 2.5 s sends one identical request beside it (the first answer wins, the other is cancelled), and the deadline is 8 s instead of 5 s. Production fallbacks were almost all the old 5 s deadline cutting off slow decision calls. A fallback is now counted in `opengeni_tool_search_selection_fallbacks_total` by reason (`deadline`, `rate_limited`, `provider_error`, `request_failed`, `invalid_answer`) and logged with its time and attempts; before, its cause was discarded.
