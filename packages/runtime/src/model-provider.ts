@@ -13,6 +13,8 @@ import { MultiProviderModelProvider } from "./model-provider-routing";
 export { ResponsesStreamingTerminalError } from "./responses-terminal-error";
 export {
   CodexSubscriptionUnavailableError,
+  INCOMPLETE_CHAT_COMPLETION_CODE,
+  IncompleteChatCompletionError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,

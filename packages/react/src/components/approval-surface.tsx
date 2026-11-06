@@ -61,8 +61,14 @@ export type ApprovalSurfaceProps = {
   error?: string | Error | null | undefined;
   messages?: Partial<ApprovalSurfaceMessages> | undefined;
   renderApproval?: ((approval: PendingApproval) => ReactNode) | undefined;
-  /** Authenticated server facts; hosts need not import any web-app code. */
-  loadReview?: ((approval: PendingApproval) => Promise<ToolActionReview>) | undefined;
+  /**
+   * Authenticated server facts, or the host's own review; hosts need not
+   * import any web-app code. Resolve `null` to keep the standard card for an
+   * approval the host has no review for.
+   */
+  loadReview?:
+    | ((approval: PendingApproval) => Promise<ToolActionReview | null | undefined>)
+    | undefined;
   loadDetails?: ToolReviewDetailsLoader | undefined;
   onViewDetails?: ((review: ToolActionReview, path: string) => void) | undefined;
   selectedApprovalId?: string | null | undefined;
@@ -308,7 +314,11 @@ function ApprovalRequest({
         (review) => {
           if (active) {
             setResult(
-              review.id !== request.approval.id ? { request, failed: true } : { request, review },
+              review === null || review === undefined
+                ? { request, legacy: true }
+                : review.id !== request.approval.id
+                  ? { request, failed: true }
+                  : { request, review },
             );
           }
         },

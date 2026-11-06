@@ -363,21 +363,32 @@ ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
 # from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
 # poppler-utils gives PDF text page by page (pdftotext -f N -l N, pdfinfo),
 # which AnyDoc's Markdown does not mark.
+# The small general tools agents reach for without checking first: GNU time
+# (`/usr/bin/time -v`), zip, iproute2 (ss, ip), netcat and net-tools, file,
+# binutils (strings, objdump, readelf), xxd, bc and patch. The last build step
+# (docker/check-default-commands.sh) proves every default command is present.
 RUN set -eux; \
     printf '%s\n' \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     packages=" \
         bash \
+        bc \
+        binutils \
         ca-certificates \
         coreutils \
         curl \
+        file \
         gpg \
         git \
+        iproute2 \
         jq \
         libatomic1 \
         libstdc++6 \
+        netcat-openbsd \
+        net-tools \
         openssh-client \
+        patch \
         poppler-utils \
         postgresql-client \
         procps \
@@ -385,10 +396,13 @@ RUN set -eux; \
         fonts-liberation \
         rclone \
         ripgrep \
+        time \
         unzip \
         util-linux \
         uuid-runtime \
         wget \
+        xxd \
+        zip \
         xvfb \
         x11vnc \
         xauth \
@@ -432,9 +446,19 @@ RUN set -eux; \
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
+# npm and npx come from the same pinned Node release as the binary; bunx is Bun
+# started under that name, as in the official Bun images.
 COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=node-target /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY --from=bun-runtime /out/bun /usr/local/bin/bun
-RUN test "$(node --version)" = "v22.22.0"
+RUN set -eux; \
+    test "$(node --version)" = "v22.22.0"; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    ln -s bun /usr/local/bin/bunx; \
+    npm --version; \
+    npx --version; \
+    test "$(bunx --version)" = "$(bun --version)"
 
 # Pinned native document-to-Markdown parser. The lock contains the registry
 # integrity for the JS wrapper and every target binding; the builder copies
@@ -660,6 +684,11 @@ RUN set -eux; \
     bash -n /usr/local/bin/opengeni-browserd-down; \
     chromium --version; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS
+
+# Last build step: every default command an agent may reach for is present
+# and runs (docker/check-default-commands.sh), so a regression fails the build.
+RUN --mount=type=bind,source=docker/check-default-commands.sh,target=/opt/opengeni-check/check-default-commands.sh \
+    sh /opt/opengeni-check/check-default-commands.sh
 
 EXPOSE 7681
 EXPOSE 7682

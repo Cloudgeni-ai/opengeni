@@ -1888,6 +1888,8 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1913,6 +1915,8 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",

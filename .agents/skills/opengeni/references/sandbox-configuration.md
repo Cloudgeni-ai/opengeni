@@ -71,6 +71,8 @@ OPENGENI_DOCKER_IMAGE=opengeni-sandbox:local
 
 Inspect `docker/sandbox.Dockerfile` for what the agent can use. The current image is infrastructure-oriented: Terraform, Checkov, Azure CLI, GitHub CLI, git, jq, curl, shell utilities, rclone/FUSE support, and an askpass helper for GitHub credentials. Do not promise these tools unless the Dockerfile still installs them.
 
+The general commands every default image ships (headless `docker/sandbox.Dockerfile` and desktop `docker/desktop.Dockerfile`) are listed in `docker/check-default-commands.sh`, which both images run as their last build step: Bun and `bunx`, Node with npm and npx, Python with pip and uv, `ogtool`, `anydoc`, ripgrep, GNU time, zip/unzip, iproute2 (`ss`, `ip`), `file`, binutils `strings`, `xxd` and the usual shell utilities. Add a command there when it becomes part of every default box; `scripts/sandbox-default-commands.test.ts` keeps the check as each image's final step. Task-specific tools (database clients, cloud CLIs, kubectl, docker) stay out of that list.
+
 ## Modal Sandbox Setup
 
 Modal configuration is separate from Docker image configuration. Current knobs include app name, timeout, optional image ref, optional Modal token pair, optional Modal environment, and an optional private-registry image secret.

@@ -12,6 +12,7 @@ import {
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -667,5 +668,110 @@ describe("deployment environment instructions", () => {
         options,
       ),
     ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
+  });
+});
+
+describe("agent instructions layer", () => {
+  const AGENT = "Answer every question as a pirate.";
+  const bindings = [
+    { credentialBindingId: "a", provider: "github" as const, token: "x" },
+    { credentialBindingId: "b", provider: "github" as const, token: "y" },
+  ];
+
+  test("modular: after the directives and before Git bindings, governance, memory and session", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      agentInstructions: `  ${AGENT}\n`,
+      workspaceGovernance: "GOVERNANCE",
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+    });
+    expect(inspection.layers.map((layer) => layer.id)).toEqual([
+      "identity",
+      "operational_contract",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_governance",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    const layer = inspection.layers.find((candidate) => candidate.id === "agent_instructions")!;
+    expect(layer.content).toBe(`${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}`);
+    expect(layer.content).toContain("grant no additional authority");
+    expect(inspection.composed).toBe(joinPersistentAgentInstructionLayers(inspection.layers));
+  });
+
+  test("absent or blank instructions add nothing and keep the exact bytes", () => {
+    for (const agentConfig of [config(allAgentCapabilities()), undefined]) {
+      const options = {
+        ...(agentConfig ? { agentConfig } : {}),
+        codemodeAvailable: true,
+        codeSearchAvailable: true,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+      };
+      const plain = inspectPersistentAgentInstructions(testSettings(), options);
+      expect(
+        inspectPersistentAgentInstructions(testSettings(), {
+          ...options,
+          agentInstructions: " \n",
+        }),
+      ).toEqual(plain);
+      expect(plain.layers.map((layer) => layer.id)).not.toContain("agent_instructions");
+    }
+  });
+
+  test("legacy: after the directives without governance, right after the persona with it", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    const base = {
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      agentInstructions: AGENT,
+    };
+    const ungoverned = inspectPersistentAgentInstructions(settings, base);
+    expect(ungoverned.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    // A Markdown section of its own: a paragraph break before and after it.
+    expect(ungoverned.composed).toContain(
+      `${CODE_SEARCH_DIRECTIVE}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}\n\n`,
+    );
+    const governed = inspectPersistentAgentInstructions(settings, {
+      ...base,
+      workspaceGovernance: "GOVERNANCE",
+    });
+    expect(governed.layers.map((layer) => layer.id).slice(0, 4)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "agent_instructions",
+      "workspace_governance",
+    ]);
+    // Removing the layer gives back the historical legacy bytes.
+    const { agentInstructions: _omitted, ...legacy } = base;
+    expect(inspectPersistentAgentInstructions(settings, legacy).composed.includes(AGENT)).toBe(
+      false,
+    );
+    expect(
+      joinPersistentAgentInstructionLayers(
+        ungoverned.layers
+          .filter((layer) => layer.id !== "agent_instructions")
+          .map(({ joinBefore: _join, ...layer }) => layer),
+      ),
+    ).toBe(inspectPersistentAgentInstructions(settings, legacy).composed);
   });
 });

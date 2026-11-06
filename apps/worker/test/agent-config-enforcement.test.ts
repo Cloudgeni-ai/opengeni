@@ -136,6 +136,8 @@ type FixtureOptions = {
   bundledSkillIds?: BundledSkillId[] | "omit";
   /** Rendered workspace governance for this turn. */
   workspaceGovernance?: string;
+  /** The agent revision in the chat's system prompt (sessions.agent_prompt_revision). */
+  agentPrompt?: BuildTurnAgentDeps["agentPrompt"];
   /** The session started unattended (frozen in its metadata) and still is. */
   unattended?: boolean;
   /** Above zero: a child session, which a parent agent can answer. */
@@ -228,6 +230,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const governanceWrites: Array<string | null> = [];
+  const agentInstructionChecks: Array<NonNullable<BuildTurnAgentDeps["agentPrompt"]>> = [];
   let preparationPhase: "tool-preparation" | "agent-build" = "tool-preparation";
   const metadataReads = { skillDescriptors: 0, videoPolicy: 0 };
   const persistence = [
@@ -269,6 +272,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
       governanceWrites.push(input.governance);
       return input.governance;
+    }),
+    spyOn(db, "ensureSessionAgentInstructions").mockImplementation(async (_db, input) => {
+      agentInstructionChecks.push(input.prompt);
+      return null;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
     ...(typeof db.sessionHasToolRouterHistory === "function"
@@ -536,6 +543,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       ...(options.workspaceGovernance !== undefined
         ? { workspaceGovernance: options.workspaceGovernance }
         : {}),
+      agentPrompt: options.agentPrompt ?? null,
       input,
       db: {} as BuildTurnAgentDeps["db"],
       runtime: runtime as OpenGeniRuntime,
@@ -672,6 +680,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       modelVisibleSkillCatalogText: built.modelVisibleSkillCatalogText,
       skillCatalogWrites,
       governanceWrites,
+      agentInstructionChecks,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
       settings,
       session,
@@ -888,6 +897,36 @@ describe("agent configuration reaches the production model request", () => {
       expect(governed.request.systemInstructions).toBe(other.request.systemInstructions);
       expect(governed.request.systemInstructions).not.toContain("Workspace rule");
       expect(governed.governanceWrites).toEqual(["Workspace rule: answer in English."]);
+    },
+  );
+
+  test.each(["legacy", "all"] as const)(
+    "an agent chat's instructions are a system-prompt layer; edits are checked each turn (%s config)",
+    async (from) => {
+      const agent = from === "all" ? agentConfig("all") : null;
+      const prompt = { agentId: crypto.randomUUID(), revision: 3 };
+      const bound = await captureWorkerRequest({
+        agent,
+        agentPrompt: { ...prompt, instructions: "Agent rule: answer as a pirate." },
+      });
+      expect(bound.request.systemInstructions).toContain(
+        "# Instructions for this agent\n\nThe agent's editors wrote these.",
+      );
+      expect(bound.request.systemInstructions).toContain("Agent rule: answer as a pirate.");
+      expect(bound.agentInstructionChecks).toEqual([
+        { ...prompt, instructions: "Agent rule: answer as a pirate." },
+      ]);
+      // A plain chat neither gets the layer nor checks for edits; a deleted
+      // agent checks (to withdraw an earlier edit) and runs as a plain chat.
+      const plain = await captureWorkerRequest({ agent });
+      expect(plain.agentInstructionChecks).toEqual([]);
+      const deleted = await captureWorkerRequest({
+        agent,
+        agentPrompt: { ...prompt, instructions: null },
+      });
+      expect(deleted.agentInstructionChecks).toHaveLength(1);
+      expect(deleted.request.systemInstructions).toBe(plain.request.systemInstructions);
+      expect(plain.request.systemInstructions).not.toContain("Instructions for this agent");
     },
   );
 

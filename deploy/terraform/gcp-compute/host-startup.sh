@@ -89,17 +89,41 @@ BUNDLE_SHA256=$(attr compute-bundle-sha256)
 # --- The state volume: local NVMe SSDs, striped, or the "state" disk.
 state_device=
 # install.sh records the volume it set up; a record with no UUID in it
-# is none (the same test as install.sh's).
+# is none (the same test as install.sh's). With no record, as on a first
+# boot or on a host whose boot disk was rebuilt from a newer image while
+# its state disk or SSDs kept their data, install.sh is given the device:
+# it keeps a file system it finds there and formats only a blank device.
 recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
 if [ -z "$recorded" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
   if [ "${#nvme[@]}" -eq 1 ]; then
     state_device=${nvme[0]}
   elif [ "${#nvme[@]}" -gt 1 ]; then
-    [ -e /dev/md/compute-state ] ||
-      mdadm --create /dev/md/compute-state --level=0 --raid-devices="${#nvme[@]}" "${nvme[@]}" --run
-    mdadm --detail --scan >/etc/mdadm/mdadm.conf
     state_device=/dev/md/compute-state
+    # The SSDs may be striped already, their array's record (mdadm.conf)
+    # gone with the boot disk: an array the kernel assembled from them
+    # under another name is used as it is, and SSDs carrying an array's
+    # superblock are assembled again. Only SSDs with none are striped
+    # anew, as creating an array over them would write over its data.
+    first=$(basename "$(readlink -f "${nvme[0]}")")
+    held=
+    for holder in /sys/class/block/"$first"/holders/md*; do
+      [ -e "$holder" ] && held=${holder##*/} && break
+    done
+    if [ -n "$held" ]; then
+      state_device=/dev/$held
+    elif [ ! -e /dev/md/compute-state ]; then
+      striped=
+      for ssd in "${nvme[@]}"; do
+        mdadm --examine "$ssd" >/dev/null 2>&1 && striped=1
+      done
+      if [ -n "$striped" ]; then
+        mdadm --assemble /dev/md/compute-state "${nvme[@]}"
+      else
+        mdadm --create /dev/md/compute-state --level=0 --raid-devices="${#nvme[@]}" "${nvme[@]}" --run
+      fi
+    fi
+    mdadm --detail --scan >/etc/mdadm/mdadm.conf
   else
     state_device=/dev/disk/by-id/google-state
   fi
