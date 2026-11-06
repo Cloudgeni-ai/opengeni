@@ -5,6 +5,7 @@ import { createRootRoute, createRouter, RouterProvider } from "@tanstack/react-r
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { BillingCreditNotification, InboxItem } from "@opengeni/sdk";
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { RailSurface, ShellRail } from "@opengeni/react/app/components/rail/rail-surface";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { Toaster } from "sonner";
 import { InboxRoute } from "../src/routes/inbox";
@@ -135,11 +136,13 @@ const rootRoute = createRootRoute({
     <AppContext.Provider value={context}>
       <TooltipProvider>
         <div className="flex h-dvh min-w-0 flex-col bg-bg text-fg sm:flex-row">
-          <nav aria-label="Preview navigation" className="og-rail-glow shrink-0 p-3 sm:w-60">
-            <p className="mb-3 px-2.5 text-sm font-medium">Opengeni</p>
-            <InboxLink />
-            <p className="mt-3 px-2.5 text-xs text-fg-muted">Preview · sample data</p>
-          </nav>
+          <ShellRail as="nav" aria-label="Preview navigation" className="sm:w-60">
+            <RailSurface className="p-3">
+              <p className="mb-3 px-2.5 text-sm font-medium">Opengeni</p>
+              <InboxLink />
+              <p className="mt-3 px-2.5 text-xs text-fg-muted">Preview · sample data</p>
+            </RailSurface>
+          </ShellRail>
           <main data-canvas className="flex min-h-0 min-w-0 flex-1 bg-canvas">
             <InboxRoute workspaceId={workspaceId} />
           </main>
