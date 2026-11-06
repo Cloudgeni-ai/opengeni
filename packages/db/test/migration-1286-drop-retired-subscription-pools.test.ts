@@ -19,7 +19,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 
-const migration = "1267_drop_retired_subscription_pools.sql";
+const migration = "1286_drop_retired_subscription_pools.sql";
 const providers = ["codex", "claude", "xai"] as const;
 const tables = [
   "claude_credential_leases",

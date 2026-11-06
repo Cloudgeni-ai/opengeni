@@ -1997,10 +1997,6 @@ describe("durable active-goal wake", () => {
     });
     expect(armed.action).toBe("waiting");
     if (armed.action !== "waiting") throw new Error("core capacity wait was not armed");
-    const [legacy] = await shared.admin<{ count: number }[]>`
-      select count(*)::int as count from codex_capacity_waiters
-      where session_id = ${ctx.session.id}::uuid`;
-    expect(legacy?.count).toBe(0);
 
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))

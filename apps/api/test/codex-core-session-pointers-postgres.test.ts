@@ -27,8 +27,6 @@ const settings = testSettings({
   codexSubscriptionEnabled: true,
 });
 const SUBJECT = `user:codex-pointers-${crypto.randomUUID()}`;
-const LEGACY_PINNED = crypto.randomUUID();
-const LEGACY_LAST = crypto.randomUUID();
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -236,13 +234,10 @@ beforeAll(async () => {
     permissions: organizationReadApiKeyPermissions,
     credentialKind: "organization",
   });
-  // Fixture rows written directly: the legacy pointer columns as legacy wrote
-  // them, a child link, and a core binding for the parent only.
+  // Fixture rows written directly: a child link and a core binding for the
+  // parent only.
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
-    await tx`update sessions set codex_pinned_credential_id = ${LEGACY_PINNED}::uuid,
-        codex_last_credential_id = ${LEGACY_LAST}::uuid
-      where id in (${parentId}::uuid, ${childId}::uuid)`;
     await tx`update sessions set parent_session_id = ${parentId}::uuid,
         root_session_id = ${parentId}::uuid, nested_agent_depth = 1
       where id = ${childId}::uuid`;
@@ -270,7 +265,7 @@ describe.skipIf(!realDb)("Codex session pointers on every Session response", () 
     expectEverywhere(
       await everySessionResponse(),
       { codexPinnedCredentialId: connectionId, codexLastCredentialId: connectionId },
-      // No core binding: nulls, never the legacy ids.
+      // No core binding: nulls.
       { codexPinnedCredentialId: null, codexLastCredentialId: null },
     );
   });

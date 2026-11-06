@@ -199,7 +199,6 @@ describe("archived import PostgreSQL persistence", () => {
         );
       }
       const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
-      const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
       const options = {
         expectedRole: "opengeni_app",
         rlsStrategy: "force" as const,
@@ -226,17 +225,6 @@ describe("archived import PostgreSQL persistence", () => {
         (violations: string[]) =>
           violations.includes(laterQuotaGap) && missingScopeTable(violations),
       );
-      await oldProvision.provisionRoles(shared.adminUrl, {
-        appRole: "opengeni_app",
-        appPassword: new URL(shared.appUrl).password,
-        rlsStrategy: "force",
-      });
-      expect(
-        old.evaluateRuntimeDatabasePosture(
-          await old.inspectRuntimeDatabasePosture(client.db, options),
-          options,
-        ),
-      ).toSatisfy(missingScopeTable);
       await provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
