@@ -10,6 +10,12 @@ export type SearchScore = {
   loadedRight: boolean;
   /** Some loaded or shown tool is acceptable: the agent can get there with at most one more call. */
   visible: boolean;
+  /** The search's needs (one unless the scenario lists several). */
+  needs: number;
+  /** Needs with a loaded tool that serves them. */
+  needsLoaded: number;
+  /** Needs with a loaded or shown tool that serves them. */
+  needsVisible: number;
   offLabelLoaded: number;
   agentTokens: number;
   /** 1-based rank of the first acceptable tool in the first stage's candidates, if ranked. */
@@ -26,17 +32,25 @@ export function scoreSearch(record: SearchRecord): SearchScore | undefined {
       firstPick: empty,
       loadedRight: empty,
       visible: empty,
+      needs: 1,
+      needsLoaded: Number(empty),
+      needsVisible: Number(empty),
       offLabelLoaded: trace.loaded.length,
       agentTokens: encode(trace.agentText).length,
     };
   }
   const ok = (toolName: string) => record.acceptable.includes(toolName);
+  const needs = record.needs?.length ? record.needs : [record.acceptable];
+  const shown = [...trace.loaded, ...trace.shown];
   const candidates = trace.stages.find((stage) => stage.name === "candidates")?.candidates;
   const rank = candidates?.findIndex((candidate) => ok(candidate.name));
   return {
     firstPick: trace.loaded.length > 0 && ok(trace.loaded[0]!),
     loadedRight: trace.loaded.some(ok),
-    visible: [...trace.loaded, ...trace.shown].some(ok),
+    visible: shown.some(ok),
+    needs: needs.length,
+    needsLoaded: needs.filter((need) => need.some((name) => trace.loaded.includes(name))).length,
+    needsVisible: needs.filter((need) => need.some((name) => shown.includes(name))).length,
     offLabelLoaded: trace.loaded.filter((toolName) => !ok(toolName)).length,
     agentTokens: encode(trace.agentText).length,
     ...(rank !== undefined && rank >= 0 ? { candidateRank: rank + 1 } : {}),
@@ -45,6 +59,11 @@ export function scoreSearch(record: SearchRecord): SearchScore | undefined {
 
 const mean = (values: number[]) =>
   values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+/** Sum of parts over sum of wholes. */
+const ratio = (pairs: [number, number][]) => {
+  const whole = pairs.reduce((sum, [, of]) => sum + of, 0);
+  return whole ? pairs.reduce((sum, [part]) => sum + part, 0) / whole : 0;
+};
 const percentile = (values: number[], fraction: number) =>
   [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * fraction) - 1)] ?? 0;
 
@@ -69,6 +88,10 @@ export type Summary = {
   firstPick: number;
   loadedRight: number;
   visible: number;
+  /** Share of all needs that the search loaded a tool for. */
+  needsLoaded: number;
+  /** Share of all needs that the search loaded or showed a tool for. */
+  needsVisible: number;
   offLabelLoaded: number;
   meanAgentTokens: number;
   p95AgentTokens: number;
@@ -99,6 +122,8 @@ export function summarize(records: readonly SearchRecord[]): Summary {
     firstPick: mean(scored.map(({ score }) => Number(score.firstPick))),
     loadedRight: mean(scored.map(({ score }) => Number(score.loadedRight))),
     visible: mean(scored.map(({ score }) => Number(score.visible))),
+    needsLoaded: ratio(scored.map(({ score }) => [score.needsLoaded, score.needs])),
+    needsVisible: ratio(scored.map(({ score }) => [score.needsVisible, score.needs])),
     offLabelLoaded: mean(scored.map(({ score }) => score.offLabelLoaded)),
     meanAgentTokens: mean(scored.map(({ score }) => score.agentTokens)),
     p95AgentTokens: percentile(

@@ -29,13 +29,21 @@ export type Scenario = {
   queries: string[];
   /** Model names of every tool that would be a right answer. */
   acceptable: string[];
+  /**
+   * For a search that asks for several things: what each separate need would
+   * accept (model names). A need is met when a tool that serves it is loaded.
+   * When omitted, the search has one need, met by any acceptable tool.
+   */
+  needs?: string[][];
+  /** The search's result limit, as the agent passed it. */
+  limit?: number;
   tags: string[];
   /** Where the scenario came from, for reading reports; not a slice. */
   source?: string;
   notes?: string;
 };
 
-export type SearchInput = { query: string; task?: string; signal?: AbortSignal };
+export type SearchInput = { query: string; task?: string; limit?: number; signal?: AbortSignal };
 
 export type StageTrace = {
   name: string;
@@ -76,6 +84,8 @@ export type SearchRecord = {
   query: string;
   task?: string;
   acceptable: string[];
+  needs?: string[][];
+  limit?: number;
   strategy: string;
   trace?: SearchTrace;
   error?: string;

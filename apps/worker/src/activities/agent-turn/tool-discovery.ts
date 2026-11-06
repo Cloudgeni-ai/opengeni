@@ -1,13 +1,14 @@
 import type { Settings } from "@opengeni/config";
 import { knowledgeEmbeddingTarget } from "@opengeni/core";
 import { recordUsageEvent, type Database, type UsageEventProcessingResidency } from "@opengeni/db";
-import type { DecisionUsage, DecisionModel } from "@opengeni/decisions";
+import { DecisionError, type DecisionUsage, type DecisionModel } from "@opengeni/decisions";
 import { createDocumentEmbedder, type DocumentEmbedder } from "@opengeni/documents";
 import {
   createEmbeddingToolRanker,
   sideFeatureRouteRunnable,
   type EmbeddingToolRanker,
   type ToolMeaningRanker,
+  type ToolSelectionFailure,
 } from "@opengeni/runtime";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 import { configuredDecisionModel } from "./decision-model";
@@ -128,3 +129,26 @@ export async function recordToolDecisionUsage(input: {
     });
   }
 }
+
+/**
+ * Why a tool search's selection fell back to keywords, as a bounded metric
+ * label: its own deadline, a rate limit, another provider reply, a dropped
+ * request, or an answer the runtime could not use.
+ */
+export function toolSelectionFallbackReason(
+  failure: ToolSelectionFailure,
+): "deadline" | "rate_limited" | "provider_error" | "request_failed" | "invalid_answer" {
+  if (failure.timedOut) return "deadline";
+  const { error } = failure;
+  if (error instanceof DecisionError) {
+    if (error.status === 429) return "rate_limited";
+    if (error.status !== undefined) return "provider_error";
+    if (error.code === "request_failed") return "request_failed";
+  }
+  return "invalid_answer";
+}
+
+export const TOOL_SELECTION_FALLBACK_METRIC = {
+  name: "opengeni_tool_search_selection_fallbacks_total",
+  help: "Tool searches whose decision-model selection fell back to keywords, by reason.",
+} as const;

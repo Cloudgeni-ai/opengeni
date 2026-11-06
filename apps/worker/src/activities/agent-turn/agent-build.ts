@@ -101,6 +101,8 @@ import {
   configuredToolDecisionModel,
   configuredToolMeaningRanker,
   recordToolDecisionUsage,
+  TOOL_SELECTION_FALLBACK_METRIC,
+  toolSelectionFallbackReason,
 } from "./tool-discovery";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
@@ -1066,6 +1068,28 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               processingResidency: decisionModelProcessingResidency(runSettings),
             }),
         }),
+        // The search result says only that it fell back; the deployment
+        // keeps why, so slow or failing selections can be fixed.
+        onToolSelectionError: (failure) => {
+          // Telemetry never changes the search: it has already fallen back.
+          try {
+            const reason = toolSelectionFallbackReason(failure);
+            observability.incrementCounter({
+              ...TOOL_SELECTION_FALLBACK_METRIC,
+              labels: { reason },
+            });
+            const { status, code } = (failure.error ?? {}) as { status?: unknown; code?: unknown };
+            observability.warn("Tool search selection fell back to keywords", {
+              reason,
+              elapsedMs: failure.elapsedMs,
+              attempts: failure.attempts,
+              ...(typeof status === "number" ? { status } : {}),
+              ...(typeof code === "string" ? { code } : {}),
+            });
+          } catch {
+            // Best effort.
+          }
+        },
         toolSearchMeaningRanker: configuredToolMeaningRanker({
           settings: runSettings,
           onError: (error) =>
