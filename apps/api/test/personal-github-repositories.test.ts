@@ -93,6 +93,80 @@ describe("personal GitHub repository capabilities", () => {
     expect(states).toHaveLength(0);
   });
 
+  test("All my repositories lists branches of any repository the person can read", async () => {
+    const selection = {
+      connectionAuthorityGeneration: 4,
+      credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      providerPrincipalId: "123456",
+      selectionGeneration: 7,
+      allRepositoriesAccess: "read" as const,
+      repositories: [],
+    };
+    const urls: string[] = [];
+    const authorities: unknown[] = [];
+    const services: PersonalGitHubRepositoryBranchServices = {
+      requireConnection: async () =>
+        ({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        }) as never,
+      getSelectionState: async () => selection,
+      providerJson: async (input) => {
+        urls.push(input.url.toString());
+        authorities.push(input.options.expectedRepositoryAuthority);
+        return input.url.pathname.startsWith("/repositories/")
+          ? {
+              id: 77,
+              full_name: "acme/widgets",
+              default_branch: "trunk",
+              visibility: "private",
+              private: true,
+              archived: false,
+              disabled: false,
+              permissions: {
+                pull: true,
+                push: false,
+                admin: false,
+                maintain: false,
+                triage: false,
+              },
+            }
+          : [{ name: "trunk" }];
+      },
+    };
+    const input = {
+      accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      subjectId: "user:owner",
+      connectionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      repositoryId: "77",
+      query: { cursor: 1, limit: 30 },
+    };
+    await expect(
+      listLivePersonalGitHubRepositoryBranches({ db: {}, settings: {} } as never, input, services),
+    ).resolves.toEqual({ branches: [{ name: "trunk", isDefault: true }], nextCursor: null });
+    expect(urls).toEqual([
+      "https://api.github.com/repositories/77",
+      "https://api.github.com/repos/acme/widgets/branches?page=1&per_page=30",
+    ]);
+    expect(authorities[1]).toEqual({
+      selectionGeneration: 7,
+      repositoryId: "77",
+      fullName: "acme/widgets",
+      allRepositories: true,
+    });
+    // Turned off meanwhile: nothing is returned.
+    const off = { ...selection, allRepositoriesAccess: null };
+    const states = [selection, off];
+    await expect(
+      listLivePersonalGitHubRepositoryBranches({ db: {}, settings: {} } as never, input, {
+        ...services,
+        getSelectionState: async () => states.shift() ?? null,
+      }),
+    ).rejects.toMatchObject({ code: "repository_selection_changed" });
+  });
+
   test("fails before provider use for unselected repositories and discards in-flight changes", async () => {
     const repository = {
       repositoryId: "9007199254740993123",

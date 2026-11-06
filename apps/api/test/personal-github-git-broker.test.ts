@@ -678,7 +678,9 @@ describe("personal GitHub Git broker", () => {
    * `refresh` stores an expired token whose refresh GitHub answers with that
    * OAuth error in an HTTP 200, the way github.com reports refresh errors.
    */
-  async function acceptedPersonalBrokerFixture(options: { refresh?: string } = {}) {
+  async function acceptedPersonalBrokerFixture(
+    options: { refresh?: string; allRepositories?: "read" | "write" } = {},
+  ) {
     if (!shared || !dbClient) throw new Error("PostgreSQL test database unavailable");
     const client = dbClient;
     const userId = `git-broker-${crypto.randomUUID()}`;
@@ -786,6 +788,7 @@ describe("personal GitHub Git broker", () => {
       expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
       expectedSelectionGeneration: 0,
       idempotencyKey: crypto.randomUUID(),
+      ...(options.allRepositories ? { allRepositoriesAccess: options.allRepositories } : {}),
       repositories: [
         {
           repositoryId: repository.repositoryId,
@@ -825,6 +828,7 @@ describe("personal GitHub Git broker", () => {
           credentialBindingId,
           connectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
           selectionGeneration: selected.selectionGeneration,
+          ...(options.allRepositories ? { allRepositoriesAccess: options.allRepositories } : {}),
           repositories: [frozenRepository],
         },
       },
@@ -1139,5 +1143,69 @@ describe("personal GitHub Git broker", () => {
       expect(push.status).toBe(403);
     }
     expect(fixture.counter.providerCalls).toBe(providerCallsBeforeRemoval);
+  }, 120_000);
+
+  test("All my repositories keeps Git working across selection edits until the mode is turned off", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ allRepositories: "write" });
+    const { app, session, target, originGrant, connection, emptySelection, subjectId } = fixture;
+    const route = await fixture.brokerFor(session);
+    const first = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(first.status).toBe(200);
+
+    // Editing the explicit list bumps the generation; the mode stays on.
+    const edited = await replacePersonalGitHubRepositorySelections(dbClient.db, {
+      accountId: originGrant.accountId,
+      originWorkspaceId: originGrant.workspaceId,
+      subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: fixture.selected.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      repositories: [],
+    });
+    expect(edited.allRepositoriesAccess).toBe("write");
+    const afterEdit = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(afterEdit.status).toBe(200);
+
+    // Removing the repository from the chat does not revoke it in this mode.
+    await removeSessionResources(
+      { db: dbClient.db, bus: new MemoryEventBus() },
+      {
+        accountId: originGrant.accountId,
+        workspaceId: target.id,
+        subjectId,
+        permissions: ["sessions:read", "sessions:control"],
+        principalKind: "human_session",
+      },
+      session.id,
+      { resources: [{ kind: "repository", uri: repository.canonicalUrl }] },
+    );
+    const afterRemoval = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(afterRemoval.status).toBe(200);
+
+    await replacePersonalGitHubRepositorySelections(dbClient.db, {
+      accountId: originGrant.accountId,
+      originWorkspaceId: originGrant.workspaceId,
+      subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: edited.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      allRepositoriesAccess: null,
+      repositories: [],
+    });
+    const providerCallsBeforeOff = fixture.counter.providerCalls;
+    const afterOff = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(afterOff.status).toBe(401);
+    expect(fixture.counter.providerCalls).toBe(providerCallsBeforeOff);
   }, 120_000);
 });

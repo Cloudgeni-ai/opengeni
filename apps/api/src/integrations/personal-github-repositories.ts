@@ -333,7 +333,7 @@ export async function listLivePersonalGitHubRepositoryBranches(
     selectionGeneration: current.selectionGeneration,
     repositoryId: current.repository.repositoryId,
     fullName: current.repository.fullName,
-    allRepositories: current.allRepositories,
+    ...(current.allRepositories ? { allRepositories: true } : {}),
   };
   const payload = await services.providerJson({
     deps,

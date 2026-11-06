@@ -1026,6 +1026,103 @@ describe("personal MCP connection delegation", () => {
         "personal GitHub repository resource is outside the selected authority",
       );
 
+      // All my repositories (read): every chat of the person gets Your
+      // GitHub, any repository can be attached for reading, and the saved
+      // per-repository list comes back when the mode is turned off.
+      const emptied = await getPersonalGitHubRepositorySelectionState(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      const allOn = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: emptied!.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: "read",
+      });
+      expect(allOn.allRepositoriesAccess).toBe("read");
+      expect(allOn.repositories.map((entry) => entry.repositoryId)).toEqual([
+        repository.repositoryId,
+      ]);
+      const freezeWith = (resources: (typeof resource)[], selections = [authoritySelection]) =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          tools: [],
+          resources,
+          source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
+          authoritySelections: selections,
+        });
+      const allSnapshot = {
+        credentialBindingId,
+        connectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        selectionGeneration: allOn.selectionGeneration,
+        allRepositoriesAccess: "read",
+      };
+      expect(await freezeWith([], [])).toEqual([
+        expect.objectContaining({
+          connectionId: connection.id,
+          connectionType: "github_personal",
+          personalGitHubRepositorySelection: { ...allSnapshot, repositories: [] },
+        }),
+      ]);
+      const unlisted = {
+        ...resource,
+        uri: "https://github.com/someone/else",
+        repositoryId: "123",
+        access: "read" as const,
+      };
+      expect((await freezeWith([unlisted]))[0]?.personalGitHubRepositorySelection).toEqual({
+        ...allSnapshot,
+        repositories: [
+          {
+            repositoryId: "123",
+            fullName: "someone/else",
+            canonicalUrl: "https://github.com/someone/else",
+            ref: "main",
+            access: "read",
+            selectionGeneration: allOn.selectionGeneration,
+          },
+        ],
+      });
+      await expect(freezeWith([{ ...unlisted, access: "write" }])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Children keep All my repositories without attached repositories.
+      expect(
+        personalConnectionDelegationsFromParent({
+          servers: [],
+          parentDelegations: await freezeWith([], []),
+          personalGitHubResources: [],
+        })[0]?.personalGitHubRepositorySelection?.allRepositoriesAccess,
+      ).toBe("read");
+      // Turning it off keeps the saved list and leaves other chats without Your GitHub.
+      const allOff = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: allOn.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: null,
+      });
+      expect(allOff.allRepositoriesAccess).toBeNull();
+      expect(allOff.selectionGeneration).toBeGreaterThan(allOn.selectionGeneration);
+      expect(allOff.repositories).toHaveLength(1);
+      expect(await freezeWith([], [])).toEqual([]);
+      await expect(freezeWith([unlisted])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+
       await sql`
         delete from workspace_memberships
         where workspace_id = ${target!.id} and subject_id = ${subjectId}
