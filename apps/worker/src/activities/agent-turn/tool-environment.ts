@@ -108,7 +108,7 @@ import {
   recordToolPreparationPhase,
   recordTurnStartupPhase,
 } from "../../observability-metrics";
-import { ToolResultSpill } from "./tool-result-spill";
+import { ToolResultSpill, spilledToolResultReadersForTurn } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { turnToolRouterExpected } from "./tool-router-expectation";
@@ -1348,7 +1348,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
-          await toolResultSpill.spill({ operationId, result }),
+          await toolResultSpill.spill({
+            operationId,
+            result,
+            readers: spilledToolResultReadersForTurn({
+              tools: turnTools,
+              mcpServers: runSettings.mcpServers,
+              sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+            }),
+          }),
         modelToolOutputTruncationTokens: () =>
           eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,

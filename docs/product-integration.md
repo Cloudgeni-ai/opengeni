@@ -299,7 +299,10 @@ only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
 Every built-in tool and prompt section follows what the session can use, so
 `"none"` pays only for what is relevant on each call: a neutral identity
 without a shared workspace; `request_human_input` with the secret kind only
-under `secrets` and Skill reviews only under `skills: "manage"`;
+under `secrets` and Skill reviews only under `skills: "manage"`, and not at all
+when nobody can answer (a session created with `unattended: true`, or
+`humanInput: false`; an API-started session keeps it because the backend can
+answer, and a child session because its parent agent can);
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
 `browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
 on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
