@@ -774,7 +774,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       piecesAtCall.push(
         [...storage.objects.keys()].filter((key) => !key.includes("/prepared/")).length,
       );
-      const microphone = request.audio.fileName === "track-0.wav";
+      const microphone = request.audio.fileName === "track-0.flac";
       return {
         languages: ["eng"],
         audioMilliseconds: 2_000,
@@ -818,13 +818,13 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
 
     expect(calls.map((call) => [call.audio.fileName, call.diarize, call.language]).sort()).toEqual([
-      ["track-0.wav", true, "en"],
-      ["track-1.wav", true, "en"],
+      ["track-0.flac", true, "en"],
+      ["track-1.flac", true, "en"],
     ]);
     // Each track is heard as speech PCM decoded from its uploaded pieces,
-    // which stay until the transcript is settled; the compact kept copy is
-    // written beside it and never waited for.
-    expect(calls.map((call) => call.audio.mimeType)).toEqual(["audio/wav", "audio/wav"]);
+    // sent as lossless FLAC, while the pieces stay until the transcript is
+    // settled; the compact kept copy is written beside it and never waited for.
+    expect(calls.map((call) => call.audio.mimeType)).toEqual(["audio/flac", "audio/flac"]);
     expect(piecesAtCall.every((count) => count > 0)).toBe(true);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
@@ -938,7 +938,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     });
     const { activities: run } = activities(storage, provider);
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
-    expect(sent).toEqual(["track-0.wav"]);
+    expect(sent).toEqual(["track-0.flac"]);
     const page = await getRecordingTranscriptPage(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,
@@ -1101,7 +1101,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       audioMilliseconds: 2_000,
       diarized: request.diarize,
       words:
-        request.audio.fileName === "track-0.wav"
+        request.audio.fileName === "track-0.flac"
           ? [word("Hello", 100, null)]
           : [word("Hi", 900, "speaker_0"), word("Yes", 1_300, "speaker_0")],
     }));
@@ -1233,7 +1233,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       audioMilliseconds: 2_000,
       diarized: false,
       words:
-        request.audio.fileName === "track-0.wav"
+        request.audio.fileName === "track-0.flac"
           ? [word("Hei.", 100, 300), word("Velkommen", 600, 1_100), word("hit.", 1_150, 1_500)]
           : [word("Hallo.", 1_600, 1_900)],
     }));
@@ -1342,7 +1342,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       audioMilliseconds: 4_000,
       diarized: false,
       words:
-        request.audio.fileName === "track-0.wav"
+        request.audio.fileName === "track-0.flac"
           ? [
               word("Takk.", 100, 400),
               word("vi", 1_100, 1_600),
@@ -1664,7 +1664,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         audioMilliseconds: null,
         diarized: false,
         words: [],
-        text: request.audio.fileName === "track-0.wav" ? " Hello there " : "Hi. Yes!",
+        text: request.audio.fileName === "track-0.flac" ? " Hello there " : "Hi. Yes!",
       }),
     };
     const aligned: Array<{ fileName: string; words: readonly string[] }> = [];
@@ -1702,8 +1702,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const run = activities(storage, subscription, null, ours, aligner).activities;
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
     expect(aligned.sort((left, right) => left.fileName.localeCompare(right.fileName))).toEqual([
-      { fileName: "track-0.wav", words: ["Hello", "there"] },
-      { fileName: "track-1.wav", words: ["Hi.", "Yes!"] },
+      { fileName: "track-0.flac", words: ["Hello", "there"] },
+      { fileName: "track-1.flac", words: ["Hi.", "Yes!"] },
     ]);
     const transcript = await getRecordingTranscriptPage(client.db, {
       ...recording.actor,
@@ -1790,7 +1790,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ).activities.transcribeRecordingVersion(recording.input),
     ).toEqual({ outcome: "complete" });
     // Each track was asked once; the retry placed their kept words.
-    expect(asked.sort()).toEqual(["track-0.wav", "track-1.wav"]);
+    expect(asked.sort()).toEqual(["track-0.flac", "track-1.flac"]);
     const transcript = await getRecordingTranscriptPage(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,

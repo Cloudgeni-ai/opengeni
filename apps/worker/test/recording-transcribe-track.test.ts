@@ -270,7 +270,7 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       ["track-1-0.flac", "audio/flac", "fLaC"],
       ["track-1-1.flac", "audio/flac", "fLaC"],
     ]);
-    // A model that names no formats gets the samples as they are.
+    // A model that names no formats gets the same lossless FLAC.
     const pcm: typeof flac = [];
     const heard: number[] = [];
     const result = await transcribeTrack({
@@ -285,12 +285,28 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       onSent: (milliseconds) => heard.push(milliseconds),
     });
     expect(pcm.map((item) => [item.fileName, item.head]).sort()).toEqual([
-      ["track-1-0.wav", "RIFF"],
-      ["track-1-1.wav", "RIFF"],
+      ["track-1-0.flac", "fLaC"],
+      ["track-1-1.flac", "fLaC"],
     ]);
     expect(heard.sort((left, right) => left - right)).toEqual([4_000, 5_000]);
     const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
     expect(seconds).toContain(2);
     expect(seconds).toContain(15);
+    // A model that takes only WAV gets the samples as they are.
+    const wavOnly: typeof flac = [];
+    await transcribeTrack({
+      provider: countingProvider(wavOnly),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null, audioFormats: ["wav"] },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+    });
+    expect(wavOnly.map((item) => [item.fileName, item.head]).sort()).toEqual([
+      ["track-1-0.wav", "RIFF"],
+      ["track-1-1.wav", "RIFF"],
+    ]);
   });
 });

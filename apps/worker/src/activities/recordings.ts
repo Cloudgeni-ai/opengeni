@@ -567,8 +567,10 @@ function pieceShape(
   const source = preparedPieceFormat(extension);
   const accepted = spec.audioFormats;
   let format: RecordingPieceFormat | null = null;
-  if (source === "wav" && accepted?.includes("flac")) {
-    // The same samples in half the upload.
+  if (source === "wav" && (!accepted || accepted.includes("flac"))) {
+    // The same samples in half the upload, and quick to write: FLAC of an
+    // hour takes seconds, where Opus takes most of a minute. A model that
+    // names no formats takes FLAC like any other speech API.
     format = "flac";
   } else if (accepted && !accepted.includes(source)) {
     format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
