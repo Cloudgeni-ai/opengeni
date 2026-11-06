@@ -546,9 +546,11 @@ const MISS_LISTED_SKILLS = 20;
 
 /** A miss names the identifiers that do exist, so the next call can use one. */
 function repositorySkillMissMessage(skills: readonly WorkspaceSkill[]): string {
-  if (!skills.length) return "Repository Skill is not in this index: no repository skills were found.";
+  if (!skills.length)
+    return "Repository Skill is not in this index: no repository skills were found.";
   const listed = skills.slice(0, MISS_LISTED_SKILLS).map(repositorySkillId).join(", ");
-  const more = skills.length > MISS_LISTED_SKILLS ? `, and ${skills.length - MISS_LISTED_SKILLS} more` : "";
+  const more =
+    skills.length > MISS_LISTED_SKILLS ? `, and ${skills.length - MISS_LISTED_SKILLS} more` : "";
   return `Repository Skill is not in this index. Use one of these exact identifiers: ${listed}${more}.`;
 }
 
