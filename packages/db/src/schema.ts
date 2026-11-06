@@ -4,7 +4,7 @@ import type { StoredApiIntegrationRevision } from "./capability-integrations";
 import {
   commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
-  meaningfulSessionEventSql,
+  meaningfulAttentionIndexPredicateSql,
 } from "./session-meaningful-events";
 import type {
   OrganizationAccessPolicy,
@@ -10064,7 +10064,7 @@ export const sessionEvents = pgTable(
       .where(commentaryExclusiveMeaningfulSessionEventSql("session_events")),
     meaningfulAttentionWithUsageLimitStops: index("session_events_meaningful_attention_v3_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
-      .where(meaningfulSessionEventSql("session_events")),
+      .where(meaningfulAttentionIndexPredicateSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
@@ -10817,6 +10817,9 @@ export const sandboxLeases = pgTable(
     // The agent gateway reported the current compute sandbox asleep since then;
     // warm time does not accrue while it sleeps (0861).
     computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
+    // The agent gateway reported the current compute sandbox's host handing
+    // it off since then; it may refuse wakes for a short while (1281).
+    computeHandingOffSince: timestamp("compute_handing_off_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
     // these remain bare UUIDs here rather than generating a stricter wrong FK.

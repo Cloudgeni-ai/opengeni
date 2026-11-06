@@ -361,6 +361,13 @@ impl Handle {
         .await?
     }
 
+    /// Boots a sandbox afresh from its disk where it is, and returns once
+    /// its VM has ended and its memory image is gone; see
+    /// [`crate::protocol::Request::Restart`].
+    pub async fn restart(&self, id: Id) -> Result<(), HostError> {
+        self.ask(|reply| Command::Restart { id, reply }).await?
+    }
+
     /// Keeps a sandbox awake for a named reason, such as an agent turn in
     /// progress, waking it if it sleeps. Holding again under the same name
     /// refreshes the hold; with a `ttl` it lapses on its own unless

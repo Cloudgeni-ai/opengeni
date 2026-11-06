@@ -5,7 +5,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ComputeSandboxSession } from "../src/sandbox/compute/session";
 import { OpenSandboxSession } from "../src/sandbox/providers/opensandbox-adapter";
-import { workspaceTarExcludeArgs } from "../src/sandbox/workspace-tar-excludes";
+import {
+  fingerprintSandboxWorkspace,
+  probeRemoteWorkspaceSize,
+  readRemoteWorkspaceContentManifest,
+} from "../src/sandbox/workspace-archive";
+import {
+  workspaceTarExcludeArgs,
+  workspaceTopLevelExcludeGlobs,
+} from "../src/sandbox/workspace-tar-excludes";
 
 // Compute and OpenSandbox build their own workspace tar. It must leave out
 // exactly what the workspace fingerprint (and the Agents SDK's tar) leaves
@@ -46,7 +54,9 @@ function localRunner(workspace: string, privateRoot: string) {
   const rewrite = (value: string) =>
     value
       .replaceAll("/tmp/opengeni-private", privateRoot)
-      .replaceAll("'/workspace'", `'${workspace}'`);
+      .replaceAll("'/workspace'", `'${workspace}'`)
+      .replaceAll("cd /workspace\n", `cd ${workspace}\n`)
+      .replaceAll("cd /workspace 2>", `cd ${workspace} 2>`);
   return {
     scripts: [] as string[],
     run(cmd: string) {
@@ -81,7 +91,9 @@ function manifestState() {
   };
 }
 
-async function computeArchive(workspace: string): Promise<{ members: string[]; script: string }> {
+async function computeArchive(
+  workspace: string,
+): Promise<{ members: string[]; script: string; bytes: Uint8Array }> {
   const privateRoot = mkdtempSync(join(tmpdir(), "og-tar-private-"));
   created.push(privateRoot);
   const runner = localRunner(workspace, privateRoot);
@@ -93,12 +105,12 @@ async function computeArchive(workspace: string): Promise<{ members: string[]; s
     readFile: async (args: { path: string }) => runner.read(args.path),
   });
   const bytes = await (session as unknown as ComputeSandboxSession).persistWorkspaceTar();
-  return { members: archiveMembers(bytes), script: runner.scripts[0]! };
+  return { members: archiveMembers(bytes), script: runner.scripts[0]!, bytes };
 }
 
 async function openSandboxArchive(
   workspace: string,
-): Promise<{ members: string[]; script: string }> {
+): Promise<{ members: string[]; script: string; bytes: Uint8Array }> {
   const privateRoot = mkdtempSync(join(tmpdir(), "og-tar-private-"));
   created.push(privateRoot);
   const runner = localRunner(workspace, privateRoot);
@@ -111,7 +123,7 @@ async function openSandboxArchive(
     deletePath: async () => undefined,
   });
   const bytes = await (session as unknown as OpenSandboxSession).persistWorkspaceTar();
-  return { members: archiveMembers(bytes), script: runner.scripts[0]! };
+  return { members: archiveMembers(bytes), script: runner.scripts[0]!, bytes };
 }
 
 const EXPECTED_MEMBERS = [
@@ -121,6 +133,34 @@ const EXPECTED_MEMBERS = [
   "w1/node_modules/pkg/index.js",
   "w[1]/src/main.ts",
 ].sort();
+
+/** The backend's session over a local tree, for the workspace fingerprint
+ * and content manifest (both run through `exec`). */
+function fingerprintSession(
+  prototype: object,
+  workspace: string,
+): Parameters<typeof fingerprintSandboxWorkspace>[0] {
+  const privateRoot = mkdtempSync(join(tmpdir(), "og-tar-private-"));
+  created.push(privateRoot);
+  const runner = localRunner(workspace, privateRoot);
+  const session = Object.create(prototype) as Record<string, unknown>;
+  Object.assign(session, {
+    state: manifestState(),
+    exec: async (args: { cmd: string }) => runner.run(args.cmd),
+  });
+  return session;
+}
+
+function extract(bytes: Uint8Array): string {
+  const dir = mkdtempSync(join(tmpdir(), "og-tar-restored-"));
+  created.push(dir);
+  const file = join(dir, "..", `${dir.split("/").pop()}.tar`);
+  created.push(file);
+  writeFileSync(file, bytes);
+  const result = spawnSync("tar", ["-xf", file, "-C", dir], { encoding: "utf8" });
+  expect(result.status).toBe(0);
+  return dir;
+}
 
 describe("backend workspace tar exclusions", () => {
   for (const [name, capture] of [
@@ -138,10 +178,76 @@ describe("backend workspace tar exclusions", () => {
     });
   }
 
+  // A failed cleanup can leave a restore's staging or backup folder in the
+  // workspace. The archive always left those out, but the fingerprint and
+  // content manifest counted them, so a save taken while one was present could
+  // never verify on restore (its fingerprint described files the archive
+  // never held).
+  for (const [name, prototype, capture] of [
+    ["compute", ComputeSandboxSession.prototype, computeArchive],
+    ["OpenSandbox", OpenSandboxSession.prototype, openSandboxArchive],
+  ] as const) {
+    test(`${name}: a restore of a save taken beside leftover restore folders verifies`, async () => {
+      const source = workspaceTree();
+      const { bytes } = await capture(source);
+      const restored = extract(bytes);
+      const before = fingerprintSession(prototype, source);
+      const after = fingerprintSession(prototype, restored);
+      expect(await fingerprintSandboxWorkspace(after)).toEqual(
+        await fingerprintSandboxWorkspace(before),
+      );
+      expect(await readRemoteWorkspaceContentManifest(after)).toEqual(
+        await readRemoteWorkspaceContentManifest(before),
+      );
+      // The size walk (the metric a failed save's size is compared with)
+      // measures the same files as the archive holds.
+      const sourceSize = await probeRemoteWorkspaceSize(before);
+      expect(sourceSize).not.toBeNull();
+      expect(await probeRemoteWorkspaceSize(after)).toEqual(sourceSize);
+      expect(sourceSize).not.toEqual(
+        await probeRemoteWorkspaceSize(fingerprintSession({}, source)),
+      );
+    });
+  }
+
+  // Saves recorded before this change carry the old fingerprint. Without a
+  // leftover folder the extra exclusions match nothing, so those still verify.
+  test("without leftover restore folders the fingerprint is unchanged", async () => {
+    const source = workspaceTree();
+    for (const leftover of [".opengeni-old-1234", ".opengeni-restore-5678"]) {
+      rmSync(join(source, leftover), { recursive: true, force: true });
+    }
+    const withGlobs = fingerprintSession(ComputeSandboxSession.prototype, source);
+    const withoutGlobs = fingerprintSession({}, source);
+    expect(await fingerprintSandboxWorkspace(withGlobs)).toEqual(
+      await fingerprintSandboxWorkspace(withoutGlobs),
+    );
+    expect(await readRemoteWorkspaceContentManifest(withGlobs)).toEqual(
+      await readRemoteWorkspaceContentManifest(withoutGlobs),
+    );
+  });
+
   test("an empty path is dropped instead of becoming a no-op `./` pattern", () => {
     expect(workspaceTarExcludeArgs(["", "target"], [".opengeni-old-*"])).toEqual([
       "'--exclude=./.opengeni-old-*'",
       "'--exclude=./target'",
     ]);
+  });
+
+  // The archive and the fingerprint apply one check to the top-level globs.
+  // An entry that isn't a plain top-level name throws on both sides instead
+  // of being dropped by one of them, which would make them disagree.
+  test("an invalid top-level glob throws for the archive and the fingerprint alike", async () => {
+    const source = workspaceTree();
+    for (const glob of [".cache/*", "a\\b", "", ".", "..", "x\ny"]) {
+      expect(() => workspaceTopLevelExcludeGlobs([glob])).toThrow(TypeError);
+      expect(() => workspaceTarExcludeArgs([], [glob])).toThrow(TypeError);
+      const session = fingerprintSession({ workspaceArchiveExcludedGlobs: () => [glob] }, source);
+      await expect(fingerprintSandboxWorkspace(session)).rejects.toThrow(TypeError);
+      await expect(readRemoteWorkspaceContentManifest(session)).rejects.toThrow(TypeError);
+      // The size walk is observability only: no measurement, not an error.
+      expect(await probeRemoteWorkspaceSize(session)).toBeNull();
+    }
+    expect(workspaceTopLevelExcludeGlobs(["b*", "a*", "b*"])).toEqual(["a*", "b*"]);
   });
 });

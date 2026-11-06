@@ -2365,6 +2365,9 @@ New bare rates require a configured model on the official OpenAI API route;
 custom proxies and Azure do not inherit them by matching a model name.
 Registry prices and explicit
 product-ID overrides still win. External metering never becomes a credit debit.
+When a model has no debit price, its usage record's equivalent credit cost is the
+reviewed list rate's equivalent-credit comparison, so list-priced subscription
+calls still report what they would have cost.
 
 Forward fact writers may use `calculateModelListUsageCostSnapshot` with
 `priceContextKnown: true` only after establishing the request's price provenance

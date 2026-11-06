@@ -659,6 +659,81 @@ describe("intent-preserving failed-session retry", () => {
     expect((await f.retry()).outcome).toBe("accepted");
   });
 
+  test("a workspace machine replacement settles a waiting command as not started and keeps a started one unknown", async () => {
+    const f = await fixture(true);
+    expect((await f.retry()).outcome).toBe("accepted");
+    const claimed = await f.claim();
+    if (claimed.action !== "claimed") throw new Error("not claimed");
+    const identity = {
+      accountId: f.grant.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.session.id,
+      turnId: claimed.turn.id,
+      executionGeneration: claimed.turn.executionGeneration,
+      attemptId: claimed.turn.activeAttemptId!,
+    };
+    const waiting = crypto.randomUUID();
+    const started = crypto.randomUUID();
+    for (const callId of [waiting, started]) {
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callId,
+        callType: "function_call",
+        callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
+      });
+    }
+    // Setup found the box could not start programs and asked for its
+    // replacement while `waiting` was still waiting for the box.
+    const recovery = await requestSessionTurnRecovery(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.turn.activeAttemptId!,
+      reason: "sandbox_lifecycle_transition",
+      notStartedToolCallIds: [waiting],
+      detail: { transitionReason: "rotation_in_progress" },
+    });
+    expect(recovery.action).toBe("recovering");
+    const outputs = new Map(
+      recovery.events
+        .filter((event) => event.type === "agent.toolCall.output")
+        .map((event) => [(event.payload as { id: string }).id, event.payload]),
+    );
+    expect(outputs.get(waiting)).toMatchObject({
+      output: {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.",
+          },
+        ],
+      },
+      recovery: { outcome: "not_started", reason: "sandbox_lifecycle_transition" },
+    });
+    expect(outputs.get(started)).toMatchObject({
+      output: {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Tool execution was interrupted by sandbox_lifecycle_transition; its side-effect outcome is unknown.",
+          },
+        ],
+      },
+      recovery: { outcome: "unknown", reason: "sandbox_lifecycle_transition" },
+    });
+    const results = new Map(
+      (await getActiveSessionHistoryItems(client.db, f.workspaceId, f.session.id))
+        .filter(({ item }) => item.type === "function_call_result")
+        .map(({ item }) => [item.callId, (item.output as { text: string }).text]),
+    );
+    expect(results.get(waiting)).toBe(
+      "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run it again.",
+    );
+    expect(results.get(started)).toContain("The side-effect outcome is unknown");
+  });
+
   test("a turn's process-start restarts are counted from its own events until a human retry", async () => {
     const f = await fixture(true);
     // A never-claimed preclaim failure has no started turn; retry it first.

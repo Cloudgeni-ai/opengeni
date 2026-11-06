@@ -675,6 +675,14 @@ export type AgentToolEnvironment = {
    * find a command; undefined means not yet known and keeps them.
    */
   sandboxAttached?: boolean;
+  /**
+   * Whether the session has a goal, in any state, as frozen with the turn.
+   * `false` (proven none) withholds `goal_resume` from a configured agent: it
+   * acts only on an existing goal and otherwise fails. Once a goal exists the
+   * tool stays whatever the goal's state, so pausing or resuming never changes
+   * the tool list. Undefined means not known and keeps it.
+   */
+  sessionGoal?: boolean;
 };
 
 /**
@@ -760,6 +768,7 @@ export function resolveAgentToolFamilies(
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
     if (owner === "sandbox") return sandboxTools;
     if (name === "wait_for_input") return waitForInput;
+    if (name === "goal_resume" && config && environment.sessionGoal === false) return false;
     if (owner === "notifications") return notifications;
     return owner === "runtime" || enabled(owner);
   };

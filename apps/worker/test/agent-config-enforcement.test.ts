@@ -144,6 +144,13 @@ type FixtureOptions = {
   filesAllowedTools?: string[];
   /** Observes what the worker hands the spill port for an oversized result. */
   onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
+  /**
+   * The product connector needs the person's own sign-in, and none was
+   * admitted for this turn (no accepted account binding).
+   */
+  productSignInNotAdmitted?: boolean;
+  /** The goal frozen with the turn; omitted leaves it unknown. */
+  goal?: "none" | "paused";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -196,6 +203,16 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
           : id === "files" && options.filesAllowedTools
             ? options.filesAllowedTools
             : ["search_documents"],
+      ...(options.productSignInNotAdmitted && id === "customer-product"
+        ? {
+            name: "Customer Product",
+            connectionRef: {
+              providerDomain: "product.example",
+              kind: "oauth2" as const,
+              subjectScope: "subject" as const,
+            },
+          }
+        : {}),
     })),
   });
   const settings =
@@ -399,6 +416,22 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         : { kind: "subject", subjectId: "user:fixture-human" },
     resources: [],
     tools: session.tools,
+    ...(options.goal === "none"
+      ? { goalSnapshot: { state: "none", capturedAt: "2026-01-01T00:00:00.000Z" } }
+      : options.goal === "paused"
+        ? {
+            goalSnapshot: {
+              state: "paused",
+              goalId: "77777777-7777-4777-8777-777777777777",
+              objectiveRevision: 1,
+              text: "Finish the migration",
+              successCriteria: null,
+              rootConstraints: [],
+              mutationPolicy: "preserve_intent",
+              capturedAt: "2026-01-01T00:00:00.000Z",
+            },
+          }
+        : {}),
     personalConnectionDelegations: [],
     mcpAccountBindings: [],
   } as BuildTurnAgentDeps["turn"];
@@ -635,6 +668,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         video: buildOptions?.videoGeneration !== undefined,
       } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
+      mcpAvailabilityNote: toolRuntime.mcpAvailabilityNote,
       modelVisibleSkillCatalogText: built.modelVisibleSkillCatalogText,
       skillCatalogWrites,
       governanceWrites,
@@ -921,6 +955,30 @@ describe("agent configuration reaches the production model request", () => {
     expect(captured.names).not.toContain("skill_search");
   });
 
+  test("a product connector whose sign-in was not admitted is named to the model, never silently missing", async () => {
+    // The person's own sign-in for the product connector was not usable in this
+    // workspace when the turn was accepted (for example right after a
+    // membership change), so the turn carries no account for it.
+    const captured = await captureWorkerRequest({ productSignInNotAdmitted: true });
+    const productTool = prefixedMcpToolName("customer-product", "search_documents");
+    expect(captured.names).not.toContain(productTool);
+    expect(captured.deferredNames).not.toContain(productTool);
+    // The turn's own notice names the connector and the reason category.
+    expect(captured.mcpAvailabilityNote).toContain(
+      '- "Customer Product" (customer-product): no signed-in account for it was available to this turn.',
+    );
+    // Tool search and tool listing report it beside runtime failures.
+    expect(captured.preparation.preparationUnavailableMcpServers?.get("customer-product")).toMatch(
+      /^not loaded this turn: no signed-in account for it was available to this turn\./u,
+    );
+
+    // With every connector available there is no notice at all.
+    const ordinary = await captureWorkerRequest();
+    expect(ordinary.names).toContain(productTool);
+    expect(ordinary.mcpAvailabilityNote).toBeUndefined();
+    expect(ordinary.preparation.preparationUnavailableMcpServers).toBeUndefined();
+  });
+
   test("Codemode guidance needs a sandbox or Connected Machine to run it from", async () => {
     const codemode = "Every tool in the Codemode catalog";
     const detached = await captureWorkerRequest({
@@ -1072,6 +1130,29 @@ describe("agent configuration reaches the production model request", () => {
       }
     },
   );
+});
+
+// goal_resume acts only on an existing goal, so a configured session whose
+// frozen goal is none is not sent it; any goal, or an unknown one, keeps it.
+describe("goal_resume follows the session's goal", () => {
+  const resume = "opengeni__goal_resume";
+  test("a configured session without a goal has no goal_resume or its guidance", async () => {
+    const captured = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
+    expect(captured.names).toContain("opengeni__goal_set");
+    expect(captured.names).toContain("opengeni__goal_pause");
+    expect(captured.names).not.toContain(resume);
+    expect(captured.request.systemInstructions).not.toContain("goal_resume");
+  });
+
+  test.each([
+    ["a paused goal", { agent: agentConfig("all"), goal: "paused" }],
+    ["an unknown goal", { agent: agentConfig("all") }],
+    ["a legacy session without a goal", { agent: null, goal: "none" }],
+  ] as const)("%s keeps goal_resume", async (_label, options) => {
+    const captured = await captureWorkerRequest(options);
+    expect(captured.names).toContain(resume);
+    expect(captured.request.systemInstructions).toContain("goal_resume");
+  });
 });
 
 describe("effective-tools projection agrees with actual model preparation", () => {
@@ -1858,7 +1939,7 @@ const INVENTORY = {
     "## Final answer": 434,
     "### Formatting rules": 127,
     "# Rules for getting work done": 682,
-    "## Autonomy and persistence": 3089,
+    "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
     "## New messages while you work": 805,

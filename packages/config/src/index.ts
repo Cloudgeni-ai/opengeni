@@ -777,6 +777,9 @@ const SettingsSchema = z.object({
       )
       .default([]),
   ),
+  // Lets a Microsoft 365 Global or Teams Administrator of an admitted tenant
+  // connect it from Teams without an operator allowlist entry.
+  teamsBotSelfServeSetupEnabled: EnvBoolean.default(false),
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),
   teamsBotTenantId: z.string().uuid().optional(),
@@ -5923,6 +5926,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotAllowedChannelIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS"),
     teamsBotAllowedGroupChatIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS"),
     teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
+    teamsBotSelfServeSetupEnabled: optional("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED"),
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
     teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),

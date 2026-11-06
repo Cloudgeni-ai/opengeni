@@ -138,7 +138,6 @@ async function organization(): Promise<Org> {
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${role})
       on conflict do nothing`;
-  await setCutover(accountId, true);
   return {
     accountId,
     ownerSubjectId,
@@ -147,13 +146,6 @@ async function organization(): Promise<Org> {
     sharedWorkspaceId: workspace!.id,
     memberSubjectId,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'xai', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 /** The organization's personal-connections rule (its organization-level settings row). */
@@ -417,14 +409,6 @@ describe("a personal-only SuperGrok user's status on the core", () => {
     // Another member sees nothing of it, in the shared workspace.
     expect(
       await status(org, org.sharedWorkspaceId, org.memberSubjectId, upstream.fetchImpl),
-    ).toEqual({ connected: false, valid: false, accountCount: 0 });
-    expect(upstream.state.calls).toEqual([]);
-
-    // An organization held for maintenance reads and reports nothing usable.
-    await setCutover(org.accountId, false);
-    upstream.state.calls.length = 0;
-    expect(
-      await status(org, org.personalWorkspaceId, org.ownerSubjectId, upstream.fetchImpl),
     ).toEqual({ connected: false, valid: false, accountCount: 0 });
     expect(upstream.state.calls).toEqual([]);
   });
@@ -757,7 +741,6 @@ describe("the status route: only the verified owning person reads a personal acc
       select id::text as id, personal_workspace_id::text as personal_workspace_id
       from organization_memberships
       where account_id = ${accountId}::uuid and subject_id = ${subjectId}`;
-    await setCutover(accountId, true);
     const org: Org = {
       accountId,
       ownerSubjectId: subjectId,

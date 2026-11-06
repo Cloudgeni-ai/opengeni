@@ -70,16 +70,6 @@ async function organization(): Promise<Org> {
   };
 }
 
-/** Legacy Claude state that makes the legacy shared pool `organization`. */
-async function legacyOrganizationPool(org: Org) {
-  await shared!.admin.begin(async (tx) => {
-    await tx`set local session_replication_role = replica`;
-    await tx`insert into claude_rotation_settings (account_id, workspace_id, authority_scope,
-        active_credential_id)
-      values (${org.accountId}::uuid, null, 'organization', gen_random_uuid())`;
-  });
-}
-
 const oauthCredential = (accountUuid: string) => ({
   version: 1 as const,
   token: `sk-ant-oat01-${crypto.randomUUID()}`,
@@ -223,7 +213,6 @@ beforeAll(async () => {
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
-  await legacyOrganizationPool(org);
 }, 180_000);
 
 afterAll(async () => {

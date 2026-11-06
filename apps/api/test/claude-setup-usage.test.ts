@@ -107,9 +107,7 @@ test("0598 retirement rejects legacy Claude creation and replay before effect", 
 
 async function claudeRowCounts() {
   const [row] = await shared.admin`
-    select
-      (select count(*)::int from claude_subscription_credentials) as legacy,
-      (select count(*)::int from subscription_connections where provider = 'claude') as core`;
+    select count(*)::int as core from subscription_connections where provider = 'claude'`;
   return row;
 }
 

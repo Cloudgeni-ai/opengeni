@@ -221,7 +221,10 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(64);
+    // The one way every surface shows an attached image from its stored file
+    // (a restored draft, a queued message, another device).
+    expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
+    expect(reactSources.length).toBe(65);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

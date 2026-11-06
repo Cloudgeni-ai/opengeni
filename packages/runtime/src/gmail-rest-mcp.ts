@@ -1593,10 +1593,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     return raw;
   }
 
-  private async readFileInput(
-    value: unknown,
-    maxBytes = MAX_ATTACHMENT_BYTES,
-  ): Promise<Uint8Array> {
+  private fileInputReference(value: unknown): { path: string; sha256: string } {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new GmailRestInputError("file must contain path and sha256");
     const file = value as Record<string, unknown>;
@@ -1606,12 +1603,16 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       throw new GmailRestInputError("file.sha256 must be an exact SHA-256");
     if (!this.options.readGmailFile)
       throw new GmailRestInputError("Gmail file input requires an available agent filesystem");
-    const bytes = await this.options.readGmailFile({
-      path,
-      sha256: hash.toLowerCase(),
-      maxBytes,
-    });
-    if (bytes.byteLength > maxBytes || sha256(bytes) !== hash.toLowerCase())
+    return { path, sha256: hash.toLowerCase() };
+  }
+
+  private async readFileInput(
+    value: unknown,
+    maxBytes = MAX_ATTACHMENT_BYTES,
+  ): Promise<Uint8Array> {
+    const reference = this.fileInputReference(value);
+    const bytes = await this.options.readGmailFile!({ ...reference, maxBytes });
+    if (bytes.byteLength > maxBytes || sha256(bytes) !== reference.sha256)
       throw new GmailRestInputError("Gmail file bytes changed or exceed the input size limit");
     return bytes;
   }
@@ -1637,24 +1638,43 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       (!Array.isArray(args.attachments) || args.attachments.length > 100)
     )
       throw new GmailRestInputError("attachments must be an array of at most 100 items");
-    const attachments =
-      args.attachments === undefined
-        ? undefined
-        : await Promise.all(
-            (args.attachments as unknown[]).map(async (value) => {
-              if (!value || typeof value !== "object" || Array.isArray(value))
-                throw new GmailRestInputError("Invalid attachment");
-              const item = value as Record<string, unknown>;
-              if (item.file !== undefined && item.content !== undefined)
-                throw new GmailRestInputError("Choose attachment file or content, not both");
-              return item.file
-                ? {
-                    ...item,
-                    content: Buffer.from(await this.readFileInput(item.file)).toString("base64"),
-                  }
-                : item;
-            }),
-          );
+    // Validate the complete descriptor list before any filesystem work. A
+    // request-local cache shares exact reads, never attachment occurrences or
+    // authorization across operations. Distinct files retain parallel I/O.
+    const descriptors = (args.attachments as unknown[] | undefined)?.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new GmailRestInputError("Invalid attachment");
+      const item = value as Record<string, unknown>;
+      if (item.file !== undefined && item.content !== undefined)
+        throw new GmailRestInputError("Choose attachment file or content, not both");
+      const reference = item.file === undefined ? undefined : this.fileInputReference(item.file);
+      return { item, reference };
+    });
+    for (const [index, { item }] of (descriptors ?? []).entries()) attachmentMetadata(item, index);
+    const reads = new Map<string, Promise<string>>();
+    const settled =
+      descriptors &&
+      (await Promise.allSettled(
+        descriptors.map(async ({ item, reference }) => {
+          if (!reference) return item;
+          const key = JSON.stringify([reference.path, reference.sha256]);
+          let read = reads.get(key);
+          if (!read) {
+            read = this.readFileInput(reference).then((bytes) =>
+              Buffer.from(bytes).toString("base64"),
+            );
+            reads.set(key, read);
+          }
+          return { ...item, content: await read };
+        }),
+      ));
+    const failed = settled?.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
+    const attachments = settled?.map(
+      (result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value,
+    );
     const mime = Buffer.from(
       buildDraftMime({ ...args, ...(attachments ? { attachments } : {}) }, reply),
     );
@@ -2112,12 +2132,20 @@ function parseAttachments(value: unknown): Array<{
     }
     return {
       content,
-      filename: optionalString(record.filename, `attachments[${index}].filename`, 255) ?? "",
-      mimeType: attachmentMimeType(record.mimeType, index),
-      inline: record.inline === true,
-      contentId: optionalContentId(record.contentId),
+      ...attachmentMetadata(record, index),
     };
   });
+}
+
+/** Metadata validation must not decode inline payloads during file preflight.
+ * Their bytes are decoded once, under the aggregate limit in parseAttachments. */
+function attachmentMetadata(record: Record<string, unknown>, index: number) {
+  return {
+    filename: optionalString(record.filename, `attachments[${index}].filename`, 255) ?? "",
+    mimeType: attachmentMimeType(record.mimeType, index),
+    inline: record.inline === true,
+    contentId: optionalContentId(record.contentId),
+  };
 }
 
 function decodeAttachmentContent(value: string, index: number): Buffer {

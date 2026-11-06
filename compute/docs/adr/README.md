@@ -38,6 +38,7 @@ old one; old records stay as history.
 | 30 | [Disk relief counts as room](0030-disk-relief-for-admission.md) | Accepted |
 | 31 | [An archive stores its chunks in packs](0031-an-archive-stores-its-chunks-in-packs.md) | Accepted |
 | 32 | [A lost host's sandboxes wait for it](0032-a-lost-hosts-sandboxes-wait-for-it.md) | Accepted |
+| 33 | [A restart stays where it is, and a hand-off yields to a wake](0033-a-restart-stays-where-it-is-and-a-hand-off-yields-to-a-wake.md) | Accepted |
 
 ## Format
 

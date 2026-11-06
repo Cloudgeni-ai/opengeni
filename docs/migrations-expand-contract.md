@@ -265,7 +265,11 @@ created the organization vault list and 1224 the organization machine and rig
 list withheld, with the same caller check, and 1272 granted both and removed
 the check. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
-list as unavailable.
+list as unavailable. 1240 created the inventory of meeting tracks not yet
+kept compact withheld, with the same caller check; 1282 grants it and removes
+the check, so the retention sweep then converts existing meetings' audio as
+well. 1282 follows the production baseline pin that contains 1240
+(`2a02889ffe` or later).
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

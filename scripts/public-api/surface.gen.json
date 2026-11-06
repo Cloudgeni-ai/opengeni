@@ -5942,6 +5942,15 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
       "method": "DELETE",
       "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
       "sdk": [
@@ -38246,7 +38255,9 @@
     },
     "@opengeni/sdk/teams": {
       "teamsApi": "value",
-      "TeamsBotStatus": "type"
+      "TeamsBotStatus": "type",
+      "TeamsMicrosoftSignInResult": "type",
+      "TeamsMicrosoftSignInStart": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",
@@ -38645,6 +38656,7 @@
       "isRegionRestricted": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
       "isSessionUsageLimitSubmissionError": "value",
+      "isStoredImage": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
       "KnowledgeActivityActions": "type",
@@ -38831,6 +38843,8 @@
       "QueueSurfaceProps": "type",
       "rawTypeOf": "value",
       "readClientConfig": "value",
+      "readStoredFile": "value",
+      "readStoredFilePreviewUrl": "value",
       "ReasoningItem": "type",
       "REGION_RESTRICTED": "value",
       "regionRestrictedText": "value",
@@ -38956,6 +38970,10 @@
       "StartupTimings": "value",
       "StatusDot": "value",
       "StatusDotProps": "type",
+      "StoredFileClientLike": "type",
+      "StoredFilePreview": "type",
+      "StoredFiles": "type",
+      "StoredFileSource": "type",
       "stringifyPayload": "value",
       "stripExecBanner": "value",
       "SuperGrokAccountsClientLike": "type",
@@ -39128,6 +39146,8 @@
       "UseSlashCommandsOptions": "type",
       "UseSlashCommandsResult": "type",
       "useStartupDetails": "value",
+      "useStoredFilePreview": "value",
+      "useStoredFiles": "value",
       "useSuperGrokAccounts": "value",
       "UseSuperGrokAccountsOptions": "type",
       "UseSuperGrokAccountsResult": "type",
@@ -40400,6 +40420,7 @@
       "isLineageRefreshEvent": "value",
       "isMachineComputeSelectable": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
+      "isStoredImage": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
       "latestRecallableQueuedTurn": "value",
@@ -40422,6 +40443,8 @@
       "QueueMutationKind": "type",
       "QueueRecallResult": "type",
       "readClientConfig": "value",
+      "readStoredFile": "value",
+      "readStoredFilePreviewUrl": "value",
       "ReasoningItem": "type",
       "recheckSessionAdmission": "value",
       "runSavedMessageOnMachine": "value",
@@ -40452,6 +40475,10 @@
       "shouldRecallQueuedOnKey": "value",
       "shouldSteerOnKey": "value",
       "shouldSubmitOnKey": "value",
+      "StoredFileClientLike": "type",
+      "StoredFilePreview": "type",
+      "StoredFiles": "type",
+      "StoredFileSource": "type",
       "TimelineAnnotationSourceDescriptor": "type",
       "TimelineGroup": "type",
       "TimelineItem": "type",
@@ -40505,6 +40532,8 @@
       "UseSessionStartOptions": "type",
       "UseSessionStartResult": "type",
       "useSessionStartupTimeline": "value",
+      "useStoredFilePreview": "value",
+      "useStoredFiles": "value",
       "useTimelinePauses": "value",
       "useTurnQueue": "value",
       "UseTurnQueueOptions": "type",

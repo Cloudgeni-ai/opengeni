@@ -59,6 +59,11 @@ export function createTranscriptionService(input: {
   probeCodex?: SpeechToTextDeploymentOptions["probeCodex"];
   /** Test seam for exercising timeout and late-completion behavior quickly. */
   providerRequestTimeoutMilliseconds?: number;
+  /**
+   * The longest audio one request may carry. Defaults to the one-shot voice
+   * input limit; a dictation recording's pieces may be longer.
+   */
+  maxDurationSeconds?: number;
   /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
   now?: () => Date;
   /** Credit admission/settlement for deployment-funded providers. */
@@ -82,7 +87,7 @@ export function createTranscriptionService(input: {
     );
   const providers = dictationProviders(deployment);
   const limits = {
-    maxDurationSeconds: input.settings.voiceInputMaxDurationSeconds,
+    maxDurationSeconds: input.maxDurationSeconds ?? input.settings.voiceInputMaxDurationSeconds,
     maxSizeBytes: input.settings.voiceInputMaxSizeBytes,
     acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
   };

@@ -598,12 +598,11 @@ describe("useFileAttachments", () => {
     const requested: Array<{
       workspaceId: string;
       fileId: string;
-      signal: AbortSignal | undefined;
     }> = [];
     const client = fakeClient({
       uploadFile: async () => ready,
-      createFileDownloadUrl: async (workspaceId, fileId, options) => {
-        requested.push({ workspaceId, fileId, signal: options?.signal });
+      createFileDownloadUrl: async (workspaceId, fileId) => {
+        requested.push({ workspaceId, fileId });
         return { url: "https://files.example/restored-preview", expiresAt: "2026-09-05T01:00:00Z" };
       },
     });
@@ -621,9 +620,7 @@ describe("useFileAttachments", () => {
     const controller = new AbortController();
     const url = await hook.result.current.loadPreview?.(restored.id, controller.signal);
     expect(url).toBe("https://files.example/restored-preview");
-    expect(requested).toEqual([
-      { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
-    ]);
+    expect(requested).toEqual([{ workspaceId: WORKSPACE_ID, fileId: ready.id }]);
     expect(created).toEqual([]);
     await hook.unmount();
   });

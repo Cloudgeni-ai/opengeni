@@ -3584,11 +3584,30 @@ export function buildOpenGeniAgent(
     : skillComposition.index.length > 0
       ? skillCatalogFromComposition(skillComposition)
       : undefined;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image:
+      options.imageGeneration?.kind === "native_hosted" &&
+      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
+        ? null
+        : (options.imageGeneration?.kind ?? null),
+    video: Boolean(options.videoGeneration),
+  });
+  // This build attaches every media tool it has, so an empty surface proves
+  // the turn has none: the media guidance would describe tools it cannot use.
+  const mediaToolsAbsent =
+    resolveAgentToolFamilies(options.agentConfig).media &&
+    mediaTools.hosted.length === 0 &&
+    mediaTools.runtime.length === 0;
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
     ...(options.agentConfig && !options.agentPromptResources
-      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      ? {
+          agentPromptResources: {
+            ...agentPromptResourcesFor(settings, resources, options),
+            ...(mediaToolsAbsent ? { mediaTools: false } : {}),
+          },
+        }
       : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -3606,14 +3625,6 @@ export function buildOpenGeniAgent(
     humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
-  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
-    image:
-      options.imageGeneration?.kind === "native_hosted" &&
-      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
-        ? null
-        : (options.imageGeneration?.kind ?? null),
-    video: Boolean(options.videoGeneration),
-  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -5725,6 +5736,13 @@ export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
   /**
+   * Connectors configured for this turn that the caller already left out, by
+   * server id, with the plain reason. Tool discovery reports them beside the
+   * connectors that fail to connect or list here, so a connector dropped
+   * before preparation is never silently missing from search and listing.
+   */
+  preparationUnavailableMcpServers?: ReadonlyMap<string, string>;
+  /**
    * Current-human workspace gateway only: give every connection-backed MCP
    * server (built-in bridges and remote servers) a side-effect-free approval
    * preflight, so an approval-required tool can be confirmed by a person. The
@@ -6220,7 +6238,10 @@ export async function prepareAgentTools(
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
-  const unavailableMcpServers = new Map<string, string>();
+  const unavailableMcpServers = new Map<string, string>(options.preparationUnavailableMcpServers);
+  // Why a connection-backed server's setup was refused a credential, by
+  // server id, so its connect/list failure says why instead of a bare 401.
+  const setupAuthNeededReasons = new Map<string, ToolAuthNeededPayload["reason"]>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
   tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
@@ -6470,6 +6491,7 @@ export async function prepareAgentTools(
                 resolvedMcpConnectionIds,
                 resolvedMcpToolConnectionIds,
                 optional,
+                setupAuthNeededReasons,
               )
             : firstParty
               ? firstPartyAuthFetch(guardedFetch, settings, options)
@@ -6635,6 +6657,7 @@ export async function prepareAgentTools(
     // list, and any server whose list was trimmed to fit this turn.
     if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
+      entry.server.setupAuthNeededReasons = setupAuthNeededReasons;
     }
   }
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
@@ -6682,7 +6705,11 @@ export async function prepareAgentTools(
         failed.releaseAggregateBudget();
         unavailableMcpServers.set(
           failed.registryId,
-          mcpUnavailableReason(connected.errors.get(failed), "connect"),
+          mcpUnavailableReason(
+            connected.errors.get(failed),
+            "connect",
+            setupAuthNeededReasons.get(failed.registryId),
+          ),
         );
       }
       if (
@@ -7812,11 +7839,27 @@ function connectionBrokerFetch(
   resolvedMcpConnectionIds: Map<string, string>,
   resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
+  setupAuthNeededReasons?: Map<string, ToolAuthNeededPayload["reason"]>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
     return baseFetch;
   }
+  const authNeeded = async (
+    request: McpRequestReplayInfo,
+    auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  ): Promise<Response> => {
+    // A setup request (connect or tools/list) has no tool name.
+    if (!request.toolName) setupAuthNeededReasons?.set(config.id, auth.reason);
+    return await authNeededFetchResponse(
+      options,
+      config.id,
+      request,
+      auth,
+      connectionRef,
+      suppressSetupAuthNeeded,
+    );
+  };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
     const destinationUrl = mcpRequestDestinationUrl(input);
@@ -7829,15 +7872,9 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        first,
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, first);
     }
+    if (!request.toolName) setupAuthNeededReasons?.delete(config.id);
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     recordResolvedMcpToolConnectionId(
       resolvedMcpToolConnectionIds,
@@ -7846,14 +7883,7 @@ function connectionBrokerFetch(
       first.connectionId,
     );
     if (!(await authorizeResolvedProviderRequest(first))) {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        providerRequestAuthorizationDenied(connectionRef, first),
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, providerRequestAuthorizationDenied(connectionRef, first));
     }
     if (request.method === "tools/call") {
       assertMcpOperationObservationAuthority({
@@ -7919,27 +7949,16 @@ function connectionBrokerFetch(
           );
           return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          refreshed,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, refreshed);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
         return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       if (!(await authorizeResolvedProviderRequest(refreshed))) {
-        return await authNeededFetchResponse(
-          options,
-          config.id,
+        return await authNeeded(
           request,
           providerRequestAuthorizationDenied(connectionRef, refreshed),
-          connectionRef,
-          suppressSetupAuthNeeded,
         );
       }
       const retry = await baseFetch(
@@ -7950,39 +7969,25 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(
-            options,
-            config.id,
-            request,
-            auth,
-            connectionRef,
-            suppressSetupAuthNeeded,
-          );
+          return await authNeeded(request, auth);
         }
         return retry;
       }
       if (retry.status === 401) {
         await cancelMcpResponseBody(retry);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          {
-            status: "auth_needed",
-            reason: "expired",
-            providerDomain: connectionRef.providerDomain,
-            ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-            connectionId: refreshed.connectionId,
-            ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
-            ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-            ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-            ...(connectionRef.selectedResources
-              ? { selectedResources: connectionRef.selectedResources }
-              : {}),
-          },
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, {
+          status: "auth_needed",
+          reason: "expired",
+          providerDomain: connectionRef.providerDomain,
+          ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
+          connectionId: refreshed.connectionId,
+          ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+          ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+          ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+          ...(connectionRef.selectedResources
+            ? { selectedResources: connectionRef.selectedResources }
+            : {}),
+        });
       }
       return retry;
     }
@@ -7990,14 +7995,7 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          auth,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, auth);
       }
       return response;
     }
@@ -8752,7 +8750,39 @@ function mcpErrorFields(
  * only from the public diagnostic projection: status, error class and code,
  * never provider message text.
  */
-export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"): string {
+/**
+ * Why a connection-backed server's setup got no credential, in plain words with
+ * what the person can do. The connect or list then fails with a bare 401, which
+ * says nothing about the cause.
+ */
+function mcpSetupAuthNeededReason(reason: ToolAuthNeededPayload["reason"]): string {
+  switch (reason) {
+    case "missing_connection":
+      return "no signed-in account is available for it; the person can sign in to it and try again";
+    case "expired":
+    case "refresh_failed":
+      return "its sign-in expired or could not be renewed; the person can sign in to it again";
+    case "insufficient_scope":
+      return "its sign-in lacks a permission these tools need; the person can sign in again and grant it";
+    case "personal_authority_unavailable":
+      return "the person's own sign-in for it is not usable in this workspace for this turn, for example right after their workspace access changed; this can clear within minutes, otherwise they can sign in to it again";
+    case "resource_scope_unavailable":
+      return "its sign-in does not cover the resource these tools need; the person can sign in again and choose it";
+    case "designated_credential_unavailable":
+      return "the account this workspace designated for it cannot be used right now; whoever manages this workspace's connectors can reconnect it";
+    case "unsupported_auth":
+      return "it uses a sign-in method that is not supported; it needs to be connected again";
+  }
+}
+
+export function mcpUnavailableReason(
+  error: unknown,
+  phase: "connect" | "list",
+  /** The credential refusal behind the failure, when its setup had one. */
+  authNeededReason?: ToolAuthNeededPayload["reason"],
+): string {
+  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
+  if (authNeededReason) return `${what}: ${mcpSetupAuthNeededReason(authNeededReason)}.`;
   const fields = mcpErrorFields(
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
@@ -8781,7 +8811,6 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
   ]
     .filter(Boolean)
     .join(", ");
-  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
   const next =
     status === 401 || status === 403
       ? "; its connection may need to be signed in again"
@@ -9881,6 +9910,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Why setup was refused a credential, by server id (see connectionBrokerFetch). */
+  setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
   /** Set by this server's transport when a tools/list response is refused for size. */
   listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
@@ -10369,7 +10400,7 @@ export class PrefixedMcpServer implements MCPServer {
         this.registryId,
         tooLarge
           ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
-          : mcpUnavailableReason(error, "list"),
+          : mcpUnavailableReason(error, "list", this.setupAuthNeededReasons?.get(this.registryId)),
       );
       this.releaseAggregateBudget();
       return [];

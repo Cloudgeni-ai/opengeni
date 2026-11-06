@@ -41,6 +41,7 @@ import {
   isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
+  sessionsWithGoal,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
@@ -289,14 +290,30 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   settings: Settings,
   subjectId?: string,
 ): Promise<string[]> {
+  return (await workspaceSessionToolPolicyDefaultServers(db, workspaceId, settings, subjectId)).map(
+    (server) => server.id,
+  );
+}
+
+/**
+ * The same defaults with each connector's display name, so a turn can name a
+ * default connector that is missing from its own registry.
+ */
+export async function workspaceSessionToolPolicyDefaultServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  subjectId?: string,
+): Promise<{ id: string; name: string | undefined }[]> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
   const workspace = await requireWorkspace(db, workspaceId);
+  const names = new Map(runtimeSettings.mcpServers.map((server) => [server.id, server.name]));
   return workspaceSessionToolPolicyDefaultServerIdsFor(
     runtimeSettings.mcpServers,
     workspace.settings,
-  );
+  ).map((id) => ({ id, name: names.get(id) ?? undefined }));
 }
 
 /**
@@ -333,6 +350,12 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /**
+   * The sessions in this response page that have a goal, in any state. When
+   * present, a configured session missing from it projects no `goal_resume`,
+   * as the worker omits it for a turn whose frozen goal is none.
+   */
+  goalSessionIds?: ReadonlySet<string>;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -357,7 +380,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly] =
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly, goalSessions] =
     await Promise.all([
       workspaceRead ?? requireWorkspace(deps.db, workspaceId),
       resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
@@ -394,6 +417,7 @@ export async function workspaceSessionEffectiveToolsContext(
       }),
       // EU-only: the projection lists only tools the worker would attach.
       isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+      sessionsWithGoal(deps.db, workspaceId, [...new Set(configured.map((session) => session.id))]),
     ]);
   return {
     ...baseline,
@@ -407,6 +431,7 @@ export async function workspaceSessionEffectiveToolsContext(
       ),
     ),
     routerHistorySessionIds: routerHistory,
+    goalSessionIds: goalSessions,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -546,6 +571,9 @@ export function sessionEffectiveToolProjectionInput(
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, {
           sandboxAttached: sandboxAvailable,
+          ...(context.goalSessionIds
+            ? { sessionGoal: context.goalSessionIds.has(session.id) }
+            : {}),
         })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)

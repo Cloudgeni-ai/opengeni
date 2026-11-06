@@ -1,3 +1,4 @@
+import { version as sdkVersion } from "../package.json";
 import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
@@ -12325,6 +12326,7 @@ export class OpenGeniClient {
     const headers: Record<string, string> = {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      ...(sdkVersion ? { "x-opengeni-sdk-version": sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
