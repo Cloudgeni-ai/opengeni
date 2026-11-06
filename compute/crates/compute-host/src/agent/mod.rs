@@ -1092,7 +1092,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             stream_idle,
             self.lease.clone(),
             self.observer.clone(),
-            crate::rootfs::Preparer::of(prepare, &self.store),
+            crate::rootfs::Preparer::of(prepare, &self.store, &self.rootfs),
             captures,
         ))
     }
