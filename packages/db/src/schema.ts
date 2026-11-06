@@ -13054,7 +13054,7 @@ export const githubInstallationRepositories = pgTable(
 /**
  * Repositories GitHub recently reported removed from a bound installation.
  * GitHub's list can lag its webhook: a list read within the hold window never
- * adds such a repository back (migration 1290).
+ * adds such a repository back (migration 1293).
  */
 export const githubInstallationRepositoryRemovals = pgTable(
   "github_installation_repository_removals",

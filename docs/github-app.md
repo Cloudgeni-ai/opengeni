@@ -169,7 +169,7 @@ bind stamps its proof time; the fence is sound while clock skew between API
 replicas and the database stays far below GitHub's webhook latency, as it does
 with ordinary NTP time sync.
 Cross-workspace lookup by installation uses the read-only installation lane of
-migration 1290 (`opengeni.github_installation_id`); each write runs in its
+migration 1293 (`opengeni.github_installation_id`); each write runs in its
 workspace's own RLS scope. Suspension needs no allowlist change: the live
 lifecycle check makes the binding unusable while the installation is
 suspended, and the allowlist is kept for when it returns.
