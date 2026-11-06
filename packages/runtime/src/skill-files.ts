@@ -7,6 +7,9 @@ export type SkillTextFile = Readonly<{ path: string; content: string }>;
 
 export const SKILL_READ_MAX_OUTPUT_BYTES = 512 * 1024;
 export const SKILL_READ_MAX_PATHS = 128;
+/** Bounds on the file list a read with missing paths returns. */
+export const SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES = 50;
+export const SKILL_READ_AVAILABLE_PATHS_MAX_BYTES = 4 * 1024;
 
 export class SkillFileError extends Error {
   constructor(
@@ -55,21 +58,8 @@ export function readSkillFiles(
   files: readonly SkillTextFile[],
   paths?: readonly string[],
 ): { files: SkillTextFile[] } {
-  const requested = paths ?? ["SKILL.md"];
-  if (requested.length === 0 || requested.length > SKILL_READ_MAX_PATHS) {
-    throw new SkillFileError(
-      "invalid_request",
-      `Request between 1 and ${SKILL_READ_MAX_PATHS} paths, or omit paths for SKILL.md.`,
-    );
-  }
-  const byPath = new Map<string, SkillTextFile>();
-  for (const file of files) {
-    assertSkillRelativePath(file.path);
-    if (byPath.has(file.path)) {
-      throw new SkillFileError("invalid_request", `Duplicate stored Skill path: ${file.path}`);
-    }
-    byPath.set(file.path, file);
-  }
+  const requested = requestedSkillPaths(paths);
+  const byPath = indexSkillFiles(files);
   const seen = new Set<string>();
   const selected = requested.map((path) => {
     assertSkillRelativePath(path);
@@ -81,7 +71,132 @@ export function readSkillFiles(
     if (!file) throw new SkillFileError("missing_file", `Skill file not found: ${path}`);
     return { path: file.path, content: file.content };
   });
-  const result = { files: selected };
+  return boundedSkillRead({ files: selected });
+}
+
+export type SkillFilesRead = {
+  files: SkillTextFile[];
+  /** Requested paths that are not files of this Skill, in request order. */
+  missing?: string[];
+  /** This Skill's own paths, bounded, so the caller can correct the request. */
+  availablePaths?: string[];
+  availablePathsOmitted?: number;
+  note?: string;
+};
+
+/**
+ * Explicit paths that are not files of this Skill do not fail the read: the
+ * files that exist return, each missing path is named, and the Skill's own
+ * paths are listed (bounded) so the caller can correct the request instead
+ * of retrying a path that will never exist. A path that could never be a
+ * Skill file, such as one leaving the folder, is reported the same way; the
+ * lookup is an in-memory map, so no such path reaches any filesystem.
+ * Omitted paths keep the strict SKILL.md read.
+ */
+export function readSkillFilesReportingMissing(
+  files: readonly SkillTextFile[],
+  paths?: readonly string[],
+): SkillFilesRead {
+  if (paths === undefined) return readSkillFiles(files);
+  const requested = requestedSkillPaths(paths);
+  const byPath = indexSkillFiles(files);
+  const seen = new Set<string>();
+  const selected: SkillTextFile[] = [];
+  const missing: string[] = [];
+  for (const path of requested) {
+    if (seen.has(path)) {
+      throw new SkillFileError("invalid_request", `Duplicate requested Skill path: ${path}`);
+    }
+    seen.add(path);
+    const file = byPath.get(path);
+    if (file) selected.push({ path: file.path, content: file.content });
+    else missing.push(path);
+  }
+  if (missing.length === 0) return boundedSkillRead({ files: selected });
+  const available = boundedAvailablePaths([...byPath.keys()], missing);
+  const listed = available.paths.length;
+  const note = [
+    "Each path in missing is not a file of this Skill, so reading it again will not help.",
+    "Paths are relative to this Skill's folder; a file that another Skill names is read from that Skill.",
+    available.omitted > 0
+      ? `availablePaths lists ${listed} of this Skill's ${listed + available.omitted} files; call skill_read with listFiles:true for all of them.`
+      : "availablePaths lists every file of this Skill.",
+  ].join(" ");
+  return boundedSkillRead({
+    files: selected,
+    missing,
+    availablePaths: available.paths,
+    ...(available.omitted > 0 ? { availablePathsOmitted: available.omitted } : {}),
+    note,
+  });
+}
+
+function requestedSkillPaths(paths: readonly string[] | undefined): readonly string[] {
+  const requested = paths ?? ["SKILL.md"];
+  if (requested.length === 0 || requested.length > SKILL_READ_MAX_PATHS) {
+    throw new SkillFileError(
+      "invalid_request",
+      `Request between 1 and ${SKILL_READ_MAX_PATHS} paths, or omit paths for SKILL.md.`,
+    );
+  }
+  return requested;
+}
+
+function indexSkillFiles(files: readonly SkillTextFile[]): Map<string, SkillTextFile> {
+  const byPath = new Map<string, SkillTextFile>();
+  for (const file of files) {
+    assertSkillRelativePath(file.path);
+    if (byPath.has(file.path)) {
+      throw new SkillFileError("invalid_request", `Duplicate stored Skill path: ${file.path}`);
+    }
+    byPath.set(file.path, file);
+  }
+  return byPath;
+}
+
+/**
+ * Paths sharing a missing path's file name, then its top folder, come first,
+ * so a likely intended file stays inside the bound; the listed paths are
+ * returned in sorted order.
+ */
+function boundedAvailablePaths(
+  paths: readonly string[],
+  missing: readonly string[],
+): { paths: string[]; omitted: number } {
+  const wanted = missing.map((path) => ({
+    name: path.split("/").at(-1) ?? "",
+    top: path.includes("/") ? (path.split("/")[0] ?? "") : "",
+  }));
+  const score = (path: string): number => {
+    const name = path.split("/").at(-1) ?? "";
+    const top = path.includes("/") ? (path.split("/")[0] ?? "") : "";
+    let best = 0;
+    for (const entry of wanted) {
+      if (entry.name && entry.name === name) best = Math.max(best, 2);
+      else if (entry.top && entry.top === top) best = Math.max(best, 1);
+    }
+    return best;
+  };
+  const ranked = paths
+    .map((path) => ({ path, score: score(path) }))
+    .sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const listed: string[] = [];
+  let bytes = 0;
+  for (const { path } of ranked) {
+    const pathBytes = new TextEncoder().encode(JSON.stringify(path)).byteLength + 1;
+    if (
+      listed.length >= SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES ||
+      bytes + pathBytes > SKILL_READ_AVAILABLE_PATHS_MAX_BYTES
+    )
+      continue;
+    listed.push(path);
+    bytes += pathBytes;
+  }
+  listed.sort();
+  return { paths: listed, omitted: paths.length - listed.length };
+}
+
+function boundedSkillRead<T extends { files: SkillTextFile[] }>(result: T): T {
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength > SKILL_READ_MAX_OUTPUT_BYTES) {
     throw new SkillFileError(
       "output_too_large",
