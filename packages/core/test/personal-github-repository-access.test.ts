@@ -138,6 +138,52 @@ describe("personalGitHubRepositoryAuthority", () => {
     ).toEqual({ allowed: false, reason: "write_denied" });
   });
 
+  test("turning the mode off and on again, or narrowing and widening, never revives earlier work", () => {
+    // Accepted at generation 3 with the mode on at write.
+    const snapshot = accepted({ allRepositoriesAccess: "write", repositories: [] });
+    const decide = (state: PersonalGitHubRepositorySelectionState, access: "read" | "write") =>
+      personalGitHubRepositoryAuthority({
+        current: state,
+        metadata,
+        accepted: snapshot,
+        repository: { fullName: "acme/other" },
+        access,
+      });
+    // Off at 4, on again at 5.
+    expect(
+      decide(
+        current({
+          allRepositoriesAccess: "write",
+          selectionGeneration: 5,
+          allRepositoriesGeneration: 5,
+        }),
+        "read",
+      ),
+    ).toEqual({ allowed: false, reason: "selection_changed" });
+    // Narrowed to read at 4, widened to write at 5.
+    expect(
+      decide(
+        current({
+          allRepositoriesAccess: "write",
+          selectionGeneration: 5,
+          allRepositoriesGeneration: 5,
+        }),
+        "write",
+      ),
+    ).toEqual({ allowed: false, reason: "selection_changed" });
+    // The mode last changed when the work was accepted: it keeps working.
+    expect(
+      decide(
+        current({
+          allRepositoriesAccess: "write",
+          selectionGeneration: 7,
+          allRepositoriesGeneration: 3,
+        }),
+        "write",
+      ).allowed,
+    ).toBe(true);
+  });
+
   test("per-repository work keeps working after All my repositories is turned on", () => {
     expect(
       personalGitHubRepositoryAuthority({
@@ -238,6 +284,41 @@ describe("livePersonalGitHubRepository", () => {
     await expect(livePersonalGitHubRepository(input)).rejects.toThrow();
     await expect(livePersonalGitHubRepository(input)).rejects.toThrow();
     expect(calls).toBe(2);
+  });
+
+  test("follows a renamed repository's redirect on the API origin only", async () => {
+    const asked: string[] = [];
+    const githubGet = async (url: URL) => {
+      asked.push(url.href);
+      return url.pathname === "/repos/acme/old"
+        ? new Response(null, {
+            status: 301,
+            headers: { location: "https://api.github.com/repositories/77" },
+          })
+        : url.pathname === "/repositories/77"
+          ? new Response(JSON.stringify(payload))
+          : new Response(null, {
+              status: 302,
+              headers: { location: "https://example.com/repositories/77" },
+            });
+    };
+    const renamed = await livePersonalGitHubRepository({
+      cacheScope: "rename",
+      repository: { fullName: "acme/old" },
+      githubGet,
+    });
+    expect(renamed).toMatchObject({ repositoryId: "77", fullName: "acme/widgets" });
+    expect(asked).toEqual([
+      "https://api.github.com/repos/acme/old",
+      "https://api.github.com/repositories/77",
+    ]);
+    await expect(
+      livePersonalGitHubRepository({
+        cacheScope: "rename",
+        repository: { fullName: "acme/elsewhere" },
+        githubGet,
+      }),
+    ).rejects.toThrow("redirected");
   });
 
   test("rejects names GitHub could not have", async () => {

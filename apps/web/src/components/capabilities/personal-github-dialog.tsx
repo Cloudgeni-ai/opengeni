@@ -31,13 +31,14 @@ export function PersonalGitHubDialog(props: {
   login: string;
   repositories: PersonalGitHubRepositoryCatalogItem[];
   /**
-   * The saved per-repository choice. In All my repositories the catalog marks
-   * every repository usable, so this is what "Choose repositories" restores.
-   * Without it, the catalog's marks are the choice.
+   * The saved per-repository choice, which "Choose repositories" restores.
+   * Without it, the catalog's `selectedAccess` marks are the choice.
    */
   savedRepositories?: PersonalGitHubSelectedRepository[] | undefined;
   /** All my repositories, at this access; null when only chosen repositories. */
   allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
+  /** All my repositories can be turned on here. It stays offered while it is on. */
+  allRepositoriesAvailable?: boolean | undefined;
   /** The repository list is still loading from GitHub. */
   loading?: boolean;
   busy: boolean;
@@ -100,6 +101,7 @@ export function PersonalGitHubDialog(props: {
     return () => {
       active = false;
       clearTimeout(timer);
+      setSearching(false);
     };
   }, [props.open, query]);
 
@@ -146,36 +148,38 @@ export function PersonalGitHubDialog(props: {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center gap-2">
-          <Select
-            value={allAccess ? "all" : "chosen"}
-            disabled={props.busy}
-            onChange={(event) =>
-              setAllAccess(
-                event.target.value === "all" ? (props.allRepositoriesAccess ?? "write") : null,
-              )
-            }
-            aria-label="Repositories Opengeni may use"
-            className="h-9 flex-1 text-sm"
-          >
-            <option value="chosen">Choose repositories</option>
-            <option value="all">All my repositories</option>
-          </Select>
-          {allAccess ? (
+        {props.allRepositoriesAvailable || props.allRepositoriesAccess ? (
+          <div className="flex items-center gap-2">
             <Select
-              value={allAccess}
+              value={allAccess ? "all" : "chosen"}
               disabled={props.busy}
               onChange={(event) =>
-                setAllAccess(event.target.value as PersonalGitHubRepositoryAccess)
+                setAllAccess(
+                  event.target.value === "all" ? (props.allRepositoriesAccess ?? "write") : null,
+                )
               }
-              aria-label="Access to all repositories"
-              className="h-9 w-40 text-sm"
+              aria-label="Repositories Opengeni may use"
+              className="h-9 flex-1 text-sm"
             >
-              <option value="read">Read only</option>
-              <option value="write">Read and write</option>
+              <option value="chosen">Choose repositories</option>
+              <option value="all">All my repositories</option>
             </Select>
-          ) : null}
-        </div>
+            {allAccess ? (
+              <Select
+                value={allAccess}
+                disabled={props.busy}
+                onChange={(event) =>
+                  setAllAccess(event.target.value as PersonalGitHubRepositoryAccess)
+                }
+                aria-label="Access to all repositories"
+                className="h-9 w-40 text-sm"
+              >
+                <option value="read">Read only</option>
+                <option value="write">Read and write</option>
+              </Select>
+            ) : null}
+          </div>
+        ) : null}
 
         {allAccess ? null : (
           <>
@@ -266,9 +270,7 @@ export function PersonalGitHubDialog(props: {
         )}
 
         <p className="text-xs leading-5 text-fg-muted">
-          {allAccess
-            ? "Any repository you can access on GitHub. "
-            : "GitHub grants account-wide OAuth access. This list is Opengeni's additional allowlist. "}
+          {allAccess ? "Any repository you can access on GitHub. " : "Only these repositories. "}
           Repository writes still follow the GitHub action approvals configured on this integration.
         </p>
 

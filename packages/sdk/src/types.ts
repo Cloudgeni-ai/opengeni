@@ -1211,6 +1211,8 @@ export type PersonalGitHubConnectionStatusResponse = {
   enabled: boolean;
   connection: ConnectionMetadata | null;
   reviewUrl: string | null;
+  /** "All my repositories" can be turned on. Absent from older servers. */
+  allRepositoriesAvailable?: boolean | undefined;
 };
 
 export type PersonalGitHubDisconnectRequest = {
@@ -1262,7 +1264,14 @@ export type PersonalGitHubRepositorySelectionState = {
 };
 
 export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
+  /** The saved per-repository choice. */
   selectedAccess: PersonalGitHubRepositoryAccess | null;
+  /**
+   * The access Opengeni may use now: the saved choice, or in "All my
+   * repositories" that mode's access lowered to GitHub's permission. Null
+   * when not usable; absent from older servers, where `selectedAccess` is it.
+   */
+  effectiveAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesOptions = {

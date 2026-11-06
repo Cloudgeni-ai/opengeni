@@ -1050,11 +1050,19 @@ describe("personal MCP connection delegation", () => {
       expect(allOn.repositories.map((entry) => entry.repositoryId)).toEqual([
         repository.repositoryId,
       ]);
-      const freezeWith = (resources: (typeof resource)[], selections = [authoritySelection]) =>
+      const freezeWith = (
+        resources: (typeof resource)[],
+        selections = [authoritySelection],
+        allRepositoriesEnabled = true,
+      ) =>
         freezePersonalConnectionDelegations({
           db: client.db,
           workspaceId: target!.id,
-          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          settings: {
+            mcpServers: [],
+            githubPersonalOauthEnabled: true,
+            githubPersonalAllRepositoriesEnabled: allRepositoriesEnabled,
+          },
           tools: [],
           resources,
           source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
@@ -1093,6 +1101,11 @@ describe("personal MCP connection delegation", () => {
         ],
       });
       await expect(freezeWith([{ ...unlisted, access: "write" }])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Until the deployment allows the mode, a stored mode is ignored.
+      expect(await freezeWith([], [], false)).toEqual([]);
+      await expect(freezeWith([unlisted], [authoritySelection], false)).rejects.toThrow(
         "personal GitHub repository resource is outside the selected authority",
       );
       // Children keep All my repositories without attached repositories.
@@ -1247,6 +1260,50 @@ describe("personal MCP connection delegation", () => {
         },
       },
     ]);
+    // A parent listing the repository for reading, under All my repositories
+    // at write, still lets a child write there.
+    const allParent: McpPersonalConnectionDelegation = {
+      ...parent,
+      personalGitHubRepositorySelection: {
+        ...parent.personalGitHubRepositorySelection!,
+        allRepositoriesAccess: "write",
+        repositories: [
+          { ...parent.personalGitHubRepositorySelection!.repositories[0]!, access: "read" },
+        ],
+      },
+    };
+    const writeRequest = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId,
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [allParent],
+        personalGitHubResources: [writeRequest],
+      })[0]?.personalGitHubRepositorySelection?.repositories,
+    ).toEqual([expect.objectContaining({ repositoryId: "9007199254740993123", access: "write" })]);
+    expect(() =>
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [
+          {
+            ...allParent,
+            personalGitHubRepositorySelection: {
+              ...allParent.personalGitHubRepositorySelection!,
+              allRepositoriesAccess: "read",
+            },
+          },
+        ],
+        personalGitHubResources: [writeRequest],
+      }),
+    ).toThrow("exceeds parent authority");
   });
 
   test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {

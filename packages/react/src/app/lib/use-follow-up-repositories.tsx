@@ -687,8 +687,13 @@ export function useFollowUpRepositories(
       ...catalogRefresh,
       onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
       onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
-      onSearchPersonalGitHubRepositories: (query: string) =>
-        context.searchPersonalGitHubRepositories(session.workspaceId, query),
+      // Only All my repositories can use a repository found past the listed ones.
+      ...(context.personalGitHubSelection?.allRepositoriesAccess
+        ? {
+            onSearchPersonalGitHubRepositories: (query: string) =>
+              context.searchPersonalGitHubRepositories(session.workspaceId, query),
+          }
+        : {}),
       onPersonalGitHubRefChange: (repositoryId, ref) =>
         setPendingPersonalRepoRefs((current) => ({ ...current, [repositoryId]: ref })),
       onToggleRepo: togglePendingRepository,

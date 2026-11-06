@@ -135,7 +135,14 @@ chat changes their branch.
 The mode lives on the connection's selection head
 (`all_repositories_access`: `read`, `write` or null). Turning it on or off,
 or changing its access, advances the selection generation like any other
-selection edit. Every check uses the shared
+selection edit and records it in `all_repositories_generation`. Work accepted
+under the mode keeps working while the mode is unchanged; work accepted before
+the mode last changed stops, so turning it off and on again, or narrowing and
+widening it, never revives earlier work.
+
+Catalog items keep `selectedAccess` as the saved per-repository choice and add
+`effectiveAccess`: the access usable now, which in this mode is the mode's
+access lowered to GitHub's permission on the repository. Every check uses the shared
 `personalGitHubRepositoryAuthority` and `checkPersonalGitHubRepositoryAccess`
 in `@opengeni/core` (`packages/core/src/domain/personal-github-repository-access.ts`):
 
@@ -146,20 +153,30 @@ in `@opengeni/core` (`packages/core/src/domain/personal-github-repository-access
 - The git broker, token minting and the REST bridge accept a repository when
   the mode is still on, its access still covers the request, and GitHub's
   live repository answer grants it (cached for 60 seconds, by id and by
-  name). Editing the explicit list does not interrupt running work; turning
-  the mode off, narrowing it to read, reconnecting or disconnecting does.
+  name). A renamed repository's redirect to `/repositories/<id>` on
+  `api.github.com` is followed once. Editing the explicit list does not
+  interrupt running work; turning the mode off, narrowing it to read,
+  reconnecting or disconnecting does.
 - Removing a repository from a chat does not revoke it in this mode, because
   the person already allows every repository they can reach.
 
-Rolling deploys: a worker older than this change rejects a delegation that
-has no repositories, so start all-mode chats only after workers are updated.
+Rollout: releases older than this change reject a delegation with the mode or
+without repositories. The mode is therefore offered only when
+`OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is on (status
+`allRepositoriesAvailable`); turn it on once every API and worker runs this
+release. While it is off, the replace route refuses to turn the mode on (409),
+admission ignores a stored mode, and the catalog shows only the chosen
+repositories as usable; the person can still turn a stored mode off.
 
 ## Read tools
 
 These `github_personal__*` tools work in chats without a sandbox, as the
 person, through the same REST bridge and action policy (all are reads):
 
-- `organizations_list`: the person's organizations.
+- `organizations_list`: the organizations whose repositories the person can
+  reach. The connection has only the `repo` scope, which `/user/orgs` does not
+  accept, so the list comes from the person's repositories (and `/user/orgs`
+  when GitHub answers); `complete` is false when the scan stopped early.
 - `owner_repositories_list`: repositories of a user or organization, with
   `filter` (name search through GitHub search) and pagination.
 - `workflow_runs_list`: Actions runs, filtered by workflow, branch, pull
@@ -169,7 +186,8 @@ person, through the same REST bridge and action policy (all are reads):
   `offset`, at most 256 KB per call (32 KB by default), returning
   `nextOffset` to page. GitHub answers with a redirect to a signed log URL;
   the bridge follows it only to an `https` URL and sends no token or GitHub
-  headers there.
+  headers there. It asks the storage for just the needed bytes with an HTTP
+  range (the end for the default read) and falls back to reading the stream.
 
 The account tools (`organizations_list`, `owner_repositories_list`) need the
 connection only. The repository tools need the repository to be selected or

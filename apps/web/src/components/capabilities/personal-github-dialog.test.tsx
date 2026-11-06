@@ -126,6 +126,7 @@ describe("PersonalGitHubDialog", () => {
             repositories={[listed]}
             savedRepositories={[saved]}
             allRepositoriesAccess="write"
+            allRepositoriesAvailable
             busy={false}
             onSave={onSave}
             onReconnect={() => undefined}
@@ -158,6 +159,40 @@ describe("PersonalGitHubDialog", () => {
         [{ repositoryId: "102", fullName: "octocat/kept", access: "read" }],
         null,
       );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("offers All my repositories only where the deployment allows it", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = async (allRepositoriesAvailable: boolean) =>
+      await act(async () => {
+        root.render(
+          <PersonalGitHubDialog
+            open
+            onOpenChange={() => undefined}
+            login="octocat"
+            repositories={[repository("101", "octocat/one")]}
+            allRepositoriesAvailable={allRepositoriesAvailable}
+            busy={false}
+            onSave={async () => true}
+            onReconnect={() => undefined}
+            onDisconnect={() => undefined}
+          />,
+        );
+      });
+    const modeSelect = () =>
+      container.querySelector('select[aria-label="Repositories Opengeni may use"]');
+    try {
+      await render(false);
+      expect(modeSelect()).toBeNull();
+      expect(container.querySelector('button[aria-label="Allow octocat/one"]')).not.toBeNull();
+      await render(true);
+      expect(modeSelect()).not.toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -273,6 +273,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     return () => {
       active = false;
       clearTimeout(timer);
+      setPersonalSearching(false);
     };
   }, [personalSearchActive, search]);
   const matchesSearch = (name: string) => name.toLowerCase().includes(search.trim().toLowerCase());

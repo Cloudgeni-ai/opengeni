@@ -2654,8 +2654,13 @@ function workspaceRepositoryPickerProps(
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
     onTogglePersonalGitHubRepo: (repository) =>
       void context.togglePersonalGitHubRepository(workspaceId, repository),
-    onSearchPersonalGitHubRepositories: (query: string) =>
-      context.searchPersonalGitHubRepositories(workspaceId, query),
+    // Only All my repositories can use a repository found past the listed ones.
+    ...(context.personalGitHubSelection?.allRepositoriesAccess
+      ? {
+          onSearchPersonalGitHubRepositories: (query: string) =>
+            context.searchPersonalGitHubRepositories(workspaceId, query),
+        }
+      : {}),
     onPersonalGitHubRefChange: (repositoryId: string, ref: string) =>
       context.setSelectedPersonalGitHubRepoRefs((current) => ({
         ...current,

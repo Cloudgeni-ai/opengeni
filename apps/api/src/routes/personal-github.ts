@@ -154,7 +154,12 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
             repository.selectedAccess,
           ]),
         );
-        const allRepositoriesAccess = selection.allRepositoriesAccess;
+        // A mode saved while the deployment allowed it is not used once it no longer does.
+        const allRepositoriesAccess =
+          deps.settings.githubPersonalOauthEnabled &&
+          deps.settings.githubPersonalAllRepositoriesEnabled
+            ? selection.allRepositoriesAccess
+            : null;
         return c.json(
           ListPersonalGitHubRepositoriesResponse.parse({
             // `selectedAccess` stays the saved choice; in All my repositories
@@ -236,7 +241,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
             ? { allRepositoriesAccess: request.allRepositoriesAccess }
             : {}),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)));
+        return c.json(
+          PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)),
+        );
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }
@@ -321,7 +328,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           idempotencyKey: request.idempotencyKey,
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)));
+        return c.json(
+          PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)),
+        );
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }

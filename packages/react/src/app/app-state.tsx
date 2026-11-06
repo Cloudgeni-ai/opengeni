@@ -30,6 +30,7 @@ import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
 import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
 import { createWithOpeningContext } from "./lib/message-context";
+import { personalGitHubAllRepositoriesEffectiveAccess } from "@opengeni/contracts/personal-github";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -1714,7 +1715,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ...(cursor ? { cursor } : {}),
             limit: 100,
           });
-          repositories.push(...page.repositories);
+          repositories.push(...page.repositories.map(usablePersonalGitHubRepository));
           selection = page.selection;
           cursor = page.nextCursor ?? undefined;
         } while (cursor !== undefined && repositories.length < 1_000);
@@ -1722,12 +1723,22 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setPersonalGitHubRepositories((current) => {
           // In All my repositories, repositories found by search past the
           // listed pages stay available.
-          if (!selection?.allRepositoriesAccess) return repositories;
+          const allRepositoriesAccess =
+            status.allRepositoriesAvailable === false ? null : selection?.allRepositoriesAccess;
+          if (!allRepositoriesAccess) return repositories;
           const listed = new Set(repositories.map((repository) => repository.repositoryId));
-          return [
-            ...repositories,
-            ...current.filter((repository) => !listed.has(repository.repositoryId)),
-          ];
+          // Their access follows the mode as it is now, not as it was found.
+          const found = current.flatMap((repository) => {
+            if (listed.has(repository.repositoryId)) return [];
+            const access = personalGitHubAllRepositoriesEffectiveAccess(
+              allRepositoriesAccess,
+              repository,
+            );
+            return access
+              ? [{ ...repository, selectedAccess: access, effectiveAccess: access }]
+              : [];
+          });
+          return [...repositories, ...found];
         });
         setPersonalGitHubSelection(selection);
         setPersonalGitHubAuthorityCache((current) =>
@@ -1869,7 +1880,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     if (page.repositories.length === 0) return;
     setPersonalGitHubRepositories((current) => {
       const known = new Set(current.map((repository) => repository.repositoryId));
-      const added = page.repositories.filter((repository) => !known.has(repository.repositoryId));
+      const added = page.repositories
+        .filter((repository) => !known.has(repository.repositoryId))
+        .map(usablePersonalGitHubRepository);
       return added.length > 0 ? [...current, ...added] : current;
     });
   }
@@ -3005,4 +3018,18 @@ function submitGitHubManifest(
   // A same-tab post leaves the page anyway; a new-tab post must not leave the
   // manifest behind in the host page.
   if (newTab) form.remove();
+}
+
+/**
+ * The console's catalog keeps the access Opengeni may use now in
+ * `selectedAccess`, which is what the pickers read. The saved choice is the
+ * selection state's `repositories`.
+ */
+function usablePersonalGitHubRepository(
+  repository: PersonalGitHubRepositoryCatalogItem,
+): PersonalGitHubRepositoryCatalogItem {
+  if (repository.effectiveAccess === undefined) return repository;
+  return repository.effectiveAccess === repository.selectedAccess
+    ? repository
+    : { ...repository, selectedAccess: repository.effectiveAccess };
 }

@@ -199,6 +199,7 @@ function fakeContext(state: State) {
           ? { ...personalConnection, status: state.connectionStatus ?? "active" }
           : null,
         reviewUrl: null,
+        allRepositoriesAvailable: true,
       },
       personalGitHubSelection:
         state.connected && state.selectionLoaded !== false

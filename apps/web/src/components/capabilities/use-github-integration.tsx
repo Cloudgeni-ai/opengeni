@@ -669,6 +669,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           repositories={context.personalGitHubRepositories}
           savedRepositories={context.personalGitHubSelection?.repositories}
           allRepositoriesAccess={context.personalGitHubSelection?.allRepositoriesAccess ?? null}
+          allRepositoriesAvailable={context.personalGitHubStatus?.allRepositoriesAvailable === true}
           loading={!personalCatalogReady}
           busy={context.personalGitHubBusy}
           onSave={(selections, allRepositoriesAccess) =>

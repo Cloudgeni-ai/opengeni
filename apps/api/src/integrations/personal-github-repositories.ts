@@ -155,22 +155,26 @@ export async function listLivePersonalGitHubRepositories(
     page: number;
     limit: number;
   },
+  services: Pick<
+    PersonalGitHubRepositoryBranchServices,
+    "requireConnection" | "providerJson"
+  > = personalGitHubRepositoryBranchServices,
 ): Promise<{ repositories: PersonalGitHubRepositoryContract[]; nextPage: number | null }> {
-  const connection = await requirePersonalGitHubRepositoryConnection(deps, input);
+  const connection = await services.requireConnection(deps, input);
   const url = new URL("/user/repos", PERSONAL_GITHUB_API_ORIGIN);
   url.searchParams.set("affiliation", "owner,collaborator,organization_member");
   url.searchParams.set("direction", "asc");
   url.searchParams.set("page", String(input.page));
   url.searchParams.set("per_page", String(input.limit));
   url.searchParams.set("sort", "full_name");
-  const payload = await personalGitHubProviderJson(
+  const payload = await services.providerJson({
     deps,
     connection,
-    input.subjectId,
+    subjectId: input.subjectId,
     url,
-    input.expectedConnectionAuthorityGeneration,
-    { operation: "repositories_list" },
-  );
+    expectedConnectionAuthorityGeneration: input.expectedConnectionAuthorityGeneration,
+    options: { operation: "repositories_list" },
+  });
   if (!Array.isArray(payload) || payload.length > PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX) {
     throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
   }
@@ -227,8 +231,12 @@ export async function searchLivePersonalGitHubRepositories(
     query: string;
     limit: number;
   },
+  services: Pick<
+    PersonalGitHubRepositoryBranchServices,
+    "requireConnection" | "providerJson"
+  > = personalGitHubRepositoryBranchServices,
 ): Promise<{ repositories: PersonalGitHubRepositoryContract[] }> {
-  const connection = await requirePersonalGitHubRepositoryConnection(deps, input);
+  const connection = await services.requireConnection(deps, input);
   const needle = input.query.trim().toLowerCase();
   const matches: PersonalGitHubRepositoryContract[] = [];
   const seen = new Set<string>();
@@ -247,17 +255,17 @@ export async function searchLivePersonalGitHubRepositories(
   ) {
     try {
       const repository = parsePersonalGitHubRepository(
-        await personalGitHubProviderJson(
+        await services.providerJson({
           deps,
           connection,
-          input.subjectId,
-          new URL(
+          subjectId: input.subjectId,
+          url: new URL(
             `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
             PERSONAL_GITHUB_API_ORIGIN,
           ),
-          input.expectedConnectionAuthorityGeneration,
-          { operation: "repository_verify" },
-        ),
+          expectedConnectionAuthorityGeneration: input.expectedConnectionAuthorityGeneration,
+          options: { operation: "repository_verify" },
+        }),
       );
       if (personalGitHubRepositoryCanRead(repository.permissions)) add(repository);
     } catch (error) {
@@ -282,11 +290,11 @@ export async function searchLivePersonalGitHubRepositories(
           complete: false,
         };
         for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
-          const result = await listLivePersonalGitHubRepositories(deps, {
-            ...input,
-            page,
-            limit: SEARCH_PAGE_SIZE,
-          });
+          const result = await listLivePersonalGitHubRepositories(
+            deps,
+            { ...input, page, limit: SEARCH_PAGE_SIZE },
+            services,
+          );
           entry.repositories.push(...result.repositories);
           if (result.nextPage === null) {
             entry.complete = true;
