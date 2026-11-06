@@ -1,0 +1,7 @@
+---
+"@opengeni/react": patch
+"@opengeni/runtime": patch
+"@opengeni/worker-bundle": patch
+---
+
+A Skill an agent saves for review now says plainly in the chat that it isn't in use yet. The collapsed "Review <name>" row is now a compact bar: the Skill's name, "New Skill · Not active until approved" (or "Skill update · Not applied until approved", or "Delete Skill · Can't be undone once approved") and inline Decline and Approve buttons. Clicking the name shows its description and files. Decline rejects the exact revision, as Knowledge > Review's Reject does, so the proposal leaves the chat and agents never use it. Approving or declining shows a one-line confirmation ("Approved · Agents can use it from your next message", or "Declined · Agents won't use it" or "Declined · The current version stays") that stays until the next turn and keeps focus on the card when the clicked button goes away. People who can't approve see no actions. The skill_save, skill_publish and skill_install descriptions and the skill-management Skill now tell agents that a Skill or change pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown (an edited Skill keeps its current version until then), and to say so in their reply. The Skill tool descriptions, including skill_remove's, now name the review tab "Review", as the app does, not "Needs review".

@@ -2484,6 +2484,9 @@
 :where(.og-root).flex-\[1_1_5rem\],:where(.og-root) .flex-\[1_1_5rem\] {
     flex: 1 1 5rem;
   }
+:where(.og-root).flex-\[1_1_14rem\],:where(.og-root) .flex-\[1_1_14rem\] {
+    flex: 1 1 14rem;
+  }
 :where(.og-root).flex-\[2\],:where(.og-root) .flex-\[2\] {
     flex: 2;
   }

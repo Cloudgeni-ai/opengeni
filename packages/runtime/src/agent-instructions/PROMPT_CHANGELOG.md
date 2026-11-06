@@ -106,6 +106,18 @@ source, which adds no other text). Nothing was reworded.
 + … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
 ```
 
+The `skill_save`, `skill_install` and `skill_publish` tool descriptions and the
+bundled `skill-management` Skill now say that a Skill or change pending
+approval has no effect until someone who can manage it approves it, in
+Knowledge > Review or from its card in the chat where one is shown (an edited
+Skill keeps its current version until then), and that the agent's reply should
+say so.
+Before, they only named where a pending revision waits, so agents reported
+"waiting for your approval" without saying the Skill was inactive until then,
+and people didn't realise approval was needed for it to work. They also named
+the review tab "Needs review"; the app labels it "Review", and `skill_remove`
+now says so too. No system prompt text changes.
+
 `request_human_input` says the same in fewer words, for every session. The
 system prompt is unchanged. In the embedding profile the tool falls from 588
 to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
