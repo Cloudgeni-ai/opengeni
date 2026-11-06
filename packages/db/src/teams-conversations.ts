@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
@@ -108,6 +108,57 @@ export async function getWorkspaceTeamsInstallation(
       )
     )[0] ?? null
   );
+}
+/**
+ * How long a welcomed personal chat isn't welcomed again: long enough to cover
+ * every delivery of one install, short enough that reinstalling later welcomes
+ * the person afresh.
+ */
+export const TEAMS_WELCOME_WINDOW_MS = 10 * 60_000;
+export type TeamsWelcomeClaim = { scopeHash: string; claimId: string };
+/**
+ * Claims the welcome for a personal chat, once across every API replica and
+ * every delivery of the install. Null when the chat was claimed within
+ * `windowMs`. Works before an organization has connected: the row holds only a
+ * hash of the tenant and conversation, and grants nothing.
+ */
+export async function claimTeamsWelcome(
+  db: Database,
+  input: { tenantId: string; conversationId: string },
+  windowMs: number = TEAMS_WELCOME_WINDOW_MS,
+): Promise<TeamsWelcomeClaim | null> {
+  const scopeHash = createHash("sha256")
+    .update(`${input.tenantId.toLowerCase()}\n${input.conversationId.split(";")[0]}`)
+    .digest("hex");
+  const claimId = randomUUID();
+  const rows = await rawRows<{ claim_id: string }>(
+    db,
+    sql`insert into teams_bot_welcomes(scope_hash,claim_id) values(${scopeHash},${claimId}::uuid) on conflict(scope_hash) do update set claim_id=excluded.claim_id,claimed_at=now() where teams_bot_welcomes.claimed_at<=now()-(${Math.max(0, Math.trunc(windowMs))}*interval '1 millisecond') returning claim_id`,
+  );
+  return rows.length ? { scopeHash, claimId } : null;
+}
+/** Gives up a claim whose welcome wasn't sent, unless a newer claim replaced it. */
+export async function releaseTeamsWelcome(db: Database, claim: TeamsWelcomeClaim): Promise<void> {
+  await db.execute(
+    sql`delete from teams_bot_welcomes where scope_hash=${claim.scopeHash} and claim_id=${claim.claimId}::uuid`,
+  );
+}
+/** How long a welcome claim is kept after its window: a day, then it is removed. */
+export const TEAMS_WELCOME_RETENTION_MS = 24 * 60 * 60_000;
+/**
+ * Removes up to `limit` claims older than the retention, so the table holds
+ * roughly a day of installs. Returns how many it removed.
+ */
+export async function pruneTeamsWelcomes(
+  db: Database,
+  limit = 100,
+  retentionMs: number = TEAMS_WELCOME_RETENTION_MS,
+): Promise<number> {
+  const rows = await rawRows<{ scope_hash: string }>(
+    db,
+    sql`delete from teams_bot_welcomes where scope_hash in (select scope_hash from teams_bot_welcomes where claimed_at<now()-(${Math.max(TEAMS_WELCOME_WINDOW_MS, Math.trunc(retentionMs))}*interval '1 millisecond') limit ${Math.max(1, Math.trunc(limit))} for update skip locked) returning scope_hash`,
+  );
+  return rows.length;
 }
 export async function installTeamsBot(
   db: Database,

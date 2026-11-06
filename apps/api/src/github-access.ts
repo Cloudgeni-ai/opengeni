@@ -12,15 +12,18 @@ import {
   type ListGitHubRepositoryBranchesQuery,
 } from "@opengeni/contracts/github-repository-contracts";
 import {
+  applyGitHubInstallationRepositoryObservation,
   areGitHubRepositoriesAllowedForWorkspace,
   hasAuditableGitHubInstallationAuthority,
+  hasGitHubInstallationOwnerAuthority,
   listGitHubInstallationAccessForWorkspace,
+  type GitHubInstallationAccess,
 } from "@opengeni/db";
 import {
   GitHubAppApiError,
   GitHubAppConfigurationError,
   getGitHubAppWebhookSetup,
-  listGitHubAppInstallationSummaries,
+  getGitHubAppInstallationSummary,
   listGitHubAppRepositories,
   listGitHubAppRepositoryBranches,
   setGitHubAppWebhookUrl,
@@ -30,6 +33,18 @@ import {
   createGitHubRepositoryCatalog,
   type GitHubRepositoryCatalog,
 } from "./github-repository-catalog";
+import {
+  requestGitHubInstallationRepositorySync,
+  scheduleGitHubInstallationRepositoryResync,
+} from "./github-installation-sync";
+
+/** How often a passive read may ask GitHub about one installation by itself. */
+const GITHUB_BACKGROUND_SYNC_INTERVAL_MS = 60_000;
+/**
+ * How long a passive repository read waits for GitHub when it has a last good
+ * list to answer with instead; GitHub's answer then applies in the background.
+ */
+export const GITHUB_PASSIVE_LIST_WAIT_MS = 3_000;
 
 /**
  * The GitHub App's webhook settings for GitHub event sources: the host's App
@@ -93,9 +108,54 @@ export async function listWorkspaceGitHubInstallationBindings(
   deps: ApiRouteDeps,
   workspaceId: string,
 ): Promise<GitHubInstallationBinding[]> {
+  const { installations, liveById, lifecycleVerified } = await readWorkspaceGitHubInstallations(
+    deps,
+    workspaceId,
+  );
+  for (const installation of installations) {
+    // GitHub left this binding with no repositories. If the installation
+    // shares some again and its webhook was missed, read them now so the
+    // workspace recovers by itself.
+    if (
+      installation.repositoryIds.length === 0 &&
+      githubInstallationLiveLifecycle(installation, liveById, lifecycleVerified) === "active"
+    ) {
+      void requestGitHubInstallationRepositorySync(deps, installation.installationId, {
+        minIntervalMs: GITHUB_BACKGROUND_SYNC_INTERVAL_MS,
+      });
+    }
+  }
+  return installations.map((installation) => ({
+    installationId: installation.installationId,
+    githubAccountId: installation.githubAccountId,
+    accountLogin: installation.accountLogin,
+    accountType: installation.accountType,
+    lifecycle: githubInstallationBindingLifecycle(
+      installation,
+      liveById,
+      installation.installationId,
+      lifecycleVerified,
+    ),
+    repositoryScope: installation.repositoryScope,
+    repositoryCount: installation.repositoryIds.length,
+    configureUrl: null,
+    createdAt: installation.createdAt,
+    updatedAt: installation.updatedAt,
+  }));
+}
+
+/** The workspace's stored bindings with GitHub's live view of each installation. */
+async function readWorkspaceGitHubInstallations(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<{
+  installations: GitHubInstallationAccess[];
+  liveById: Map<number, LiveGitHubInstallation | null>;
+  lifecycleVerified: boolean;
+}> {
   const installations = await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId);
   if (installations.length === 0) {
-    return [];
+    return { installations, liveById: new Map(), lifecycleVerified: false };
   }
   let liveById = new Map<number, LiveGitHubInstallation | null>();
   let lifecycleVerified = false;
@@ -116,11 +176,18 @@ export async function listWorkspaceGitHubInstallationBindings(
       );
       lifecycleVerified = true;
     } else if (!deps.githubAppApi) {
+      // Each bound installation is read by id, never by paging through every
+      // installation of the App.
       liveById = new Map(
-        (await listGitHubAppInstallationSummaries(deps.settings)).map((installation) => [
-          installation.installationId,
-          installation,
-        ]),
+        await Promise.all(
+          installations.map(
+            async (installation) =>
+              [
+                installation.installationId,
+                await getGitHubAppInstallationSummary(deps.settings, installation.installationId),
+              ] as const,
+          ),
+        ),
       );
       lifecycleVerified = true;
     }
@@ -129,24 +196,9 @@ export async function listWorkspaceGitHubInstallationBindings(
     // audit/unlink but project it as unverified and keep workspace status
     // unbound until GitHub can be checked again.
     liveById = new Map();
+    lifecycleVerified = false;
   }
-  return installations.map((installation) => ({
-    installationId: installation.installationId,
-    githubAccountId: installation.githubAccountId,
-    accountLogin: installation.accountLogin,
-    accountType: installation.accountType,
-    lifecycle: githubInstallationBindingLifecycle(
-      installation,
-      liveById,
-      installation.installationId,
-      lifecycleVerified,
-    ),
-    repositoryScope: installation.repositoryScope,
-    repositoryCount: installation.repositoryIds.length,
-    configureUrl: null,
-    createdAt: installation.createdAt,
-    updatedAt: installation.updatedAt,
-  }));
+  return { installations, liveById, lifecycleVerified };
 }
 
 export function githubBindingStatus(
@@ -174,6 +226,27 @@ export function githubInstallationBindingLifecycle(
   lifecycleVerified: boolean,
 ): GitHubInstallationBinding["lifecycle"] {
   if (!hasAuditableGitHubInstallationAuthority(stored)) {
+    return "unverified";
+  }
+  return githubInstallationLiveLifecycle(
+    { ...stored, installationId },
+    liveById,
+    lifecycleVerified,
+  );
+}
+
+/**
+ * The binding's lifecycle from its owner proof and GitHub's live view,
+ * whatever its repository allowlist holds: an active binding follows GitHub's
+ * repository list even when GitHub left it with none.
+ */
+function githubInstallationLiveLifecycle(
+  stored: GitHubInstallationAccess,
+  liveById: Map<number, LiveGitHubInstallation | null>,
+  lifecycleVerified: boolean,
+): GitHubInstallationBinding["lifecycle"] {
+  const installationId = stored.installationId;
+  if (!hasGitHubInstallationOwnerAuthority(stored)) {
     return "unverified";
   }
   if (!lifecycleVerified) {
@@ -229,26 +302,25 @@ function repositoryCatalogFor(deps: ApiRouteDeps): GitHubRepositoryCatalog {
  * repository allowlist are read live every time; GitHub's own repository list
  * comes from a short-lived per-process catalog unless `fresh` is set (an
  * explicit sync), so passive reads survive a brief GitHub failure.
+ *
+ * The allowlist follows GitHub: a list GitHub just returned is applied to it
+ * (repositories the installation now shares are added, ones it no longer
+ * shares are dropped), so a missed webhook is repaired by the next listing.
+ * A stale fallback list is never applied, and a failed update only means the
+ * stored allowlist answers this read.
  */
 export async function listWorkspaceGitHubRepositories(
   deps: ApiRouteDeps,
   workspaceId: string,
   options: { fresh?: boolean } = {},
 ): Promise<GitHubRepository[]> {
-  const bindings = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
-  const activeInstallationIds = new Set(
-    bindings
-      .filter((installation) => installation.lifecycle === "active")
-      .map((installation) => installation.installationId),
+  const { installations, liveById, lifecycleVerified } = await readWorkspaceGitHubInstallations(
+    deps,
+    workspaceId,
   );
-  if (activeInstallationIds.size === 0) {
-    return [];
-  }
-  const access = await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId);
-  const authorizedAccess = access.filter(
+  const authorizedAccess = installations.filter(
     (installation) =>
-      activeInstallationIds.has(installation.installationId) &&
-      hasAuditableGitHubInstallationAuthority(installation),
+      githubInstallationLiveLifecycle(installation, liveById, lifecycleVerified) === "active",
   );
   if (authorizedAccess.length === 0) {
     return [];
@@ -260,24 +332,88 @@ export async function listWorkspaceGitHubRepositories(
     ...authorizedAccess.map((installation) => Date.parse(installation.updatedAt) || 0),
   );
   const host = deps.githubAppApi;
-  const repositories = await repositoryCatalogFor(deps).read(
+  const observed = await repositoryCatalogFor(deps).readObserved(
     installationIds,
     () =>
       host?.listRepositories
         ? host.listRepositories({ installationIds })
         : listGitHubAppRepositories(deps.settings, { installationIds }),
-    { ...options, notBefore: boundAt },
+    { ...options, notBefore: boundAt, waitMs: GITHUB_PASSIVE_LIST_WAIT_MS },
   );
-  const accessByInstallation = new Map(
-    authorizedAccess.map((installation) => [installation.installationId, installation]),
+  const allowed = new Map(
+    authorizedAccess.map((installation) => [
+      installation.installationId,
+      new Set(installation.repositoryIds),
+    ]),
   );
-  return repositories.filter((repository) => {
-    const installation = accessByInstallation.get(repository.installationId);
-    if (!installation) {
-      return false;
+  if (!observed.stale) {
+    await followGitHubRepositoryLists(deps, authorizedAccess, observed, allowed);
+  } else if (observed.pending) {
+    // GitHub is slow: this read used the last good list; apply GitHub's
+    // answer when it arrives so the next read has it.
+    const pendingAllowed = new Map([...allowed].map(([id, ids]) => [id, new Set(ids)]));
+    void observed.pending
+      .then(async (answer) => {
+        if (answer)
+          await followGitHubRepositoryLists(deps, authorizedAccess, answer, pendingAllowed);
+      })
+      .catch(() => undefined);
+  }
+  return observed.repositories.filter(
+    (repository) => allowed.get(repository.installationId)?.has(repository.id) === true,
+  );
+}
+
+/**
+ * Apply the lists GitHub just returned to the workspace's allowlists, only
+ * where they differ, and update `allowed` with the result.
+ */
+async function followGitHubRepositoryLists(
+  deps: ApiRouteDeps,
+  bindings: GitHubInstallationAccess[],
+  observed: { repositories: GitHubRepository[]; fetchedAt: number },
+  allowed: Map<number, Set<number>>,
+): Promise<void> {
+  const listed = new Map<number, number[]>();
+  for (const repository of observed.repositories) {
+    const ids = listed.get(repository.installationId) ?? [];
+    ids.push(repository.id);
+    listed.set(repository.installationId, ids);
+  }
+  for (const binding of bindings) {
+    const live = new Set(listed.get(binding.installationId) ?? []);
+    const stored = allowed.get(binding.installationId) ?? new Set<number>();
+    // GitHub also lists nothing for an installation suspended or removed
+    // since the lifecycle check above; its webhook says which it was.
+    if (live.size === 0) continue;
+    if (live.size === stored.size && [...live].every((id) => stored.has(id))) continue;
+    try {
+      const result = await applyGitHubInstallationRepositoryObservation(deps.db, {
+        accountId: binding.accountId,
+        workspaceId: binding.workspaceId,
+        installationId: binding.installationId,
+        observation: {
+          kind: "mirror",
+          repositoryIds: [...live],
+          observedAt: new Date(observed.fetchedAt),
+        },
+      });
+      if (result) allowed.set(binding.installationId, new Set(result.repositoryIds));
+      else allowed.delete(binding.installationId);
+      if (result?.heldUntil) {
+        scheduleGitHubInstallationRepositoryResync(deps, binding.installationId, result.heldUntil);
+      }
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "GitHub repository allowlist update failed",
+          githubInstallationId: binding.installationId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
-    return installation.repositoryIds.includes(repository.id);
-  });
+  }
 }
 
 /**

@@ -6,7 +6,6 @@ import {
   Loader2Icon,
   LockIcon,
   PlusIcon,
-  RefreshCwIcon,
   Settings2Icon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -1092,7 +1091,6 @@ export function ScheduledTaskRepositoryPicker(props: {
   resources: ResourceRef[];
   busy: boolean;
   repoBusy: boolean;
-  onRefresh: () => Promise<void>;
   onResourcesChange: (resources: ResourceRef[]) => void;
 }) {
   const repositoryResources = props.resources.filter(
@@ -1144,16 +1142,6 @@ export function ScheduledTaskRepositoryPicker(props: {
             {repoCountLabel(repositoryResources.length)} attached to this task
           </div>
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          onClick={() => void props.onRefresh()}
-          disabled={props.status !== "bound" || props.repoBusy || props.busy}
-        >
-          <RefreshCwIcon className={cn("size-3", props.repoBusy && "animate-spin")} />
-          Refresh
-        </Button>
       </div>
 
       {props.status !== "bound" ? (

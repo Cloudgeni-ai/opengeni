@@ -362,6 +362,9 @@ export function buildGitHubAppManifest(input: {
     "pull_request_review_comment",
     "push",
     "release",
+    // New repositories of an "All repositories" installation, which no
+    // installation event reports: workspace allowlists follow them.
+    "repository",
   ];
   if (input.includeCiPermissions) {
     permissions.actions = "read";
@@ -540,10 +543,13 @@ export async function getGitHubAppInstallationSummary(
   settings: Settings,
   installationId: number,
 ): Promise<GitHubAppInstallationSummary | null> {
-  const installations = await listGitHubAppInstallationSummaries(settings);
-  return (
-    installations.find((installation) => installation.installationId === installationId) ?? null
-  );
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const jwt = await createGitHubAppJwt(settings);
+  const installation = await getInstallation(jwt, installationId);
+  return installation ? installationSummaryFromPayload(installation) : null;
 }
 
 export async function verifyGitHubInstallationAccessForUser(
@@ -794,7 +800,19 @@ export async function listGitHubAppRepositoriesWithSigningSettings(
     return [];
   }
   const jwt = await createGitHubAppJwt(settings);
-  const installations = await listInstallations(jwt);
+  // Named installations are read one by one rather than paging through every
+  // installation of the App.
+  const installations = allowedInstallations
+    ? (
+        await Promise.all(
+          [...allowedInstallations].map(async (installationId) =>
+            Number.isSafeInteger(installationId) && installationId > 0
+              ? await getInstallation(jwt, installationId)
+              : null,
+          ),
+        )
+      ).filter((installation): installation is Record<string, unknown> => installation !== null)
+    : await listInstallations(jwt);
   const repositories: GitHubRepository[] = [];
   for (const installation of installations) {
     if (installation.suspended_at) {
@@ -1397,6 +1415,24 @@ async function listInstallations(token: string): Promise<Array<Record<string, un
       return out;
     }
   }
+}
+
+/** One installation of the App, or null when GitHub does not know it. */
+async function getInstallation(
+  jwt: string,
+  installationId: number,
+): Promise<Record<string, unknown> | null> {
+  let payload: unknown;
+  try {
+    payload = await githubGet(`/app/installations/${installationId}`, jwt);
+  } catch (error) {
+    if (error instanceof GitHubAppApiError && error.status === 404) return null;
+    throw error;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GitHubAppApiError("GitHub returned an invalid installation payload");
+  }
+  return payload as Record<string, unknown>;
 }
 
 async function exchangeGitHubOAuthCodeForUserToken(

@@ -77,6 +77,26 @@ export class TeamsOnboardingLimiter {
     return true;
   }
 
+  /** Gives back a reservation whose reply Teams clearly never received. */
+  release(tenantId: string, actorId: string, now = Date.now()): void {
+    const tenantKey = tenantId.toLowerCase();
+    const actorKey = `${tenantKey}:${actorId.toLowerCase()}`;
+    const actor = this.actors.get(actorKey);
+    const tenant = this.tenants.get(tenantKey);
+    // Only a person's own reservation can be given back.
+    if (!actor || actor.count === 0 || now - actor.start >= DAY_MS) return;
+    for (const [window, span] of [
+      [actor, DAY_MS],
+      [tenant, DAY_MS],
+      [this.process, HOUR_MS],
+    ] as const) {
+      if (!window || window.count === 0 || now - window.start >= span) continue;
+      window.count -= 1;
+      // Without a reply in the window, there is no cooldown to wait out.
+      if (window.count === 0) window.last = 0;
+    }
+  }
+
   private current(map: Map<string, Window>, key: string, span: number, now: number): Window {
     const value = map.get(key);
     return value && now - value.start < span ? value : { start: now, count: 0, last: 0 };

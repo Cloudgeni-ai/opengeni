@@ -5970,7 +5970,9 @@ describe("API component integration", () => {
               suspended: false,
             }
           : null,
-      listRepositories: async () => [adminRepository, readOnlyRepository],
+      // The installation shares only the admin repository; the workspace
+      // allowlists follow GitHub's list, so the read-only one is never usable.
+      listRepositories: async () => [adminRepository],
     };
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -6019,8 +6021,8 @@ describe("API component integration", () => {
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
     // One GitHub installation can be deliberately delegated into two Opengeni
-    // workspaces, but each workspace owns an independent exact allowlist and
-    // an independent consumed owner-authority proof.
+    // workspaces; each workspace has its own binding, allowlist and consumed
+    // owner-authority proof.
     await Promise.all([
       bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,

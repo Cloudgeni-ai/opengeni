@@ -18,6 +18,9 @@ import {
   teamsScoped,
   invalidateTeamsGroup,
   removeTeamsLink,
+  claimTeamsWelcome,
+  releaseTeamsWelcome,
+  pruneTeamsWelcomes,
 } from "../src";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -245,4 +248,46 @@ test("group audience changes retire queued work and never revive former sessions
         .admin`select count(*)::int n from teams_bot_routes where tenant_id=${i.tenant_id} and group_active`
     )[0]!.n,
   ).toBe(0);
+});
+test("a welcome is claimed once per window across connections, and only its own claim token releases it", async () => {
+  const chat = { tenantId: crypto.randomUUID(), conversationId: `a:${crypto.randomUUID()}` };
+  const other = createDb(shared!.appUrl);
+  try {
+    // Two replicas racing for the same chat: exactly one claim.
+    const raced = await Promise.all([
+      claimTeamsWelcome(client!.db, chat),
+      claimTeamsWelcome(other.db, chat),
+      claimTeamsWelcome(client!.db, {
+        ...chat,
+        conversationId: `${chat.conversationId};messageid=1`,
+      }),
+    ]);
+    expect(raced.filter(Boolean)).toHaveLength(1);
+    const first = raced.find(Boolean)!;
+    expect(first.scopeHash).toMatch(/^[0-9a-f]{64}$/);
+    // Inside the window nobody else claims it.
+    expect(await claimTeamsWelcome(other.db, chat)).toBeNull();
+    // After the window it can be claimed again; the old token then releases nothing.
+    await shared!
+      .admin`update teams_bot_welcomes set claimed_at=now()-interval '11 minutes' where scope_hash=${first.scopeHash}`;
+    const second = await claimTeamsWelcome(other.db, chat);
+    expect(second).not.toBeNull();
+    await releaseTeamsWelcome(client!.db, first);
+    expect(await claimTeamsWelcome(client!.db, chat)).toBeNull();
+    // Its own token gives it back.
+    await releaseTeamsWelcome(client!.db, second!);
+    expect(await claimTeamsWelcome(client!.db, chat)).not.toBeNull();
+    // Claims older than a day are removed; recent ones stay.
+    await shared!
+      .admin`update teams_bot_welcomes set claimed_at=now()-interval '25 hours' where scope_hash=${first.scopeHash}`;
+    expect(await pruneTeamsWelcomes(client!.db)).toBeGreaterThanOrEqual(1);
+    expect(
+      (
+        await shared!
+          .admin`select count(*)::int n from teams_bot_welcomes where scope_hash=${first.scopeHash}`
+      )[0]!.n,
+    ).toBe(0);
+  } finally {
+    await other.close();
+  }
 });
