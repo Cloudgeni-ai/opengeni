@@ -41,6 +41,8 @@ describes the spend rule, receipt semantics and top-up integration.
 
 Server updates don't break existing integrations: the API only grows, so a pinned SDK keeps working and you upgrade when you want new features. Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes. Pin all `@opengeni` packages to the same version, install stable releases (the npm `latest` tag) rather than canaries, and let your code ignore unknown response fields and event types. Deprecated members keep working; their docs name the replacement. Read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
 
+Our [published SDK test matrix](https://github.com/Cloudgeni-ai/opengeni/blob/main/test/integration/sdk-compatibility/versions.json) exercises pinned stable releases and known integrator pins against the current server. The bounded test matrix is not a limit on the compatibility promise.
+
 ## Keep the tool surface minimal
 
 Every visible tool costs prompt tokens and widens what the agent can do. For an agent that should use only your tools, return this from the proxy's `createSession` hook:

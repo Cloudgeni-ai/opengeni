@@ -1,3 +1,4 @@
+import { version as sdkVersion } from "../package.json";
 import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
@@ -32,7 +33,17 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  AutoConnectSupport,
+  CheckMcpTrustedIssuerRequest,
+  CheckMcpTrustedIssuerResponse,
+  CheckOrganizationConnectorAutoConnectRequest,
+  CreateMcpTrustedIssuerRequest,
   CreateOrganizationConnectorRequest,
+  ListMcpTrustedIssuerEventsResponse,
+  ListMcpTrustedIssuersResponse,
+  McpTrustedIssuer,
+  TestOrganizationConnectorAutoConnectResponse,
+  UpdateMcpTrustedIssuerRequest,
   ListOrganizationConnectorsResponse,
   OrganizationApiIntegrationHere,
   OrganizationConnector,
@@ -477,6 +488,8 @@ import type {
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
+  OrganizationCompatibleEndpointModel,
+  SetOrganizationCompatibleEndpointModelReasoningRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -2407,7 +2420,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Archive or restore this authenticated member's root chat. */
+  /**
+   * Archive this authenticated member's root chat, or restore it (at any
+   * time; stored content comes back in the background). Archiving refuses
+   * while a sub-chat is in use unless `confirmActiveSubChats` lists it.
+   */
   async updateSessionArchive(
     workspaceId: string,
     sessionId: string,
@@ -6253,6 +6270,124 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Whether a connector can connect everyone automatically: its server must
+   * accept ID-JAGs (MCP Enterprise-Managed Authorization). Ask before adding it.
+   */
+  async checkOrganizationConnectorAutoConnect(
+    organizationId: string,
+    request: CheckOrganizationConnectorAutoConnectRequest,
+  ): Promise<AutoConnectSupport> {
+    return await this.requestJson<AutoConnectSupport>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/auto-connect/check`,
+      request,
+    );
+  }
+
+  /**
+   * Try an auto-connect connector as yourself: Opengeni signs an ID-JAG for
+   * you and the app redeems it. Saves only the outcome on the connector.
+   */
+  async testOrganizationConnectorAutoConnect(
+    organizationId: string,
+    connectorId: string,
+  ): Promise<TestOrganizationConnectorAutoConnectResponse> {
+    return await this.requestJson<TestOrganizationConnectorAutoConnectResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}/auto-connect/test`,
+      {},
+    );
+  }
+
+  /**
+   * Connect yourself to an auto-connect connector that works in this
+   * workspace. When the app refuses, the message says why; sign in instead.
+   */
+  async connectWorkspaceOrganizationConnector(
+    workspaceId: string,
+    connectorId: string,
+  ): Promise<{ status: "connected" } | { status: "refused"; message: string }> {
+    return await this.requestJson<{ status: "connected" } | { status: "refused"; message: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-connectors/${connectorId}/connect`,
+      {},
+    );
+  }
+
+  // --- Auto-connect: trusted issuers (organization MCP server) ----------------------------------
+
+  /**
+   * Issuers whose ID-JAGs connect members to the organization MCP server
+   * with no sign-in (Claude's organization issuer, or an identity provider),
+   * with the MCP URL and audience to give the app. Owners and admins.
+   */
+  async listMcpTrustedIssuers(organizationId: string): Promise<ListMcpTrustedIssuersResponse> {
+    return await this.requestJson<ListMcpTrustedIssuersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+    );
+  }
+
+  /** Look an issuer up before trusting it: whether its signing keys load. */
+  async checkMcpTrustedIssuer(
+    organizationId: string,
+    request: CheckMcpTrustedIssuerRequest,
+  ): Promise<CheckMcpTrustedIssuerResponse> {
+    return await this.requestJson<CheckMcpTrustedIssuerResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/check`,
+      request,
+    );
+  }
+
+  /** Trust an issuer, with the access every app it connects gets. */
+  async createMcpTrustedIssuer(
+    organizationId: string,
+    request: CreateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+      request,
+    );
+  }
+
+  /**
+   * Change a trusted issuer. New access applies to every app it connected;
+   * turning it off disconnects them.
+   */
+  async updateMcpTrustedIssuer(
+    organizationId: string,
+    trustedIssuerId: string,
+    request: UpdateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+      request,
+    );
+  }
+
+  /** Stop trusting an issuer and disconnect every app it connected. */
+  async deleteMcpTrustedIssuer(organizationId: string, trustedIssuerId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+    );
+  }
+
+  /** Recent auto-connect attempts through an issuer, refusals with their reason. */
+  async listMcpTrustedIssuerEvents(
+    organizationId: string,
+    trustedIssuerId: string,
+  ): Promise<ListMcpTrustedIssuerEventsResponse> {
+    return await this.requestJson<ListMcpTrustedIssuerEventsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}/events`,
+    );
+  }
+
   /** List workspace-owned Claude model slugs. */
   async listWorkspaceClaudeCustomModels(
     workspaceId: string,
@@ -6398,7 +6533,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Add a model to an OpenAI-compatible endpoint. */
+  /**
+   * Add a model to an OpenAI-compatible endpoint. The response also carries
+   * the model's `reasoning` levels; list the endpoints to read them typed.
+   */
   async createOrganizationCompatibleEndpointModel(
     organizationId: string,
     connectionId: string,
@@ -6407,6 +6545,20 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationProviderCustomModel>(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Set an OpenAI-compatible endpoint model's reasoning levels, or read them again from the endpoint. */
+  async setOrganizationCompatibleEndpointModelReasoning(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
       request,
     );
   }
@@ -7208,7 +7360,7 @@ export class OpenGeniClient {
     };
   }
 
-  /** Browse first-party Atlassian sources without choosing or starting sync. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7219,6 +7371,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7231,6 +7384,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async setAtlassianLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -10412,7 +10566,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Browse source metadata through one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -10433,7 +10587,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -11095,6 +11249,11 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /**
+   * @deprecated The native Google Drive source connection was removed with
+   * Integration Knowledge sync. Use `deleteConnection`; this method goes in
+   * the next SDK major.
+   */
   async disconnectGoogleDriveConnection(
     workspaceId: string,
     connectionId: string,
@@ -11108,6 +11267,7 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async transitionGoogleDriveLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -12165,6 +12325,7 @@ export class OpenGeniClient {
     const headers: Record<string, string> = {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      ...(sdkVersion ? { "x-opengeni-sdk-version": sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };

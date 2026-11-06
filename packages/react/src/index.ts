@@ -189,6 +189,19 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -475,6 +488,7 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 
 // Timeline projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
   creditRefusalFromEvents,
@@ -569,6 +583,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
@@ -786,6 +801,7 @@ export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/sess
 export {
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";

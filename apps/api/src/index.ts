@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
@@ -83,7 +82,6 @@ import {
   startEventTriggerDispatchPump,
   startEventSubscriptionPump,
 } from "./event-trigger-dispatch";
-import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
@@ -396,6 +394,26 @@ export async function createTemporalWorkflowClient(
               sessionId: input.sessionId,
               subjectId: input.subjectId,
               archivedAt: input.archivedAt,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchiveRestore: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRestoreWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One restore request, one run; a repeated request has a new time.
+          workflowId: `session-archive-restore-${input.workspaceId}-${input.sessionId}-${Date.parse(input.requestedAt)}`,
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
             },
           ],
         });
@@ -736,8 +754,6 @@ export async function startApi(options: StartApiOptions = {}) {
   });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
-    cleanupConnectorAuthorization: async (claim) =>
-      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },
@@ -1016,12 +1032,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
 }
 
 function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
-  if (task.status === "paused") return true;
-  if (!scheduledTaskKnowledgeSource(task)) return false;
-  const control = task.metadata.knowledgeSourceSync;
-  if (!control || typeof control !== "object") return false;
-  const record = control as Record<string, unknown>;
-  return record.sourceEnabled === false || record.connectionPaused === true;
+  return task.status === "paused";
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

@@ -236,15 +236,23 @@ export function SessionHeader({
 }) {
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
-  const waiting = sessionInputWait({ ...session, status });
-  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  // A session the runtime could not start reads as stuck, not "Waiting on you",
+  // and an archived chat reads as archived, never as its last run state.
   const displayStatus = sessionDisplayStatus({
     status,
     admissionBlock: session.admissionBlock,
+    archived: session.archived,
+    retention: session.retention,
   });
+  const archived = displayStatus === "archived";
+  // Archiving stops the chat's work, which also pauses it and settles its waits:
+  // the header names the archive, not a pause or a wait.
+  const waiting = archived ? null : sessionInputWait({ ...session, status });
+  const paused = !archived && sessionControlPaused(session);
   const startup = useSessionStartup({ ...session, status });
-  const startupLabel =
-    startup === "starting"
+  const startupLabel = archived
+    ? undefined
+    : startup === "starting"
       ? "Starting"
       : startup === "delayed" || startup === "retrying"
         ? "Waiting to start"
@@ -273,8 +281,8 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  // Archiving is one-way, so an archived chat offers no archive action, and
-  // only people who can control the chat archive it.
+  // An archived chat is restored from its own notice, so it offers no
+  // archive action, and only people who can control the chat archive it.
   const canArchive =
     Boolean(onArchive) &&
     session.parentSessionId === null &&
@@ -422,7 +430,7 @@ export function SessionHeader({
           {/* Below lg (or when the full badge has no room) the lifecycle is a
               dot beside the title. */}
           <CompactSessionStatus
-            paused={sessionControlPaused(session)}
+            paused={paused}
             waiting={Boolean(waiting)}
             status={displayStatus}
             label={startupLabel}
@@ -551,7 +559,7 @@ export function SessionHeader({
                 control is Active (Running + Active) is redundant noise. When
                 paused, admission is the headline — hide lifecycle so we don't
                 imply the session is still "Running"/"Idle" under a pause gate. */}
-            {!sessionControlPaused(session) ? (
+            {!paused ? (
               waiting ? (
                 <StatusPill
                   className="border-border bg-surface text-fg-muted"

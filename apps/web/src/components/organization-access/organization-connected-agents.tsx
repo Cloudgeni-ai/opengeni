@@ -2,6 +2,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useMemo } from "react";
 
 import { apiBaseUrl } from "@/api";
+import type { AutoConnectApi } from "@/components/organization-access/auto-connect";
 import {
   ConnectedAgents,
   type ConnectedAgentsLocation,
@@ -35,6 +36,18 @@ export function OrganizationConnectedAgents({
     }),
     [client, organizationId],
   );
+  const autoConnect = useMemo<AutoConnectApi>(
+    () => ({
+      list: async () => await client.listMcpTrustedIssuers(organizationId),
+      check: async (request) => await client.checkMcpTrustedIssuer(organizationId, request),
+      create: async (request) => await client.createMcpTrustedIssuer(organizationId, request),
+      update: async (id, request) =>
+        await client.updateMcpTrustedIssuer(organizationId, id, request),
+      remove: async (id) => await client.deleteMcpTrustedIssuer(organizationId, id),
+      events: async (id) => await client.listMcpTrustedIssuerEvents(organizationId, id),
+    }),
+    [client, organizationId],
+  );
   // The workspaces this person can open here; a connected agent never reaches more.
   const workspaces = useMemo(
     () =>
@@ -61,6 +74,7 @@ export function OrganizationConnectedAgents({
       workspaces={workspaces}
       location={location}
       onNavigate={onNavigate}
+      autoConnect={{ organizationId, api: autoConnect }}
       {...(onCreateApiKey ? { onCreateApiKey } : {})}
     />
   );

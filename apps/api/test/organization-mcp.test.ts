@@ -266,6 +266,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         // Teams setup and account linking require the person's verified browser.
         "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
         "POST /v1/workspaces/:workspaceId/integrations/teams/link",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",

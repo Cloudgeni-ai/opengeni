@@ -16,7 +16,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { CdpConnection } from "../src/cdp";
-import { PAGE_NOT_ANSWERING_MESSAGE, PAGE_STILL_BUSY_MESSAGE } from "../src/cdp-driver";
+import { PAGE_NOT_ANSWERING_HIDDEN_MESSAGE, PAGE_NOT_ANSWERING_MESSAGE } from "../src/cdp-driver";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -362,7 +362,7 @@ e2e(
           actor: { kind: "agent", subjectId: "browserd-dialog-e2e" },
           action: { type: "handle_dialog", response: "dismiss" },
         }),
-      ).rejects.toThrow(PAGE_STILL_BUSY_MESSAGE);
+      ).rejects.toThrow(PAGE_NOT_ANSWERING_HIDDEN_MESSAGE);
       expect(bridge.activeTabId).toBe(tabId);
       expect(await bridge.pageCount()).toBe(pages);
       expect(await bridge.title(tabId)).toBe("busy");

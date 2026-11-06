@@ -465,7 +465,10 @@ import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
-import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import {
+  deploymentCannotConnect,
+  inChatCapabilitySetup,
+} from "@opengeni/contracts/personal-integration-setup";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
@@ -2521,10 +2524,11 @@ export function buildOpenGeniMcpServer(
           );
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
-        const agentRunUsageIdempotencyKey =
-          task.action.kind === "agent_turn"
-            ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
-            : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
+        const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+          grant.workspaceId,
+          task.id,
+          triggerToken,
+        );
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
         await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
@@ -7263,6 +7267,10 @@ function registerWorkspaceOrchestrationTools(
               reasoningEffort: result.reasoningEffort,
               latencyMode: result.latencyMode,
               effectiveFrom: result.effectiveFrom,
+              // The turn that was waiting for subscription capacity continues on this model now.
+              ...(result.releasedCapacityWaitTurnId
+                ? { capacityWaitingTurnContinuesNow: result.releasedCapacityWaitTurnId }
+                : {}),
             },
             nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
           }),
@@ -7905,6 +7913,17 @@ async function capabilitySetupProjection(
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  // The rule the Capabilities page uses to hide such entries: no card could
+  // finish a connection this deployment cannot start.
+  if (deploymentCannotConnect(item)) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        item.runtime.notes ??
+        "New connections to this integration are not available on this deployment.",
+    };
+  }
   if (item.surfaceType === "first_party_onepassword") {
     // 1Password is connected and its vaults linked in Settings > Secrets; the
     // agent reaches linked vaults through secret references, not tools.

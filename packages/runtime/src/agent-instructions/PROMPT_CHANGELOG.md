@@ -1,5 +1,89 @@
 # Modular prompt changelog
 
+Three pieces of text now follow state the session actually has. Compositions
+with the state keep their bytes (`modular-parity-lock.test.ts`; its
+"none-with-features" cases now include workspace connectors, a setup-card
+source, which adds no other text). Nothing was reworded.
+
+- `goal_resume` and the goals sentence that names it are sent to a configured
+  agent once the session has a goal, in any state, as frozen with the turn.
+  Before a goal exists the tool can only fail ("this session has no goal").
+  The tool stays for paused, active and completed goals, so pausing or
+  resuming never changes the tool list or the prompt. Legacy (unconfigured)
+  sessions are unchanged.
+- The "# Images and video" section is left out when the media capability is on
+  but the built agent attaches no image or video tool (no provider adapter,
+  runnable hosted image tool or video boundary). Prompt inspection without a
+  tool surface keeps it.
+- The blocked-tool sentence names a setup card only when the agent has a
+  capability whose tools show one (workspace admin, workspace connectors,
+  browser, or secrets with the question tool). A card a refused tool posts by itself carries its own
+  instructions in that tool's result.
+
+```text
+- Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.   (configured session with no goal)
+- # Images and video …   (media on, no media tool attached)
+- … offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
+```
+
+`request_human_input` says the same in fewer words, for every session. The
+system prompt is unchanged. In the embedding profile the tool falls from 588
+to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
+(legacy, top-level) from 1,179 to 1,070.
+
+- Description: the purpose sentence is shorter; "Supports free text,
+  single-select, multi-select, multiple questions, explicit skip policy, and
+  an optional expiry." is cut because the schema states each of these
+  (`kind`, `questions`, `allowSkip`, `expiresInSeconds`); the recommended,
+  preview, confirm and Other rules keep their meaning in fewer words; the
+  "Let the agent decide" sentence is cut because the tool result carries
+  `HUMAN_INPUT_AGENT_DECIDES_NOTE` exactly when it applies.
+- Parent-agent sentences (child sessions): "In a sub-session," is cut when
+  the caller says the session has a parent (`subSession: true`, which the
+  worker always sets from the frozen nested depth). A direct runtime caller
+  that leaves `subSession` out keeps the conditioned wording.
+- The secret sentences are unchanged.
+- Schema: `allowOther` is no longer sent (new choice questions are always
+  normalized to offer Other, and a text question that set it was rejected),
+  nor the `$schema` marker. The zod contract that validates calls is unchanged.
+- A session that started unattended still gets no tool and no question clause
+  (unchanged); the docs now point backends nobody answers at `unattended: true`.
+
+```text
+- Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.
++ Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.
+- In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
++ Your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
+```
+
+A tool result too large to show names only the tools the session has. The
+spilled-result notice names `files__files_get_download_url` and the shell only
+when the turn has compute and the Files server's download tool. Without both
+(and no placed copy), it says the result was saved, which reader is missing,
+and to call the tool again with narrower arguments if it can. Sessions with
+both readers get the same text as before.
+
+```text
++ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no download tool)
++ … but this session has no shell to read it with. …   (download tool, no shell)
+- If the file is not there, call files__files_get_download_url with fileId <fileId> and download it with the shell.   (placed copy, no download tool)
+```
+
+The search rule no longer assumes `rg` exists. Many user, task and Connected
+Machine images ship without ripgrep, and "`rg` … first" made the agent spend
+its first search on `rg: not found`. Nothing in a turn's prompt inputs says
+which search tools a machine has (the prompt can be composed before a lazy
+sandbox exists, and a machine's PATH can change), so the sentence names both
+paths in fixed text instead of detecting one: it is byte-identical on every
+backend and attachment. Legacy and modular compositions change the same way;
+their locks are updated.
+
+```text
+- Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.
++ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find` (`Select-String` in PowerShell). Until you know `rg` exists, choose in the same command, for example `if command -v rg >/dev/null; then rg -n PATTERN; else grep -rn PATTERN .; fi`.
+```
+
 A configured agent with nothing to wait for or run code in no longer carries
 that guidance, and two answer rules follow the features they describe. As
 before, only text for an absent feature is omitted: compositions with the

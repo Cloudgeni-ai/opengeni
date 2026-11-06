@@ -243,7 +243,10 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
     return new ReconnectingAttachedBridge(options, await connector(options), connector);
   }
 
-  async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+  async request<T = unknown>(
+    payload: Readonly<Record<string, unknown>>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<T> {
     if (this.stopped)
       throw new AttachedBrowserBridgeError(
         "transport_failed",
@@ -268,7 +271,7 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
       );
     }
     try {
-      return await client.request<T>(payload);
+      return await client.request<T>(payload, options);
     } catch (error) {
       if (client.closed && this.client === pending) this.client = null;
       throw error;
@@ -681,10 +684,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   /** Whether the tab is the one shown in its window. */
   async tabInFront(tabId: string): Promise<boolean> {
     if (this.stopped || this.failure) return false;
-    const listed = requireTabs(
-      (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
-    );
-    return listed.find((entry) => entry.id === tabId)?.active === true;
+    return (await this.tabShown(tabId)) === true;
   }
 
   /**
@@ -742,7 +742,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private async sendNow<T>(
     method: string,
     params: Readonly<Record<string, unknown>>,
-    options: { sessionId?: string },
+    options: { sessionId?: string; timeoutMs?: number },
   ): Promise<T> {
     try {
       if (options.sessionId) {
@@ -764,14 +764,19 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const attachment = this.tabAttachments.get(tabId);
         let response: { result: unknown };
         try {
-          response = await this.bridge.request<{ result: unknown }>({
-            type: "debugger.command",
-            tabId,
-            sessionId: nestedSessionId(options.sessionId),
-            ...(attachment === undefined ? {} : { attachment }),
-            method,
-            params,
-          });
+          // send() stops waiting at the command's own deadline; the bridge's
+          // pending request ends then too instead of at the connection's limit.
+          response = await this.bridge.request<{ result: unknown }>(
+            {
+              type: "debugger.command",
+              tabId,
+              sessionId: nestedSessionId(options.sessionId),
+              ...(attachment === undefined ? {} : { attachment }),
+              method,
+              params,
+            },
+            options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+          );
         } catch (error) {
           if (
             error instanceof AttachedBrowserBridgeError &&
@@ -888,6 +893,17 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       listeners.delete(listener);
       if (listeners.size === 0) this.listeners.delete(key);
     };
+  }
+
+  /** Whether the tab is the active one in its window, as Chrome reports it;
+   * null for a tab Chrome does not list. The extension has no single-tab
+   * lookup, so this lists the profile's tabs. */
+  async tabShown(targetId: string, options: { timeoutMs?: number } = {}): Promise<boolean | null> {
+    const listed = await withinTimeout(
+      this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" }, options),
+      options.timeoutMs,
+    );
+    return requireTabs(listed.tabs).find((tab) => tab.id === targetId)?.active ?? null;
   }
 
   /**
@@ -1624,6 +1640,28 @@ function tabUrl(value: unknown): string | null {
   return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
 }
 
+/** A bridge reply waited for no longer than the caller allowed, whichever
+ * bridge carries it. The command may still arrive or finish in Chrome. */
+async function withinTimeout<T>(reply: Promise<T>, timeoutMs: number | undefined): Promise<T> {
+  if (timeoutMs === undefined) return await reply;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
+        ),
+      Math.max(1, Math.ceil(timeoutMs)),
+    );
+  });
+  try {
+    return await Promise.race([reply, expired]);
+  } finally {
+    clearTimeout(timer);
+    reply.catch(() => undefined);
+  }
+}
+
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
   if (error instanceof InteractionControllerError) return error;
   if (error instanceof InteractionDefiniteDriverError) return error;
@@ -1841,6 +1879,7 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.resolveNode",
+  "Emulation.clearDeviceMetricsOverride",
   "DOMSnapshot.captureSnapshot",
   "Emulation.setFocusEmulationEnabled",
   "Inspector.enable",

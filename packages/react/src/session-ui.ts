@@ -69,6 +69,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";

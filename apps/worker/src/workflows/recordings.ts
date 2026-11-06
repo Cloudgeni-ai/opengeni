@@ -2,6 +2,7 @@ import {
   ActivityFailure,
   ApplicationFailure,
   continueAsNew,
+  patched,
   proxyActivities,
   sleep,
 } from "@temporalio/workflow";
@@ -68,7 +69,10 @@ const settleActivity = proxyActivities<Pick<typeof activities, "failRecordingTra
 });
 
 const deletionActivity = proxyActivities<
-  Pick<typeof activities, "deleteRecordingMedia" | "expireDictation">
+  Pick<
+    typeof activities,
+    "deleteRecordingMedia" | "expireDictation" | "archiveDeletedMeetingSummaries"
+  >
 >({
   startToCloseTimeout: "10 minutes",
   heartbeatTimeout: "2 minutes",
@@ -78,6 +82,11 @@ const deletionActivity = proxyActivities<
     maximumInterval: "1 hour",
     maximumAttempts: 50,
   },
+});
+
+const stopChatActivity = proxyActivities<Pick<typeof activities, "stopArchivedSessionWork">>({
+  startToCloseTimeout: "2 minutes",
+  retry: { initialInterval: "5 seconds", backoffCoefficient: 2, maximumInterval: "2 minutes" },
 });
 
 /**
@@ -186,6 +195,13 @@ export async function browserRecordingVideoWorkflow(
 export async function recordingDeletionWorkflow(
   input: RecordingDeletionWorkflowInput,
 ): Promise<void> {
+  // A deleted meeting's own summary chats are archived and stopped first, so
+  // one still waiting to run never wakes to a meeting that is gone.
+  if (patched("archive-deleted-meeting-summaries")) {
+    for (const archived of await deletionActivity.archiveDeletedMeetingSummaries(input)) {
+      await stopChatActivity.stopArchivedSessionWork(archived);
+    }
+  }
   await deletionActivity.deleteRecordingMedia(input);
 }
 

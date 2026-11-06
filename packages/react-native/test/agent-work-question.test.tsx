@@ -6,7 +6,9 @@ import { registerDom, renderComponent } from "../../react/test/render-hook";
 /*
  * The native timeline draws a question the parent agent answered as one quiet
  * row inside the turn's work, and keeps a person's answer in the conversation.
- * Host components are DOM stand-ins.
+ * An automation run is one plain line and its answer: never its instructions,
+ * nothing for a run with nothing to say, and no work row for a reader who
+ * never sees the agent's work. Host components are DOM stand-ins.
  */
 type Recorded = { props: Record<string, unknown>; clears: number };
 const inputs = new Map<string, Recorded>();
@@ -467,6 +469,129 @@ test("layout and programmatic momentum keep the answer start; a reader's scroll 
     // Sending resumes answer-start following rather than tail following.
     await view.rerender(<MessageTimeline events={events} followLatestSignal={1} />);
     expect(scrollOffsets.at(-1)).toBe(24);
+  } finally {
+    await view.unmount();
+  }
+});
+
+const INSTRUCTIONS = "Continue this conversation when a ticket is assigned to the signed-in user.";
+
+function automationRun(member: Record<string, unknown>, answer: string): SessionEvent[] {
+  sequence = 0;
+  return [
+    event(
+      "system.update.delivered",
+      {
+        members: [
+          {
+            id: "update-1",
+            kind: "scheduled_occurrence",
+            sourceId: "run-1",
+            classification: "info",
+            ...member,
+          },
+        ],
+      },
+      "run",
+    ),
+    event("turn.started", {}, "run"),
+    event("agent.toolCall.created", { id: "call-1", name: "get_ticket", arguments: {} }, "run"),
+    event("agent.toolCall.output", { id: "call-1", output: "{}" }, "run"),
+    event("agent.message.completed", { messageId: "m1", phase: "final", text: answer }, "run"),
+    event("turn.completed", {}, "run"),
+  ];
+}
+
+const named = {
+  summary: "Ticket assigned to you",
+  automation: {
+    name: "Ticket assigned to you",
+    eventSummaries: ["T-4907 Refund request"],
+    eventCount: 1,
+  },
+};
+
+const workRow = (container: HTMLElement) =>
+  [...container.querySelectorAll("button")].find((button) =>
+    /Worked for|Steps/.test(button.getAttribute("aria-label") ?? button.textContent ?? ""),
+  );
+
+test("an automation run reads as one line saying what happened, then the answer", async () => {
+  const view = await renderComponent(
+    <MessageTimeline events={automationRun(named, "Contoso wants a refund.")} />,
+  );
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Ticket assigned to you: T-4907 Refund request");
+    expect(text).toContain("Contoso wants a refund.");
+    expect(text).not.toContain("Continue this conversation");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an older run never shows its instructions", async () => {
+  const view = await renderComponent(
+    <MessageTimeline events={automationRun({ summary: INSTRUCTIONS }, "Done.")} />,
+  );
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Automation run");
+    expect(text).not.toContain("Continue this conversation");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a run with nothing for the person is not drawn", async () => {
+  const view = await renderComponent(<MessageTimeline events={automationRun(named, "NO_REPLY")} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("Ticket assigned to you");
+    expect(text).not.toContain("NO_REPLY");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("without agent signals there is no work row under the line", async () => {
+  const events = automationRun(named, "Contoso wants a refund.");
+  const full = await renderComponent(<MessageTimeline events={events} />);
+  try {
+    expect(workRow(full.container)).toBeDefined();
+  } finally {
+    await full.unmount();
+  }
+  const simple = await renderComponent(<MessageTimeline events={events} agentSignals={false} />);
+  try {
+    expect(workRow(simple.container)).toBeUndefined();
+    const text = simple.container.textContent ?? "";
+    expect(text).toContain("Ticket assigned to you: T-4907 Refund request");
+    expect(text).toContain("Contoso wants a refund.");
+  } finally {
+    await simple.unmount();
+  }
+});
+
+test("an ID in what the event says goes with its label, never leaving it dangling", async () => {
+  const withId = {
+    summary: "Ticket assigned to you",
+    automation: {
+      name: "Ticket assigned to you",
+      eventSummaries: [
+        "T-4907 Refund request. Organisation: 3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c.",
+      ],
+      eventCount: 1,
+    },
+  };
+  const view = await renderComponent(
+    <MessageTimeline events={automationRun(withId, "Contoso wants a refund.")} />,
+  );
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Ticket assigned to you: T-4907 Refund request.");
+    expect(text).not.toContain("Organisation");
+    expect(text).not.toContain("3f2b8c1e");
   } finally {
     await view.unmount();
   }

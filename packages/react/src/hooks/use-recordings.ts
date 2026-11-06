@@ -588,6 +588,26 @@ function isProcessing(recording: Recording | null | undefined): boolean {
   return recording.state === "processing" || state === "queued" || state === "processing";
 }
 
+/** How long after a meeting ends its audio is waited for once the transcript is ready. */
+const AUDIO_KEPT_WAIT_MS = 10 * 60_000;
+
+/**
+ * The transcript is ready but an audio track is still being kept as its
+ * compact playable file, which the worker writes beside the transcript.
+ */
+export function isKeepingRecordingAudio(
+  recording: Recording | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!recording || recording.state !== "ready" || recording.purpose !== "meeting") return false;
+  if (recording.audioDeletedAt) return false;
+  const ended = Date.parse(recording.captureEndedAt ?? recording.updatedAt);
+  if (!Number.isFinite(ended) || now - ended > AUDIO_KEPT_WAIT_MS) return false;
+  return recording.tracks.some(
+    (track) => track.kind === "audio" && track.chunkCount > 0 && !track.playable,
+  );
+}
+
 /**
  * The recordings the signed-in person can see, newest first. Polls while any is
  * being transcribed, and less often while any is still being recorded.
@@ -726,9 +746,10 @@ export function useRecording(
     isProcessing(recording) ||
     versions.some((version) => version.state === "queued" || version.state === "processing");
   useRefreshWhile(
-    enabled && (nowProcessing || recording?.state === "capturing"),
+    enabled &&
+      (nowProcessing || recording?.state === "capturing" || isKeepingRecordingAudio(recording)),
     state.refresh,
-    nowProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
+    nowProcessing || isKeepingRecordingAudio(recording) ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
   );
   const refresh = state.refresh;
   const require = () => {

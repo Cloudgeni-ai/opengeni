@@ -41,6 +41,7 @@ import {
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
+  type DictationProvider,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import {
@@ -59,6 +60,7 @@ import {
   listRecordingTranscriptPieceResults,
   listStalledRecordingWork,
   listUncompactedRecordingTracks,
+  listUntouchedMeetingSummarySessions,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
@@ -68,6 +70,8 @@ import {
   recordingPreparedTrackObjectKey,
   recordingSpeakerScanObjectKey,
   RecordingNotFoundError,
+  requestSessionArchive,
+  SessionArchiveBlockedError,
   recordingVoiceChannel,
   saveRecordingTranscriptPieceResult,
   setRecordingTrackPrepared,
@@ -83,7 +87,6 @@ import {
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceVoiceInputEnabled,
   DICTATION_RETENTION_MILLISECONDS,
-  TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
   WorkspaceVoiceInputSettings,
 } from "@opengeni/contracts";
 import {
@@ -110,12 +113,14 @@ import {
   RecordingAudioError,
   RECORDING_PIECE_BYTES_PER_SECOND,
   renderRecordingAudioPiece,
+  SPEECH_PCM_FORMAT,
   transcodeRecordingAudio,
   type RecordingPieceFormat,
 } from "./recording-audio";
 import { mapConcurrently } from "./concurrently";
 import {
   DICTATION_PIECE_CONCURRENCY,
+  DICTATION_PIECES,
   dictationPiecePlan,
   pcmWavPiece,
   planDictationPieces,
@@ -295,6 +300,7 @@ function shiftWords(
 
 /** The prepared formats as a model names them. */
 function preparedPieceFormat(extension: string): RecordingPieceFormat {
+  if (extension === "wav") return "wav";
   return extension === "m4a" ? "mp4" : "webm";
 }
 
@@ -548,6 +554,33 @@ async function alignPiece(
 }
 
 /**
+ * The longest dictation piece every model that may hear it takes in one
+ * request, by length and by the size of a 16 kHz WAV piece (the largest
+ * form a piece is sent in), capped by the service's own limits.
+ */
+export function dictationPieceLimitMilliseconds(
+  providers: readonly DictationProvider[],
+  service: { maxDurationSeconds: number; maxSizeBytes: number },
+): number {
+  const wavBytesPerSecond = RECORDING_PIECE_BYTES_PER_SECOND.wav!;
+  const bytesToMilliseconds = (bytes: number) =>
+    Math.floor(((bytes * 0.9) / wavBytesPerSecond) * 1_000);
+  const limits = [
+    service.maxDurationSeconds * 1_000,
+    bytesToMilliseconds(service.maxSizeBytes),
+    ...providers.flatMap(({ model }) => [
+      ...(model.capabilities.maxDurationSeconds === null
+        ? []
+        : [model.capabilities.maxDurationSeconds * 1_000]),
+      ...(model.capabilities.maxFileBytes === null
+        ? []
+        : [bytesToMilliseconds(model.capabilities.maxFileBytes)]),
+    ]),
+  ];
+  return Math.min(...limits);
+}
+
+/**
  * The format a model is sent a track in (null keeps the prepared one) and
  * the longest piece it takes in one request.
  */
@@ -562,7 +595,12 @@ function pieceShape(
   const source = preparedPieceFormat(extension);
   const accepted = spec.audioFormats;
   let format: RecordingPieceFormat | null = null;
-  if (accepted && !accepted.includes(source)) {
+  if (source === "wav" && (!accepted || accepted.includes("flac"))) {
+    // The same samples in half the upload, and quick to write: FLAC of an
+    // hour takes seconds, where Opus takes most of a minute. A model that
+    // names no formats takes FLAC like any other speech API.
+    format = "flac";
+  } else if (accepted && !accepted.includes(source)) {
     format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
     if (!format) throw new PermanentRecordingFailure("model_unavailable");
   } else if (!accepted && source === "mp4") {
@@ -572,7 +610,7 @@ function pieceShape(
     format = "webm";
   }
   const { maxDurationSeconds, maxFileBytes } = spec.capabilities;
-  const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
+  const bytesPerSecond = RECORDING_PIECE_BYTES_PER_SECOND[format ?? source];
   const limits = [
     maxDurationSeconds === null ? null : maxDurationSeconds * 1_000,
     // Converted audio has a known rate; keep a tenth spare under the file limit.
@@ -635,6 +673,22 @@ function meetingCharge(
 async function everyTrack(work: ReadonlyArray<Promise<void>>): Promise<void> {
   const settled = await Promise.allSettled(work);
   for (const result of settled) if (result.status === "rejected") throw result.reason;
+}
+
+/**
+ * One uploaded chunk's bytes. With `read`, a chunk is downloaded once for
+ * everything made from the track's pieces in this attempt.
+ */
+async function readTrackChunk(
+  storage: ObjectStorage,
+  chunk: { chunkNumber: number; objectKey: string },
+  read?: Map<number, Uint8Array>,
+): Promise<Uint8Array | null> {
+  const known = read?.get(chunk.chunkNumber);
+  if (known) return known;
+  const bytes = (await storage.getObjectBytes(chunk.objectKey))?.bytes ?? null;
+  if (bytes && read) read.set(chunk.chunkNumber, bytes);
+  return bytes;
 }
 
 /** A meeting that sent no audio for this long is not scanned until it does. */
@@ -720,7 +774,13 @@ export function createRecordingActivities(
         settings,
         service: options.dictationTranscription
           ? options.dictationTranscription(settings, db)
-          : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
+          : createTranscriptionService({
+              settings,
+              db,
+              deployment: deploymentFor(settings, db),
+              // A dictation's piece may be longer than a one-shot dictation.
+              maxDurationSeconds: DICTATION_PIECES.maxMilliseconds / 1_000,
+            }),
       };
     }
     return defaultDictation;
@@ -834,6 +894,11 @@ export function createRecordingActivities(
       ourDiarizerFailed: false,
       alignment: null,
     };
+    /**
+     * Meeting tracks' kept copies being written beside the transcript, each
+     * its kept file once written; the attempt ends after them.
+     */
+    const keeping: Array<Promise<{ trackNumber: number; objectKey: string } | null>> = [];
     let finished: RecordingTranscriptOutcome | null = null;
     let retryCode = "unknown";
     // Set once the transcript is being charged and saved. From then on the
@@ -862,6 +927,36 @@ export function createRecordingActivities(
       throw error;
     } finally {
       clearTimeout(budgetTimer);
+      // The transcript is out; its tracks' kept copies are finished before
+      // the attempt ends, so none is left half written for the next one.
+      // Once the transcript is settled the uploaded pieces they replace go;
+      // a retry still needs them to decode the very same samples.
+      if (keeping.length > 0) {
+        const kept = await withHeartbeat(() => Promise.all(keeping));
+        if (finished && finished.outcome !== "skipped" && objectStorage) {
+          for (const track of kept) {
+            if (!track) continue;
+            await withHeartbeat(() =>
+              deleteTrackChunkObjects({
+                db,
+                objectStorage,
+                actor,
+                recordingId: input.recordingId,
+                trackNumber: track.trackNumber,
+                objectKey: track.objectKey,
+              }),
+            ).catch((error: unknown) => {
+              // The retention sweep deletes them later.
+              observability.warn("couldn't delete a kept track's uploaded pieces", {
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                trackNumber: track.trackNumber,
+                error: errorMessage(error),
+              });
+            });
+          }
+        }
+      }
       reportRecordingProcessing(
         observability,
         {
@@ -881,6 +976,95 @@ export function createRecordingActivities(
           versionId: input.versionId,
         },
       );
+    }
+
+    /**
+     * A meeting track as speech PCM: from its uploaded pieces while they
+     * exist, starting its kept copy from the same downloaded pieces beside
+     * the transcript, otherwise from its kept audio. The pieces stay until
+     * this attempt's transcript is settled, so a retry decodes exactly the
+     * same samples and reuses every piece already heard.
+     */
+    async function speechTrackAudio(
+      keep: Omit<Parameters<typeof preparedTrackAudio>[0], "signal" | "chunkBytes" | "keepChunks">,
+      signal: AbortSignal,
+    ): Promise<{
+      bytes: Uint8Array;
+      mimeType: string;
+      extension: string;
+      durationMilliseconds: number;
+    }> {
+      const decoded = async (bytes: Uint8Array, extension: string) => {
+        const pcm = await transcodeRecordingAudio({
+          audio: { bytes, extension },
+          format: SPEECH_PCM_FORMAT,
+          ffmpegPath: settings.voiceInputFfmpegPath,
+          signal,
+        });
+        return {
+          bytes: pcm.bytes,
+          mimeType: pcm.mimeType,
+          extension: pcm.extension,
+          durationMilliseconds: pcm.durationMilliseconds ?? keep.knownDurationMilliseconds,
+        };
+      };
+      heartbeat({ phase: "preparing", trackNumber: keep.trackNumber });
+      const fromKept = async (chunkBytes?: Map<number, Uint8Array>) => {
+        const stored = await preparedTrackAudio({ ...keep, signal, chunkBytes });
+        telemetry.preparedBytes += stored.storedBytes;
+        return await decoded(stored.bytes, stored.extension);
+      };
+      const existing = await getRecordingTrackPreparedObject(keep.db, {
+        ...keep.actor,
+        recordingId: keep.recordingId,
+        trackNumber: keep.trackNumber,
+      });
+      // A re-run, or a track kept compact already: only its kept audio is left.
+      if (existing?.chunkObjectsDeleted) return await fromKept();
+      const chunkBytes = new Map<number, Uint8Array>();
+      let pcm: Awaited<ReturnType<typeof prepareRecordingTrackAudio>>;
+      try {
+        pcm = await prepareRecordingTrackAudio({
+          chunks: keep.chunks,
+          mimeType: keep.mimeType,
+          format: SPEECH_PCM_FORMAT,
+          ffmpegPath: settings.voiceInputFfmpegPath,
+          signal,
+          onProgress: () => heartbeat({ phase: "preparing", trackNumber: keep.trackNumber }),
+          readChunk: (chunk) => readTrackChunk(keep.objectStorage, chunk, chunkBytes),
+        });
+      } catch (error) {
+        // The pieces went meanwhile: another worker kept the track compact.
+        if (!(error instanceof RecordingAudioError) || error.code !== "missing_chunk") throw error;
+        return await fromKept(chunkBytes);
+      }
+      // Only the worker stopping stops it, never the transcript's budget:
+      // the audio is kept whatever becomes of the transcript.
+      keeping.push(
+        preparedTrackAudio({ ...keep, signal: cancellation(), chunkBytes, keepChunks: true }).then(
+          (stored) => {
+            telemetry.preparedBytes += stored.storedBytes;
+            return { trackNumber: keep.trackNumber, objectKey: keptTrackObjectKey(keep) };
+          },
+          (error: unknown) => {
+            // Its pieces stay, so the next version or the retention sweep keeps it.
+            observability.warn("couldn't keep a meeting track's compact audio yet", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              versionId: input.versionId,
+              trackNumber: keep.trackNumber,
+              error: errorMessage(error),
+            });
+            return null;
+          },
+        ),
+      );
+      return {
+        bytes: pcm.bytes,
+        mimeType: pcm.mimeType,
+        extension: pcm.extension,
+        durationMilliseconds: pcm.durationMilliseconds,
+      };
     }
 
     /**
@@ -1040,15 +1224,22 @@ export function createRecordingActivities(
               });
             },
           });
-        // Every track's audio is prepared before any is transcribed, so the
-        // whole meeting is playable within seconds of the recording ending.
-        // Transcribing one track can take many minutes, and a player with only
-        // the first track meanwhile looks like the rest was never recorded.
+        // Every track is decoded once, straight to the speech PCM it is
+        // heard, told apart and searched for sound in: seconds even for an
+        // hour. Its compact kept copy takes most of a minute to encode for
+        // an hour, so it is written beside the transcript from the same
+        // downloaded pieces, and the transcript never waits for it. Until it
+        // is kept the player waits and the uploaded pieces stay.
         const prepared: Array<{
           plan: (typeof plans)[number];
           track: (typeof job.recording.tracks)[number];
           offsetMilliseconds: number;
-          audio: Awaited<ReturnType<typeof preparedTrackAudio>>;
+          audio: {
+            bytes: Uint8Array;
+            mimeType: string;
+            extension: string;
+            durationMilliseconds: number;
+          };
         }> = [];
         // Tracks are prepared, then transcribed, side by side: the worker has
         // the cores, and a meeting with computer audio has two.
@@ -1060,26 +1251,25 @@ export function createRecordingActivities(
             const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
             if (chunks.length === 0) return;
             const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+            const keep = {
+              db,
+              objectStorage,
+              settings,
+              actor,
+              recordingId: input.recordingId,
+              trackNumber: plan.trackNumber,
+              mimeType: track.mimeType,
+              chunks,
+              offsetMilliseconds,
+              knownDurationMilliseconds: Math.max(
+                0,
+                track.durationMilliseconds - offsetMilliseconds,
+              ),
+              store: true,
+            };
             const audio = await measureRecordingStage("prepare", () =>
-              preparedTrackAudio({
-                db,
-                objectStorage,
-                settings,
-                actor,
-                recordingId: input.recordingId,
-                trackNumber: plan.trackNumber,
-                mimeType: track.mimeType,
-                chunks,
-                offsetMilliseconds,
-                knownDurationMilliseconds: Math.max(
-                  0,
-                  track.durationMilliseconds - offsetMilliseconds,
-                ),
-                signal,
-                store: true,
-              }),
+              speechTrackAudio(keep, signal),
             );
-            telemetry.preparedBytes += audio.storedBytes;
             prepared.push({ plan, track, offsetMilliseconds, audio });
           }),
         );
@@ -1456,58 +1646,81 @@ export function createRecordingActivities(
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
-        const providerSegmentMilliseconds =
-          Math.min(TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS, service.limits().maxDurationSeconds) *
-          1_000;
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
         // A dictation that named its model (a desktop shortcut's own) is heard
         // by exactly that model, never another provider's.
         const named = claimed.recording.transcription?.providerId
           ? { providerId: claimed.version.providerId, model: claimed.version.model }
           : null;
+        const plan = dictationPiecePlan(
+          dictationPieceLimitMilliseconds(
+            named ? offered.filter((provider) => provider.id === named.providerId) : offered,
+            service.limits(),
+          ),
+        );
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
-        // Decoded once to 16 kHz PCM, then cut at the speaker's pauses.
-        const { wav, pieces } = await measureRecordingStage("segment", async () => {
-          const rendered = await renderRecordingAudioPiece({
-            audio: { bytes: audio.bytes, extension: audio.extension },
-            startMilliseconds: 0,
-            endMilliseconds: audio.durationMilliseconds,
-            whole: true,
-            format: "wav",
-            ffmpegPath: settings.voiceInputFfmpegPath,
-            signal,
-          });
-          const decoded = readPcmWav(rendered.bytes);
-          if (!decoded) throw new PermanentRecordingFailure("invalid_audio");
-          const cuts = planDictationPieces(
-            decoded,
-            dictationPiecePlan(providerSegmentMilliseconds),
-          );
-          return {
-            wav: decoded,
-            pieces: cuts.slice(1).flatMap((end, index) => {
-              const start = cuts[index]!;
-              return end > start
-                ? [{ segmentNumber: index, startSample: start, endSample: end }]
-                : [];
-            }),
-          };
-        });
-        const perMillisecond = wav.sampleRate / 1_000;
+        // A dictation short enough to be heard whole goes out as recorded,
+        // compressed, in one request. A longer one is decoded once to 16 kHz
+        // PCM and cut at the speaker's pauses.
+        const pieces: Array<{
+          segmentNumber: number;
+          bytes: Uint8Array;
+          mimeType: string;
+          startMilliseconds: number;
+          durationMilliseconds: number;
+        }> =
+          audio.durationMilliseconds <= plan.wholeMilliseconds
+            ? [
+                {
+                  segmentNumber: 0,
+                  bytes: audio.bytes,
+                  mimeType: audio.mimeType,
+                  startMilliseconds: 0,
+                  durationMilliseconds: audio.durationMilliseconds,
+                },
+              ]
+            : await measureRecordingStage("segment", async () => {
+                const rendered = await renderRecordingAudioPiece({
+                  audio: { bytes: audio.bytes, extension: audio.extension },
+                  startMilliseconds: 0,
+                  endMilliseconds: audio.durationMilliseconds,
+                  whole: true,
+                  format: "wav",
+                  ffmpegPath: settings.voiceInputFfmpegPath,
+                  signal,
+                });
+                const wav = readPcmWav(rendered.bytes);
+                if (!wav) throw new PermanentRecordingFailure("invalid_audio");
+                const perMillisecond = wav.sampleRate / 1_000;
+                const cuts = planDictationPieces(wav, plan);
+                return cuts.slice(1).flatMap((end, index) => {
+                  const start = cuts[index]!;
+                  return end > start
+                    ? [
+                        {
+                          segmentNumber: index,
+                          bytes: pcmWavPiece(wav, start, end),
+                          mimeType: "audio/wav",
+                          startMilliseconds: start / perMillisecond,
+                          durationMilliseconds: (end - start) / perMillisecond,
+                        },
+                      ]
+                    : [];
+                });
+              });
         // Every piece is heard at once, so a long dictation is ready about as
         // soon as its longest piece is.
         const heardPieces = await withHeartbeat(() =>
           mapConcurrently(pieces, DICTATION_PIECE_CONCURRENCY, async (piece) => {
-            const bytes = pcmWavPiece(wav, piece.startSample, piece.endSample);
-            const durationMilliseconds = (piece.endSample - piece.startSample) / perMillisecond;
+            const { durationMilliseconds } = piece;
             const result = await measureRecordingStage("transcribe", () =>
               service.transcribe({
                 workspaceId: input.workspaceId,
                 accountId: input.accountId,
                 subjectId: input.ownerSubjectId,
-                audio: bytes,
-                mimeType: "audio/wav",
+                audio: piece.bytes,
+                mimeType: piece.mimeType,
                 durationSeconds: durationMilliseconds / 1_000,
                 // The language the dictation was started in; detected when none.
                 ...(claimed.version.options.language
@@ -1539,7 +1752,7 @@ export function createRecordingActivities(
             return {
               result,
               durationMilliseconds,
-              startMilliseconds: piece.startSample / perMillisecond,
+              startMilliseconds: piece.startMilliseconds,
             };
           }),
         );
@@ -1679,6 +1892,48 @@ export function createRecordingActivities(
     }
   }
 
+  /** Where a track's kept audio is stored, in the current kept format. */
+  function keptTrackObjectKey(input: {
+    actor: { workspaceId: string };
+    recordingId: string;
+    trackNumber: number;
+  }): string {
+    return recordingPreparedTrackObjectKey({
+      workspaceId: input.actor.workspaceId,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+      extension: `${KEPT_AUDIO_REVISION}.${ARCHIVAL_AUDIO_FORMAT.extension}`,
+    });
+  }
+
+  /**
+   * The track's kept audio when it is already in the current kept format,
+   * deleting uploaded pieces an earlier attempt left unless `keepChunks`;
+   * null otherwise.
+   */
+  async function currentKeptTrackAudio(input: {
+    db: Database;
+    objectStorage: ObjectStorage;
+    actor: { workspaceId: string; subjectId: string };
+    recordingId: string;
+    trackNumber: number;
+    keepChunks?: boolean | undefined;
+  }): Promise<Uint8Array | null> {
+    const objectKey = keptTrackObjectKey(input);
+    const existing = await getRecordingTrackPreparedObject(input.db, {
+      ...input.actor,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+    });
+    if (existing?.objectKey !== objectKey) return null;
+    const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
+    if (!stored || stored.bytes.byteLength !== existing.bytes) return null;
+    if (!existing.chunkObjectsDeleted && !input.keepChunks) {
+      await deleteTrackChunkObjects({ ...input, objectKey });
+    }
+    return stored.bytes;
+  }
+
   /**
    * The track's prepared file. A meeting's is its kept audio
    * (`ARCHIVAL_AUDIO_FORMAT`): reused when an earlier version made it,
@@ -1710,6 +1965,10 @@ export function createRecordingActivities(
     knownDurationMilliseconds: number;
     signal: AbortSignal | undefined;
     store: boolean;
+    /** Chunks already read for this track, by number; read ones are added. */
+    chunkBytes?: Map<number, Uint8Array> | undefined;
+    /** Leave the uploaded pieces; whoever asked deletes them later. */
+    keepChunks?: boolean | undefined;
   }): Promise<{
     bytes: Uint8Array;
     mimeType: string;
@@ -1728,8 +1987,7 @@ export function createRecordingActivities(
         ffmpegPath: input.settings.voiceInputFfmpegPath,
         signal: input.signal,
         onProgress: () => heartbeat({ phase: "preparing", trackNumber: input.trackNumber }),
-        readChunk: async (chunk) =>
-          (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
+        readChunk: (chunk) => readTrackChunk(input.objectStorage, chunk, input.chunkBytes),
       });
     if (!input.store) {
       heartbeat({ phase: "preparing", trackNumber: input.trackNumber });
@@ -1741,28 +1999,18 @@ export function createRecordingActivities(
       recordingId: input.recordingId,
       trackNumber: input.trackNumber,
     };
-    const objectKey = recordingPreparedTrackObjectKey({
-      workspaceId: input.actor.workspaceId,
-      recordingId: input.recordingId,
-      trackNumber: input.trackNumber,
-      extension: `${KEPT_AUDIO_REVISION}.${format.extension}`,
-    });
-    const existing = await getRecordingTrackPreparedObject(input.db, track);
-    if (existing?.objectKey === objectKey) {
-      const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
-      if (stored && stored.bytes.byteLength === existing.bytes) {
-        if (!existing.chunkObjectsDeleted) {
-          await deleteTrackChunkObjects({ ...input, objectKey });
-        }
-        return {
-          bytes: stored.bytes,
-          mimeType: format.mimeType,
-          extension: format.extension,
-          durationMilliseconds: input.knownDurationMilliseconds,
-          storedBytes: 0,
-        };
-      }
+    const objectKey = keptTrackObjectKey(input);
+    const current = await currentKeptTrackAudio(input);
+    if (current) {
+      return {
+        bytes: current,
+        mimeType: format.mimeType,
+        extension: format.extension,
+        durationMilliseconds: input.knownDurationMilliseconds,
+        storedBytes: 0,
+      };
     }
+    const existing = await getRecordingTrackPreparedObject(input.db, track);
     heartbeat({ phase: "preparing", trackNumber: input.trackNumber });
     /** The old kept file, written again in the kept format, when the pieces are gone. */
     const fromKept = async (kept: { objectKey: string }) => {
@@ -1850,7 +2098,7 @@ export function createRecordingActivities(
     if (existing && existing.objectKey !== objectKey) {
       await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
-    await deleteTrackChunkObjects({ ...input, objectKey });
+    if (!input.keepChunks) await deleteTrackChunkObjects({ ...input, objectKey });
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }
 
@@ -1912,6 +2160,9 @@ export function createRecordingActivities(
       const audio = await prepareRecordingTrackAudio({
         chunks: contiguous,
         mimeType: track.mimeType,
+        // Decoded only: re-encoding an hour of audio for each scan took most
+        // of a minute, and the speaker models hear 16 kHz PCM anyway.
+        format: SPEECH_PCM_FORMAT,
         ffmpegPath: settings.voiceInputFfmpegPath,
         signal,
         onProgress: () => heartbeat({ phase: "scanning", trackNumber: track.trackNumber }),
@@ -2031,6 +2282,48 @@ export function createRecordingActivities(
       throw error;
     }
     return await deleteRecordingMedia(input);
+  }
+
+  /**
+   * Archive a deleted meeting's built-in summary chats that nobody wrote in,
+   * as the meeting's owner. A summary chat still waiting to run (for model
+   * capacity, say) would otherwise wake to a meeting that is gone, and a
+   * finished one would keep pointing at it. Returns each Archive, so the
+   * workflow stops the work still running in those chats now; the archiver
+   * stores them later as usual. Repeating it finds nothing new.
+   */
+  async function archiveDeletedMeetingSummaries(input: RecordingWorkInput): Promise<
+    Array<{
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      subjectId: string;
+      archivedAt: string;
+    }>
+  > {
+    const { db } = await services();
+    const sessionIds = await listUntouchedMeetingSummarySessions(db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.ownerSubjectId,
+      recordingId: input.recordingId,
+    });
+    const archived = [];
+    for (const sessionId of sessionIds) {
+      const scope = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId,
+        subjectId: input.ownerSubjectId,
+      };
+      try {
+        const request = await requestSessionArchive(db, scope);
+        if (request) archived.push({ ...scope, archivedAt: request.archivedAt.toISOString() });
+      } catch (error) {
+        // A chat kept live on purpose stays; the meeting is deleted anyway.
+        if (!(error instanceof SessionArchiveBlockedError)) throw error;
+      }
+    }
+    return archived;
   }
 
   /**
@@ -2187,8 +2480,6 @@ export function createRecordingActivities(
     const due = await listUncompactedRecordingTracks(db, {
       keptSuffix: KEPT_AUDIO_SUFFIX,
     });
-    // Null until the inventory's runtime grant ships (migration 1240).
-    if (due === null) return result;
     result.found = due.length;
     for (const item of due) {
       if (Date.now() >= deadline) break;
@@ -2257,6 +2548,7 @@ export function createRecordingActivities(
     transcribeRecordingVersion,
     scanRecordingSpeakers,
     failRecordingTranscript,
+    archiveDeletedMeetingSummaries,
     deleteRecordingMedia,
     expireDictation,
     recoverRecordingWorkflows,

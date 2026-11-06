@@ -90,8 +90,20 @@ async function archiveChat(input: {
         select account_id from workspaces where id = ${input.workspaceId}`
     )[0]!.account_id;
   const scope = { accountId, workspaceId: input.workspaceId, sessionId: input.sessionId };
+  // These fixtures archive whole trees on purpose, sub-chats at work included.
+  const tree = await admin<{ id: string }[]>`
+    select id from sessions where workspace_id = ${input.workspaceId}
+      and root_session_id = ${input.sessionId}`;
   return input.archived
-    ? await requestSessionArchive(db, { ...scope, subjectId: input.subjectId }, input.now)
+    ? await requestSessionArchive(
+        db,
+        {
+          ...scope,
+          subjectId: input.subjectId,
+          confirmActiveSubChats: tree.map((row) => row.id),
+        },
+        input.now,
+      )
     : await undoSessionArchive(db, scope, input.now);
 }
 

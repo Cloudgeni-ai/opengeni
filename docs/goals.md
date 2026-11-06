@@ -227,6 +227,10 @@ A goal is `active`, `paused`, or `completed`.
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  A session with an agent configuration receives it once it has a goal, in
+  any state, as frozen with the turn: before that the tool could only fail, so
+  neither it nor its prompt sentence is sent. Pausing or resuming a goal never
+  changes the tool list, so the cached prompt stays the same across both.
   The agent is told to resume only when the user asks it to continue or the
   blocker it paused for has cleared. A user's question alone is not a reason:
   the agent answers it and leaves the goal paused. An active goal still
@@ -589,7 +593,7 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset - no cap)_ | Optional hard ceiling on consecutive no-input continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower; reaching it pauses the goal until new external input resumes it. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
-| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
+| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `true` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity` for a long capacity wait, `child_progress`) for parent sessions. Set it to false only while a fleet still runs an image from before August 2026, which does not understand the kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
 
 
 ### Interpreting wake delivery

@@ -85,7 +85,7 @@ import {
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { mergeResourceRefs } from "../common";
 import {
-  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyDefaultServers,
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
@@ -108,7 +108,7 @@ import {
   recordToolPreparationPhase,
   recordTurnStartupPhase,
 } from "../../observability-metrics";
-import { ToolResultSpill } from "./tool-result-spill";
+import { ToolResultSpill, spilledToolResultReadersForTurn } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { turnToolRouterExpected } from "./tool-router-expectation";
@@ -125,7 +125,11 @@ import {
 } from "@opengeni/contracts";
 
 import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
-import { unavailableMcpOperationalContext } from "./errors";
+import {
+  unavailableMcpConnectorReasonText,
+  unavailableMcpOperationalContext,
+  type UnavailableMcpConnector,
+} from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { shouldDeferNonEagerToolPreparation } from "./tool-policy";
@@ -231,6 +235,8 @@ export type PrepareTurnToolRuntimeDeps = {
   /** Hosted paid tools would run on Opengeni's bill; provider web tools replace hosted search. */
   hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
+  /** Configured connectors the tool policy already left out of this turn. */
+  unavailableMcpConnectors: PrepareTurnToolPolicyOk["unavailableMcpConnectors"];
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -309,24 +315,22 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   // sessions follow the current configured MCP set,
   // while explicit, inherited-fixed, and legacy sessions remain narrowed
   // to their stored materialized allow-list.
+  const scheduledMcpServerIds = scheduledTurnMcpServerIds(turn);
+  const workspaceDefaults =
+    scheduledMcpServerIds === null && session.toolPolicy.mode === "workspace_default"
+      ? await workspaceSessionToolPolicyDefaultServers(
+          db,
+          input.workspaceId,
+          capabilitySettings,
+          fileAuthoritySubjectId ?? undefined,
+        )
+      : [];
   const resolvedToolPolicy = resolveTurnToolPolicy({
     toolPolicy: session.toolPolicy,
     session,
     turn,
     availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
-    defaultMcpServerIds:
-      scheduledTurnMcpServerIds(turn) === null && session.toolPolicy.mode === "workspace_default"
-        ? await workspaceSessionToolPolicyDefaultServerIds(
-            db,
-            input.workspaceId,
-            capabilitySettings,
-            fileAuthoritySubjectId ?? undefined,
-          )
-        : [],
-  });
-  const mcpAvailabilityNote = unavailableMcpOperationalContext({
-    droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
-    droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
+    defaultMcpServerIds: workspaceDefaults.map((server) => server.id),
   });
   const families = resolveAgentToolFamilies(session.agent, {
     productServerIds: new Set([
@@ -339,6 +343,15 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   const effectivePolicyTools = resolvedToolPolicy.toolRefs.filter(
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
+  const unavailableMcpConnectors = unavailableMcpConnectorsForPolicy({
+    session,
+    scheduledMcpServerIds,
+    workspaceDefaults,
+    availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
+    droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
+    droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
+    allowsMcpServer: (id) => families.allowsMcpServer(id),
+  });
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // Nothing user-defined is injected into the sandbox environment. User
   // secrets reach a command only through `{{secret:…}}` references resolved at
@@ -351,9 +364,54 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     turnResources,
     runtimeResources,
     repositoryRemoval,
-    mcpAvailabilityNote,
+    unavailableMcpConnectors,
     turnTools,
     connectionScope,
+  };
+}
+
+/** Opengeni's own servers are not connectors a person configures. */
+const BUILT_IN_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files", "docs"]);
+
+/**
+ * Configured connectors the tool policy leaves out of this turn because they
+ * are not in its registry: a selected connector that is gone (`droppedIds`),
+ * and a workspace default (or a scheduled run's frozen connector) that this
+ * turn's registry lacks although it is configured for the chat. The second
+ * used to vanish without a word, because defaults absent from the registry
+ * never entered the effective selection. Connectors the agent configuration
+ * itself does not allow are not reported: they were never meant to be here.
+ */
+export function unavailableMcpConnectorsForPolicy(input: {
+  session: Pick<ClaimTurnOk["session"], "toolPolicy" | "mcpServers">;
+  scheduledMcpServerIds: readonly string[] | null;
+  workspaceDefaults: readonly { id: string; name: string | undefined }[];
+  availableMcpServerIds: readonly string[];
+  droppedIds: readonly string[];
+  droppedCount: number;
+  allowsMcpServer: (id: string) => boolean;
+}): { connectors: UnavailableMcpConnector[]; omittedCount: number } {
+  const available = new Set(input.availableMcpServerIds);
+  const names = new Map<string, string | undefined>([
+    ...input.workspaceDefaults.map((server) => [server.id, server.name] as const),
+    ...input.session.mcpServers.map((server) => [server.id, server.name ?? undefined] as const),
+  ]);
+  const policy = input.session.toolPolicy;
+  const excluded = new Set(policy.mode === "workspace_default" ? policy.excludedMcpServerIds : []);
+  const missingDefaults =
+    policy.mode === "workspace_default"
+      ? (input.scheduledMcpServerIds ?? input.workspaceDefaults.map((server) => server.id)).filter(
+          (id) => !available.has(id) && !excluded.has(id),
+        )
+      : [];
+  const connectors = new Map<string, UnavailableMcpConnector>();
+  for (const id of [...input.droppedIds, ...missingDefaults]) {
+    if (BUILT_IN_SESSION_MCP_SERVER_IDS.has(id) || !input.allowsMcpServer(id)) continue;
+    connectors.set(id, { id, name: names.get(id), reason: "not_available" });
+  }
+  return {
+    connectors: [...connectors.values()],
+    omittedCount: Math.max(0, input.droppedCount - input.droppedIds.length),
   };
 }
 
@@ -405,6 +463,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
+  // Every configured connector this turn runs without, named with its reason:
+  // the policy's registry gaps, and connectors with no usable accepted account.
+  const unavailableMcpConnectors: UnavailableMcpConnector[] = [
+    ...deps.unavailableMcpConnectors.connectors,
+    ...accountRoutes.unavailable,
+  ];
+  const mcpAvailabilityNote = unavailableMcpOperationalContext({
+    connectors: unavailableMcpConnectors,
+    omittedCount: deps.unavailableMcpConnectors.omittedCount,
+  });
+  // Tool discovery reports the same connectors beside runtime failures.
+  const preparationUnavailableMcpServers = new Map(
+    unavailableMcpConnectors.map((connector) => [
+      connector.id,
+      `not loaded this turn: ${unavailableMcpConnectorReasonText(connector.reason)}`,
+    ]),
+  );
   const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
@@ -506,6 +581,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ),
     tools: turnTools,
     resolveCredential,
+    warn: (message, attributes) => observability.warn(message, attributes),
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   // Apps authorization is the exact core designation resolved at claim.
@@ -532,8 +608,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
+  // `goal_resume` follows the goal frozen with the turn, as the goal context
+  // the model reads does, so a session that has never had a goal is not sent it.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+    ...(turn.goalSnapshot ? { sessionGoal: turn.goalSnapshot.state !== "none" } : {}),
   });
   const bundledSkillIds = bundledSkillSelectionForAgentConfig(
     session.bundledSkillIds,
@@ -1347,10 +1426,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
-          await toolResultSpill.spill({ operationId, result }),
+          await toolResultSpill.spill({
+            operationId,
+            result,
+            readers: spilledToolResultReadersForTurn({
+              tools: turnTools,
+              mcpServers: runSettings.mcpServers,
+              sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+            }),
+          }),
         modelToolOutputTruncationTokens: () =>
           eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
+        ...(preparationUnavailableMcpServers.size > 0 ? { preparationUnavailableMcpServers } : {}),
         ...(deferNonEagerToolPreparation
           ? {
               deferNonEagerUntilToolDemand: true,
@@ -1459,6 +1547,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     attemptConnectorActionBindings,
     connectorActionPolicy,
     mcpServers: runSettings.mcpServers,
+    mcpAvailabilityNote,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: [

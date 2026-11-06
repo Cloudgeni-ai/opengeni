@@ -11,6 +11,7 @@
 //! host; [`PostgresStore`] is the store a fleet runs on. Both decide with
 //! the same rules ([`admits`] and [`rule`]).
 
+mod lost;
 mod memory;
 mod pointers;
 mod postgres;
@@ -29,7 +30,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::e2b::lifecycle::Record;
 
-pub use memory::MemoryStore;
+pub use lost::{Forsaken, Gone, LostCopy, notice, rfc3339};
+pub use memory::{Called, MemoryStore};
 pub use pointers::{Found, Import, Imported, PointerRow};
 pub use postgres::{PostgresLead, PostgresStore};
 pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
@@ -197,6 +199,11 @@ pub struct SandboxRow {
     pub class: Option<String>,
     /// When it was created, in milliseconds since the Unix epoch.
     pub created_ms: u64,
+    /// Its copy on a host given up for gone, if it went on from an older
+    /// stored copy since ([`LostCopy`]). Only the store writes it, as it
+    /// declares a host gone or rules on what a returning host lists;
+    /// every other write keeps it as it is.
+    pub lost: Option<LostCopy>,
     /// Raised by every write; each write is conditional on the version its
     /// writer read.
     pub version: u64,
@@ -252,12 +259,24 @@ pub(crate) fn admits(row: Option<(HostState, u64)>, attempt: u64) -> Admits {
     }
 }
 
-/// The ruling on a sandbox `host` lists, given the sandbox's row, and the
-/// change to the row it needs: a reclaim, which the store applies in the
-/// same transaction as the registration.
-pub(crate) fn rule(host: HostId, held: Held, row: Option<Ownership>) -> (Ruling, Option<Change>) {
-    let (verdict, change) = match compute_fleet::reconcile(host, OwnerEpoch(held.owner_epoch), row)
-    {
+/// The ruling on a sandbox `host` lists, given the sandbox's row and the
+/// loss it notes, if any, and the change to the row it needs: a reclaim,
+/// which the store applies in the same transaction as the registration
+/// (and which ends the loss: nobody took it since). A host that cannot
+/// set a copy aside (`sets_aside` false, from an earlier release) is told
+/// to drop it instead, loudly.
+pub(crate) fn rule(
+    host: HostId,
+    held: Held,
+    row: Option<(Ownership, Option<&LostCopy>)>,
+    sets_aside: bool,
+) -> (Ruling, Option<Change>) {
+    let declared = row
+        .and_then(|(_, lost)| lost)
+        .map(|lost| OwnerEpoch(lost.epoch));
+    let row = row.map(|(ownership, _)| ownership);
+    let listed = OwnerEpoch(held.owner_epoch);
+    let (verdict, change) = match compute_fleet::reconcile(host, listed, row, declared) {
         Verdict::Keep { epoch } => (
             Wire::Keep {
                 owner_epoch: epoch.0,
@@ -278,6 +297,16 @@ pub(crate) fn rule(host: HostId, held: Held, row: Option<Ownership>) -> (Ruling,
             None,
         ),
         Verdict::Drop => (Wire::Drop, None),
+        Verdict::SetAside if sets_aside => (Wire::SetAside, None),
+        Verdict::SetAside => {
+            tracing::error!(
+                host = host.0,
+                sandbox = %held.id,
+                "a host declared gone came back with a copy that may be newer than the one \
+                 its sandbox went on from, and cannot set it aside: it drops it"
+            );
+            (Wire::Drop, None)
+        }
     };
     (
         Ruling {
@@ -328,11 +357,12 @@ pub trait Store: Send + Sync + 'static {
     /// registration named.
     fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send;
 
-    /// Gives up on `host` if its renewal count is still `renewals`, and in
-    /// the same transaction leaves each of its sandboxes without an owner
-    /// under a raised epoch, noting `at_ms` as when, for
-    /// [`Store::prune_hosts`]. Returns how many it had, or `None` when a
-    /// renewal came meanwhile or another replica gave up on it first.
+    /// Gives up on `host` if its renewal count is still `renewals`, noting
+    /// `at_ms` as when, for [`Store::prune_hosts`]. Its sandboxes stay its
+    /// own: they wait for it, since it may come back with copies newer
+    /// than the store's, until it registers again or is declared gone
+    /// ([`Store::declare_gone`]). Returns how many it owns, or `None` when
+    /// a renewal came meanwhile or another replica gave up on it first.
     fn give_up(
         &self,
         host: HostId,
@@ -340,9 +370,21 @@ pub trait Store: Send + Sync + 'static {
         at_ms: u64,
     ) -> impl Future<Output = Result<Option<usize>>> + Send;
 
-    /// Forgets the hosts given up on before `before_ms`, so hosts replaced
-    /// over time are not kept forever. Answers how many. Nothing is lost:
-    /// a host given up on owns no sandbox, a write naming a host the store
+    /// Gives up for gone the copies of `host`, a host given up on: in one
+    /// transaction, each sandbox it still owns is left without an owner
+    /// under a raised epoch, to go on from its newest stored copy, and
+    /// notes the loss ([`LostCopy`], `why` at `at_ms`). Returns those
+    /// sandboxes, or `None` if the host is not given up on (or unknown).
+    fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Forsaken>>>> + Send;
+
+    /// Forgets the hosts given up on before `before_ms` that no sandbox
+    /// still waits for, so hosts replaced over time are not kept forever.
+    /// Answers how many. Nothing is lost: a write naming a host the store
     /// does not have is refused as one naming a host given up on
     /// ([`Write::OwnerLost`]), and a host registering again under a
     /// forgotten name is a new host.
@@ -637,10 +679,9 @@ pub enum Write {
     /// Someone wrote it since it was read, or, for an insert, it exists.
     Conflict,
     /// It names as owner a host the service has given up on, or one it
-    /// does not have, such as a host given up on and since forgotten.
-    /// Giving up clears the owner of every sandbox the host owns in one
-    /// transaction, and this check is ordered with it, so no sandbox is
-    /// left owned by a host after it was given up on.
+    /// does not have, such as a host given up on and since forgotten. A
+    /// sandbox a host owned as it was given up on stays its own, waiting
+    /// for it, but nothing may give it one while it is given up on.
     OwnerLost,
     /// For an insert of a sandbox created from a team's template: the
     /// template was deleted since the create found it. Never for a
@@ -704,7 +745,7 @@ mod tests {
             taken: OwnerEpoch(2),
             whole: Some(OwnerEpoch(3)),
         };
-        let (ruling, change) = rule(host, held, Some(cleared));
+        let (ruling, change) = rule(host, held, Some((cleared, None)), true);
         let change = change.expect("a reclaim");
         assert_eq!(change.expect, cleared);
         assert_eq!(change.set.owner, Some(host));
@@ -714,7 +755,7 @@ mod tests {
                 owner_epoch: change.set.epoch.0
             }
         );
-        let (gone, none) = rule(host, held, None);
+        let (gone, none) = rule(host, held, None, true);
         assert_eq!((gone.verdict, none), (Wire::Drop, None));
         let taken_since = Ownership {
             owner: Some(HostId(5)),
@@ -722,7 +763,10 @@ mod tests {
             taken: OwnerEpoch(4),
             whole: Some(OwnerEpoch(4)),
         };
-        assert_eq!(rule(host, held, Some(taken_since)).0.verdict, Wire::Drop);
+        assert_eq!(
+            rule(host, held, Some((taken_since, None)), true).0.verdict,
+            Wire::Drop
+        );
         // Its own again since, but from a copy nothing vouched for since it
         // was lost: it starts from that copy's files.
         let lost_since = Ownership {
@@ -732,11 +776,37 @@ mod tests {
             whole: Some(OwnerEpoch(4)),
         };
         assert_eq!(
-            rule(host, held, Some(lost_since)).0.verdict,
+            rule(host, held, Some((lost_since, None)), true).0.verdict,
             Wire::Refetch {
                 owner_epoch: 6,
                 whole: false
             }
         );
+    }
+
+    #[test]
+    fn a_copy_from_before_its_host_was_declared_gone_is_set_aside() {
+        let host = HostId(4);
+        let id = Id(compute_fleet::SandboxId(9));
+        let held = Held { id, owner_epoch: 2 };
+        let lost = LostCopy {
+            host: "host-4".into(),
+            why: Gone::Declared,
+            at_ms: 1,
+            epoch: 3,
+            saved_ms: None,
+            set_aside_ms: None,
+        };
+        // Declared gone under 3, adopted elsewhere under 4.
+        let adopted = Ownership {
+            owner: Some(HostId(5)),
+            epoch: OwnerEpoch(4),
+            taken: OwnerEpoch(4),
+            whole: None,
+        };
+        let row = Some((adopted, Some(&lost)));
+        assert_eq!(rule(host, held, row, true).0.verdict, Wire::SetAside);
+        // A host of an earlier release cannot: it drops it, loudly.
+        assert_eq!(rule(host, held, row, false).0.verdict, Wire::Drop);
     }
 }

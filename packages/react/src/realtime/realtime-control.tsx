@@ -274,7 +274,6 @@ export function SessionRealtimeControl(props: {
       menuSide="top"
       modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={props.showDiagnostics}
-      audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}
       onSelectModel={realtime.lifecycleActive ? undefined : selection.selectModel}
@@ -367,7 +366,6 @@ function NewSessionRealtimeControlView(
 ) {
   const t = useOpenGeniText();
   const selection = props.selection;
-  const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const snapshot = useMemo<SessionRealtimeControllerSnapshot>(
@@ -407,7 +405,6 @@ function NewSessionRealtimeControlView(
       menuSide="bottom"
       modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={false}
-      audioRef={audioRef}
       selectedModel={selection.selectedModel}
       models={selection.models}
       onSelectModel={selection.selectModel}
@@ -445,7 +442,11 @@ export function RealtimeVoiceControl(props: {
   showDiagnostics?: boolean | undefined;
   /** Extra classes on the in-bar mute cluster (e.g. `max-sm:hidden` when mutes live in “+”). */
   muteControlsClassName?: string | undefined;
-  audioRef: RefObject<HTMLAudioElement | null>;
+  /**
+   * @deprecated Replies play through the realtime controller's own audio
+   * element; this control no longer renders one.
+   */
+  audioRef?: RefObject<HTMLAudioElement | null> | undefined;
   selectedModel?: RealtimeModelOption | undefined;
   models?: readonly RealtimeModelOption[] | undefined;
   onSelectModel?: ((modelId: string) => void) | undefined;
@@ -579,7 +580,6 @@ export function RealtimeVoiceControl(props: {
       data-model-menu={modelMenu}
       className="og-realtime-control inline-flex shrink-0 items-center"
     >
-      <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
       <RealtimeComposerGlow phase={status.phase} reduceMotion={reduceMotion === true} />
       <AnimatePresence initial={false}>
         {modeOwned ? (
@@ -666,6 +666,21 @@ export function RealtimeVoiceControl(props: {
         >
           <span className="og-realtime-failure-label line-clamp-2 max-w-56">{failureText}</span>
           <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+        </button>
+      ) : null}
+      {audioBlocked ? (
+        // The browser refused to play the voice's replies until the person
+        // acts. Say so where they look, and let the same tap turn sound on.
+        <button
+          type="button"
+          data-realtime-attention=""
+          data-testid="realtime-audio-blocked"
+          onClick={() => void props.onRetryAudibleOutput().catch(() => undefined)}
+          className="og-realtime-audio-blocked mr-1.5 inline-flex min-w-0 items-center rounded-og-sm px-1 text-og-xs font-medium leading-tight text-og-status-waiting outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-og-accent/45"
+        >
+          <span className="line-clamp-2 max-w-40 text-right">
+            {t("realtime.realtimeControl.tapToHearReplies")}
+          </span>
         </button>
       ) : null}
       <div className="inline-flex shrink-0 items-center">

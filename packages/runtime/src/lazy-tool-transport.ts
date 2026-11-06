@@ -459,7 +459,9 @@ export function connectableIntegrationsFromCatalogResult(
       const setup = isRecord(match.setup) ? match.setup : null;
       const next = setup && isRecord(setup.nextAction) ? setup.nextAction : null;
       if (next?.toolName !== "capability_authorization_request") continue;
-      if (setup!.action === "enable") continue;
+      // A setup the catalog reports unavailable (this deployment cannot
+      // connect it) has no card the person could finish.
+      if (setup!.action === "enable" || setup!.status === "unavailable") continue;
       if (typeof match.capabilityId !== "string" || typeof match.name !== "string") continue;
       found.push({
         capabilityId: match.capabilityId,

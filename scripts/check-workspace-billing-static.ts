@@ -136,14 +136,19 @@ const organizationMcpSurfaceFiles = new Set([
   "apps/api/test/organization-admin-connected-agents.test.ts",
   // Organization admins disconnect a member's agent connected to the endpoint.
   "apps/api/test/organization-admin-integration-administration.test.ts",
+  // Auto-connect: Claude or an identity provider connects members to the endpoint.
+  "apps/api/test/mcp-auto-connect.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
   "apps/api/test/workspace-content-flow-e2e.test.ts",
   "apps/api/test/workspace-content-flow-mcp.test.ts",
   "apps/web/src/App.tsx",
+  "apps/web/src/components/organization-access/auto-connect.test.tsx",
   "apps/web/src/components/organization-access/connected-agents.test.tsx",
   "apps/web/src/components/organization-access/organization-connected-agents.tsx",
   "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
+  // The auto-connect resource and audience name the organization MCP endpoint.
+  "packages/contracts/src/mcp-auto-connect.ts",
   "packages/sdk/src/client.ts",
   "packages/sdk/src/site-browser-runtime.gen.ts",
   // Opengeni's organization MCP endpoint added as a remote MCP server.

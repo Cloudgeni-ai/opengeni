@@ -216,8 +216,7 @@ export async function mayStartOnlyMe(
 
 /**
  * The audience to store for a created or edited schedule. A schedule that
- * posts into an Only me chat, or writes to its owner's personal knowledge, is
- * always Only me. Choosing Only me needs a human owner who may create Only me
+ * posts into an Only me chat is always Only me. Choosing Only me needs a human owner who may create Only me
  * chats in this workspace.
  */
 export async function resolveScheduledTaskVisibility(input: {
@@ -227,7 +226,6 @@ export async function resolveScheduledTaskVisibility(input: {
   requested: SessionVisibility | undefined;
   current: Pick<ScheduledTask, "visibility"> | null;
   targetSessionId: string | null;
-  personalKnowledge: boolean;
   ownerSubjectId: string | null;
 }): Promise<"user_private" | "workspace_shared"> {
   const targetPrivate =
@@ -237,13 +235,9 @@ export async function resolveScheduledTaskVisibility(input: {
       input.grant.workspaceId,
       input.targetSessionId,
     )) === "user_private";
-  const forced = targetPrivate || input.personalKnowledge;
+  const forced = targetPrivate;
   if (forced && input.requested === "workspace")
-    throw new HTTPException(422, {
-      message: targetPrivate
-        ? SCHEDULED_TASK_PRIVATE_TARGET_MESSAGE
-        : "This schedule saves to your personal knowledge, so it is Only me.",
-    });
+    throw new HTTPException(422, { message: SCHEDULED_TASK_PRIVATE_TARGET_MESSAGE });
   const wanted = forced ? "private" : (input.requested ?? input.current?.visibility ?? "workspace");
   if (wanted === "workspace") return "workspace_shared";
   if (!input.ownerSubjectId)

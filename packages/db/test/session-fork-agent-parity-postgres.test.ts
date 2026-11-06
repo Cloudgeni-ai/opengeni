@@ -61,10 +61,6 @@ const COPIED = [
   "max_nested_agent_depth_override",
   "effective_max_nested_agent_depth",
   "nested_agent_depth_policy_source",
-  // The source's creator holds no manual pin here; a manual pin carries over
-  // only to that same person's fork, a policy pin never does.
-  "codex_pinned_credential_id",
-  "codex_pin_source",
   // The fork's first request repeats the source's history, so it keeps the
   // source's search-record form (docs/web-search.md).
   "search_records_as_input",
@@ -176,7 +172,6 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   active_sandbox_id: { why: "route to its own group sandbox", expected: fresh(null) },
   active_epoch: { why: "its own route fence", expected: fresh(0) },
   working_dir: { why: "follows the route", expected: fresh(null) },
-  codex_last_credential_id: { why: "its own measurements", expected: fresh(null) },
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
   // The fork routines start from the source row and clear only the request;
@@ -208,6 +203,7 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   content_archived_at: { why: "its own archive", expected: fresh(null) },
   content_archive: { why: "its own archive", expected: fresh(null) },
   content_archive_purged_at: { why: "its own archive", expected: fresh(null) },
+  content_restore_requested_at: { why: "its own archive", expected: fresh(null) },
   archived_at: { why: "its own archive", expected: fresh(null) },
   archive_requested_by: { why: "its own archive", expected: fresh(null) },
   tool_policy_version: { why: "edit counter of this row's policy", expected: fresh(1) },

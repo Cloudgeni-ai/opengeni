@@ -19,7 +19,6 @@ import type { ScheduledTask } from "@opengeni/react/app/types";
 import {
   hasEventTriggers,
   isFinishedOnce,
-  isKnowledgeSync,
   nextRunOf,
   runTimeLabel,
   scheduleErrorText,
@@ -147,9 +146,7 @@ export function useScheduleActions({
       const done = await run(task, "trigger");
       if (!done) return false;
       toast.success(`Started ${task.name}`, {
-        description: isKnowledgeSync(task)
-          ? "The sync runs in the background."
-          : "Its chat shows up in your chats in a moment.",
+        description: "Its chat shows up in your chats in a moment.",
       });
       await onChanged(task);
       return true;
@@ -157,9 +154,6 @@ export function useScheduleActions({
     [onChanged, run],
   );
 
-  const knowledge = confirmDelete
-    ? Boolean(confirmDelete.agentConfig.knowledgeSource) || isKnowledgeSync(confirmDelete)
-    : false;
   const now = new Date();
   const next = confirmDelete ? nextRunOf(confirmDelete, now) : null;
 
@@ -170,22 +164,15 @@ export function useScheduleActions({
         if (!open) setConfirmDelete(null);
       }}
       title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete automation?"}
-      consequences={
-        knowledge
-          ? [
-              "It stops syncing, and its source is turned off.",
-              "Turn the source back on from its connector.",
-            ]
-          : [
-              next
-                ? `It stops running. The next run was ${runTimeLabel(next, now)}.`
-                : confirmDelete && hasEventTriggers(confirmDelete) && !isFinishedOnce(confirmDelete)
-                  ? "It stops listening for events and won't run again."
-                  : "It won't run again.",
-              "Chats from earlier runs stay in your chats.",
-              "This can't be undone. Pause it instead to keep it for later.",
-            ]
-      }
+      consequences={[
+        next
+          ? `It stops running. The next run was ${runTimeLabel(next, now)}.`
+          : confirmDelete && hasEventTriggers(confirmDelete) && !isFinishedOnce(confirmDelete)
+            ? "It stops listening for events and won't run again."
+            : "It won't run again.",
+        "Chats from earlier runs stay in your chats.",
+        "This can't be undone. Pause it instead to keep it for later.",
+      ]}
       confirmLabel="Delete automation"
       pendingLabel="Deleting…"
       onConfirm={async () => {

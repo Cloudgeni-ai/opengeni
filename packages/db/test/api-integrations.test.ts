@@ -1162,7 +1162,7 @@ describe("API Integration persistence", () => {
       facetDefinitions: [
         {
           facetKey: "drive-content",
-          kind: "knowledge_source",
+          kind: "inbound_trigger",
           configSchema: {
             type: "object",
             required: ["sources"],
@@ -1232,7 +1232,7 @@ describe("API Integration persistence", () => {
           binding: null,
         },
         {
-          definition: { facetKey: "drive-content", kind: "knowledge_source" },
+          definition: { facetKey: "drive-content", kind: "inbound_trigger" },
           binding: null,
         },
       ],
@@ -1441,105 +1441,6 @@ describe("API Integration persistence", () => {
       remainingOwners: [],
     });
 
-    const microsoftConnection = await createConnection(client.db, {
-      accountId: first.accountId,
-      workspaceId: first.workspaceId,
-      providerDomain: "onedrive.example.test",
-      kind: "oauth2",
-      credentialEncrypted: "onedrive-facet-encrypted-bundle",
-      grantedScopes: ["files.read"],
-      createdBySubjectId: first.subjectId,
-    });
-    const microsoftBase = integrationInput(microsoftConnection.id, "generic-onedrive");
-    const microsoftInput: InstallApiIntegrationInput = {
-      ...microsoftBase,
-      name: "Generic OneDrive",
-      providerDomain: "onedrive.example.test",
-      baseUrl: "https://onedrive.example.test/v1/",
-      sourceUrl: "https://onedrive.example.test/openapi.json",
-      authScheme: { kind: "oauth2" },
-      requiredScopes: ["files.read"],
-      instanceKey: "legal",
-      facetDefinitions: [
-        {
-          facetKey: "drive-content",
-          kind: "knowledge_source",
-          configSchema: {
-            type: "object",
-            required: ["sourceId", "sourceKind"],
-            properties: {
-              sourceId: { type: "string", minLength: 1, maxLength: 512 },
-              sourceKind: {
-                type: "string",
-                enum: ["my_drive", "shared_library", "folder"],
-              },
-            },
-            additionalProperties: false,
-          },
-          capabilities: {
-            provider: "microsoft-onedrive",
-            connectionRequired: true,
-            cursor: "delta_link",
-          },
-        },
-      ],
-      revision: {
-        ...microsoftBase.revision,
-        bindings: Object.fromEntries(
-          Object.entries(microsoftBase.revision.bindings).map(([key, binding]) => [
-            key,
-            { ...binding, serverUrl: "https://onedrive.example.test/v1/" },
-          ]),
-        ),
-      },
-    };
-    const microsoftInstalled = await installApiIntegration(client.db, microsoftInput);
-    const microsoftFeature = await configureIntegrationFacet(client.db, {
-      accountId: first.accountId,
-      workspaceId: first.workspaceId,
-      subjectId: first.subjectId,
-      capabilityId: microsoftInput.capabilityId,
-      instanceKey: "legal",
-      facetKey: "drive-content",
-      displayName: "Legal library",
-      config: { sourceId: "library:legal", sourceKind: "shared_library" },
-      idempotencyKey: crypto.randomUUID(),
-    });
-    expect(microsoftFeature.binding).toMatchObject({
-      kind: "knowledge_source",
-      connectionId: microsoftConnection.id,
-      config: { sourceId: "library:legal", sourceKind: "shared_library" },
-    });
-    // Knowledge-source facets are retired. A revision that no longer publishes
-    // one keeps the configured binding readable on its historical definition
-    // instead of refusing the upgrade or dropping user data.
-    await installApiIntegration(client.db, {
-      ...microsoftInput,
-      facetDefinitions: [],
-      expectedInstanceVersion: microsoftInstalled.instanceVersion,
-      revision: {
-        ...microsoftInput.revision,
-        id: "openapi:444444444444444444444444",
-        contentSha256: "4".repeat(64),
-      },
-    });
-    const retiredSource = (
-      await listIntegrationInstanceFacets(
-        client.db,
-        first.workspaceId,
-        first.subjectId,
-        microsoftInput.capabilityId,
-        "legal",
-      )
-    ).facets.find((facet) => facet.definition.facetKey === "drive-content");
-    expect(retiredSource).toMatchObject({
-      definition: { facetKey: "drive-content", kind: "knowledge_source" },
-      binding: {
-        id: microsoftFeature.binding.id,
-        status: "active",
-        config: { sourceId: "library:legal", sourceKind: "shared_library" },
-      },
-    });
     await expect(
       listIntegrationInstanceFacets(
         client.db,

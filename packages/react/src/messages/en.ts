@@ -935,6 +935,8 @@ export const englishMessages = {
   "browserViewer.thisBrowserProfileIsNo":
     "This browser profile is no longer available. Refresh and choose another.",
   "browserViewer.thisChatMovedToAnother": "This chat moved to another computer.",
+  "browserViewer.chatIsOnAnotherComputer":
+    "This chat is working on another computer right now. The browser keeps running on its own computer and is available again when the chat moves back.",
   "browserViewer.thisChromeProfileIsLive":
     "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome.",
   "browserViewer.thisMachineOnly": "This machine only",
@@ -1145,6 +1147,7 @@ export const englishMessages = {
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
   "composer.appShotSummary": "{app} · App-shot",
+  "composer.imageTag": "Image {number}",
   "composer.appShotTextIncluded":
     "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
   "composer.appShotNoText": "Only the screenshot: this window shared no text.",
@@ -2242,6 +2245,15 @@ export const englishMessages = {
   "machineInputDisplay.agentWaitingForCapacity": "Agent waiting for capacity",
   "machineInputDisplay.automationRun": "Automation run",
   "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
+  /**
+   * The one line a chat shows when an automation acted in it: the automation's
+   * name, then what the event that started it says, e.g. "New task assigned:
+   * Replace the gutter".
+   */
+  "machineInputDisplay.automationRunWhat": "{name}: {what}",
+  /** As above when several events started the run; count is the others. */
+  "machineInputDisplay.automationRunWhatAndMore_one": "{name}: {what} and {count} more",
+  "machineInputDisplay.automationRunWhatAndMore_other": "{name}: {what} and {count} more",
   "machineInputDisplay.commandResultReceived": "Command result received",
   "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
@@ -3386,6 +3398,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -4166,7 +4179,7 @@ export const englishMessages = {
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
-    "Resume audio to hear the existing voice connection.",
+    "Your browser didn't let the replies play. Tap to hear them.",
   "realtime.realtimeControl.resumeVoiceAudio": "Resume voice audio",
   "realtime.realtimeControl.retryConnection": "Retry connection",
   "realtime.realtimeControl.retryVoiceConnection": "Retry voice connection",
@@ -4178,6 +4191,7 @@ export const englishMessages = {
   "realtime.realtimeControl.startVoice": "Start voice",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
   "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
+  "realtime.realtimeControl.tapToHearReplies": "Tap to hear replies",
   "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
   "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
   "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
@@ -4501,6 +4515,10 @@ export const englishMessages = {
   "sessionAgentsModel.needsYou": "Needs you",
   "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  /** The agents chip's detail: how many helper agents are paused. */
+  "sessionAgentsModel.pausedCount_other": "{count} paused",
+  /** The agents chip's detail: how many helper agents are running. */
+  "sessionAgentsModel.runningCount_other": "{count} running",
   "sessionAgentsModel.stuck": "Stuck",
   "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
@@ -4606,6 +4624,26 @@ export const englishMessages = {
     "Paused by the agent: it is waiting on a human decision before continuing.",
   "sessionChrome.pausedManuallyByAPerson":
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
+  // The goal pill's short pause reasons, shown after "Paused · ". Keep each to a word or two:
+  // the goal panel carries the full explanation.
+  /** The agent paused its own goal to wait for a person's decision. */
+  "sessionChrome.pausedReasonAgent": "agent",
+  /** The deployment's usage allowance ran out. */
+  "sessionChrome.pausedReasonAllowance": "allowance",
+  /** The monthly model spending limit was reached. */
+  "sessionChrome.pausedReasonBudget": "budget",
+  /** The goal reached its cap of automatic continuations; new input resumes it. */
+  "sessionChrome.pausedReasonCap": "cap",
+  /** The workspace ran out of credits. */
+  "sessionChrome.pausedReasonCredits": "credits",
+  /** An admission limit or the application's usage policy paused the goal. */
+  "sessionChrome.pausedReasonLimits": "limits",
+  /** A person (or an API call) paused the goal. */
+  "sessionChrome.pausedReasonManually": "manually",
+  /** The selected model is unavailable. */
+  "sessionChrome.pausedReasonModel": "model",
+  /** A model policy blocks the selected model. */
+  "sessionChrome.pausedReasonPolicy": "policy",
   "sessionChrome.pausedSuffix": "Paused · {suffix}",
   "sessionChrome.placingInQueue": "Placing in queue",
   "sessionChrome.previousWorkStopping": "Previous work stopping",
@@ -4778,6 +4816,11 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
+  "sessionMcpCapabilityCard.details": "Details",
+  "sessionMcpCapabilityCard.detailsAbout": "About",
+  "sessionMcpCapabilityCard.detailsAccess": "Access",
+  "sessionMcpCapabilityCard.detailsAddress": "Address",
+  "sessionMcpCapabilityCard.detailsType": "Type",
   "sessionMcpCapabilityCard.done": "Done",
   "sessionMcpCapabilityCard.everyoneInThisWorkspace": "Everyone in this workspace",
   "sessionMcpCapabilityCard.finishingYourConnection": "Finishing your connection…",
@@ -4787,6 +4830,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
@@ -4839,6 +4883,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",
@@ -5207,6 +5252,7 @@ export const englishMessages = {
   "timeline.commandStep.write.running": "Writing {name}",
   "timeline.commandStep.writeFile.done": "Wrote a file",
   "timeline.commandStep.writeFile.running": "Writing a file",
+  "timeline.compactionCopy.chatHistoryIsUnchanged": "Chat history is unchanged.",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":

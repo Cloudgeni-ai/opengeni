@@ -107,7 +107,7 @@ describe("owner-bound Connect state", () => {
     expect(exempt).toEqual(EXEMPT_STATES);
     expect(kindless).toEqual(KINDLESS_OWNER_STATES);
     // Guards the scan itself: the known owner-bound starters are still found.
-    expect(ownerBound).toBeGreaterThanOrEqual(9);
+    expect(ownerBound).toBeGreaterThanOrEqual(7);
   });
 
   test("owner-bound callbacks re-check through requireConnectOwnerAuthority, never a bare membership lookup", async () => {

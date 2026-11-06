@@ -7,10 +7,17 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   steer-waiting, steered, waiting, long, empty, error, and automation runs:
+   automation, automation-live, automation-quiet). `&legacy=1` delivers an
+   automation run the way Opengeni recorded it before runs had a plain
+   description; `&ids=1` puts internal IDs in what the run's event and an
+   earlier setup update say. `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
-   messages waiting. */
+   messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
+   `&signals=off` mounts it with `agentSignals: false`, as a product for end
+   users would. `&mark=1` leads the live turn row with a host mark
+   (`turnSummary.renderLiveMark`). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -20,8 +27,9 @@ import {
   NewConversation,
   SessionConversationView,
   useSessionConversation,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react";
-import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
+import { fakeClient, fakeGoal, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -34,6 +42,9 @@ const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
+const pausedGoal = params.get("goal") === "paused";
+const agentSignals = params.get("signals") !== "off";
+const liveMark = params.get("mark") === "1";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -64,8 +75,13 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
 
 const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
 const steering = scenario === "steer-waiting" || scenario === "steered";
+const RUN_TURN = "5a1c0000-0000-4000-8000-0000000000d1";
+const automationRun = scenario.startsWith("automation");
+const legacyRun = params.get("legacy") === "1";
+const withIds = params.get("ids") === "1";
+const ORGANISATION_ID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c";
 const selectedStatus =
-  scenario === "running" || scenario === "waiting" || steering
+  scenario === "running" || scenario === "waiting" || steering || scenario === "automation-live"
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -157,6 +173,119 @@ const finding = [
 ];
 
 const humanInputRequests: unknown[] = [];
+
+/**
+ * An event-triggered automation acting in this chat: a ticket was assigned to
+ * the person, and the agent looks it up and tells them about it.
+ */
+function automationRunEvents() {
+  const instructions =
+    "Continue this conversation when a ticket is assigned to the signed-in user. The recipient is the assignee (confirm through acme__list_my_tickets). Read the event, check that the ticket is still open, and tell the person what it is about and what to do first. If it is already closed, do nothing.";
+  if (withIds) {
+    push(
+      "system.update.delivered",
+      {
+        updateIds: ["5a1c0000-0000-4000-8000-0000000000f1"],
+        count: 1,
+        members: [
+          {
+            id: "5a1c0000-0000-4000-8000-0000000000f1",
+            kind: "capability_setup_completed",
+            classification: "info",
+            sourceId: "5a1c0000-0000-4000-8000-0000000000f2",
+            summary: `Acme Helpdesk is connected for the support team. Organisation: ${ORGANISATION_ID}.`,
+          },
+        ],
+      },
+      3,
+      null,
+    );
+  }
+  push(
+    "system.update.delivered",
+    {
+      updateIds: ["5a1c0000-0000-4000-8000-0000000000e1"],
+      count: 1,
+      members: [
+        {
+          id: "5a1c0000-0000-4000-8000-0000000000e1",
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: "5a1c0000-0000-4000-8000-0000000000e2",
+          ...(legacyRun
+            ? { summary: instructions }
+            : {
+                summary: "Ticket assigned to you",
+                automation: {
+                  name: "Ticket assigned to you",
+                  eventSummaries: [
+                    withIds
+                      ? `T-4907 Refund request from Contoso (organisation ${ORGANISATION_ID})`
+                      : "T-4907 Refund request from Contoso",
+                  ],
+                  eventCount: 1,
+                },
+              }),
+        },
+      ],
+    },
+    2,
+    RUN_TURN,
+  );
+  push("turn.started", {}, 2, RUN_TURN);
+  push(
+    "agent.toolCall.created",
+    { id: "call-run-ticket", name: "acme__get_ticket", arguments: { ticketId: "T-4907" } },
+    2,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.output",
+    {
+      id: "call-run-ticket",
+      output: text({
+        id: "T-4907",
+        status: scenario === "automation-quiet" ? "closed" : "open",
+        customer: { name: "Contoso" },
+        subject: "Refund request for October invoice",
+      }),
+    },
+    1.8,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.created",
+    {
+      id: "call-run-history",
+      name: "acme__list_ticket_events",
+      arguments: { ticketId: "T-4907" },
+    },
+    1.6,
+    RUN_TURN,
+  );
+  if (scenario === "automation-live") return;
+  push(
+    "agent.toolCall.output",
+    { id: "call-run-history", output: text([{ type: "assigned" }, { type: "commented" }]) },
+    1.5,
+    RUN_TURN,
+  );
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text:
+        scenario === "automation-quiet"
+          ? legacyRun
+            ? "The ticket was already closed, so I didn't notify anyone."
+            : "NO_REPLY"
+          : "Contoso is asking for a refund of their October invoice ($1,250). The ticket is open and now yours. Start by checking whether the October payment went through twice.",
+    },
+    1.4,
+    RUN_TURN,
+  );
+  push("turn.completed", {}, 1.4, RUN_TURN);
+}
 
 if (scenario === "approval") {
   investigation();
@@ -281,6 +410,18 @@ if (scenario === "approval") {
       STEER_TURN,
     );
   }
+} else if (automationRun) {
+  investigation();
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text: [...finding, "", "I refunded the duplicate and noted it on the ticket."].join("\n"),
+    },
+    6,
+  );
+  push("turn.completed", {}, 6);
+  automationRunEvents();
 } else if (scenario === "long") {
   investigation();
   push(
@@ -348,7 +489,7 @@ const client = fakeClient({
     if (scenario === "error") throw new Error("Network request failed");
     return {
       ...(sessions.find((session) => session.id === id) ?? sessions[0]!),
-      activeTurnId: TURN,
+      activeTurnId: scenario === "automation-live" ? RUN_TURN : TURN,
       effectiveControl: control,
     } as never;
   },
@@ -391,6 +532,21 @@ const client = fakeClient({
     yield* [];
   },
 });
+
+// A goal the agent paused to wait for a person's decision.
+if (pausedGoal) {
+  const goal = fakeGoal({
+    sessionId: SELECTED,
+    status: "paused",
+    pausedReason: "agent",
+    text: "Resolve the double charge on T-4821",
+  });
+  Object.assign(client, {
+    getGoal: async () => goal,
+    updateGoal: async () => goal,
+    deleteGoal: async () => undefined,
+  });
+}
 
 // The demo can hold the real default new-chat flow at a response boundary.
 // Browser checks edit the next draft, retry an uncertain outcome, then settle
@@ -485,6 +641,13 @@ function PersistentConversationDemo() {
 }
 
 /** A plain host product around the stock component, as a customer would ship it. */
+/** A stand-in for a host's animated mascot at the start of the live turn row. */
+function demoLiveMark(state: TurnSummaryLiveMarkState) {
+  return (
+    <span data-demo-mark={state.kind} className="size-4 animate-pulse rounded-full bg-og-accent" />
+  );
+}
+
 function HostApp() {
   const nav = ["Inbox", "Tickets", "Customers", "Billing"];
   const narrow = window.innerWidth < 640;
@@ -557,9 +720,20 @@ function HostApp() {
           ) : (
             <OpenGeniChat
               defaultSessionId={scenario === "empty" ? null : SELECTED}
-              {...(oneSend
-                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
-                : {})}
+              conversationProps={{
+                agentSignals,
+                ...(liveMark
+                  ? {
+                      timelineProps: {
+                        turnSummary: {
+                          rolling: true,
+                          renderLiveMark: demoLiveMark,
+                        },
+                      },
+                    }
+                  : {}),
+                ...(oneSend ? { composerOptions: { busySend: "steer" as const } } : {}),
+              }}
             />
           )}
         </OpenGeniProvider>

@@ -12,6 +12,7 @@ import {
   consentPublicSandboxRecovery,
   createDb,
   createSession,
+  deliverPendingSandboxRestoreNotice,
   failWarmingToCold,
   getSandboxRecoveryDiscontinuity,
   markWarmLeaseInstanceLost,
@@ -291,6 +292,114 @@ describe("system continuity after a lost sandbox on every backend", () => {
         capturedAt: archive.workspaceArchiveMeta.capturedAt,
       }),
     ]);
+  });
+
+  // DC-G follow-up: the older-save notice is written after the warm commit.
+  // The old code only logged a failed write, so the people in the chat were
+  // never told. It is now pending on the lease until written, retried at the
+  // next turn start, and written exactly once.
+  test("an older-save notice whose write failed after the restore is delivered once on the next turn", async () => {
+    const archive = tarArchive();
+    const f = await fixture("docker", {
+      archiveGeneration: 10,
+      resumeState: { sessionState: archive, opengeniRecovery: lostRecovery(true) },
+    });
+    const attempt = await claimedAttempt(f);
+    expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, attempt)).toMatchObject({
+      status: "authorized",
+      lane: "checkpoint",
+    });
+    const elected = await acquireLease(client.db, {
+      ...f.group,
+      kind: "turn",
+      holderId: "notice-retry",
+      backend: "docker",
+      leaseTtlMs: 60_000,
+    });
+    const rematerializationId = crypto.randomUUID();
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        ...f.group,
+        expectedEpoch: elected.lease.leaseEpoch,
+        rematerializationId,
+      }),
+    ).toMatchObject({ status: "started" });
+    const leaseScope = { ...f.group, expectedEpoch: elected.lease.leaseEpoch };
+    await recordWarmingSandboxCreated(client.db, {
+      ...leaseScope,
+      rematerializationId,
+      instanceId: "restored-notice-box",
+      resumeBackendId: "docker",
+      resumeState: { backendId: "docker", sessionState: archive },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, { ...leaseScope, rematerializationId });
+    // The notice write fails (as any database error would) right after the
+    // restore commits.
+    const blocker = `fail_notice_${crypto.randomUUID().replaceAll("-", "")}`;
+    await shared.admin.unsafe(`
+      create function ${blocker}() returns trigger language plpgsql as $$
+      begin
+        if new.type = 'sandbox.recovery.selected' and new.session_id = '${f.sessionId}' then
+          raise exception 'notice write unavailable';
+        end if;
+        return new;
+      end $$;
+      create trigger ${blocker} before insert on session_events
+        for each row execute function ${blocker}();
+    `);
+    const notices = async () =>
+      (
+        await shared.admin`select payload from session_events
+          where session_id = ${f.sessionId} and type = 'sandbox.recovery.selected'`
+      ).map((row) => row.payload);
+    try {
+      expect(
+        await commitWarmingToWarm(client.db, {
+          ...leaseScope,
+          instanceId: "restored-notice-box",
+          leaseTtlMs: 60_000,
+          rematerialization: {
+            id: rematerializationId,
+            verifiedRevision: archive.workspaceArchiveMeta.revision,
+          },
+        }),
+      ).toMatchObject({ committed: true });
+      // The restore stands; the person has not been told yet.
+      expect((await readLease(client.db, f.workspaceId, f.group.sandboxGroupId))?.liveness).toBe(
+        "warm",
+      );
+      expect(await notices()).toEqual([]);
+    } finally {
+      await shared.admin.unsafe(`drop trigger ${blocker} on session_events;
+        drop function ${blocker}();`);
+    }
+    // The next turn start delivers it, with the save's time.
+    expect(
+      await deliverPendingSandboxRestoreNotice(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.sessionId,
+      }),
+    ).toBe(true);
+    expect(await notices()).toEqual([
+      expect.objectContaining({
+        mode: "checkpoint",
+        capturedAt: archive.workspaceArchiveMeta.capturedAt,
+      }),
+    ]);
+    // Exactly once: later turns, and concurrent callers, add nothing.
+    const again = await Promise.all(
+      [0, 1, 2].map(() =>
+        deliverPendingSandboxRestoreNotice(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sandboxGroupId: f.group.sandboxGroupId,
+        }),
+      ),
+    );
+    expect(again).toEqual([false, false, false]);
+    expect(await notices()).toHaveLength(1);
   });
 
   for (const named of [true, false]) {

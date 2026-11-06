@@ -57,9 +57,6 @@ export function failoverFixture(
     await admin`insert into subscription_settings(account_id, rotation, providers, cross_provider_failover, fallback_order,
       personal_connections_allowed, personal_fallback_allowed) values
       (${accountId}::uuid, '{}'::jsonb, '{}'::jsonb, true, ${admin.json({ [models[0]!.id]: models.slice(1).map((model) => model.id) })}::jsonb, true, true)`;
-    for (const provider of providers)
-      await admin`insert into subscription_provider_cutovers(account_id, provider, enabled)
-      values (${accountId}::uuid, ${provider.adapter.provider}, true) on conflict (account_id, provider) do update set enabled = true`;
     return {
       accountId,
       workspaceId,

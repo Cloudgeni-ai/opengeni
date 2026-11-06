@@ -362,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210 and 1239 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272, 1274 and 1282 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -378,6 +378,8 @@ realTest(
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "summarize_queued_turns_by_hold()",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]) {
       try {
         await admin.unsafe(
@@ -431,6 +433,14 @@ realTest(
       expect(await current()).toContain(
         "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_organization_vaults_v1(uuid, jsonb)",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_organization_compute_v1(uuid, uuid, text)",
+      );
     } finally {
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
@@ -441,6 +451,8 @@ realTest(
       await admin`GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text) TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

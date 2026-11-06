@@ -65,6 +65,17 @@ With Stripe billing enabled, customers redeem promotion codes in the console. Yo
 
 Signup and coupon credits can share an editable model list, with overrides per offer. The model picker shows which credits a model uses and marks models the remaining credits do not cover; billing shows the models each grant covers. Operators can update that coverage for existing promotional balances without restarting services. Follow the [promotional credit setup](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/scoped-promotional-credits.md) for activation and the policy command.
 
+## Connected subscriptions over the API
+
+By default, connected AI subscriptions (Claude, Codex, SuperGrok) serve only work in the Opengeni apps. API requests, including organization access keys and embedded products, that select one get `403` with `subscription_api_unavailable`, and API model lists and defaults leave subscriptions out.
+
+If you run your own deployment and own the subscriptions you connect, you can let API work use them: set `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` on the API and worker processes (with Helm, under `config`). It applies to the whole deployment, and API callers cannot change it. Agent turns, goals, schedules, stateless model calls, transcription, realtime voice, titles, model lists and defaults then treat API work like app work. Paid-plan requirements still apply where credit billing is on.
+
+<Note>
+  You are responsible for complying with your model provider's terms when you use a subscription
+  this way.
+</Note>
+
 ## Before you expose it
 
 Put the deployment behind a gateway with:

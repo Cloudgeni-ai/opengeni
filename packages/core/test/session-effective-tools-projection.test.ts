@@ -23,11 +23,15 @@ const settings = testSettings({ openaiModel: "gpt-6-astra", lazyToolSearchEnable
 
 // The workspace's EU-only setting: off unless a test says otherwise.
 let euOnly: ReturnType<typeof spyOn<typeof db, "isWorkspaceEuOnly">>;
+// The sessions with a goal: none unless a test says otherwise.
+let goals: ReturnType<typeof spyOn<typeof db, "sessionsWithGoal">>;
 beforeEach(() => {
   euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
+  goals = spyOn(db, "sessionsWithGoal").mockResolvedValue(new Set());
 });
 afterEach(() => {
   euOnly.mockRestore();
+  goals.mockRestore();
 });
 
 function session(capabilities: AgentCapabilities = "all", overrides: Partial<Session> = {}) {
@@ -618,6 +622,9 @@ describe("server effectiveTools environment projection", () => {
       expect(result.objectStorageAvailable).toBe(true);
       expect(result.activeSandboxBackends?.get(sandboxId)).toBe("selfhosted");
       expect(result.routerHistorySessionIds?.has(row.id)).toBe(true);
+      expect(result.goalSessionIds).toEqual(new Set());
+      expect(goals).toHaveBeenCalledTimes(1);
+      expect(goals.mock.calls[0]?.slice(1)).toEqual([row.workspaceId, [row.id]]);
       expect(models).toHaveBeenCalledTimes(1);
       expect(skills).toHaveBeenCalledTimes(1);
       expect(skills.mock.calls[0]?.[1]).toEqual({
@@ -644,6 +651,18 @@ describe("server effectiveTools environment projection", () => {
       models.mockRestore();
       workspace.mockRestore();
     }
+  });
+
+  test("goal_resume is projected once the session has a goal, as the worker attaches it", () => {
+    const resume = "opengeni__goal_resume";
+    const names = (env: SessionEffectiveToolsContext) =>
+      projected(session(), env).effectiveTools!.tools.map((tool) => tool.name);
+    const row = session();
+    expect(names(context({ goalSessionIds: new Set() }))).not.toContain(resume);
+    expect(names(context({ goalSessionIds: new Set() }))).toContain("opengeni__goal_set");
+    expect(names(context({ goalSessionIds: new Set([row.id]) }))).toContain(resume);
+    // Without the goal lookup the projection keeps it, as an unknown goal does.
+    expect(names(context())).toContain(resume);
   });
 
   test("configured all reports availability without inventing media or sandbox tools", () => {

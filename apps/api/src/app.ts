@@ -1,3 +1,4 @@
+import { observedSdkVersion } from "./http/sdk-version";
 import {
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
@@ -201,6 +202,7 @@ import {
   configureBillingLegacyAccounts,
   fundedBillingOrigin,
   ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -902,6 +904,7 @@ export function createAppComposition(
       "Range",
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Sdk-Version",
       "X-OpenGeni-Actor-Epoch",
       // Resumable voice-input chunk integrity/timing (cross-origin embeds).
       "X-OpenGeni-Chunk-Duration-Milliseconds",
@@ -1038,11 +1041,13 @@ export function createAppComposition(
     const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
     const correlationId = correlationIds.get(c) ?? crypto.randomUUID();
     const start = performance.now();
+    const sdkVersion = observedSdkVersion(c.req.header("x-opengeni-sdk-version"));
     const span = observability.startSpan(
       `HTTP ${c.req.method} ${route}`,
       {
         "http.request.method": c.req.method,
         "opengeni.route": route,
+        ...(sdkVersion ? { "opengeni.sdk.version": sdkVersion } : {}),
       },
       {
         ...requestSpanTraceParent(
@@ -1113,6 +1118,7 @@ export function createAppComposition(
             traceId: span.traceId,
             spanId: span.spanId,
             correlationId,
+            ...(sdkVersion ? { sdkVersion } : {}),
             ...(rejection ? rejectionLogAttributes(rejection) : {}),
           });
         } catch (error) {
@@ -1650,7 +1656,7 @@ export function createAppComposition(
             { observeAvailability: true },
           );
           const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
-          if (billingOrigin === "api") {
+          if (connectedSubscriptionsRefusedForOrigin(deps.settings, billingOrigin)) {
             selections = selections.filter(
               ({ model }) => ownModelFunding(model) !== "subscription",
             );
@@ -4181,10 +4187,6 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/integrations\/github-personal\/oauth\/callback$/,
     label: "/v1/integrations/github-personal/oauth/callback",
-  },
-  {
-    pattern: /^\/v1\/integrations\/google-drive\/callback$/,
-    label: "/v1/integrations/google-drive/callback",
   },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,

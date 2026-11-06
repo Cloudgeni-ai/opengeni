@@ -22,6 +22,8 @@ export function sessionStatusLabel(status: SessionDisplayStatus): string {
       return "Failed";
     case "cancelled":
       return "Cancelled";
+    case "archived":
+      return "Archived";
     default:
       return "Idle";
   }
@@ -45,6 +47,9 @@ export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact =
 
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
 export function sessionStateLabel(session: Session): string {
+  // Archiving stops (and so pauses) the chat's work: it reads as archived,
+  // never as "Cancelled · Paused here".
+  if (sessionDisplayStatus(session) === "archived") return sessionStatusLabel("archived");
   const commandActivity = session.backgroundCommandActivity;
   if (commandActivity?.unavailableCount) {
     const unavailable = Math.min(commandActivity.count, commandActivity.unavailableCount);

@@ -6,6 +6,7 @@ import {
 import {
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
   canAddIntegrations,
+  deploymentCannotConnect,
   inChatCapabilitySetup,
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
@@ -230,5 +231,39 @@ describe("personal integration setup", () => {
     expect(
       inChatCapabilitySetup({ permissions: chat }, gmail, { ...reviewed, authKind: "api_key" }),
     ).toEqual({ kind: "default" });
+  });
+
+  test("nothing offers a connection this deployment cannot start; turned-on ones stay usable", () => {
+    const unconnectable = {
+      ...reviewed,
+      runtime: { available: true, operatorOAuthClient: { configured: false } },
+    };
+    expect(deploymentCannotConnect(unconnectable)).toBe(true);
+    expect(deploymentCannotConnect({ ...unconnectable, enabled: false })).toBe(true);
+    // Already on: its connections keep working and stay manageable.
+    expect(deploymentCannotConnect({ ...unconnectable, enabled: true })).toBe(false);
+    expect(
+      deploymentCannotConnect({
+        ...reviewed,
+        runtime: { available: true, operatorOAuthClient: { configured: true } },
+      }),
+    ).toBe(false);
+    expect(deploymentCannotConnect(reviewed)).toBe(false);
+
+    // The chat card offers no Connect for it, whatever the person may do.
+    const admin = { permissions: ["workspace:admin"] };
+    expect(inChatCapabilitySetup(admin, "mcp:gmail", unconnectable)).toEqual({
+      kind: "unavailable",
+    });
+    expect(
+      inChatCapabilitySetup(admin, "mcp:gmail", { ...unconnectable, authKind: "api_key" }),
+    ).toEqual({ kind: "unavailable" });
+    expect(
+      inChatCapabilitySetup(admin, "mcp:gmail", {
+        ...unconnectable,
+        enabled: true,
+        connectionRef: { subjectScope: "workspace" },
+      }),
+    ).toEqual({ kind: "card", personalOnly: false });
   });
 });

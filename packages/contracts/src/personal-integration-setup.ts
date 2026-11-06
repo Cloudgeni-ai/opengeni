@@ -75,6 +75,27 @@ export function permissionSetCovers(permissions: readonly string[], permission: 
 const REVIEWED_SOURCES = new Set(["built_in", "configured", "registry"]);
 
 /**
+ * Whether this deployment cannot start a new connection to a catalog
+ * integration: the provider needs an operator-registered OAuth client that is
+ * missing here, or the operator has switched the integration's setup off. The
+ * catalog projects both as `runtime.operatorOAuthClient.configured === false`.
+ * An integration that is already on stays usable and manageable, so it never
+ * counts. The Capabilities page, the chat's Connect card and the agent's setup
+ * tools all use this one rule, so nothing offers a Connect that cannot finish.
+ */
+export function deploymentCannotConnect(item: {
+  enabled?: boolean | undefined;
+  runtime?:
+    | {
+        available?: boolean | undefined;
+        operatorOAuthClient?: { configured: boolean } | undefined;
+      }
+    | undefined;
+}): boolean {
+  return item.enabled !== true && item.runtime?.operatorOAuthClient?.configured === false;
+}
+
+/**
  * Whether a catalog integration may be turned on for personal accounts by
  * someone holding only the personal setup permission: a reviewed catalog MCP
  * integration that signs each person in with OAuth. Custom MCP servers,
@@ -169,6 +190,7 @@ export function inChatCapabilitySetup(
   item:
     | (Parameters<typeof personalIntegrationSetupAccess>[1] & {
         authKind?: string | null | undefined;
+        runtime?: { operatorOAuthClient?: { configured: boolean } | undefined } | undefined;
       })
     | undefined,
   memberIntegrationSetup?: MemberIntegrationSetup,
@@ -197,6 +219,8 @@ export function inChatCapabilitySetup(
     // the connect route requires connections:write for that exact person.
     return can("connections:write") ? { kind: "default" } : { kind: "unavailable" };
   }
+  // Nobody can finish a connection this deployment cannot start.
+  if (item && deploymentCannotConnect(item)) return { kind: "unavailable" };
   if (!item || item.kind !== "mcp" || item.authKind !== "oauth2") return { kind: "default" };
   if (!can("sessions:control")) return { kind: "unavailable" };
   const usesSharedAccount =

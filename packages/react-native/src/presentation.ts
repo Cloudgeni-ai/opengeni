@@ -142,6 +142,8 @@ export interface OpenGeniNativeLabels {
   statusBlocked: string;
   statusFailed: string;
   statusCancelled: string;
+  /** An archived chat: read-only, continuable in a new chat. */
+  statusArchived: string;
   relativeNow: string;
   relativeSeconds: string;
   relativeMinutes: string;
@@ -277,6 +279,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = (t: OpenGeniText) =>
     statusBlocked: t("native.presentation.stuck"),
     statusFailed: t("native.presentation.failed"),
     statusCancelled: t("native.presentation.cancelled"),
+    statusArchived: t("native.presentation.archived"),
     relativeNow: t("native.presentation.relativeNow"),
     relativeSeconds: t("native.presentation.relativeSeconds", { value: "{value}" }),
     relativeMinutes: t("native.presentation.relativeMinutes", { value: "{value}" }),

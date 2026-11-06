@@ -17,6 +17,13 @@ supported. Their platform fee is configuration-driven; at
 requirement for it. See [billing-origin.md](billing-origin.md) for funding and
 the existing internal-account legacy terms.
 
+A self-hosted operator that owns the subscriptions it connects can let its own
+product's API requests use them by setting
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` on the deployment (default
+`false`); the operator is responsible for its provider's terms. See
+[deployment.md](deployment.md) and
+[billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
@@ -292,7 +299,10 @@ only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
 Every built-in tool and prompt section follows what the session can use, so
 `"none"` pays only for what is relevant on each call: a neutral identity
 without a shared workspace; `request_human_input` with the secret kind only
-under `secrets` and Skill reviews only under `skills: "manage"`;
+under `secrets` and Skill reviews only under `skills: "manage"`, and not at all
+when nobody can answer (a session created with `unattended: true`, or
+`humanInput: false`; an API-started session keeps it because the backend can
+answer, and a child session because its parent agent can);
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
 `browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
 on its own), and the Codemode guidance only with a sandbox or `run_on`; tool

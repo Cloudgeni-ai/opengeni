@@ -122,6 +122,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 level,
                 reply,
             } => self.sleep(id, generation, level, reply),
+            Command::Restart { id, reply } => self.restart(id, reply),
             Command::Capture {
                 id,
                 generation,
@@ -254,7 +255,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         by: By,
     ) -> Result<(), HostError> {
         self.check(id, generation)?;
-        self.not_handing_off(id)?;
+        self.wake_past_hand_off(id)?;
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
@@ -296,7 +297,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) {
         if let Err(error) = self
             .check(id, generation)
-            .and_then(|()| self.not_handing_off(id))
+            .and_then(|()| self.wake_past_hand_off(id))
         {
             let _ = reply.send(Err(error));
             return;
@@ -438,7 +439,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
-        self.not_handing_off(id)?;
+        self.wake_past_hand_off(id)?;
         let until = ttl.map(|ttl| self.now() + ttl);
         self.note_ask(id, By::Fleet);
         self.input(Input::Hold {

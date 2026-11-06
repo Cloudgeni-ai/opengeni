@@ -91,7 +91,8 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
         .vaults,
     /**
      * Every organization vault, wherever it works (the organization's owner or an admin).
-     * `complete` is false while the server lists only the ones that work here.
+     * `complete` is always true; servers before migration 1272 listed only the
+     * ones that work here and sent false.
      */
     listOrganizationVaults: (signal?: AbortSignal) =>
       json<{ vaults: VaultSummary[]; complete: boolean }>(

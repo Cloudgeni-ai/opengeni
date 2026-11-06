@@ -18,6 +18,7 @@ import {
   byokPlatformFeeActive,
   directPersonalConnectionSubjectId,
   ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
   ownSubscriptionPlanAllows,
 } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
@@ -444,7 +445,7 @@ export async function ensureRunAllowed(
   ownSubscription = false,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
-  if (ownSubscription && billingOrigin === "api") {
+  if (ownSubscription && connectedSubscriptionsRefusedForOrigin(settings, billingOrigin)) {
     throw new Error(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
   }
   // Per-task usage limit: independent of funding, so it applies to
