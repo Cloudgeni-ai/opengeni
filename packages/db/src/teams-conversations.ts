@@ -338,6 +338,9 @@ export async function disconnectTeamsBot(
     await tx.execute(
       sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid`,
     );
+    await tx.execute(
+      sql`delete from teams_bot_context_cutoffs where workspace_id=${i.workspace_id}::uuid`,
+    );
     if (options.audit && prior?.active) {
       await insertDisconnectAuditEventInScope(tx, {
         accountId: i.account_id,
@@ -820,8 +823,12 @@ export async function recordTeamsContextMessage(
       sql`select 1 as ok from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid and generation=${i.generation}::uuid and active for share`,
     );
     if (!current) return;
+    // A message from before people were last added to the chat is never
+    // kept, even when Teams delivers it after the cleanup (see
+    // clearTeamsContextConversation, which holds this row exclusively).
     await tx.execute(sql`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at)
-      values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.conversationId},${thread},${input.messageId},${input.actorId}::uuid,${input.actorName?.slice(0, 256) ?? null},${input.text.slice(0, 4000)},${input.hasAttachments},${input.mentioned},${input.occurredAt}::timestamptz)
+      select ${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.conversationId},${thread},${input.messageId},${input.actorId}::uuid,${input.actorName?.slice(0, 256) ?? null},${input.text.slice(0, 4000)},${input.hasAttachments},${input.mentioned},${input.occurredAt}::timestamptz
+      where not exists (select 1 from teams_bot_context_cutoffs where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and cutoff_at>=${input.occurredAt}::timestamptz)
       on conflict(workspace_id,conversation_id,message_id) do nothing`);
     await tx.execute(
       sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and thread_id=${thread} and message_id in (select message_id from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and thread_id=${thread} order by occurred_at desc, message_id desc offset ${TEAMS_CONTEXT_MESSAGES_PER_THREAD})`,
@@ -863,8 +870,8 @@ export async function listTeamsContextMessages(
     }>(
       tx,
       input.rootPostsOnly
-        ? sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=message_id and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) order by occurred_at desc, message_id desc limit ${limit}`
-        : sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=${input.threadId ?? ""} and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) order by occurred_at desc, message_id desc limit ${limit}`,
+        ? sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=message_id and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) and not exists (select 1 from teams_bot_context_cutoffs c where c.workspace_id=${i.workspace_id}::uuid and c.conversation_id=${input.conversationId} and c.cutoff_at>=teams_bot_context_messages.occurred_at) order by occurred_at desc, message_id desc limit ${limit}`
+        : sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=${input.threadId ?? ""} and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) and not exists (select 1 from teams_bot_context_cutoffs c where c.workspace_id=${i.workspace_id}::uuid and c.conversation_id=${input.conversationId} and c.cutoff_at>=teams_bot_context_messages.occurred_at) order by occurred_at desc, message_id desc limit ${limit}`,
     ),
   );
   return rows.map((row) => ({
@@ -921,18 +928,29 @@ export async function reviseTeamsContextMessage(
 }
 
 /**
- * Forgets every recorded message in one conversation: when a group chat's
- * members change, a newcomer must not get answers built from history Teams
- * did not share with them.
+ * Forgets every recorded message in one conversation and moves its join
+ * cutoff to now: when people are added to a group chat, a newcomer must not
+ * get answers built from history Teams did not share with them. Holding the
+ * installation row exclusively orders this against every context write (which
+ * shares it), so a delayed delivery of an older message either lands first and
+ * is deleted here, or sees the new cutoff and is not kept.
  */
 export async function clearTeamsContextConversation(
   db: Database,
   i: TeamsInstallation,
   conversationId: string,
 ): Promise<void> {
-  await teamsScoped(db, i, (tx) =>
-    tx.execute(
+  await teamsScoped(db, i, async (tx) => {
+    await tx.execute(
+      sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid for update`,
+    );
+    await tx.execute(
+      sql`insert into teams_bot_context_cutoffs(account_id,workspace_id,tenant_id,conversation_id,cutoff_at)
+        values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${conversationId},clock_timestamp())
+        on conflict(workspace_id,conversation_id) do update set cutoff_at=greatest(teams_bot_context_cutoffs.cutoff_at,excluded.cutoff_at)`,
+    );
+    await tx.execute(
       sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${conversationId}`,
-    ),
-  );
+    );
+  });
 }

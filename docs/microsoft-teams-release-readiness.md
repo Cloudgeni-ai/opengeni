@@ -609,8 +609,9 @@ package nothing changes: only the mention itself is visible.
   chat, for seven days. Reads ignore older rows; they are deleted as new messages
   are recorded in the workspace, and all of them when the installation is
   disconnected. When someone is added to a group chat, its kept messages are
-  deleted, so a newcomer never gets answers built from history Teams did not
-  show them.
+  deleted and messages from before that moment are never kept or read again,
+  even if Teams delivers one late, so a newcomer never gets answers built from
+  history Teams did not show them.
 - Context attached to a mention becomes part of that Opengeni chat and stays
   with the chat's history, like the mention itself.
 - A mention that starts a chat gets up to 30 earlier messages of its thread or

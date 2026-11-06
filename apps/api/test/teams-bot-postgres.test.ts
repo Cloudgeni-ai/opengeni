@@ -446,12 +446,52 @@ test("recorded context follows edits, deletions, accepted mentions, retention an
   expect(await read(f.i)).toEqual([]);
   expect((await read(f.i, "19:elsewhere")).map((row) => row.text)).toEqual(["Another chat"]);
 
+  // Clearing also sets the chat's join cutoff: a delayed delivery of a message
+  // from before people were added never puts that history back, while a
+  // message from after it is kept.
+  await keep(f.i, "19:group", "delayed", 4, "Posted before the join");
+  const afterJoin = new Date(Date.now() + 60_000).toISOString();
+  await recordTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    threadId: null,
+    messageId: "joined",
+    actorId: f.actor,
+    actorName: "Ada Lovelace",
+    text: "Posted after the join",
+    hasAttachments: false,
+    mentioned: false,
+    occurredAt: afterJoin,
+  });
+  // A row from before the cutoff that is somehow still there is never read.
+  await shared.admin`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,text,occurred_at)
+    values(${f.i.account_id},${f.i.workspace_id},${f.i.tenant_id},'19:group','','stale',${f.actor},'Stale pre-join row','2026-11-02T15:05:00Z')`;
+  const readAll = () =>
+    listTeamsContextMessages(client.db, f.i, {
+      conversationId: "19:group",
+      threadId: null,
+      beforeMessageId: "none",
+      notAfter: new Date(Date.now() + 3_600_000).toISOString(),
+      limit: 50,
+    });
+  expect((await readAll()).map((row) => row.messageId)).toEqual(["joined"]);
+  const [delayed] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id} and message_id='delayed'`;
+  expect(delayed!.n).toBe(0);
+  // Adding people again only moves the cutoff forward.
+  await clearTeamsContextConversation(client.db, f.i, "19:group");
+  const [cutoffs] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_cutoffs where workspace_id=${f.i.workspace_id} and conversation_id='19:group'`;
+  expect(cutoffs!.n).toBe(1);
+
   // A write from before a disconnect never lands after it.
   await disconnectTeamsBot(client.db, f.i);
   await keep(f.i, "19:group", "late", 4, "Racing the disconnect");
   const [left] =
     await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
   expect(left!.n).toBe(0);
+  const [cutoffsLeft] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_cutoffs where workspace_id=${f.i.workspace_id}`;
+  expect(cutoffsLeft!.n).toBe(0);
 });
 test("throttling retries durable output while an ambiguous delivery is never repeated", async () => {
   const f = await fixture();

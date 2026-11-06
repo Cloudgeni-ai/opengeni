@@ -17,9 +17,11 @@
 -- * mentioned marks a mention Opengeni accepted: a reader walking back from
 --   a mention that continues the same chat stops at the previous one.
 -- * Teams edits replace text and deletions remove the row; a new member in a
---   group chat clears that chat's rows.
+--   group chat clears that chat's rows and advances its join cutoff in
+--   teams_bot_context_cutoffs, so a delayed delivery of an older message
+--   can never put pre-join history back.
 --
--- Only a new table, so an older binary keeps working unchanged and never
+-- Only new tables, so an older binary keeps working unchanged and never
 -- reads or writes it.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -69,10 +71,34 @@ CREATE POLICY workspace_isolation ON teams_bot_context_messages
 
 COMMENT ON TABLE teams_bot_context_messages IS 'Recent Teams channel and group chat messages kept as context for the next mention of Opengeni.';
 
+CREATE TABLE teams_bot_context_cutoffs (
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  tenant_id uuid NOT NULL,
+  conversation_id text NOT NULL,
+  cutoff_at timestamptz NOT NULL,
+  CONSTRAINT teams_bot_context_cutoffs_pkey PRIMARY KEY (workspace_id, conversation_id),
+  CONSTRAINT teams_bot_context_cutoffs_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT teams_bot_context_cutoffs_bounds_check CHECK (
+    octet_length(conversation_id) BETWEEN 1 AND 512
+  )
+);
+
+ALTER TABLE teams_bot_context_cutoffs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE teams_bot_context_cutoffs FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE teams_bot_context_cutoffs FROM PUBLIC;
+CREATE POLICY workspace_isolation ON teams_bot_context_cutoffs
+  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
+  WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+
+COMMENT ON TABLE teams_bot_context_cutoffs IS 'When people were last added to a Teams group chat: context from before it is never recorded or read.';
+
 DO $teams_bot_context_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT SELECT, INSERT, UPDATE, DELETE ON teams_bot_context_messages TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON teams_bot_context_cutoffs TO opengeni_app;
   END IF;
 END
 $teams_bot_context_grants$;
