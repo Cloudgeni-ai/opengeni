@@ -22,6 +22,7 @@ pub(crate) fn kind(request: &Request) -> RequestKind {
         Request::Status => RequestKind::Status,
         Request::Adopt { .. } => RequestKind::Adopt,
         Request::HandOff { .. } => RequestKind::HandOff,
+        Request::Restart { .. } => RequestKind::Restart,
         Request::Prepare { .. } => RequestKind::Prepare,
         Request::Capture { .. } => RequestKind::Capture,
     }
@@ -30,9 +31,10 @@ pub(crate) fn kind(request: &Request) -> RequestKind {
 /// The sandbox `request` is about, and the generation it names.
 fn about(request: &Request) -> (Option<Id>, Option<u64>) {
     match request {
-        Request::Create { id, .. } | Request::Adopt { id, .. } | Request::HandOff { id, .. } => {
-            (Some(*id), None)
-        }
+        Request::Create { id, .. }
+        | Request::Adopt { id, .. }
+        | Request::HandOff { id, .. }
+        | Request::Restart { id } => (Some(*id), None),
         Request::Remove { id, generation }
         | Request::Touch { id, generation, .. }
         | Request::Wake { id, generation, .. }

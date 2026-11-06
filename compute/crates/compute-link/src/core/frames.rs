@@ -113,7 +113,11 @@ impl Core {
         if let Some(state) = sandbox.running {
             self.effects.push(Effect::Frame {
                 link: link_id,
-                frame: HostFrame::State { s, state },
+                frame: HostFrame::State {
+                    s,
+                    state,
+                    busy: sandbox.busy,
+                },
                 payload: Bytes::new(),
             });
         }

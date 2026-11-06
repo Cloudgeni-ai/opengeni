@@ -205,6 +205,67 @@ test("installing the bot for yourself sends one welcome; unlinked people get a b
   ]);
 });
 
+test("in an organization that hasn't connected Opengeni, installs and messages get a bounded Connect your organization card", async () => {
+  const f = await fixture();
+  const other = crypto.randomUUID();
+  const deps = {
+    ...f.deps,
+    settings: {
+      ...f.deps.settings,
+      teamsBotSelfServeSetupEnabled: true,
+      teamsBotAllowedTenantIds: [f.tenant, other],
+    },
+  } as ApiRouteDeps;
+  const handle = (body: unknown) => handleTeamsActivity(deps, f.app, body);
+  const person = crypto.randomUUID();
+  const chat = {
+    conversation: { id: `a:${person}`, conversationType: "personal", tenantId: other },
+    channelData: { tenant: { id: other } },
+  };
+  const connectAction = (index: number) => {
+    const [action] = cardActions(f.calls[index]!.activity) as Array<{
+      type: string;
+      title: string;
+      url: string;
+    }>;
+    expect(action).toMatchObject({ type: "Action.OpenUrl", title: "Connect your organization" });
+    return new URLSearchParams(new URL(action!.url).hash.slice(1)).get("teams_setup")!;
+  };
+  await handle({
+    type: "conversationUpdate",
+    channelId: "msteams",
+    serviceUrl,
+    from: { id: `29:${person}`, aadObjectId: person },
+    recipient: { id: f.botId },
+    membersAdded: [{ id: f.botId }],
+    ...chat,
+  });
+  expect(f.calls).toHaveLength(1);
+  expect(f.calls[0]!.activity.text).toContain("Your organization hasn't connected Opengeni yet.");
+  expect(verifyTeamsProof("test", connectAction(0))).toMatchObject({
+    purpose: "setup",
+    tenantId: other,
+    actorId: person,
+    workspaceId: null,
+    conversation: { id: `a:${person}`, serviceUrl },
+  });
+  await handle(f.message("hello", person, chat));
+  expect(f.calls).toHaveLength(2);
+  connectAction(1);
+  // Repeats are not answered again for a while; help still is.
+  await handle(f.message("hello again", person, chat));
+  expect(f.calls).toHaveLength(2);
+  await handle(f.message("help", person, chat));
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls[2]!.activity.text).toContain("**Opengeni help**");
+  expect(f.outcomes).toEqual([
+    "connect_link_sent",
+    "connect_link_sent",
+    "onboarding_reply_limited",
+    "help_sent",
+  ]);
+});
+
 test("help is answered in Teams without reaching the agent, for linked and unlinked people", async () => {
   const f = await fixture();
   await f.handle(f.message("help"));

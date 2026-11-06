@@ -19,8 +19,11 @@
 //!   its disk; new requests or a longer disk keep them. Its disk may only
 //!   grow.
 //! - `POST /v1/sandboxes/{id}/restart` boots it afresh from its disk,
-//!   keeping its files and shape: handed off as a resize does, even awake,
-//!   its next wake boots it from its disk, ending its running programs.
+//!   keeping its files and shape: its host ends its VM unsaved and forgets
+//!   its memory image, storing nothing first, so its next wake boots it
+//!   from its disk there, ending its running programs. A host from before
+//!   that hands it off as a resize does, even awake. A host busy with it,
+//!   as one handing it off, is answered `409 busy` with why.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
 //! - `POST /v1/sandboxes/{id}/templates`, `GET /v1/templates` and `GET` and
