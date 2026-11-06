@@ -1089,6 +1089,8 @@ export async function createAndStartSessionWithOutcome(input: {
   latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
   /** No person answers during the task; frozen in the session metadata. */
   unattended?: boolean;
+  /** The agent (agents.id) the chat starts with, at its current revision. */
+  boundAgentId?: string;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1392,6 +1394,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
+          ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
@@ -1507,6 +1510,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
+        ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
@@ -4331,6 +4335,9 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // The agent the chat starts with: its Instructions are a prompt layer
+      // of their own, never copied into `instructions`.
+      ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
       // No person answers during the task. Never inherited by a child.
       ...(payload.unattended === true ? { unattended: true } : {}),
       // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
