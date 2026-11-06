@@ -5,7 +5,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
-  applyCreditDebitUpToBalance,
+  applyCreditDebitAfterUse,
   completeSelfServiceOrganizationSetup,
   createDb,
   freePlanCreditEligible,
@@ -220,11 +220,13 @@ test("an existing in-period grant stays untouched and spendable after a later cu
   await setCutoff(new Date(Date.now() - DAY));
   expect(await freePlanCreditEligible(client.db, old)).toBe(false);
   expect((await getSpendableCreditBalance(client.db, old, "model-a")).balanceMicros).toBe(10 * M);
-  const charge = await applyCreditDebitUpToBalance(client.db, {
+  const charge = await applyCreditDebitAfterUse(client.db, {
     accountId: old,
-    requestedAmountMicros: 3 * M,
-    modelId: "model-a",
+    amountMicros: 3 * M,
+    usage: "model-a",
     type: "model_debit",
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   });
   expect(charge.debitedMicros).toBe(3 * M);

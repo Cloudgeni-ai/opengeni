@@ -1950,10 +1950,14 @@ Model-scoped promotions retain offer identity and initial eligibility on each gr
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
 new scoped grants without a restart. Each paid call retains its admitted revision
 for settlement; the next call reads current policy. `packages/db/src/credit-balances.ts` owns the general/promotional split and
-eligible balance calculation. Model settlement serializes by account, consumes
-eligible grants before general credits, and inserts `credit_debit_allocations`
-with the idempotent debit in one transaction. A settled zero-cost receipt cannot
-be charged later on retry. Non-model resources spend general credits only.
+eligible balance calculation. Model settlement charges the response's full price
+after use (`applyCreditDebitAfterUse`), like other Opengeni-funded resources: it
+serializes by account, consumes eligible grants before general credits, and
+inserts `credit_debit_allocations` with the idempotent debit in one transaction.
+Whatever grants do not cover is taken from general credit, which may go below
+zero; later grants and top-ups net against it. A retry never charges a settled
+response again, including a zero-cost or capped receipt from earlier releases.
+Non-model resources spend general credits only.
 Legacy grants remain unrestricted. Stripe checkout metadata records scoped status and initial eligibility
 before the customer confirms; webhook and status recovery share fulfillment.
 Deployment policy, activation order and customer flow: [scoped promotional

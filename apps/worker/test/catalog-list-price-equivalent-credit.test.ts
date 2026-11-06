@@ -64,7 +64,7 @@ describe("catalog list prices produce an equivalent credit cost", () => {
 
   test("every list-priced subscription model records a non-zero equivalent credit cost", async () => {
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
       debitedMicros: 0,
     } as never);
     restores.push(

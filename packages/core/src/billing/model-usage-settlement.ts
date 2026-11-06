@@ -21,7 +21,7 @@ import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usag
 import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
   applyByokPlatformFeeDebit,
-  applyCreditDebitUpToBalance,
+  applyCreditDebitAfterUse,
   isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
   settleSessionUsageReceipt,
@@ -48,7 +48,10 @@ import {
  * event, the `model.cost` event, and (for Opengeni-credit models) the
  * idempotent credit debit. Agent turns and stateless single model calls both
  * settle here; `sourceId` is the durable identity every idempotency key
- * derives from, so a retried settlement never charges twice.
+ * derives from, so a retried settlement never charges twice. The debit is the
+ * response's full price, charged after use like every other Opengeni-funded
+ * resource: it may take the balance below zero, and later grants and top-ups
+ * net against that.
  */
 
 export type ModelUsageBillingRecord = {
@@ -526,12 +529,13 @@ export async function settleModelUsage(
     idempotencyKey: `usage:model.cost:${input.sourceId}`,
   });
   if (costMicros > 0) {
-    const result = await applyCreditDebitUpToBalance(db, {
+    const result = await applyCreditDebitAfterUse(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
-      requestedAmountMicros: costMicros,
-      modelId: canonicalizeConfiguredModelId(settings, input.model),
+      amountMicros: costMicros,
+      // Grants scoped to this model pay first where they cover it.
+      usage: canonicalizeConfiguredModelId(settings, input.model),
       creditPolicyRevision: input.creditPolicyRevision,
       sourceType: "model_response",
       sourceId: input.sourceId,
@@ -549,6 +553,9 @@ export async function settleModelUsage(
         // counts. 0 when the provider did not report cached tokens.
         cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
         ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
+        ...(input.creditPolicyRevision !== undefined
+          ? { creditPolicyRevision: input.creditPolicyRevision }
+          : {}),
       },
     });
     try {

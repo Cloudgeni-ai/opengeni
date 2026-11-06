@@ -126,7 +126,6 @@ import {
   getBillingBalance,
   getSpendableCreditBalance,
   receiptCreatedAt,
-  planCreditDebit,
   planPostUseCreditAllocations,
   readBillingBalance,
   type CreditUsage,
@@ -7156,108 +7155,12 @@ async function resolveUsageOrigin(
   return ambientBillingOrigin() ?? "app";
 }
 
-export async function applyCreditDebitUpToBalance(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    requestedAmountMicros: number;
-    /** Canonical, accepted model ID. Omitted for non-model usage. */
-    modelId?: string;
-    creditPolicyRevision?: number | undefined;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
-    usageOrigin?: BillingOrigin;
-  },
-): Promise<{
-  balance: BillingBalance;
-  debitedMicros: number;
-  /**
-   * The part of `debitedMicros` paid by scoped promotional grants (signup
-   * trial, scoped coupon offers). The rest came from general credit. Zero on
-   * an idempotent replay, like `debitedMicros`.
-   */
-  grantDebitedMicros: number;
-}> {
-  if (input.requestedAmountMicros <= 0) {
-    return {
-      balance: await getBillingBalance(db, input.accountId),
-      debitedMicros: 0,
-      grantDebitedMicros: 0,
-    };
-  }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
-      const before = await getBillingBalance(
-        scopedDb,
-        input.accountId,
-        input.creditPolicyRevision,
-        settledAt,
-        true,
-      );
-      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
-      const candidateDebitMicros = plan.debitedMicros;
-      // Keep a zero-cost receipt too: retrying after a top-up must not charge
-      // a response that was already settled while the eligible balance was empty.
-      const [inserted] = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -candidateDebitMicros,
-          sourceType: input.sourceType ?? null,
-          sourceId: input.sourceId ?? null,
-          usageOrigin,
-          idempotencyKey: input.idempotencyKey,
-          metadata: {
-            ...input.metadata,
-            requestedAmountMicros: input.requestedAmountMicros,
-            debitedMicros: candidateDebitMicros,
-            creditPolicyRevision: before.creditPolicyRevision,
-          },
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({
-          target: schema.creditLedgerEntries.idempotencyKey,
-        })
-        .returning({ id: schema.creditLedgerEntries.id });
-      const debitedMicros = inserted ? candidateDebitMicros : 0;
-      if (inserted && plan.allocations.length) {
-        await scopedDb.insert(schema.creditDebitAllocations).values(
-          plan.allocations.map((allocation) => ({
-            ...allocation,
-            accountId: input.accountId,
-            debitEntryId: inserted.id,
-          })),
-        );
-      }
-      return {
-        balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros,
-        grantDebitedMicros: inserted
-          ? plan.allocations.reduce((sum, allocation) => sum + allocation.amountMicros, 0)
-          : 0,
-      };
-    },
-  );
-}
-
 /**
  * Settle an already-consumed, Opengeni-funded resource for its full cost.
  * Admission happens before use; an in-flight operation can take the account
  * below zero. Future grants and purchased top-ups net against that balance.
+ * Model responses settle here too: parallel or long calls are charged their
+ * full price even when it exceeds what was left when they were admitted.
  * Never use this helper to admit a new operation or for externally paid use.
  */
 export async function applyCreditDebitAfterUse(
@@ -7278,10 +7181,24 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /**
+     * The promotion policy revision the operation was admitted under, so its
+     * grants are allocated with the model coverage it was admitted with.
+     * Omitted: the current policy.
+     */
+    creditPolicyRevision?: number | undefined;
     /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
     usageOrigin?: BillingOrigin;
   },
-): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+): Promise<{
+  balance: BillingBalance;
+  debitedMicros: number;
+  /**
+   * The part of `debitedMicros` paid by promotional or plan credit grants;
+   * the rest came from general credit. Zero on an idempotent replay.
+   */
+  grantDebitedMicros: number;
+}> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
   }
@@ -7302,7 +7219,13 @@ export async function applyCreditDebitAfterUse(
       // tools as well as models.
       if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
+          await getBillingBalance(
+            scopedDb,
+            input.accountId,
+            input.creditPolicyRevision,
+            settledAt,
+            true,
+          ),
           input.amountMicros,
           input.usage,
         );
@@ -7320,6 +7243,9 @@ export async function applyCreditDebitAfterUse(
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
         debitedMicros: insertedId ? input.amountMicros : 0,
+        grantDebitedMicros: insertedId
+          ? allocations.reduce((sum, allocation) => sum + allocation.amountMicros, 0)
+          : 0,
       };
     },
   );
@@ -7328,6 +7254,10 @@ export async function applyCreditDebitAfterUse(
 /**
  * Insert an already-consumed charge once. A replay of the same idempotency
  * key must be the same charge. Returns the new row's id, or null on replay.
+ * A model response settled by an earlier release, which capped the debit at
+ * the eligible balance (possibly a zero-cost receipt), recorded its full price
+ * as `requestedAmountMicros`; replaying that same price is the same charge and
+ * is never charged again.
  */
 async function insertPostUseDebit(
   scopedDb: Database,
@@ -7372,6 +7302,9 @@ async function insertPostUseDebit(
       amountMicros: schema.creditLedgerEntries.amountMicros,
       sourceType: schema.creditLedgerEntries.sourceType,
       sourceId: schema.creditLedgerEntries.sourceId,
+      requestedAmountMicros: sql<
+        string | null
+      >`${schema.creditLedgerEntries.metadata}->>'requestedAmountMicros'`,
     })
     .from(schema.creditLedgerEntries)
     .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
@@ -7380,7 +7313,8 @@ async function insertPostUseDebit(
     prior.accountId !== input.accountId ||
     prior.workspaceId !== (input.workspaceId ?? null) ||
     prior.type !== input.type ||
-    prior.amountMicros !== -input.amountMicros ||
+    (prior.amountMicros !== -input.amountMicros &&
+      prior.requestedAmountMicros !== String(input.amountMicros)) ||
     prior.sourceType !== input.sourceType ||
     prior.sourceId !== input.sourceId
   ) {

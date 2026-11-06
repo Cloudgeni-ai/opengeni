@@ -59,7 +59,7 @@ describe("organization Azure OpenAI usage", () => {
         recorded.push({ eventType: input.eventType, quantity: input.quantity });
       },
     );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance");
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse");
     try {
       const billing = await recordModelUsageAndDebitCredits(settings(), db, {
         accountId: "acct",
