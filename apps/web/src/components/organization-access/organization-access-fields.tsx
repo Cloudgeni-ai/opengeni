@@ -232,11 +232,14 @@ export function WorkspaceScopeFields({
 export function PermissionChecklist({
   selected,
   canGrant,
+  withheldHint = "beyond your own access",
   disabled = false,
   onChange,
 }: {
   selected: readonly string[];
   canGrant: (permission: string) => boolean;
+  /** Why a permission is off, naming who can give it. */
+  withheldHint?: string;
   disabled?: boolean;
   onChange: (next: string[]) => void;
 }) {
@@ -258,9 +261,7 @@ export function PermissionChecklist({
                     description={
                       <span className="font-mono">
                         {permission}
-                        {allowed ? null : (
-                          <span className="font-sans"> · beyond your own access</span>
-                        )}
+                        {allowed ? null : <span className="font-sans"> · {withheldHint}</span>}
                       </span>
                     }
                     checked={allowed && selected.includes(permission)}

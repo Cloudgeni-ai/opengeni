@@ -11,6 +11,9 @@ import {
   type ApiKey,
   type OrganizationApiKeyAccess,
   serviceAccountAllowsPermission,
+  OWNER_LEVEL_API_KEY_MESSAGE,
+  workspaceAdminDelegates,
+  workspaceKeyCreatorSentence,
 } from "@opengeni/contracts";
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
@@ -265,7 +268,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
             }),
           )
         )
-          throw new HTTPException(403, { message: OWNER_LEVEL_KEY_MESSAGE });
+          throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
       }
       try {
         const apiKey = await updateOrganizationApiKey(
@@ -338,23 +341,18 @@ function ensureDelegablePermissions(
     grantPermissions.includes("workspace:admin") &&
     authorization.grant.permissionMode !== "explicit"
   ) {
-    const accountLiteralPermissions = new Set<Permission>([
-      "account:read",
-      "account:admin",
-      "workspace:create",
-      "billing:read",
-      "billing:manage",
-    ]);
-    const workspaceLiteralPermissions = new Set<Permission>(["members:manage", "secrets:read"]);
     const highTrustMissing = requested.filter(
       (permission) =>
-        (accountLiteralPermissions.has(permission) &&
-          !authorization.accountGrant?.permissions.includes(permission)) ||
-        (workspaceLiteralPermissions.has(permission) && !grantPermissions.includes(permission)),
+        !workspaceAdminDelegates(
+          grantPermissions,
+          authorization.accountGrant?.permissions ?? [],
+          permission,
+        ),
     );
     if (highTrustMissing.length === 0) return;
+    const creator = workspaceKeyCreatorSentence(requested);
     throw new HTTPException(403, {
-      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
+      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}${creator ? `. ${creator}` : ""}`,
     });
   }
   const missing = requested.filter(
@@ -445,9 +443,6 @@ function isMemberLevel(permissions: readonly Permission[]): boolean {
   return permissions.every((permission) => serviceAccountAllowsPermission("member", permission));
 }
 
-const OWNER_LEVEL_KEY_MESSAGE =
-  "Only the organization owner can manage keys and service accounts that manage people, keys or billing.";
-
 /** An organization admin creates only member-level keys, held by member service accounts. */
 async function requireMemberLevelKeyCreation(
   deps: ApiRouteDeps,
@@ -460,7 +455,8 @@ async function requireMemberLevelKeyCreation(
     permissions: input.permissions,
     permissionMode: input.explicit ? "explicit" : "legacy",
   });
-  if (!isMemberLevel(effective)) throw new HTTPException(403, { message: OWNER_LEVEL_KEY_MESSAGE });
+  if (!isMemberLevel(effective))
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
   if (input.serviceAccountId)
     await requireMemberServiceAccount(deps, control, organizationId, input.serviceAccountId);
 }
@@ -473,7 +469,7 @@ function requireMemberLevelKey(control: OrganizationApiKeyControl, apiKey: ApiKe
     permissionMode: apiKey.permissionMode ?? "legacy",
   });
   if (apiKey.serviceAccount?.role === "admin" || !isMemberLevel(effective))
-    throw new HTTPException(403, { message: OWNER_LEVEL_KEY_MESSAGE });
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
 }
 
 /** An organization admin manages only member service accounts. Missing ones read as not found later. */
@@ -485,7 +481,8 @@ export async function requireMemberServiceAccount(
 ): Promise<void> {
   if (control === "full") return;
   const found = await getOrganizationServiceAccount(deps.db, organizationId, serviceAccountId);
-  if (found?.role === "admin") throw new HTTPException(403, { message: OWNER_LEVEL_KEY_MESSAGE });
+  if (found?.role === "admin")
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
 }
 
 async function requireWorkspaceApiKeyControl(
