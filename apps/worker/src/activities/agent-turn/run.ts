@@ -1455,7 +1455,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
             repositoryRemoval,
-            mcpAvailabilityNote,
+            unavailableMcpConnectors,
             turnTools,
             connectionScope,
           } = toolPolicy;
@@ -1794,6 +1794,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceCreditModelsAllowed,
             hostedToolsBillCredits,
             turnTools,
+            unavailableMcpConnectors,
             connectionScope,
             sandboxArtifactRuntime,
             activeSandboxBackend,
@@ -1814,6 +1815,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             generateSessionTitleInParallel,
             postToolPreparationStartedAt,
             preparationIndependentToolNames,
+            mcpAvailabilityNote,
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({

@@ -28,7 +28,7 @@ export type HostFrame =
       headers?: AgentLinkHeaders;
       payload: Uint8Array;
     }
-  | { t: "state"; s: number; state: "awake" | "asleep" }
+  | { t: "state"; s: number; state: "awake" | "asleep"; busy?: "handing_off" }
   | { t: "close"; s: number };
 
 export type AgentLinkRelay = { url: string; token: string; expires_at_ms: number };
@@ -208,7 +208,11 @@ export function decodeHostFrame(bytes: Uint8Array): HostFrame {
       if (state !== "awake" && state !== "asleep") {
         throw new AgentLinkProtocolError("frame field state is invalid");
       }
-      return { t, s: sessionOf(header), state };
+      // What the host is busy with that keeps the sandbox from running for
+      // now. A kind this gateway does not know is read as none, as an older
+      // host's frame without the field is.
+      const busy = header.busy === "handing_off" ? ("handing_off" as const) : undefined;
+      return { t, s: sessionOf(header), state, ...(busy ? { busy } : {}) };
     }
     case "close":
       return { t, s: sessionOf(header) };

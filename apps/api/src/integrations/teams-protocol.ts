@@ -219,7 +219,9 @@ const PersonalInstall = z.object({
   type: z.literal("conversationUpdate"),
   channelId: z.literal("msteams"),
   serviceUrl: z.string().url(),
-  from: z.object({ id: opaque, aadObjectId: uuid.optional() }).optional(),
+  from: z
+    .object({ id: opaque, aadObjectId: uuid.optional(), role: z.string().optional() })
+    .optional(),
   recipient: z.object({ id: opaque }),
   conversation: z.object({
     id: opaque,
@@ -234,7 +236,7 @@ const PersonalInstall = z.object({
 });
 export type TeamsPersonalInstall = {
   tenantId: string;
-  /** The person who added the bot, when Teams names them. */
+  /** The person who added the bot, when Teams names a person (never a bot). */
   actorId: string | null;
   conversationId: string;
   serviceUrl: string;
@@ -260,9 +262,10 @@ export function teamsPersonalInstall(raw: unknown): TeamsPersonalInstall | null 
   } catch {
     return null;
   }
+  const person = a.from && a.from.role !== "bot" && a.from.id !== a.recipient.id ? a.from : null;
   return {
     tenantId,
-    actorId: a.from?.aadObjectId?.toLowerCase() ?? null,
+    actorId: person?.aadObjectId?.toLowerCase() ?? null,
     conversationId: a.conversation.id,
     serviceUrl,
     botId: a.recipient.id,
@@ -369,11 +372,25 @@ const Proof = z
     actorId: uuid,
     workspaceId: uuid.nullable(),
     generation: uuid.nullable(),
+    /** The 1:1 chat the setup link was sent to, so setup can confirm there. */
+    conversation: z
+      .object({ id: opaque, serviceUrl: z.string().url().max(512) })
+      .strict()
+      .optional(),
     nonce: uuid,
     expiresAt: z.number().int(),
   })
   .strict();
 export type TeamsLinkProof = z.infer<typeof Proof>;
+/**
+ * Link proofs are short-lived. A setup proof also has to cover signing up for
+ * Opengeni, creating a shared workspace and the Microsoft sign-in; its
+ * single-use nonce still prevents replay.
+ */
+const PROOF_TTL_MS: Record<TeamsLinkProof["purpose"], number> = {
+  link: 10 * 60_000,
+  setup: 60 * 60_000,
+};
 export function mintTeamsProof(
   secret: string,
   input: Omit<TeamsLinkProof, "version" | "nonce" | "expiresAt">,
@@ -381,7 +398,12 @@ export function mintTeamsProof(
 ): string {
   const payload = Buffer.from(
     JSON.stringify(
-      Proof.parse({ ...input, version: 1, nonce: randomUUID(), expiresAt: now + 10 * 60_000 }),
+      Proof.parse({
+        ...input,
+        version: 1,
+        nonce: randomUUID(),
+        expiresAt: now + PROOF_TTL_MS[input.purpose],
+      }),
     ),
   ).toString("base64url");
   return `${payload}.${createHmac("sha256", secret).update(`teams-link-v1:${payload}`).digest("base64url")}`;
@@ -395,7 +417,7 @@ export function verifyTeamsProof(secret: string, token: string, now = Date.now()
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
     throw new Error("teams_link_invalid");
   const proof = Proof.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
-  if (proof.expiresAt <= now || proof.expiresAt > now + 10 * 60_000)
+  if (proof.expiresAt <= now || proof.expiresAt > now + PROOF_TTL_MS[proof.purpose])
     throw new Error("teams_link_expired");
   return proof;
 }

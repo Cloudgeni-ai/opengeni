@@ -146,6 +146,11 @@ type FixtureOptions = {
   filesAllowedTools?: string[];
   /** Observes what the worker hands the spill port for an oversized result. */
   onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
+  /**
+   * The product connector needs the person's own sign-in, and none was
+   * admitted for this turn (no accepted account binding).
+   */
+  productSignInNotAdmitted?: boolean;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -198,6 +203,16 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
           : id === "files" && options.filesAllowedTools
             ? options.filesAllowedTools
             : ["search_documents"],
+      ...(options.productSignInNotAdmitted && id === "customer-product"
+        ? {
+            name: "Customer Product",
+            connectionRef: {
+              providerDomain: "product.example",
+              kind: "oauth2" as const,
+              subjectScope: "subject" as const,
+            },
+          }
+        : {}),
     })),
   });
   const settings =
@@ -643,6 +658,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         video: buildOptions?.videoGeneration !== undefined,
       } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
+      mcpAvailabilityNote: toolRuntime.mcpAvailabilityNote,
       modelVisibleSkillCatalogText: built.modelVisibleSkillCatalogText,
       skillCatalogWrites,
       governanceWrites,
@@ -958,6 +974,30 @@ describe("agent configuration reaches the production model request", () => {
     expect(captured.names).not.toContain("web_search");
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
+  });
+
+  test("a product connector whose sign-in was not admitted is named to the model, never silently missing", async () => {
+    // The person's own sign-in for the product connector was not usable in this
+    // workspace when the turn was accepted (for example right after a
+    // membership change), so the turn carries no account for it.
+    const captured = await captureWorkerRequest({ productSignInNotAdmitted: true });
+    const productTool = prefixedMcpToolName("customer-product", "search_documents");
+    expect(captured.names).not.toContain(productTool);
+    expect(captured.deferredNames).not.toContain(productTool);
+    // The turn's own notice names the connector and the reason category.
+    expect(captured.mcpAvailabilityNote).toContain(
+      '- "Customer Product" (customer-product): no signed-in account for it was available to this turn.',
+    );
+    // Tool search and tool listing report it beside runtime failures.
+    expect(captured.preparation.preparationUnavailableMcpServers?.get("customer-product")).toMatch(
+      /^not loaded this turn: no signed-in account for it was available to this turn\./u,
+    );
+
+    // With every connector available there is no notice at all.
+    const ordinary = await captureWorkerRequest();
+    expect(ordinary.names).toContain(productTool);
+    expect(ordinary.mcpAvailabilityNote).toBeUndefined();
+    expect(ordinary.preparation.preparationUnavailableMcpServers).toBeUndefined();
   });
 
   test("Codemode guidance needs a sandbox or Connected Machine to run it from", async () => {
