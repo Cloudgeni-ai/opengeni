@@ -670,6 +670,121 @@ describe("XLSX security preflight", () => {
     ).rejects.toThrow(/hard safety cap/i);
   });
 
+  test("bounds merged-cell and data-validation range areas before ExcelJS expands them", async () => {
+    const plain = await plainXlsx();
+    const worksheetPart = (name: string, body: string) =>
+      [`xl/worksheets/${name}.xml`, `<worksheet><sheetData/>${body}</worksheet>`] as const;
+    const withWorksheets = (...parts: ReadonlyArray<readonly [string, string]>) =>
+      parts.reduce(
+        (zip, [entryName, xml]) =>
+          appendStoredZipEntry(zip, entryName, new TextEncoder().encode(xml)),
+        plain,
+      );
+    const withWorksheet = (name: string, body: string) => withWorksheets(worksheetPart(name, body));
+    const merges = (...refs: string[]) =>
+      `<mergeCells count="${refs.length}">${refs.map((ref) => `<mergeCell ref="${ref}"/>`).join("")}</mergeCells>`;
+    const validation = (sqref: string) =>
+      `<dataValidations count="1"><dataValidation type="whole" sqref="${sqref}">` +
+      "<formula1>1</formula1></dataValidation></dataValidations>";
+    const column = (letter: string) => `${letter}1:${letter}1048576`;
+
+    // A few hundred bytes of XML that would otherwise cover the whole sheet.
+    for (const [name, body] of [
+      ["merge-bomb", merges("A1:XFD1048576")],
+      ["validation-bomb", validation("A1:XFD1048576")],
+      // Validations get four full columns; a fifth, as separate ranges or one range, is too many.
+      ["five-columns", validation(["A", "B", "C", "D", "E"].map(column).join(" "))],
+      ["five-column-range", validation("A1:E1048576")],
+      ["four-columns-and-a-cell", validation(`A1:D1048576 E1`)],
+    ] as const) {
+      await expect(SpreadsheetFile.importXlsx(withWorksheet(name, body))).rejects.toMatchObject({
+        code: "limit-exceeded",
+        entryName: `xl/worksheets/${name}.xml`,
+      });
+    }
+    await expect(
+      SpreadsheetFile.importXlsx(withWorksheet("four-columns", validation("A1:D1048576"))),
+    ).resolves.toBeInstanceOf(Workbook);
+
+    // Merged areas are summed within a part against the worksheet-cell budget.
+    const sixCells = withWorksheet("summed", merges("A1:B2", "D1:E1"));
+    await expect(
+      SpreadsheetFile.importXlsx(sixCells, { limits: { worksheetCellsPerPart: 5 } }),
+    ).rejects.toMatchObject({ code: "limit-exceeded", entryName: "xl/worksheets/summed.xml" });
+    await expect(
+      SpreadsheetFile.importXlsx(sixCells, { limits: { worksheetCellsPerPart: 6 } }),
+    ).resolves.toBeInstanceOf(Workbook);
+
+    // Validation addresses use their own ceiling and do not spend the worksheet-cell budget.
+    await expect(
+      SpreadsheetFile.importXlsx(
+        withWorksheet("separate", merges("A1:B2") + validation("D1 F1:F2 A1:B1048576")),
+        { limits: { worksheetCellsPerPart: 5, worksheetCells: 5 } },
+      ),
+    ).resolves.toBeInstanceOf(Workbook);
+
+    // Merges are also summed across worksheet parts against the package-wide cell budget.
+    const twoParts = withWorksheets(
+      worksheetPart("first", merges("A1:C1")),
+      worksheetPart("second", merges("A1:A3")),
+    );
+    await expect(
+      SpreadsheetFile.importXlsx(twoParts, { limits: { worksheetCells: 5 } }),
+    ).rejects.toMatchObject({ code: "limit-exceeded", entryName: "xl/worksheets/second.xml" });
+
+    // And validations across parts against the same four-column ceiling.
+    const twoColumnParts = ["first", "second", "third"].map((name) =>
+      worksheetPart(name, validation(`${column("A")} ${column("B")}`)),
+    );
+    await expect(
+      SpreadsheetFile.importXlsx(withWorksheets(...twoColumnParts.slice(0, 2))),
+    ).resolves.toBeInstanceOf(Workbook);
+    await expect(
+      SpreadsheetFile.importXlsx(withWorksheets(...twoColumnParts)),
+    ).rejects.toMatchObject({ code: "limit-exceeded", entryName: "xl/worksheets/third.xml" });
+
+    for (const body of [
+      ...['ref="B2:A1"', 'ref="A1:"', 'ref="A0"', 'ref=""', ""].map(
+        (reference) => `<mergeCells><mergeCell ${reference}/></mergeCells>`,
+      ),
+      validation("A1 B0"),
+      '<dataValidations><dataValidation type="whole"/></dataValidations>',
+    ]) {
+      await expect(
+        SpreadsheetFile.importXlsx(withWorksheet("malformed", body)),
+      ).rejects.toMatchObject({
+        code: "invalid-package",
+        entryName: "xl/worksheets/malformed.xml",
+      });
+    }
+  });
+
+  test("imports an ordinary whole-column data validation", async () => {
+    const { default: JSZip } = await import("jszip");
+    const zip = await JSZip.loadAsync(await plainXlsx());
+    const sheetEntry = Object.keys(zip.files).find((name) =>
+      /^xl\/worksheets\/[^/]+\.xml$/i.test(name),
+    );
+    if (!sheetEntry) throw new Error("expected a worksheet part");
+    const sheetXml = await zip.file(sheetEntry)!.async("string");
+    const validations =
+      '<dataValidations count="1"><dataValidation type="list" allowBlank="1" sqref="A1:A1048576">' +
+      '<formula1>"safe,unsafe"</formula1></dataValidation></dataValidations>';
+    const anchor = sheetXml.includes("<pageMargins") ? "<pageMargins" : "</worksheet>";
+    expect(sheetXml).toContain("</sheetData>");
+    expect(sheetXml).not.toContain("<dataValidations");
+    zip.file(sheetEntry, sheetXml.replace(anchor, validations + anchor));
+    const withColumnValidation = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+    });
+
+    const imported = await SpreadsheetFile.importXlsx(withColumnValidation);
+    const sheet = imported.worksheets.getItem("Sheet1");
+    expect(sheet.getRange("A1").values).toEqual([["safe"]]);
+    expect(sheet.dataValidations.get(sheet.getRange("A1").address)?.rule.type).toBe("list");
+  }, 30_000);
+
   test("enforces aggregate formula, XML, style, and decoded-media budgets", async () => {
     const workbook = Workbook.create();
     const sheet = workbook.worksheets.add("Aggregates");

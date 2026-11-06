@@ -146,6 +146,10 @@
       "types": "./src/organization-access.ts",
       "default": "./src/organization-access.ts"
     },
+    "./api-key-delegation": {
+      "types": "./src/api-key-delegation.ts",
+      "default": "./src/api-key-delegation.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"

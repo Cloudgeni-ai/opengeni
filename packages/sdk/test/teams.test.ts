@@ -25,6 +25,11 @@ test("Teams requests preserve exact workspace and carry proofs only in mutation 
   await api.linkAccount("link-proof");
   await api.unlinkAccount();
   await api.disconnectBot();
+  await api.installBot(
+    "setup-proof",
+    { code: "microsoft-code", state: "signed-state" },
+    { replaceOwnLink: true },
+  );
   expect(requests.map((r) => [new URL(r.url).pathname, r.method])).toEqual([
     ["/v1/workspaces/workspace%2Fencoded/integrations/teams/bot", "GET"],
     ["/v1/workspaces/workspace%2Fencoded/integrations/teams/bot", "PUT"],
@@ -33,6 +38,7 @@ test("Teams requests preserve exact workspace and carry proofs only in mutation 
     ["/v1/workspaces/workspace%2Fencoded/integrations/teams/link", "POST"],
     ["/v1/workspaces/workspace%2Fencoded/integrations/teams/link", "DELETE"],
     ["/v1/workspaces/workspace%2Fencoded/integrations/teams/bot", "DELETE"],
+    ["/v1/workspaces/workspace%2Fencoded/integrations/teams/bot", "PUT"],
   ]);
   expect(requests[1]?.body).toEqual({ setupToken: "setup-proof" });
   expect(requests[2]?.body).toEqual({ setupToken: "setup-proof" });
@@ -41,5 +47,10 @@ test("Teams requests preserve exact workspace and carry proofs only in mutation 
     microsoft: { code: "microsoft-code", state: "signed-state" },
   });
   expect(requests[4]?.body).toEqual({ token: "link-proof" });
+  expect(requests[7]?.body).toEqual({
+    setupToken: "setup-proof",
+    microsoft: { code: "microsoft-code", state: "signed-state" },
+    replaceOwnLink: true,
+  });
   expect(requests.every((r) => !r.url.includes("proof"))).toBe(true);
 });

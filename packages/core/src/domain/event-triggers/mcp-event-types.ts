@@ -21,6 +21,18 @@ import { inboundWebhookBaseUrl } from "./webhook-url";
 
 const TYPE_CACHE_MS = 10 * 60_000;
 const typeCache = new Map<string, { expiresAt: number; types: McpEventType[] }>();
+/** Bumped when a source's types are forgotten, which outdates every memo of them. */
+const typeGenerations = new Map<string, number>();
+
+/**
+ * The event types one kept MCP session read: a session reads them once, and
+ * again only after they are forgotten. Steps that ask at the same time share
+ * one read.
+ */
+export type McpEventTypesMemo = {
+  read: Promise<McpEventType[]> | null;
+  generation: number | null;
+};
 
 export class McpServerWithoutEventsError extends EventSourceBlockedError {
   constructor(serverName: string) {
@@ -29,28 +41,45 @@ export class McpServerWithoutEventsError extends EventSourceBlockedError {
   }
 }
 
-/** The event types a source's server offers, re-read at most every ten minutes. */
+/**
+ * The event types a source's server offers, re-read at most every ten
+ * minutes, or once per kept session when the caller gives its `memo`.
+ */
 export async function mcpSourceEventTypes(
   client: McpStreamableHttpClient,
   source: Pick<EventSourceRecord, "id">,
   serverName: string,
-  options: { fresh?: boolean; now?: number } = {},
+  options: { fresh?: boolean; now?: number; memo?: McpEventTypesMemo } = {},
 ): Promise<McpEventType[]> {
   const now = options.now ?? Date.now();
+  const generation = typeGenerations.get(source.id) ?? 0;
+  const memo = options.memo;
+  if (!options.fresh && memo?.read && memo.generation === generation) return await memo.read;
   const cached = typeCache.get(source.id);
-  if (!options.fresh && cached && cached.expiresAt > now) return cached.types;
-  if (!(await serverOffersMcpEvents(client, { timeout: 20_000 }))) {
-    typeCache.delete(source.id);
-    throw new McpServerWithoutEventsError(serverName);
+  if (!options.fresh && !memo && cached && cached.expiresAt > now) return cached.types;
+  const read = (async () => {
+    if (!(await serverOffersMcpEvents(client, { timeout: 20_000 }))) {
+      typeCache.delete(source.id);
+      throw new McpServerWithoutEventsError(serverName);
+    }
+    const types = await listMcpEventTypes(client, { timeout: 20_000 });
+    typeCache.set(source.id, { expiresAt: now + TYPE_CACHE_MS, types });
+    return types;
+  })();
+  if (memo) {
+    memo.read = read;
+    memo.generation = generation;
+    read.catch(() => {
+      if (memo.read === read) memo.read = null;
+    });
   }
-  const types = await listMcpEventTypes(client, { timeout: 20_000 });
-  typeCache.set(source.id, { expiresAt: now + TYPE_CACHE_MS, types });
-  return types;
+  return await read;
 }
 
 /** Forget a source's event types, after the server said they changed. */
 export function forgetMcpSourceEventTypes(sourceId: string): void {
   typeCache.delete(sourceId);
+  typeGenerations.set(sourceId, (typeGenerations.get(sourceId) ?? 0) + 1);
 }
 
 /** The callback base for webhook delivery: only a public https address can receive it. */

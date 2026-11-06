@@ -197,6 +197,30 @@ What a tenant administrator can do with a connection that already exists:
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.
 
+Each setup refusal, and each refused account link, is a 4xx whose
+`details.code` is `teams_connection_refused` and whose `details.reason` names
+the refusal (for example `not_tenant_admin`, `user_mismatch`,
+`move_requires_global_admin` or `opengeni_account_linked`). Its message says
+what happened and what to do next, and the setup page and the link dialog show
+it as is. The wording never names the workspace, account or person that holds a
+conflicting connection, and nothing about an existing binding is revealed before
+the tenant administrator sign-in passes.
+
+A workspace links one Teams account per Opengeni account, and links survive a
+disconnect. When the installer's Opengeni account is already linked to a
+different Teams account in the chosen workspace, setup refuses with
+`opengeni_account_linked` and changes nothing (the setup link stays usable).
+The setup page then offers **Unlink and connect**: it starts setup again with a
+new Microsoft sign-in and `replaceOwnLink: true`. The API removes only the
+signed-in person's own link in that workspace, as **Unlink account** does, and
+only after the administrator sign-in and every binding check pass and that link
+is what refused the install, so a refused or abandoned attempt keeps the link.
+When the installer's Teams account is linked to another Opengeni account
+(`teams_account_linked`), nothing is removed and they sign in to Opengeni with
+that account instead. A refused account link from the plugins page
+(`link_opengeni_account_linked`) tells the person to unlink in the Teams
+integration and get a new link.
+
 Replies to tenants that have not connected are bounded on each API replica, in
 separate budgets so one kind can't use up another:
 

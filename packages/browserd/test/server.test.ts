@@ -646,6 +646,29 @@ describe("BrowserControlServer", () => {
         events: [],
         supportsBackupFlags: true,
       });
+      // An owner rides in the query; the manager answers that it stamps owners.
+      const owner = randomUUID();
+      const owned = await request(server, `${path}?backupFlags=1&owner=${owner}`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(owned)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+        supportsOwners: true,
+      });
+      expect(
+        (
+          await request(server, `${path}?owner=not-an-owner`, {
+            method: "POST",
+            token: controlToken,
+            body,
+          })
+        ).status,
+      ).toBe(400);
       const credential = {
         rpId: "localhost",
         credentialId: "Y3JlZA==",

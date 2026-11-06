@@ -44,7 +44,7 @@ import {
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
 import { createVideoGenerationToolAdapter } from "../video-generation-availability";
-import { rigProviderImageSourceImage } from "@opengeni/core";
+import { rigProviderImageContentSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -1143,7 +1143,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                       timeoutMs: runSettings.rigSetupTimeoutMs,
                       contentHash: rigProviderImageContentHash({
                         backend: turn.sandboxBackend,
-                        sourceImage: rigProviderImageSourceImage(
+                        sourceImage: rigProviderImageContentSourceImage(
                           logicalSandboxSettings,
                           turn.sandboxBackend,
                         ),
