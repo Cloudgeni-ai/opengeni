@@ -24469,6 +24469,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allRepositoriesAccess": "ref(GitRepositoryAccess)? null",
         "$.connectionAuthorityGeneration": "integer!",
         "$.credentialBindingId": "string!",
         "$.providerPrincipalId": "string!",
@@ -25944,6 +25945,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allRepositoriesAccess": "ref(GitRepositoryAccess)? null",
         "$.expectedConnectionAuthorityGeneration": "integer!",
         "$.expectedSelectionGeneration": "integer!",
         "$.idempotencyKey": "string!",
