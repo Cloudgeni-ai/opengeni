@@ -178,6 +178,18 @@ segment to another speaker and text edits), `useRecordingPeople` and
 `recordings` client such as a host proxy that implements only the methods the
 mounted hooks call.
 
+A host that serves the API from its own origin with
+`createSessionProxyHandler` forwards the recordings routes as they are. A
+custom proxy, or a test double of one, must answer them with the API's own
+shapes or with an error: `GET …/recordings` (including
+`?purpose=dictation`, which every composer with voice input reads to offer
+saved dictations) answers `{ recordings: [...], nextBefore }`, so a stub with
+no recordings answers `{ "recordings": [], "nextBefore": null }`.
+`listRecordings` rejects any other success body (another route's body,
+`{ items }`, `{}`) with `OpenGeniApiError` code `invalid_response`: a
+meetings list shows its error, and the composer simply offers no saved
+dictation.
+
 `@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
 the console uses:
 
