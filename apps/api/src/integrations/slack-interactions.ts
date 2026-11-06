@@ -138,7 +138,7 @@ import {
   listPendingSlackUserLinkAccessRequests,
   listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
-  slackUserLinkOrganizationMemberMayLink,
+  slackUserLinkConfirmationVia,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
@@ -708,12 +708,12 @@ type SlackLinkTargetInstallation = NonNullable<
 >;
 
 /**
- * What the person linking is offered when they may link this Slack account as
- * a member of the organization, without workspace access: a confirmation
- * naming the Slack account, so a link someone else sent them can't link the
- * sender's account to them unnoticed. Null otherwise.
+ * What the person linking a prepared request is shown: the Slack account it
+ * links, and whether confirming it links that account now. Preparing never
+ * links, so a link someone else sent them can't link the sender's account to
+ * them unnoticed. Nothing for a request that is no longer prepared.
  */
-async function slackOrganizationMemberLinkOffer(
+async function slackUserLinkOffer(
   deps: ApiRouteDeps,
   installation: SlackLinkTargetInstallation,
   input: {
@@ -723,15 +723,18 @@ async function slackOrganizationMemberLinkOffer(
     subjectId: string;
     slackUserId: string;
   },
-): Promise<{ slackAccountLabel: string | null } | null> {
-  if (input.status !== "prepared") return null;
-  const mayLink = await slackUserLinkOrganizationMemberMayLink(deps.db, {
+): Promise<{
+  slackAccountLabel?: string | null;
+  canLink?: boolean;
+  organizationMemberLink?: { slackAccountLabel: string | null } | null;
+}> {
+  if (input.status !== "prepared") return {};
+  const via = await slackUserLinkConfirmationVia(deps.db, {
     workspaceId: input.workspaceId,
     requestId: input.requestId,
     subjectId: input.subjectId,
     identityHome: installation.identityHome,
   });
-  if (!mayLink) return null;
   // Best effort: without a name the confirmation still asks.
   const label = await createOpenGeniSlackBotInteractionClient(deps, {
     ...installation.identityHome,
@@ -740,7 +743,11 @@ async function slackOrganizationMemberLinkOffer(
   })
     .then(async (client) => (await client.userLinkLabel(input.slackUserId)).label)
     .catch(() => null);
-  return { slackAccountLabel: label };
+  return {
+    slackAccountLabel: label,
+    canLink: via !== null,
+    organizationMemberLink: via === "organization_membership" ? { slackAccountLabel: label } : null,
+  };
 }
 
 /**
@@ -1014,25 +1021,20 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         subjectLabel: boundedString(context.subjectLabel, 512),
         expiresAt: new Date(link.expiresAt),
       });
-      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
+      // Preparing never links: the person confirms which Slack account it is
+      // first (`…/link`), whatever access they already have.
+      const offer = await slackUserLinkOffer(deps, installation, {
         workspaceId,
         requestId: prepared.id,
-        subjectId: context.subjectId,
-        identityHome: installation.identityHome,
-      });
-      if (!completed) throw freshSlackLinkRequired();
-      const organizationMemberLink = await slackOrganizationMemberLinkOffer(deps, installation, {
-        workspaceId,
-        requestId: completed.id,
-        status: completed.status,
+        status: prepared.status,
         subjectId: context.subjectId,
         slackUserId: link.slackUserId,
       });
       return c.json(
         SlackUserLinkAccessRequest.parse({
-          ...completed,
+          ...prepared,
           workspaceDisplayName: installation.workspaceName,
-          organizationMemberLink,
+          ...offer,
         }),
         201,
       );
@@ -1059,20 +1061,20 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           current.status === "prepared"
             ? await slackLinkRequestInstallation(deps, workspaceId, requestId)
             : null;
-        const organizationMemberLink = stored
-          ? await slackOrganizationMemberLinkOffer(deps, stored.installation, {
+        const offer = stored
+          ? await slackUserLinkOffer(deps, stored.installation, {
               workspaceId,
               requestId,
               status: current.status,
               subjectId: context.subjectId,
               slackUserId: stored.slackUserId,
             })
-          : null;
+          : {};
         return c.json(
           SlackUserLinkAccessRequest.parse({
             ...current,
             workspaceDisplayName: workspace?.name ?? null,
-            organizationMemberLink,
+            ...offer,
           }),
         );
       } catch (error) {
@@ -1082,9 +1084,11 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   );
 
   /**
-   * Link the Slack account as a member of the organization, without workspace
-   * access, after the person confirmed which account it is. Grants nothing
-   * else; anyone else keeps the access request.
+   * Link the Slack account after the person confirmed which account it is, at
+   * the version they saw. The only way a prepared request links: as someone
+   * whose workspace access already allows it, or as a member of the
+   * organization without workspace access (which grants nothing else). Anyone
+   * else keeps the access request.
    */
   app.post(
     "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
@@ -1101,7 +1105,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           requestId,
           subjectId: context.subjectId,
           identityHome: stored.installation.identityHome,
-          linkAsOrganizationMember: { expectedVersion: payload.expectedVersion },
+          confirmed: { expectedVersion: payload.expectedVersion },
         });
         if (!linked) throw freshSlackLinkRequired();
         // Expired, cancelled or already decided: only a fresh link can link now.
@@ -1265,61 +1269,6 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }
     },
   );
-
-  app.post("/v1/workspaces/:workspaceId/integrations/slack/user-links", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const body = record(await c.req.json().catch(() => null));
-    const linkToken = boundedString(body?.linkToken, 2_048);
-    const signingSecret = deps.settings.slackSigningSecret;
-    if (!linkToken || !signingSecret) {
-      throw new HTTPException(400, {
-        message: "invalid or expired Slack identity link",
-      });
-    }
-    const link = verifySlackUserLinkToken(signingSecret, linkToken);
-    if (!link || link.workspaceId !== workspaceId) {
-      throw new HTTPException(400, {
-        message: "invalid or expired Slack identity link",
-      });
-    }
-    const installation = await resolveSlackLinkTargetInstallation(deps, link, workspaceId);
-    if (!installation) {
-      throw new HTTPException(404, {
-        message: "Slack installation not found",
-      });
-    }
-    try {
-      const prepared = await prepareSlackUserLinkAccessRequest(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        tokenDigest: createHash("sha256").update(linkToken).digest("hex"),
-        connectionId: link.connectionId,
-        slackTeamId: link.slackTeamId,
-        slackUserId: link.slackUserId,
-        subjectId: grant.subjectId,
-        subjectLabel: boundedString(grant.subjectLabel, 512),
-        expiresAt: new Date(link.expiresAt),
-      });
-      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
-        workspaceId,
-        requestId: prepared.id,
-        subjectId: grant.subjectId,
-        identityHome: installation.identityHome,
-      });
-      if (completed?.status !== "completed") throw freshSlackLinkRequired();
-      const saved = await getSlackBotUserLink(
-        deps.db,
-        workspaceId,
-        link.connectionId,
-        link.slackUserId,
-      );
-      if (!saved || saved.subjectId !== grant.subjectId) throw freshSlackLinkRequired();
-      return c.json(saved, 201);
-    } catch (error) {
-      throw slackLinkAccessHttpError(error);
-    }
-  });
 
   app.delete(
     "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
