@@ -15465,9 +15465,9 @@ function gitCredentialHelperCommandLines(
           `gh_gateway_kit_file="$wrapper_dir/"${shellQuote(GH_GATEWAY_KIT_FILE_NAME)}`,
           'if [ -f "$gh_gateway_kit_seed" ]; then',
           '  if mv -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$" && chmod 0644 "$gh_gateway_kit_file.tmp.$$" && mv -f "$gh_gateway_kit_file.tmp.$$" "$gh_gateway_kit_file"; then',
-          '    for gh_gateway_old_kit in "$wrapper_dir"/gh-gateway-*.sh; do',
-          '      [ "$gh_gateway_old_kit" = "$gh_gateway_kit_file" ] || rm -f "$gh_gateway_old_kit"',
-          "    done",
+          // Kits of earlier releases go once a day old, so a gh command
+          // still running from an earlier turn keeps the kit it sourced.
+          `    find "$wrapper_dir" -maxdepth 1 -type f -name 'gh-gateway-*.sh' ! -name ${shellQuote(GH_GATEWAY_KIT_FILE_NAME)} -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
           "  else",
           '    rm -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$"',
           "  fi",

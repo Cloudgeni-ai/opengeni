@@ -3,6 +3,7 @@
 // fake HTTPS gateway (with git http-backend for clones). Skipped when gh,
 // git, openssl or node is unavailable.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { applyDiff } from "@openai/agents";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -250,9 +251,15 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
         },
       },
     ];
-    // The static gateway kit also arrives as a staged private file.
+    // The static gateway kit also arrives as a staged private file, written
+    // by the sandbox editor's create-file diff.
     const kitSeed = join(root, "kit-seed");
-    writeFileSync(kitSeed, GH_GATEWAY_KIT_SCRIPT, { mode: 0o600 });
+    const kitDiff = GH_GATEWAY_KIT_SCRIPT.split("\n")
+      .map((line) => `+${line}`)
+      .join("\n");
+    const delivered = applyDiff("", kitDiff, "create");
+    expect(delivered).toBe(GH_GATEWAY_KIT_SCRIPT);
+    writeFileSync(kitSeed, delivered, { mode: 0o600 });
     const setup = repositoryCloneCommand(resources, bindings, [], { ghGatewayKitSeed: kitSeed })
       .split("\n")
       .filter(

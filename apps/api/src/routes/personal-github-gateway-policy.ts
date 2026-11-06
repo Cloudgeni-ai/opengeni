@@ -304,8 +304,21 @@ export async function inspectPersonalGitHubPush(input: {
     }
     await prefix.stream?.cancel().catch(() => undefined);
     // Git shows a side-band error (band 3) as `remote: ...`; without
-    // side-band an `ERR` packet ends the push with the same text.
-    const sideBand = Buffer.from(prefix.bytes.subarray(0, 4096)).includes("side-band");
+    // side-band an `ERR` packet ends the push with the same text. The
+    // capabilities are on the first command line, so a compressed push is
+    // inflated only as far as its first bytes.
+    let head: Uint8Array = raw ?? prefix.bytes;
+    if (input.gzip && !raw) {
+      try {
+        const zlib = await import("node:zlib");
+        head = zlib.gunzipSync(prefix.bytes.subarray(0, 64 * 1024), {
+          finishFlush: zlib.constants.Z_SYNC_FLUSH,
+        });
+      } catch {
+        head = new Uint8Array();
+      }
+    }
+    const sideBand = Buffer.from(head.subarray(0, 4096)).includes("side-band");
     const line = Buffer.from(
       `${sideBand ? "\u0003" : "ERR "}Opengeni: ${decision.message}\n`,
       "utf8",

@@ -272,6 +272,25 @@ describe("pushes the gateway cannot read", () => {
     if (sideBand.kind === "respond") {
       expect((await sideBand.response.text()).slice(4)).toStartWith("\u0003Opengeni: Waiting");
     }
+    // A compressed push it cannot inflate whole still answers on side-band.
+    const compressed = gzipSync(
+      pushBody(
+        [{ old: commits.main!, next: commits.feature!, ref: "refs/heads/main" }],
+        [commits.feature!, `^${commits.main!}`],
+      ),
+    );
+    const truncated = await inspectPersonalGitHubPush({
+      body: stream(compressed.subarray(0, compressed.byteLength - 12)),
+      gzip: true,
+      repositoryFullName: "acme/widgets",
+      isAncestor: async () => null,
+      identity,
+      decide,
+    });
+    expect(truncated.kind).toBe("respond");
+    if (truncated.kind === "respond") {
+      expect((await truncated.response.text()).slice(4)).toStartWith("\u0003Opengeni: Waiting");
+    }
   });
 
   test("a flush with nothing to push goes on", async () => {
