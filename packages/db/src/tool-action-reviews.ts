@@ -18,6 +18,7 @@ import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
+import { isGitHubGatewayApprovalId } from "./github-gateway";
 import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 import {
   accountOwnerLabelForTurn,
@@ -116,6 +117,22 @@ async function decidableWhileResuming(
         (call.interruptionKind === "approval" ||
           call.interruptionKind === "interaction_intervention")
       );
+    if (isGitHubGatewayApprovalId(input.approvalId)) {
+      const [request] = await scoped
+        .select({ id: schema.connectorActionRequests.id })
+        .from(schema.connectorActionRequests)
+        .where(
+          and(
+            eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+            eq(schema.connectorActionRequests.sessionId, input.sessionId),
+            eq(schema.connectorActionRequests.turnId, turnId),
+            eq(schema.connectorActionRequests.approvalId, input.approvalId),
+            eq(schema.connectorActionRequests.status, "pending"),
+          ),
+        )
+        .limit(1);
+      return request !== undefined;
+    }
     if (!UUID_PATTERN.test(input.approvalId)) return false;
     const [operation] = await scoped
       .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })

@@ -1,5 +1,25 @@
 # Modular prompt changelog
 
+In a managed sandbox, `gh` on repositories mounted as the person now acts as
+the person through the Opengeni GitHub gateway, so the repositories module
+stops telling the agent to avoid it there. Sessions without a repository
+mounted as the person keep their prompt bytes. Outside a managed sandbox
+(Connected Machines) the old sentence stays, because `gh` there is not routed
+through the gateway. The provider-CLI sentence no longer carves out personal
+repositories. `github_connect_link`'s description says the same.
+
+```text
+- On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.
++ On repositories mounted as the person, git and gh (including gh api) act as the person, as on their own computer; the github_personal__* tools act as them too.   (managed sandbox)
+- Provider CLIs such as gh, glab, and az may be pre-authenticated … for repositories that are not mounted as the person; try them there before asking for credentials.
++ Provider CLIs such as gh, glab, and az may be pre-authenticated …; try them before asking for credentials.
+```
+
+A `gh` request that waits for the person's approval fails with a message that
+says so, tells the agent to end its turn, and to run the same command again
+after approval; the approval card is the normal one, and the continuation note
+after the decision says which requests were approved or declined.
+
 The contract no longer names the product. A host names its platform through its
 own identity or instructions; the default identity still introduces the agent
 as an Opengeni workspace agent. Three clauses change wording only; their
