@@ -125,9 +125,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1240 withholds the inventory of meeting tracks not yet kept compact; until
- * it is granted, existing meetings keep their audio as it is and only new
- * transcripts keep it compact.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact and
+ * 1282 granted it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -136,7 +135,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
-  "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
