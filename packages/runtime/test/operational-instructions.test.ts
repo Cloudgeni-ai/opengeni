@@ -315,21 +315,21 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "If work you already started is still in flight (a child, a command, or a timed recheck), call `wait_for_input` when available with the answer in its `reply`, so its result resumes you, even when a goal is active.",
     );
-    // Each turn's wait sets a fresh absolute deadline from its timeout, so a
-    // re-wait with the full timeout would push a timed recheck back on every
-    // status question.
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
+    // Keeping the deadline (time remaining, not a fresh full timeout) and the
+    // verbatim `reply` are stated once, in the wait_for_input description
+    // (apps/api/test/first-party-mcp-tool-policy.test.ts), not repeated here.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "reuse that reason and keep its deadline",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "put the whole answer in its `reply` argument",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("again with the same reason");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "Otherwise the answer is your final response: an active goal continues on its own",
     );
-    // Text written just before the call can reach the person only as a
-    // summary (Claude's progress updates), so an answer goes in `reply`, which
-    // is shown verbatim (session df030716, 13:13 UTC on 2026-10-23).
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "do not post a status right before `wait_for_input`: its reason is the status. When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call.",
+      "do not post a status right before `wait_for_input`: its reason is the status.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("unless it answers the user");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
@@ -344,8 +344,10 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "when further progress genuinely depends on work already in flight or a meaningful timed recheck",
     );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
+    // When (not) to wait at all, including "only waiting for the person: reply
+    // and end the turn", is the opening of the wait_for_input description.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "Do not use `wait_for_input` for work you can still advance",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.",
@@ -427,21 +429,22 @@ describe("proportional effort", () => {
   test("distinguishes overnight waits, meaningful monitoring, and live-attempt tool limits", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS;
     expect(guidance).not.toContain("Avoid blocking sleep or wait calls longer than 60 seconds");
-    expect(guidance).toContain("No short execution wait or preliminary status recheck is required");
-    expect(guidance).toContain("hours or days can be appropriate");
     expect(guidance).toContain("Both time out after at most 50 seconds");
     expect(guidance).toContain("pending Codemode calls need the current live attempt");
     expect(guidance).toContain(
-      "preservation of an existing deadline when answering a question during a wait",
+      "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.",
     );
-    expect(guidance).toContain("explicit user/task/Skill monitoring cadence");
-    expect(guidance).toContain(
+    // The timeout, deadline and no-preliminary-wait rules are the
+    // wait_for_input description's (first-party-mcp-tool-policy.test.ts); the
+    // prompt no longer repeats them.
+    for (const repeated of [
+      "No short execution wait or preliminary status recheck is required",
       "remaining time is below the tool's minimum or its deadline has passed",
-    );
-    expect(guidance).toContain(
       "has not consumed immediate machine input may finish without replacing the retained wait",
-    );
-    expect(guidance).toContain("make any unavoidable deadline adjustment explicit");
+      "Avoid holding execution open with long sleeps",
+    ]) {
+      expect(guidance).not.toContain(repeated);
+    }
   });
 
   test("preserves comprehensive audits, scoped evidence reuse, and evidence-based persistence", () => {

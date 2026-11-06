@@ -12,6 +12,85 @@ parse forms are unchanged.
 + These take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.
 ```
 
+Each waiting rule is stated once. How a wait behaves is the `wait_for_input`
+description's job: when not to call it, `reply`, the deadline, the minimum, and
+what starts the next turn. The system prompt keeps only when to end a turn on a
+wait. About 150 tokens of prompt sentences repeated the tool description
+(deadline persistence, the minimum timeout, no preliminary wait, timeout
+cadence, Codemode's live attempt), and the description named goals, child
+sessions, Steer, Codemode and `session_*` tools that many sessions lack. Agents
+also called `wait_for_input` when they were only waiting for the person's
+answer, which a plain reply already handles, so the description now opens with
+that case. The most common refused wait was a missing `reply` (70 of 164
+refusals on staging over 30 days), and the `reply` field itself said to omit it
+"when there is nothing new to tell them", which agents read as permission to
+leave it out after only starting work. That sentence is cut, and the field
+adds no rule of its own: the description already says when `reply` is needed.
+A field reading "Required when this turn answers a person's message" was tried
+and dropped: with it, agents again called `wait_for_input` to deliver answers
+while only waiting for the person. Legacy and modular compositions change the
+same way (the sentence diff is unchanged); their locks are updated.
+
+```text
+- If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.   (New messages)
+- If an existing wait's remaining time is below the tool's minimum or its deadline has passed, do not send an invalid timeout or round up and silently extend it. A question-only human/API turn that has not consumed immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Otherwise, do not assume the old wait remains armed: register a valid wait if still needed and make any unavoidable deadline adjustment explicit.   (Waiting)
+- Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.   (Waiting)
+- Avoid holding execution open with long sleeps or repeated blocking waits when an out-of-turn wait is available. Respect each tool's actual execution-wait limits; those limits do not cap `wait_for_input`, which may span hours or days within its own limits.   (Waiting; legacy: Rules for getting work done)
+- No short execution wait or preliminary status recheck is required before `wait_for_input`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate.   (Waiting)
+- This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.   (Waiting)
+- When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call.   (Progress updates)
+```
+
+Each cut rule is in the tool description, or stays elsewhere in the prompt:
+the reply contract in the final-answer rule ("its `reply` carries any
+answer"), Codemode's live attempt in Background commands (with compute), the
+child wake in `subagents`, waiting rather than a goal pause in `goals`, and
+human-only approvals in Autonomy. The remaining Waiting text is unchanged; its
+monitoring sentence ("When monitoring requires timed checks …") now renders
+only with schedules or subagents, as it already did without `wait_for_input`,
+because it names automations and session waits.
+
+```text
+- End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, … Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: …
+```
+
+The new description (`WAIT_FOR_INPUT_DESCRIPTION`) names no tool or feature a
+session may lack, so it stays static and cache-stable. Wake behaviour, the
+reply guard and the arguments are unchanged.
+
+```text
+- reply: … do not also write it before this call. Omit it when there is nothing new to tell them.
++ reply: … do not also write it before this call.
+```
+
+Idempotency keys the model makes up (`wait_for_input`, `goal_update`,
+`goal_progress`, `session_send_message`, `session_pause`, `session_resume`,
+`session_steer`, `session_human_input_respond`) now accept any 8-4-4-4-12 hex
+UUID (`z.guid()`), which is what `format: "uuid"` tells the model; they are
+stored as opaque operation keys. Previously Zod also required RFC version and
+variant digits, so a made-up key such as `12345678-1234-1234-1234-123456789abc`
+was refused (16 of 164 refused waits on staging were invalid UUIDs). The
+pattern Zod emits for such a field only repeats the format, so Opengeni's own
+tools no longer show it (`withoutRedundantUuidPatterns`, first-party servers
+only). A stricter pattern, such as the RFC check on ids and on
+`session_set_model`'s key (validated again by its public contract), is kept.
+
+o200k_base tokens, before → after (main 11550b6c):
+
+| Configuration | System prompt | Waiting section |
+| --- | --- | --- |
+| Legacy, no compute | 6,856 → 6,549 | — |
+| Legacy, sandbox | 7,374 → 7,067 | — |
+| All, no compute | 6,423 → 6,117 | 378 → 133 |
+| All, sandbox | 7,875 → 7,569 | 378 → 133 |
+| All without subagents, sandbox | 6,625 → 6,319 | 378 → 133 |
+| None plus sandbox | 4,580 → 4,248 | 378 → 107 |
+| None plus goals, no compute | 3,404 → 3,072 | 378 → 107 |
+| None, no compute (no wait tool) | 2,398 → 2,398 | — |
+
+`wait_for_input` itself: description 341 → 305, parameters 291 → 183
+(`idempotencyKey` 105 → 9; `reply` −12), whole definition 650 → 506.
+
 Three pieces of text now follow state the session actually has. Compositions
 with the state keep their bytes (`modular-parity-lock.test.ts`; its
 "none-with-features" cases now include workspace connectors, a setup-card
@@ -38,6 +117,18 @@ source, which adds no other text). Nothing was reworded.
 - … offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
 + … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
 ```
+
+The `skill_save`, `skill_install` and `skill_publish` tool descriptions and the
+bundled `skill-management` Skill now say that a Skill or change pending
+approval has no effect until someone who can manage it approves it, in
+Knowledge > Review or from its card in the chat where one is shown (an edited
+Skill keeps its current version until then), and that the agent's reply should
+say so.
+Before, they only named where a pending revision waits, so agents reported
+"waiting for your approval" without saying the Skill was inactive until then,
+and people didn't realise approval was needed for it to work. They also named
+the review tab "Needs review"; the app labels it "Review", and `skill_remove`
+now says so too. No system prompt text changes.
 
 `request_human_input` says the same in fewer words, for every session. The
 system prompt is unchanged. In the embedding profile the tool falls from 588

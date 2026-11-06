@@ -502,6 +502,15 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+A profile id is announced by the machine and stored per workspace, so the same
+id can be visible from more than one enrollment. Copies collapse into one
+profile only when their enrollments share the machine's key (one computer
+enrolled in two workspaces), and then your own Only me enrollment's copy is the
+one addressed. Copies announced by different machines are each listed; a
+device id without a pinned profile workspace resolves to the copy on your own
+Only me machine, and otherwise is not found until a session pins the copy's
+workspace.
+
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
 inventory must name the exact live port. `stateGeneration` names the

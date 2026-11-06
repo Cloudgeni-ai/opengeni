@@ -386,6 +386,58 @@ describe("modular prompt: tool-specific clauses", () => {
       "Pending Codemode calls need the current live attempt; keep observing them with `command_wait`/`command_read` instead of ending the turn.",
     );
   });
+
+  // How a wait behaves (when to call it, `reply`, the deadline, the minimum,
+  // no preliminary wait, sleeping instead) is the wait_for_input
+  // description's; the prompt keeps only when to end a turn on one.
+  test("the prompt does not repeat what the wait_for_input description says", () => {
+    const composed = compose();
+    for (const repeated of [
+      "reuse that reason and keep its deadline",
+      "remaining time is below the tool's minimum",
+      "has not consumed immediate machine input",
+      "No short execution wait or preliminary status recheck is required",
+      "Avoid holding execution open with long sleeps",
+      "Do not use `wait_for_input` for work you can still advance",
+      "put the whole answer in its `reply` argument",
+      "This does not relax live-attempt requirements",
+    ]) {
+      expect(composed).not.toContain(repeated);
+    }
+    expect(composed).toContain(
+      "## Waiting\n\nOutside a question or status turn, do not end with only a status reply",
+    );
+    expect(composed).toContain(
+      "an explicit user/task/Skill update cadence calls for an update. When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.\n\n## Compaction",
+    );
+    // The reply contract stays in the final-answer rule.
+    expect(composed).toContain(
+      "a turn that ends with `wait_for_input` has none: its `reply` carries any answer",
+    );
+    // Codemode's live-attempt rule renders with compute, in Background commands.
+    expect(composed).toContain(
+      "Exception: pending Codemode calls need the current live attempt; keep observing them with `command_wait`/`command_read` instead of ending the turn.",
+    );
+  });
+
+  test("without automations or child sessions, Waiting names neither", () => {
+    const composed = composeModularAgentInstructions({
+      capabilities: { ...allAgentCapabilities(), schedules: false, subagents: false },
+      renderer: "opengeni",
+      identity: DEFAULT_AGENT_IDENTITY,
+      resources: ALL_RESOURCES,
+      codemode: undefined,
+    }).composed;
+    expect(composed).toContain("## Waiting\n\nOutside a question or status turn");
+    expect(composed).not.toContain("recurring-monitoring or session-wait mechanism");
+    const waiting = composed.slice(
+      composed.indexOf("## Waiting"),
+      composed.indexOf("## Compaction"),
+    );
+    for (const absent of ["session_", "child", "goal", "Steer", "Codemode"]) {
+      expect(waiting).not.toContain(absent);
+    }
+  });
 });
 
 describe("buildAgent instructions: tool availability", () => {

@@ -4427,6 +4427,10 @@ export const BrowserPasskeyEvent = /* @__PURE__ */ defineSchema(() =>
         /** Top-level origin of the page that registered it, when known. */
         origin: z.string().max(2_048).nullable(),
         credential: BrowserPasskeyCredentialMaterial,
+        /** The owner of the credential set loaded when the page registered it
+         *  (null when none was named). Returned only to a caller that names
+         *  its own owner. */
+        owner: primitives.nullableUuid.optional(),
       })
       .strict(),
     z
@@ -4450,7 +4454,12 @@ export const BROWSER_MAX_PASSKEY_CREDENTIALS = 256;
 export const BROWSER_MAX_PASSKEY_EVENTS = 256;
 
 /** Controller-private. `credentials` replaces the loaded set (null keeps it).
- * Events stay pending in browserd until a later sync acknowledges them. */
+ * Events stay pending in browserd until a later sync acknowledges them.
+ * `owner` names the agent attempt the caller syncs for. It travels as the
+ * `owner` query parameter, which controllers that predate it ignore; a
+ * controller that knows it records the owner of each replacement set, stamps
+ * registrations with it, and never carries one owner's unacknowledged
+ * registrations into another owner's set. */
 export const BrowserPasskeySyncRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -4462,6 +4471,7 @@ export const BrowserPasskeySyncRequest = /* @__PURE__ */ defineSchema(() =>
         .max(BROWSER_MAX_PASSKEY_CREDENTIALS)
         .nullable(),
       acknowledgeEventIds: z.array(primitives.uuid).max(BROWSER_MAX_PASSKEY_EVENTS),
+      owner: primitives.nullableUuid.optional(),
     })
     .strict(),
 );
@@ -4477,6 +4487,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
       /** Sent only when the caller opts into backup-flag negotiation. */
       supportsBackupFlags: z.literal(true).optional(),
+      /** Sent only when the caller names an owner: registrations carry theirs. */
+      supportsOwners: z.literal(true).optional(),
     })
     .strict(),
 );

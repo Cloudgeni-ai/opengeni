@@ -1,15 +1,19 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createRealtimeVoiceBilling } from "@opengeni/core";
+import { createRealtimeVoiceBilling, settleVoiceInputUsage } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
+  applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
   createSession,
   getBillingBalance,
+  getWorkspaceUsage,
   listUsageEvents,
   renewSessionRealtimeInTransaction,
+  setMemberAllowance,
+  setWorkspaceAllowance,
   upsertOrganizationPlan,
   withBillingOriginOverride,
   withWorkspaceSessionActivityRls,
@@ -668,4 +672,142 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       expect(await costEvents(value)).toHaveLength(1);
     },
   );
+});
+
+describe("live voice counts against the member's usage allowance (real PostgreSQL)", () => {
+  // The workspace allows ten minutes; the member who talks is allowed one.
+  async function memberFixture() {
+    const value = await fixture(10 * MINUTE);
+    const personalWorkspaceId = crypto.randomUUID();
+    await shared.admin`insert into workspaces (id, account_id, name)
+      values (${personalWorkspaceId}, ${value.accountId}, 'Personal')`;
+    await shared.admin`insert into organization_memberships
+      (account_id, subject_id, role, status, personal_workspace_id)
+      values (${value.accountId}, ${value.subjectId}, 'owner', 'active', ${personalWorkspaceId})`;
+    const scope = {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      actorSubjectId: value.subjectId,
+    };
+    await setWorkspaceAllowance(client.db, {
+      ...scope,
+      includedCredits: 10 * MINUTE,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await setMemberAllowance(client.db, {
+      ...scope,
+      subjectId: value.subjectId,
+      rule: { credits: MINUTE },
+      expectedVersion: 0,
+    });
+    return value;
+  }
+
+  async function usage(value: Awaited<ReturnType<typeof memberFixture>>) {
+    const current = await getWorkspaceUsage(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+    });
+    const member = current.members.find((row) => row.subjectId === value.subjectId);
+    return { workspace: current.workspace.used, member: member?.used, status: member?.status };
+  }
+
+  async function admitAgain(value: Awaited<ReturnType<typeof memberFixture>>) {
+    return await createRealtimeVoiceBilling({ db: client.db, settings: pricedSettings })
+      .admit({
+        accountId: value.accountId,
+        workspaceId: value.workspaceId,
+        model: AZURE_MODEL,
+        attribution: { kind: "human", initiatingHumanSubjectId: value.subjectId },
+      })
+      .then(
+        () => "admitted",
+        (error: unknown) => (error as { code?: string }).code ?? String(error),
+      );
+  }
+
+  test("a billed minute fills the member's allowance, stops the call and refuses a new one", async () => {
+    const app = appFor(pricedSettings);
+    const value = await memberFixture();
+    const started = await begin(app, value, AZURE_MODEL);
+    expect(started.response.status).toBe(201);
+    const mode = (
+      (await started.response.json()) as {
+        mode: { id: string; version: number; connectionEpoch: number };
+      }
+    ).mode;
+    const proof = started.proof;
+    const negotiated = await app.request(`${value.base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify({
+        realtimeId: mode.id,
+        operationId: crypto.randomUUID(),
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: mode.version,
+        expectedConnectionEpoch: mode.connectionEpoch,
+        rotate: false,
+        sdp: "v=0\r\na=offer:fixture\r\n",
+        version: "v3",
+      }),
+    });
+    expect(negotiated.status).toBe(200);
+    // The first started minute is billed when the provider connection is issued.
+    expect(await costEvents(value)).toHaveLength(1);
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: MINUTE, status: "exhausted" });
+
+    const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
+      method: "PATCH",
+      headers: value.headers,
+      body: JSON.stringify({
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: mode.version,
+      }),
+    });
+    expect(heartbeat.status).toBe(200);
+    const body = (await heartbeat.json()) as { stop?: { code: string } };
+    expect(body.stop).toMatchObject({ code: "allowance_exhausted" });
+    expect(await admitAgain(value)).toBe("allowance_exhausted");
+  });
+
+  test("a live-voice debit without its recorded usage event counts for the workspace only", async () => {
+    const value = await memberFixture();
+    const sourceId = `${crypto.randomUUID()}:1`;
+    // Debit metadata naming a person is not trusted on its own.
+    await applyCreditDebitAfterUse(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      type: "voice_realtime_debit",
+      amountMicros: MINUTE,
+      sourceType: "voice_realtime",
+      sourceId,
+      idempotencyKey: `credit:voice_realtime_debit:${sourceId}`,
+      metadata: { initiatingHumanSubjectId: value.subjectId },
+    });
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: 0, status: "ok" });
+    expect(await admitAgain(value)).toBe("admitted");
+  });
+
+  test("voice input still counts against the member's allowance", async () => {
+    const value = await memberFixture();
+    await settleVoiceInputUsage(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      providerId: "fixture",
+      model: "fixture-transcribe",
+      billing: {
+        sourceId: crypto.randomUUID(),
+        attribution: { kind: "human", initiatingHumanSubjectId: value.subjectId },
+      },
+      usage: { kind: "duration", seconds: 60 },
+      basis: "provider_duration",
+      providerCostMicros: 50_000,
+      creditCostMicros: MINUTE,
+    });
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: MINUTE, status: "exhausted" });
+    expect(await admitAgain(value)).toBe("allowance_exhausted");
+  });
 });

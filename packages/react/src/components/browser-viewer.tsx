@@ -1490,7 +1490,7 @@ function BrowserLaunchMenu(props: {
             </p>
             {props.attachedDevices.map((device) => (
               <button
-                key={device.id}
+                key={`${device.workspaceId}:${device.id}`}
                 type="button"
                 onClick={() => choose({ kind: "attached", device })}
                 className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"

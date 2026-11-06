@@ -284,6 +284,58 @@ describe("useVoiceInput: dictations as recordings", () => {
     await hook.unmount();
   });
 
+  test("a list answer without recordings leaves the composer quiet and still dictating", async () => {
+    // A host proxy or test double answering the list route with another
+    // route's body (here a session), or failing outright.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const listRecordings of [
+        async () => ({ id: "session-1", status: "running" }) as never,
+        async () => ({ items: [] }) as never,
+        async () => undefined as never,
+        async () => ({ recordings: [null, { state: "ready" }], nextBefore: null }) as never,
+        async () => {
+          throw new Error("refused");
+        },
+      ]) {
+        const server = new FakeServer();
+        server.heard = "still works";
+        const { platform } = fakePlatform(server);
+        const { hook, draft } = await renderDurable(server, platform, {
+          recordings: { ...server.client, listRecordings },
+        });
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await settle();
+        });
+        expect(hook.result.current.status).toBe("idle");
+        expect(hook.result.current.error).toBeNull();
+
+        await act(async () => {
+          expect(await hook.result.current.start()).toBe(true);
+        });
+        await act(async () => {
+          hook.result.current.stop();
+          await settle();
+        });
+        await waitFor(() => hook.result.current.status === "idle");
+        expect(draft.value).toBe("still works");
+        // Taking it looks again, through the same answer: still quiet.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await settle();
+        });
+        expect(hook.result.current.status).toBe("idle");
+        await hook.unmount();
+      }
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   test("release lets go of a held dictation without deleting it", async () => {
     const server = new FakeServer();
     server.failNext = "voice_provider";

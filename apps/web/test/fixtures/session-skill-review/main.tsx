@@ -19,16 +19,21 @@ const skill: SkillRecord = {
     { path: "references/checklist.txt", content: "Confirm CI, exact head, and rollback instructions." },
   ],
 };
-let approved = false;
+let decided = false;
 const context = {
   authSession: {}, accessContext: { subjectId: "fixture-user", workspaceGrants: [], accountGrants: [] },
   client: {
-    listWorkspaceSkills: async () => ({ skills: approved ? [] : [skill], nextCursor: null }),
+    listWorkspaceSkills: async () => ({ skills: decided ? [] : [skill], nextCursor: null }),
     readWorkspaceSkill: async () => { if (fail) throw new OpenGeniApiError(503, "Unavailable"); return skill; },
     approveWorkspaceSkill: async (_workspaceId: string, _skillId: string, request: unknown) => {
-      approved = true;
+      decided = true;
       (window as unknown as { approval: unknown }).approval = request;
       return { outcome: "applied" };
+    },
+    rejectWorkspaceSkill: async (_workspaceId: string, _skillId: string, request: unknown) => {
+      decided = true;
+      (window as unknown as { rejection: unknown }).rejection = request;
+      return { outcome: "preserved", decision: "rejected" };
     },
   },
 } as unknown as AppContextValue;

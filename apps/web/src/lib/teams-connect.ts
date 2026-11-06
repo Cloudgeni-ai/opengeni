@@ -1,3 +1,5 @@
+import { apiErrorDetailCode, serverRefusalText, userErrorText } from "@opengeni/react/ui/api-error";
+
 /** Fragment tokens stay out of route searches and are removed only after a confirmed action. */
 export function teamsFragmentToken(
   hash: string,
@@ -43,7 +45,7 @@ const MICROSOFT_RETURN_PARAMS = [
   "error_uri",
 ];
 
-export type TeamsPendingSetup = { setupToken: string; workspaceId: string };
+export type TeamsPendingSetup = { setupToken: string; workspaceId: string; replaceOwnLink?: true };
 export type TeamsMicrosoftReturn =
   | { kind: "signed_in"; code: string; state: string }
   | { kind: "failed"; error: string; description: string };
@@ -86,7 +88,11 @@ export function readPendingTeamsSetup(
       value.savedAt > now
     )
       return null;
-    return { setupToken: value.setupToken, workspaceId: value.workspaceId };
+    return {
+      setupToken: value.setupToken,
+      workspaceId: value.workspaceId,
+      ...(value.replaceOwnLink === true ? { replaceOwnLink: true as const } : {}),
+    };
   } catch {
     return null;
   }
@@ -134,4 +140,28 @@ export function teamsRouteMissing(error: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * `details.code` the API sets on a Teams setup or account-link refusal. Its
+ * message says what happened and what to do next, so the page shows it as is.
+ */
+export const TEAMS_CONNECTION_REFUSED_CODE = "teams_connection_refused";
+
+/** A failed Teams setup or link: the API's own refusal, or `userErrorText`. */
+export function teamsErrorText(error: unknown, fallback: string): string {
+  return (
+    serverRefusalText(error, [TEAMS_CONNECTION_REFUSED_CODE]) ?? userErrorText(error, fallback)
+  );
+}
+
+/**
+ * True when setup was refused because the signed-in Opengeni account is
+ * already linked to a different Teams account in the chosen workspace. Its
+ * owner can unlink it and connect again.
+ */
+export function teamsOwnAccountLinkedElsewhere(error: unknown): boolean {
+  if (apiErrorDetailCode(error) !== TEAMS_CONNECTION_REFUSED_CODE) return false;
+  const details = (error as { details?: { reason?: unknown } }).details;
+  return details?.reason === "opengeni_account_linked";
 }

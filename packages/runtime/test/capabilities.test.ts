@@ -3,6 +3,10 @@ import { Agent, Runner, tool as functionTool, type AgentOutputItem } from "@open
 import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import { status } from "@grpc/grpc-js";
+import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import sharp from "sharp";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
 import {
@@ -27,6 +31,73 @@ describe("portable local compaction capability boundary", () => {
       expect(types).toContain("shell");
       expect(types).not.toContain("skills");
     }
+  });
+});
+
+// An iPhone photo (HEIC) in the sandbox: providers reject the format, so
+// view_image used to answer "not a supported image file" and the agent had to
+// convert it with the shell before it could look at it.
+describe("view_image of a HEIC photo", () => {
+  const heic = new Uint8Array(readFileSync(join(import.meta.dir, "fixtures/rotated-grid.heic")));
+  const sandboxFiles = new Map<string, Uint8Array>([
+    ["photo.heic", heic],
+    ["mislabelled.jpg", heic],
+    ["notes.bin", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])],
+  ]);
+  const reads: string[] = [];
+  const session = {
+    createEditor: () => ({}),
+    // The SDK's own provider path: sniff the bytes, fall back to the name.
+    viewImage: async ({ path }: { path: string }) => {
+      const bytes = sandboxFiles.get(path);
+      if (!bytes) throw new Error(`Image file not found: ${path}`);
+      return imageOutputFromBytes(path, bytes);
+    },
+    readFile: async ({ path }: { path: string }) => {
+      reads.push(path);
+      return sandboxFiles.get(path)!;
+    },
+  };
+  const viewImage = async (structuredToolTransport: boolean | undefined, path: string) => {
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport,
+    }).find((cap) => cap.type === "filesystem")!;
+    const tool = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .find((candidate) => candidate.name === "view_image");
+    if (!tool || tool.type !== "function") throw new Error("No view_image function");
+    return await tool.invoke({} as never, JSON.stringify({ path }));
+  };
+  const jpegOf = (output: unknown): Buffer => {
+    const url =
+      typeof output === "string" ? output : (output as { image: { url: string } }).image.url;
+    expect(url.startsWith("data:image/jpeg;base64,")).toBe(true);
+    return Buffer.from(url.slice(url.indexOf(",") + 1), "base64");
+  };
+
+  for (const structuredToolTransport of [undefined, false]) {
+    test(`shows the photo as an upright JPEG (structured transport ${String(structuredToolTransport)})`, async () => {
+      const jpeg = jpegOf(await viewImage(structuredToolTransport, "photo.heic"));
+      const metadata = await sharp(jpeg).metadata();
+      expect([metadata.format, metadata.width, metadata.height]).toEqual(["jpeg", 64, 96]);
+      // The first test also loads the decoder; a cold start can take seconds.
+    }, 30_000);
+  }
+
+  test("a HEIC saved with an image extension is converted too", async () => {
+    const jpeg = jpegOf(await viewImage(false, "mislabelled.jpg"));
+    expect((await sharp(jpeg).metadata()).format).toBe("jpeg");
+  });
+
+  test("other unsupported files and missing paths keep the SDK's answers", async () => {
+    reads.length = 0;
+    expect(await viewImage(false, "notes.bin")).toBe(
+      "image path `notes.bin` is not a supported image file",
+    );
+    expect(await viewImage(false, "missing.heic")).toBe("image path `missing.heic` was not found");
+    expect(reads).toEqual(["notes.bin"]);
   });
 });
 
