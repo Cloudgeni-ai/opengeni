@@ -1979,7 +1979,8 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      mimeType: "audio/wav",
+      // Short enough to be heard whole: sent as recorded, compressed.
+      mimeType: "audio/webm",
       preferredProvider: "voice-one",
       subjectId: dictation.actor.subjectId,
       billing: {
@@ -1988,6 +1989,8 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       },
     });
     expect(calls[0]!.billing!.trustedDurationSeconds).toBeGreaterThan(2);
+    // Opus, not 16-bit PCM: well under the 32 kB a second of WAV takes.
+    expect(calls[0]!.audio.byteLength).toBeLessThan(3 * 32_000);
     // No language was named, so the provider detects it.
     expect(calls[0]!.language).toBeUndefined();
 
@@ -2017,6 +2020,42 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     ).rejects.toThrow();
     // Already gone is done.
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a dictation over two minutes is cut into WAV pieces, heard at once and in order", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage, 150);
+    const calls: TranscriptionRequest[] = [];
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      const piece = request.billing!.sourceId.split(":").at(-1);
+      return {
+        text: `piece ${piece}`,
+        languages: ["en"],
+        providerId: "voice-one",
+        audioSeconds: request.durationSeconds ?? 0,
+        latencyMs: 5,
+      };
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toMatchObject({
+      outcome: "complete",
+    });
+    expect(calls.length).toBeGreaterThan(1);
+    let heard = 0;
+    for (const call of calls) {
+      expect(call.mimeType).toBe("audio/wav");
+      expect(call.durationSeconds!).toBeLessThanOrEqual(120);
+      heard += call.durationSeconds!;
+    }
+    expect(Math.abs(heard - 150)).toBeLessThan(1);
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...dictation.actor,
+      recordingId: dictation.input.recordingId,
+    });
+    expect(page.segments.map((segment) => segment.text)).toEqual(
+      calls.map((_, index) => `piece ${index}`),
+    );
   });
 
   test("a dictation started in a language is heard in it, listening for the vocabulary", async () => {

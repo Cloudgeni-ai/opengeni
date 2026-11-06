@@ -41,6 +41,7 @@ import {
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
+  type DictationProvider,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import {
@@ -86,7 +87,6 @@ import {
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceVoiceInputEnabled,
   DICTATION_RETENTION_MILLISECONDS,
-  TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
   WorkspaceVoiceInputSettings,
 } from "@opengeni/contracts";
 import {
@@ -119,6 +119,7 @@ import {
 import { mapConcurrently } from "./concurrently";
 import {
   DICTATION_PIECE_CONCURRENCY,
+  DICTATION_PIECES,
   dictationPiecePlan,
   pcmWavPiece,
   planDictationPieces,
@@ -551,6 +552,33 @@ async function alignPiece(
 }
 
 /**
+ * The longest dictation piece every model that may hear it takes in one
+ * request, by length and by the size of a 16 kHz WAV piece (the largest
+ * form a piece is sent in), capped by the service's own limits.
+ */
+export function dictationPieceLimitMilliseconds(
+  providers: readonly DictationProvider[],
+  service: { maxDurationSeconds: number; maxSizeBytes: number },
+): number {
+  const wavBytesPerSecond = RECORDING_PIECE_BYTES_PER_SECOND.wav!;
+  const bytesToMilliseconds = (bytes: number) =>
+    Math.floor(((bytes * 0.9) / wavBytesPerSecond) * 1_000);
+  const limits = [
+    service.maxDurationSeconds * 1_000,
+    bytesToMilliseconds(service.maxSizeBytes),
+    ...providers.flatMap(({ model }) => [
+      ...(model.capabilities.maxDurationSeconds === null
+        ? []
+        : [model.capabilities.maxDurationSeconds * 1_000]),
+      ...(model.capabilities.maxFileBytes === null
+        ? []
+        : [bytesToMilliseconds(model.capabilities.maxFileBytes)]),
+    ]),
+  ];
+  return Math.min(...limits);
+}
+
+/**
  * The format a model is sent a track in (null keeps the prepared one) and
  * the longest piece it takes in one request.
  */
@@ -723,7 +751,13 @@ export function createRecordingActivities(
         settings,
         service: options.dictationTranscription
           ? options.dictationTranscription(settings, db)
-          : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
+          : createTranscriptionService({
+              settings,
+              db,
+              deployment: deploymentFor(settings, db),
+              // A dictation's piece may be longer than a one-shot dictation.
+              maxDurationSeconds: DICTATION_PIECES.maxMilliseconds / 1_000,
+            }),
       };
     }
     return defaultDictation;
@@ -1459,58 +1493,81 @@ export function createRecordingActivities(
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
-        const providerSegmentMilliseconds =
-          Math.min(TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS, service.limits().maxDurationSeconds) *
-          1_000;
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
         // A dictation that named its model (a desktop shortcut's own) is heard
         // by exactly that model, never another provider's.
         const named = claimed.recording.transcription?.providerId
           ? { providerId: claimed.version.providerId, model: claimed.version.model }
           : null;
+        const plan = dictationPiecePlan(
+          dictationPieceLimitMilliseconds(
+            named ? offered.filter((provider) => provider.id === named.providerId) : offered,
+            service.limits(),
+          ),
+        );
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
-        // Decoded once to 16 kHz PCM, then cut at the speaker's pauses.
-        const { wav, pieces } = await measureRecordingStage("segment", async () => {
-          const rendered = await renderRecordingAudioPiece({
-            audio: { bytes: audio.bytes, extension: audio.extension },
-            startMilliseconds: 0,
-            endMilliseconds: audio.durationMilliseconds,
-            whole: true,
-            format: "wav",
-            ffmpegPath: settings.voiceInputFfmpegPath,
-            signal,
-          });
-          const decoded = readPcmWav(rendered.bytes);
-          if (!decoded) throw new PermanentRecordingFailure("invalid_audio");
-          const cuts = planDictationPieces(
-            decoded,
-            dictationPiecePlan(providerSegmentMilliseconds),
-          );
-          return {
-            wav: decoded,
-            pieces: cuts.slice(1).flatMap((end, index) => {
-              const start = cuts[index]!;
-              return end > start
-                ? [{ segmentNumber: index, startSample: start, endSample: end }]
-                : [];
-            }),
-          };
-        });
-        const perMillisecond = wav.sampleRate / 1_000;
+        // A dictation short enough to be heard whole goes out as recorded,
+        // compressed, in one request. A longer one is decoded once to 16 kHz
+        // PCM and cut at the speaker's pauses.
+        const pieces: Array<{
+          segmentNumber: number;
+          bytes: Uint8Array;
+          mimeType: string;
+          startMilliseconds: number;
+          durationMilliseconds: number;
+        }> =
+          audio.durationMilliseconds <= plan.wholeMilliseconds
+            ? [
+                {
+                  segmentNumber: 0,
+                  bytes: audio.bytes,
+                  mimeType: audio.mimeType,
+                  startMilliseconds: 0,
+                  durationMilliseconds: audio.durationMilliseconds,
+                },
+              ]
+            : await measureRecordingStage("segment", async () => {
+                const rendered = await renderRecordingAudioPiece({
+                  audio: { bytes: audio.bytes, extension: audio.extension },
+                  startMilliseconds: 0,
+                  endMilliseconds: audio.durationMilliseconds,
+                  whole: true,
+                  format: "wav",
+                  ffmpegPath: settings.voiceInputFfmpegPath,
+                  signal,
+                });
+                const wav = readPcmWav(rendered.bytes);
+                if (!wav) throw new PermanentRecordingFailure("invalid_audio");
+                const perMillisecond = wav.sampleRate / 1_000;
+                const cuts = planDictationPieces(wav, plan);
+                return cuts.slice(1).flatMap((end, index) => {
+                  const start = cuts[index]!;
+                  return end > start
+                    ? [
+                        {
+                          segmentNumber: index,
+                          bytes: pcmWavPiece(wav, start, end),
+                          mimeType: "audio/wav",
+                          startMilliseconds: start / perMillisecond,
+                          durationMilliseconds: (end - start) / perMillisecond,
+                        },
+                      ]
+                    : [];
+                });
+              });
         // Every piece is heard at once, so a long dictation is ready about as
         // soon as its longest piece is.
         const heardPieces = await withHeartbeat(() =>
           mapConcurrently(pieces, DICTATION_PIECE_CONCURRENCY, async (piece) => {
-            const bytes = pcmWavPiece(wav, piece.startSample, piece.endSample);
-            const durationMilliseconds = (piece.endSample - piece.startSample) / perMillisecond;
+            const { durationMilliseconds } = piece;
             const result = await measureRecordingStage("transcribe", () =>
               service.transcribe({
                 workspaceId: input.workspaceId,
                 accountId: input.accountId,
                 subjectId: input.ownerSubjectId,
-                audio: bytes,
-                mimeType: "audio/wav",
+                audio: piece.bytes,
+                mimeType: piece.mimeType,
                 durationSeconds: durationMilliseconds / 1_000,
                 // The language the dictation was started in; detected when none.
                 ...(claimed.version.options.language
@@ -1542,7 +1599,7 @@ export function createRecordingActivities(
             return {
               result,
               durationMilliseconds,
-              startMilliseconds: piece.startSample / perMillisecond,
+              startMilliseconds: piece.startMilliseconds,
             };
           }),
         );

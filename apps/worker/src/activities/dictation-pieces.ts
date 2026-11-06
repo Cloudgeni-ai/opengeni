@@ -1,7 +1,8 @@
-// A dictation is heard in pieces at once rather than one after another, so
-// a long one is ready about as soon as a short one. The pieces are cut at
-// the speaker's pauses, found in the decoded 16-bit PCM itself, so no word
-// is split between two requests.
+// A dictation up to `DICTATION_PIECES.wholeMilliseconds` is heard whole, in
+// one request, so the model has all of it at once. A longer one is cut into
+// pieces heard at the same time, so it is ready about as soon as its longest
+// piece. The cuts fall in the speaker's pauses, found in the decoded 16-bit
+// PCM itself, so no word is split between two requests.
 
 /** The PCM of a 16-bit mono WAV file and where it sits in the file. */
 export type PcmWav = {
@@ -86,10 +87,10 @@ export type DictationPiecePlan = {
 };
 
 export const DICTATION_PIECES: DictationPiecePlan = {
-  wholeMilliseconds: 25_000,
-  targetMilliseconds: 15_000,
-  minMilliseconds: 8_000,
-  maxMilliseconds: 50_000,
+  wholeMilliseconds: 120_000,
+  targetMilliseconds: 90_000,
+  minMilliseconds: 30_000,
+  maxMilliseconds: 120_000,
 };
 
 /** Loudness is measured in frames this long. */
@@ -182,7 +183,7 @@ export function dictationPiecePlan(maxMilliseconds: number): DictationPiecePlan 
   return {
     maxMilliseconds: max,
     wholeMilliseconds: Math.min(DICTATION_PIECES.wholeMilliseconds, max),
-    targetMilliseconds: Math.min(DICTATION_PIECES.targetMilliseconds, Math.round(max * 0.6)),
-    minMilliseconds: Math.min(DICTATION_PIECES.minMilliseconds, Math.round(max * 0.3)),
+    targetMilliseconds: Math.min(DICTATION_PIECES.targetMilliseconds, Math.round(max * 0.75)),
+    minMilliseconds: Math.min(DICTATION_PIECES.minMilliseconds, Math.round(max * 0.25)),
   };
 }
