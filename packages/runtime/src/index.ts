@@ -74,6 +74,16 @@ export {
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
+import { withViewableHeifImages } from "./heif-image";
+export {
+  HeifDecodeError,
+  heifToJpeg,
+  sniffHeifImage,
+  withViewableHeifImages,
+  type HeifImageKind,
+  type HeifJpegOptions,
+  type HeifJpegRendition,
+} from "./heif-image";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -5228,6 +5238,27 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 }
 
 /**
+ * Bind the filesystem capability to a view of its session whose `view_image`
+ * shows HEIC/HEIF photos as a JPEG, the format attached photos reach the model
+ * in, so a photo looks the same whether it was attached or found in the
+ * sandbox. Like {@link neutralizeStructuredToolTransport}, this is an own
+ * property that `Capability.clone()` carries onto each per-run instance, and it
+ * must bind and return `this`.
+ */
+function showHeifImagesAsJpeg(capability: ReturnType<typeof filesystem>): void {
+  const bind = capability.bind;
+  const bindViewingHeif = function (this: typeof capability, session: unknown): unknown {
+    return bind.call(
+      this,
+      (session && typeof session === "object"
+        ? withViewableHeifImages(session)
+        : session) as Parameters<typeof bind>[0],
+    );
+  };
+  (capability as unknown as { bind: typeof bindViewingHeif }).bind = bindViewingHeif;
+}
+
+/**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
  * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
@@ -5531,6 +5562,7 @@ function buildAgentCapabilitiesFromComposition(
   const filesystemCapability = filesystem({
     configureTools: configureFilesystemTools,
   });
+  showHeifImagesAsJpeg(filesystemCapability);
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
