@@ -41,6 +41,7 @@ import {
   isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
+  sessionsWithGoal,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
@@ -349,6 +350,12 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /**
+   * The sessions in this response page that have a goal, in any state. When
+   * present, a configured session missing from it projects no `goal_resume`,
+   * as the worker omits it for a turn whose frozen goal is none.
+   */
+  goalSessionIds?: ReadonlySet<string>;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -373,7 +380,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly] =
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly, goalSessions] =
     await Promise.all([
       workspaceRead ?? requireWorkspace(deps.db, workspaceId),
       resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
@@ -410,6 +417,7 @@ export async function workspaceSessionEffectiveToolsContext(
       }),
       // EU-only: the projection lists only tools the worker would attach.
       isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+      sessionsWithGoal(deps.db, workspaceId, [...new Set(configured.map((session) => session.id))]),
     ]);
   return {
     ...baseline,
@@ -423,6 +431,7 @@ export async function workspaceSessionEffectiveToolsContext(
       ),
     ),
     routerHistorySessionIds: routerHistory,
+    goalSessionIds: goalSessions,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -562,6 +571,9 @@ export function sessionEffectiveToolProjectionInput(
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, {
           sandboxAttached: sandboxAvailable,
+          ...(context.goalSessionIds
+            ? { sessionGoal: context.goalSessionIds.has(session.id) }
+            : {}),
         })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)

@@ -1,5 +1,32 @@
 # Modular prompt changelog
 
+Three pieces of text now follow state the session actually has. Compositions
+with the state keep their bytes (`modular-parity-lock.test.ts`; its
+"none-with-features" cases now include workspace connectors, a setup-card
+source, which adds no other text). Nothing was reworded.
+
+- `goal_resume` and the goals sentence that names it are sent to a configured
+  agent once the session has a goal, in any state, as frozen with the turn.
+  Before a goal exists the tool can only fail ("this session has no goal").
+  The tool stays for paused, active and completed goals, so pausing or
+  resuming never changes the tool list or the prompt. Legacy (unconfigured)
+  sessions are unchanged.
+- The "# Images and video" section is left out when the media capability is on
+  but the built agent attaches no image or video tool (no provider adapter,
+  runnable hosted image tool or video boundary). Prompt inspection without a
+  tool surface keeps it.
+- The blocked-tool sentence names a setup card only when the agent has a
+  capability whose tools show one (workspace admin, workspace connectors,
+  browser, or secrets with the question tool). A card a refused tool posts by itself carries its own
+  instructions in that tool's result.
+
+```text
+- Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.   (configured session with no goal)
+- # Images and video …   (media on, no media tool attached)
+- … offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
+```
+
 `request_human_input` says the same in fewer words, for every session. The
 system prompt is unchanged. In the embedding profile the tool falls from 588
 to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
