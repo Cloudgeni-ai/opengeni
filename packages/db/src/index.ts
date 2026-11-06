@@ -6151,7 +6151,7 @@ export async function deleteGitHubInstallationBinding(
 
 /**
  * Every workspace bound to one GitHub App installation, across accounts (the
- * installation lane of migration 1281: only that installation's binding rows
+ * installation lane of migration 1282: only that installation's binding rows
  * are visible). Used to apply a verified GitHub webhook to each workspace;
  * the writes then run in each workspace's own RLS scope.
  */
