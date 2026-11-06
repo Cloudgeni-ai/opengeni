@@ -170,7 +170,7 @@ function authorityError(error: unknown): Response {
   }
   return gatewayError(
     401,
-    "Opengeni's GitHub access for this command is no longer current. Run it again in a new turn.",
+    "GitHub access for this command is no longer current. Run it again in a new turn.",
   );
 }
 
@@ -266,12 +266,12 @@ export function gatewayRepositoryDecision(
     .allRepositoriesAccess;
   if (allRepositoriesAccess === "read" || allRepositoriesAccess === "write") {
     if (accessCovers(allRepositoriesAccess, access)) return { allowed: true };
-    return { allowed: false, message: `Opengeni may only read ${label} as you.` };
+    return { allowed: false, message: `${label} may only be read as the person.` };
   }
   if (!selected) {
     return {
       allowed: false,
-      message: `${label} is not one of the repositories Opengeni may use as you. Add it under Your GitHub in Opengeni.`,
+      message: `${label} is not one of the repositories the person allowed under Your GitHub.`,
     };
   }
   if (selected.disabled || !canRead(selected.permissions)) {
@@ -281,7 +281,7 @@ export function gatewayRepositoryDecision(
     access === "write" &&
     (selected.selectedAccess !== "write" || selected.archived || !canWrite(selected.permissions))
   ) {
-    return { allowed: false, message: `Opengeni may only read ${label} as you.` };
+    return { allowed: false, message: `${label} may only be read as the person.` };
   }
   return { allowed: true };
 }
@@ -337,7 +337,7 @@ async function githubRepositoryName(
     // Unnamed: refused below.
   }
   throw new GatewayRepositoryDeniedError(
-    `Opengeni could not check repository ${repositoryId} on GitHub. Use its owner/name instead.`,
+    `Could not check repository ${repositoryId} on GitHub. Use its owner/name instead.`,
   );
 }
 
@@ -565,7 +565,7 @@ export async function handlePersonalGitHubGatewayRequest(
   const token = gatewayBearer(request.headers.get("authorization"));
   const claims = token ? services.openClaims(token) : null;
   if (!claims) {
-    return gatewayError(401, "Opengeni's GitHub access for this command is unavailable.");
+    return gatewayError(401, "GitHub access for this command is unavailable.");
   }
   let authority: PersonalGitHubGatewayAuthority;
   try {
@@ -583,7 +583,7 @@ export async function handlePersonalGitHubGatewayRequest(
     const prefix = await readBodyPrefix(request.body, GATEWAY_API_BODY_MAX_BYTES);
     if (!prefix.complete) {
       await prefix.stream?.cancel().catch(() => undefined);
-      return gatewayError(413, "The request body is too large for Opengeni's GitHub gateway.");
+      return gatewayError(413, "The request body is too large for the GitHub gateway.");
     }
     bodyBytes = prefix.bytes;
   } else if (hasBody) {
@@ -664,10 +664,7 @@ export async function handlePersonalGitHubGatewayRequest(
       })
       .catch(() => null);
     if (decision === null) {
-      return gatewayError(
-        502,
-        "Opengeni could not check your GitHub permission settings. Try again.",
-      );
+      return gatewayError(502, "Could not check the person's GitHub action settings. Try again.");
     }
     if (decision.kind === "refuse") {
       return gatewayError(decision.status, decision.message, {

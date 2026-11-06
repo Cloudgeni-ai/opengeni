@@ -73,7 +73,7 @@ function connectorIdentity(identity: GatewayDecisionIdentity): ConnectorActionAt
 }
 
 export function waitingForApprovalMessage(title: string): string {
-  return `Waiting for your approval in Opengeni: ${title}. End your turn now; after the person approves, run the same command again.`;
+  return `Waiting for approval: ${title}. End your turn now; after the person approves, run the same command again.`;
 }
 
 /**
@@ -105,7 +105,7 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
         kind: "refuse",
         status: 403,
         waiting: false,
-        message: `Blocked by your GitHub permission settings in Opengeni: ${input.title}.`,
+        message: `Blocked by the person's GitHub action settings: ${input.title}.`,
       };
     }
     if (strictest === "allow" && !input.action.alwaysAsk) return { kind: "allow" };
@@ -149,14 +149,14 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
           kind: "refuse",
           status: 403,
           waiting: false,
-          message: `Declined in Opengeni: ${input.title}. Do not retry it.`,
+          message: `Declined by the person: ${input.title}. Do not retry it.`,
         };
       case "blocked":
         return {
           kind: "refuse",
           status: 403,
           waiting: false,
-          message: `Blocked by your GitHub permission settings in Opengeni: ${input.title}.`,
+          message: `Blocked by the person's GitHub action settings: ${input.title}.`,
         };
       default:
         return {
@@ -320,7 +320,7 @@ export async function inspectPersonalGitHubPush(input: {
     }
     const sideBand = Buffer.from(head.subarray(0, 4096)).includes("side-band");
     const line = Buffer.from(
-      `${sideBand ? "\u0003" : "ERR "}Opengeni: ${decision.message}\n`,
+      `${sideBand ? "\u0003" : "ERR "}GitHub gateway: ${decision.message}\n`,
       "utf8",
     );
     const packet = Buffer.concat([
@@ -399,16 +399,16 @@ export async function inspectPersonalGitHubPush(input: {
       command.ref,
       asked.has(command.ref)
         ? decision.waiting
-          ? "waiting for your approval in Opengeni"
-          : "refused by Opengeni"
+          ? "waiting for approval"
+          : "refused by the GitHub gateway"
         : "not pushed: another ref in this push needs approval",
     ]),
   );
   return {
     kind: "respond",
     response: new Response(
-      receivePackRejection(request, reasons, "refused by Opengeni", [
-        `Opengeni: ${decision.message}`,
+      receivePackRejection(request, reasons, "refused by the GitHub gateway", [
+        `GitHub gateway: ${decision.message}`,
       ]) as unknown as BodyInit,
       {
         status: 200,

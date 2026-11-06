@@ -14538,7 +14538,7 @@ http.createServer((req, res) => {
     let pass = "";
     try { pass = fs.readFileSync(passFile, "utf8").trim(); } catch {}
     if (!pass) {
-      fail(res, 401, "Opengeni's GitHub access is unavailable for this session. Run the command again in a new message.");
+      fail(res, 401, "GitHub access is unavailable for this session. Run the command again in a new message.");
       req.resume();
       return;
     }
@@ -14561,7 +14561,7 @@ http.createServer((req, res) => {
       upstreamRes.pipe(res);
     },
   );
-  upstream.on("error", () => fail(res, 502, "Opengeni's GitHub gateway is unreachable. Try again."));
+  upstream.on("error", () => fail(res, 502, "The GitHub gateway is unreachable. Try again."));
   req.pipe(upstream);
 }).listen(socketPath);
 `;
@@ -15200,7 +15200,7 @@ const GH_GATEWAY_WRAPPER_LINES = [
   '  while [ ! -S "$gw_sock" ]; do',
   '    if ! kill -0 "$gw_pid" 2>/dev/null || [ "$gw_wait" -ge 200 ]; then',
   '      cat "$gw_dir/proxy.log" >&2 2>/dev/null || true',
-  "      printf '%s\\n' \"gh: Opengeni's GitHub gateway did not start\" >&2",
+  "      printf '%s\\n' \"gh: the GitHub gateway proxy did not start\" >&2",
   "      return 1",
   "    fi",
   "    gw_wait=$((gw_wait + 1))",

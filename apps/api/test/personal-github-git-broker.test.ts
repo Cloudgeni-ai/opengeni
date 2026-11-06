@@ -725,7 +725,7 @@ describe("personal GitHub Git broker", () => {
                     kind: "refuse",
                     status: 403,
                     waiting: true,
-                    message: `Waiting for your approval in Opengeni: ${input.title}.`,
+                    message: `Waiting for approval: ${input.title}.`,
                   };
             },
           }),
@@ -809,7 +809,7 @@ describe("personal GitHub Git broker", () => {
       );
       const forced = await push(["--force", "main"]);
       expect(forced.exitCode).not.toBe(0);
-      expect(forced.stderr).toContain("waiting for your approval in Opengeni");
+      expect(forced.stderr).toContain("waiting for approval");
       expect(forced.stderr).toContain("Force-push main on Cloudgeni-ai/opengeni");
       const deleted = await push([":topic"]);
       expect(deleted.exitCode).not.toBe(0);

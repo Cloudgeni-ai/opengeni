@@ -195,7 +195,7 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
           return Response.json(
             {
               message:
-                "Waiting for your approval in Opengeni: Create issue on acme/widgets. End your turn now; after the person approves, run the same command again.",
+                "Waiting for approval: Create issue on acme/widgets. End your turn now; after the person approves, run the same command again.",
             },
             { status: 403 },
           );
@@ -333,7 +333,7 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
       repo,
     );
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Waiting for your approval in Opengeni");
+    expect(result.stderr).toContain("Waiting for approval");
   });
 
   test("gh repo clone clones through the gateway and keeps the gateway remote", async () => {

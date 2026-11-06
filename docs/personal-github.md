@@ -328,12 +328,13 @@ tools use, so one setting covers both:
   and GraphQL mutations the gateway doesn't recognise.
 - Block always wins. Unattended sessions refuse instead of asking.
 
-A request that needs approval is not sent. `gh` prints `Waiting for your
-approval in Opengeni: <title>…`, the response carries `x-opengeni-approval:
-pending`, and the turn ends with the normal approval card. The approval is
+A request that needs approval is not sent. `gh` prints `Waiting for approval:
+<title>…` (gateway messages don't name the product, like other agent texts),
+the response carries `x-opengeni-approval: pending`, and the turn ends with
+the normal approval card. The approval is
 bound to a digest of the exact request (method, path, query and body bytes); after
 approval, running the same command again sends it once. A declined request
-answers `Declined in Opengeni`. Outcomes are recorded in the same connector
+answers `Declined by the person`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
 is not replayed.
 

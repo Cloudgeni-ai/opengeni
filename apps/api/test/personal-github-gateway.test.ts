@@ -178,7 +178,7 @@ describe("personal GitHub gateway", () => {
     const denied = await send("/repos/other/secret");
     expect(denied.status).toBe(403);
     expect(((await denied.json()) as { message: string }).message).toContain(
-      "other/secret is not one of the repositories Opengeni may use as you",
+      "other/secret is not one of the repositories the person allowed",
     );
     expect(upstream).toHaveLength(2);
   });
@@ -231,14 +231,14 @@ describe("personal GitHub gateway", () => {
         kind: "refuse",
         status: 403,
         waiting: true,
-        message: "Waiting for your approval in Opengeni: Delete repository on acme/widgets.",
+        message: "Waiting for approval: Delete repository on acme/widgets.",
       },
     });
     const response = await send("/repos/acme/widgets", { method: "DELETE" });
     expect(response.status).toBe(403);
     expect(response.headers.get("x-opengeni-approval")).toBe("pending");
     expect(((await response.json()) as { message: string }).message).toContain(
-      "Waiting for your approval in Opengeni",
+      "Waiting for approval",
     );
     expect(upstream).toEqual([]);
   });

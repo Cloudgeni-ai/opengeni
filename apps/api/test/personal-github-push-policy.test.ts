@@ -177,7 +177,7 @@ describe("push approvals", () => {
       kind: "refuse",
       status: 403,
       waiting: true,
-      message: "Waiting for your approval in Opengeni: Force-push main on acme/widgets.",
+      message: "Waiting for approval: Force-push main on acme/widgets.",
     });
     const result = await inspect(
       pushBody(
@@ -197,8 +197,8 @@ describe("push approvals", () => {
     expect(result.kind).toBe("respond");
     if (result.kind !== "respond") return;
     const text = Buffer.from(await result.response.arrayBuffer()).toString("latin1");
-    expect(text).toContain("ng refs/heads/main waiting for your approval in Opengeni");
-    expect(text).toContain("Opengeni: Waiting for your approval in Opengeni");
+    expect(text).toContain("ng refs/heads/main waiting for approval");
+    expect(text).toContain("GitHub gateway: Waiting for approval");
   });
 
   test("moving a branch to a commit GitHub has asks unless it is a fast-forward", async () => {
@@ -242,7 +242,7 @@ describe("pushes the gateway cannot read", () => {
       kind: "refuse",
       status: 403,
       waiting: true,
-      message: "Waiting for your approval in Opengeni: Push to acme/widgets.",
+      message: "Waiting for approval: Push to acme/widgets.",
     });
     const result = await inspectPersonalGitHubPush({
       body: stream(Buffer.from("not a receive-pack request")),
@@ -258,7 +258,7 @@ describe("pushes the gateway cannot read", () => {
     if (result.kind === "respond") {
       expect(result.response.status).toBe(200);
       const text = await result.response.text();
-      expect(text.slice(4)).toStartWith("ERR Opengeni: Waiting for your approval");
+      expect(text.slice(4)).toStartWith("ERR GitHub gateway: Waiting for approval");
       expect(Number.parseInt(text.slice(0, 4), 16)).toBe(Buffer.byteLength(text));
     }
     const sideBand = await inspectPersonalGitHubPush({
@@ -270,7 +270,9 @@ describe("pushes the gateway cannot read", () => {
       decide,
     });
     if (sideBand.kind === "respond") {
-      expect((await sideBand.response.text()).slice(4)).toStartWith("\u0003Opengeni: Waiting");
+      expect((await sideBand.response.text()).slice(4)).toStartWith(
+        "\u0003GitHub gateway: Waiting",
+      );
     }
     // A compressed push it cannot inflate whole still answers on side-band.
     const compressed = gzipSync(
@@ -289,7 +291,9 @@ describe("pushes the gateway cannot read", () => {
     });
     expect(truncated.kind).toBe("respond");
     if (truncated.kind === "respond") {
-      expect((await truncated.response.text()).slice(4)).toStartWith("\u0003Opengeni: Waiting");
+      expect((await truncated.response.text()).slice(4)).toStartWith(
+        "\u0003GitHub gateway: Waiting",
+      );
     }
   });
 
