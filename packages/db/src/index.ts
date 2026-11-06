@@ -1598,6 +1598,58 @@ function parsedPersonalConnectionDelegations(
   return parsed.data.map((delegation) => ({ ...delegation }));
 }
 
+/** A resolver offered a compaction turn a personal account its person may not lend. */
+class CompactionConnectionAccountRefusal extends Error {
+  constructor() {
+    super("Personal connection owner does not match the compacted turn's person");
+    this.name = "CompactionConnectionAccountRefusal";
+  }
+}
+
+/**
+ * Why a compaction turn runs without connection accounts, for the worker to
+ * report. Only the error's class and SQLSTATE are kept, never its message.
+ */
+function unresolvedConnectionAccountsRecord(
+  error: unknown,
+  failure: "resolution_failed" | "acceptance_refused" = "resolution_failed",
+): {
+  reason: "owner_mismatch" | "resolution_failed" | "acceptance_refused";
+  errorName?: string;
+  sqlState?: string;
+} {
+  if (error instanceof CompactionConnectionAccountRefusal) return { reason: "owner_mismatch" };
+  const errorName =
+    error instanceof Error && /^[A-Za-z0-9_$]{1,64}$/.test(error.name) ? error.name : undefined;
+  const sqlState = nestedPostgresSqlState(error) ?? undefined;
+  return {
+    reason: failure,
+    ...(errorName ? { errorName } : {}),
+    ...(sqlState ? { sqlState } : {}),
+  };
+}
+
+/**
+ * Whether accepted work runs under a credential restriction (for example
+ * developer setup). Work continuing it may not borrow its connection
+ * authority. Unreadable policy counts as restricted.
+ */
+function carriesCredentialRestriction(initiatorContext: unknown, metadata: unknown): boolean {
+  if (
+    initiatorContext &&
+    typeof initiatorContext === "object" &&
+    Object.prototype.hasOwnProperty.call(initiatorContext, "credentialRestriction")
+  ) {
+    return true;
+  }
+  try {
+    const policy = readTurnExecutionPolicyV1(metadata);
+    return policy.kind === "valid" && policy.policy.credentialRestriction !== undefined;
+  } catch {
+    return true;
+  }
+}
+
 /** Raised when a durable session tool-policy write lost its version fence. */
 export class SessionToolPolicyVersionConflictError extends Error {
   readonly code = "SESSION_TOOL_POLICY_CONFLICT";
@@ -80012,6 +80064,140 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               [session],
             );
+            const compactionInitiatingHumanSubjectId =
+              latestStarted?.initiatingHumanSubjectId ??
+              (latestStarted?.initiatorKind === "subject"
+                ? latestStarted.initiatorSubjectId
+                : null);
+            // Compaction continues the turn it compacts after, so it runs with
+            // that person's current connection accounts, resolved like an
+            // internal update continuing the same turn. The request then
+            // carries the same connector and personal tools as the turn before
+            // it and reuses its cached prompt prefix. A carried principal that
+            // is not the turn's person, or not a private session's owner, never
+            // lends personal accounts. A compaction turn cannot carry an
+            // external link's permission ceiling or a credential restriction
+            // forward, so a turn with either gives it no connection accounts
+            // and no intent at all.
+            let compactionPersonalConnectionDelegations: McpPersonalConnectionDelegation[] = [];
+            let compactionMcpAccountBindings: McpConnectionAccountBinding[] = [];
+            let compactionConnectionAccountMetadata: Record<string, unknown> = {};
+            // A stored intent the current schema no longer reads lends nothing
+            // and is not carried forward; it never fails the claim.
+            let compactionConnectionAccountIntent: ConnectionAccountIntent | null = null;
+            try {
+              compactionConnectionAccountIntent = latestStarted
+                ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
+                : null;
+            } catch (error) {
+              compactionConnectionAccountMetadata = {
+                connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+              };
+            }
+            // In a savepoint, so a failed read lends nothing instead of
+            // failing the claim.
+            const compactedTurnHasNoExternalLink = async (compactedTurnId: string) => {
+              try {
+                const rows = await tx.transaction(
+                  async (savepoint) =>
+                    await savepoint.execute<{ present: number }>(sql`
+                      select 1 as present from external_link_turn_authorities
+                      where account_id = ${session.accountId}
+                        and workspace_id = ${workspaceId}
+                        and turn_id = ${compactedTurnId}
+                      limit 1
+                    `),
+                );
+                return rows.length === 0;
+              } catch (error) {
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+                return false;
+              }
+            };
+            const compactionAuthorityBorrowable =
+              latestStarted !== null &&
+              compactionConnectionAccountIntent !== null &&
+              !carriesCredentialRestriction(
+                latestStarted.initiatorContext,
+                latestStarted.metadata,
+              ) &&
+              !carriesCredentialRestriction(null, session.metadata) &&
+              (await compactedTurnHasNoExternalLink(latestStarted.id));
+            if (
+              compactionAuthorityBorrowable &&
+              compactionConnectionAccountIntent &&
+              input.resolveContinuedConnectionAccounts
+            ) {
+              const resolveContinuedConnectionAccounts = input.resolveContinuedConnectionAccounts;
+              const claimedSession = session;
+              const principal = compactionConnectionAccountIntent.principal;
+              const principalMayLend =
+                principal.kind === "subject" &&
+                principal.subjectId === compactionInitiatingHumanSubjectId &&
+                (claimedSession.visibility !== "user_private" ||
+                  principal.subjectId === claimedSession.ownerSubjectId?.trim());
+              const intent: ConnectionAccountIntent =
+                principal.kind === "subject" && !principalMayLend
+                  ? { ...compactionConnectionAccountIntent, principal: { kind: "none" } }
+                  : compactionConnectionAccountIntent;
+              const lendingSubjectId =
+                intent.principal.kind === "subject" ? intent.principal.subjectId : null;
+              try {
+                // A savepoint, so a failed resolution leaves the claim usable.
+                // Maintenance is never blocked by connection accounts: without
+                // them it runs as before, with only the session's shared tools.
+                const resolved = await tx.transaction(async (savepoint) => {
+                  const connectorMetadata = await sessionMcpServerMetadataForSessions(
+                    savepoint as unknown as Database,
+                    workspaceId,
+                    [sessionId],
+                  );
+                  const result = await resolveContinuedConnectionAccounts(
+                    savepoint as unknown as Database,
+                    {
+                      sessionId,
+                      session: mapSession(
+                        claimedSession,
+                        serializeEffectiveSessionControl(effectiveControl),
+                        connectorMetadata.get(sessionId) ?? [],
+                      ),
+                      intent,
+                    },
+                  );
+                  const delegations = parsedPersonalConnectionDelegations(
+                    result.personalConnectionDelegations,
+                    `session_turns:${workspaceId}:${sessionId}:${turnId}:compaction`,
+                  );
+                  const bindings = parseAcceptedMcpAccountBindings(result.mcpAccountBindings) ?? [];
+                  if (
+                    delegations.some(
+                      (delegation) => delegation.ownerSubjectId !== lendingSubjectId,
+                    ) ||
+                    bindings.some(
+                      (binding) =>
+                        binding.subjectScope === "subject" &&
+                        binding.ownerSubjectId !== lendingSubjectId,
+                    )
+                  ) {
+                    throw new CompactionConnectionAccountRefusal();
+                  }
+                  return { delegations, bindings, gaps: (result.gaps ?? []).slice(0, 32) };
+                });
+                compactionPersonalConnectionDelegations = resolved.delegations;
+                compactionMcpAccountBindings = resolved.bindings;
+                if (resolved.gaps.length > 0) {
+                  compactionConnectionAccountMetadata = { connectionAccountGaps: resolved.gaps };
+                }
+              } catch (error) {
+                // A lost connection fails the turn insert below instead. The
+                // worker reports this record; it never carries the message.
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+              }
+            }
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const sharedCompactionPool = latestStarted
               ? null
@@ -80019,75 +80205,134 @@ export async function claimSessionWorkForAttempt(
                   tx as unknown as Database,
                   workspaceId,
                 );
-            const [compactionTurn] = await tx
-              .insert(schema.sessionTurns)
-              .values(
-                withLosslessContentWriteVersion(
-                  {
-                    id: turnId,
-                    accountId: session.accountId,
-                    workspaceId,
-                    sessionId,
-                    triggerEventId,
-                    temporalWorkflowId: workflowId,
-                    status: "running",
-                    executionGeneration: 1,
-                    activeAttemptId: input.attemptId,
-                    source: "compaction",
-                    // Maintenance continues the session's work; keep the
-                    // surface of the turn it compacts after.
-                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
-                    position: Number(position),
-                    prompt: "",
-                    resources: [],
-                    tools: [],
-                    model: effectivePolicy!.model,
-                    reasoningEffort: reasoningEffortForMetadata(
-                      { reasoningEffort: effectivePolicy!.reasoningEffort },
-                      session.reasoningEffort as ReasoningEffort,
-                    ),
-                    latencyMode: latencyModeForMetadata(
-                      { latencyMode: effectivePolicy!.latencyMode },
-                      session.latencyMode as LatencyMode,
-                    ),
-                    sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
-                    sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-                    metadata: metadataWithTurnDispatchAttempt(
-                      { executionKind: "context_compaction" },
-                      {
-                        id: input.dispatchId,
-                        generation: dispatchGeneration,
-                        triggerEventId,
-                      },
-                    ),
-                    ...initiatorColumns(compactionInitiator),
-                    initiatingHumanSubjectId:
-                      latestStarted?.initiatingHumanSubjectId ??
-                      (latestStarted?.initiatorKind === "subject"
-                        ? latestStarted.initiatorSubjectId
-                        : null),
-                    personalConnectionDelegations: [],
-                    mcpAccountBindings: [],
-                    xaiProviderAccountAuthoritySnapshot:
-                      latestStarted?.xaiProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.xai,
-                    claudeProviderAccountAuthoritySnapshot:
-                      latestStarted?.claudeProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.claude,
-                    // The immutable v2 accepted authority of the turn this
-                    // compacts after (NULL without a Codex cutover, so the
-                    // legacy path is unchanged). A session with no started
-                    // turn has none: shared capacity only.
-                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
-                    startedAt: now,
-                    createdAt: now,
-                    updatedAt: now,
-                  },
-                  "prompt",
-                  "promptCodecVersion",
-                ),
-              )
-              .returning();
+            const compactionIntent = compactionAuthorityBorrowable
+              ? compactionConnectionAccountIntent
+              : null;
+            type CompactionAccounts = {
+              delegations: McpPersonalConnectionDelegation[];
+              bindings: McpConnectionAccountBinding[];
+              metadata: Record<string, unknown>;
+            };
+            const insertCompactionTurn = async (writer: typeof tx, accounts: CompactionAccounts) =>
+              await writer
+                .insert(schema.sessionTurns)
+                .values(
+                  withLosslessContentWriteVersion(
+                    {
+                      id: turnId,
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      triggerEventId,
+                      temporalWorkflowId: workflowId,
+                      status: "running",
+                      executionGeneration: 1,
+                      activeAttemptId: input.attemptId,
+                      source: "compaction",
+                      // Maintenance continues the session's work; keep the
+                      // surface of the turn it compacts after.
+                      surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
+                      position: Number(position),
+                      prompt: "",
+                      resources: [],
+                      tools: [],
+                      model: effectivePolicy!.model,
+                      reasoningEffort: reasoningEffortForMetadata(
+                        { reasoningEffort: effectivePolicy!.reasoningEffort },
+                        session.reasoningEffort as ReasoningEffort,
+                      ),
+                      latencyMode: latencyModeForMetadata(
+                        { latencyMode: effectivePolicy!.latencyMode },
+                        session.latencyMode as LatencyMode,
+                      ),
+                      sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
+                      sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                      metadata: metadataWithTurnDispatchAttempt(
+                        {
+                          executionKind: "context_compaction",
+                          ...accounts.metadata,
+                        },
+                        {
+                          id: input.dispatchId,
+                          generation: dispatchGeneration,
+                          triggerEventId,
+                        },
+                      ),
+                      ...initiatorColumns(compactionInitiator),
+                      initiatingHumanSubjectId: compactionInitiatingHumanSubjectId,
+                      personalConnectionDelegations: accounts.delegations,
+                      mcpAccountBindings: accounts.bindings,
+                      // Only a borrowable turn's intent is carried, so later
+                      // work continuing this compaction never resolves accounts
+                      // the compacted turn could not lend.
+                      connectionAccountIntent: compactionIntent,
+                      xaiProviderAccountAuthoritySnapshot:
+                        latestStarted?.xaiProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.xai,
+                      claudeProviderAccountAuthoritySnapshot:
+                        latestStarted?.claudeProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.claude,
+                      // The immutable v2 accepted authority of the turn this
+                      // compacts after (NULL without a Codex cutover, so the
+                      // legacy path is unchanged). A session with no started
+                      // turn has none: shared capacity only.
+                      subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
+                      startedAt: now,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                    "prompt",
+                    "promptCodecVersion",
+                  ),
+                )
+                .returning();
+            let compactionTurn:
+              | Awaited<ReturnType<typeof insertCompactionTurn>>[number]
+              | undefined;
+            if (
+              compactionPersonalConnectionDelegations.length > 0 ||
+              compactionMcpAccountBindings.length > 0
+            ) {
+              try {
+                // Acceptance re-checks live authority in the turn's triggers.
+                // A refusal falls back to no accounts instead of failing the
+                // claim, so the pending request can still run.
+                [compactionTurn] = await tx.transaction(async (savepoint) => {
+                  if (compactionPersonalConnectionDelegations.length > 0) {
+                    // Transaction-local: released with the savepoint, it stays
+                    // set for the rest of the claim (as on the internal-update
+                    // path); rolled back with it on refusal.
+                    await savepoint.execute(sql`
+                      SELECT set_config(
+                        'opengeni.initiating_human_subject_id',
+                        ${compactionInitiatingHumanSubjectId},
+                        true
+                      )
+                    `);
+                  }
+                  return await insertCompactionTurn(savepoint as unknown as typeof tx, {
+                    delegations: compactionPersonalConnectionDelegations,
+                    bindings: compactionMcpAccountBindings,
+                    metadata: compactionConnectionAccountMetadata,
+                  });
+                });
+              } catch (error) {
+                compactionTurn = undefined;
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(
+                    error,
+                    "acceptance_refused",
+                  ),
+                };
+              }
+            }
+            compactionTurn ??= (
+              await insertCompactionTurn(tx, {
+                delegations: [],
+                bindings: [],
+                metadata: compactionConnectionAccountMetadata,
+              })
+            )[0];
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
             await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
               { kind: "session_turn", workspaceId, id: compactionTurn.id },
