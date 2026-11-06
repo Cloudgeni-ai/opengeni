@@ -1147,6 +1147,9 @@
 :where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
     grid-column: span 2 / span 2;
   }
+:where(.og-root).col-span-4,:where(.og-root) .col-span-4 {
+    grid-column: span 4 / span 4;
+  }
 :where(.og-root).col-span-full,:where(.og-root) .col-span-full {
     grid-column: 1 / -1;
   }
@@ -2766,6 +2769,9 @@
   }
 :where(.og-root).grid-cols-\[7rem_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[7rem_minmax\(0\,1fr\)\] {
     grid-template-columns: 7rem minmax(0,1fr);
+  }
+:where(.og-root).grid-cols-\[auto_auto_auto_auto\],:where(.og-root) .grid-cols-\[auto_auto_auto_auto\] {
+    grid-template-columns: auto auto auto auto;
   }
 :where(.og-root).grid-cols-\[auto_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[auto_minmax\(0\,1fr\)\] {
     grid-template-columns: auto minmax(0,1fr);

@@ -46,7 +46,12 @@ import {
 } from "@openai/agents-core/sandbox/internal";
 import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
-import { workspaceTarExcludeArgs } from "../workspace-tar-excludes";
+import {
+  WORKSPACE_RESTORE_BACKUP_PREFIX,
+  WORKSPACE_RESTORE_SCRATCH_GLOBS,
+  WORKSPACE_RESTORE_STAGING_PREFIX,
+  workspaceTarExcludeArgs,
+} from "../workspace-tar-excludes";
 import { archiveRestoreScript } from "../providers/opensandbox-adapter";
 import {
   COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
@@ -851,6 +856,13 @@ export class ComputeSandboxSession extends SelfhostedSession {
     );
   }
 
+  /** Top-level globs this session's workspace archive leaves out beyond the
+   * manifest's ephemeral paths. The workspace fingerprint reads the same list,
+   * so what the archive skips and what verification covers never diverge. */
+  workspaceArchiveExcludedGlobs(): readonly string[] {
+    return WORKSPACE_RESTORE_SCRATCH_GLOBS;
+  }
+
   /** A portable tar of /workspace. Compute persists the box itself; this
    * exists only to move a workspace to another backend. */
   async persistWorkspaceTar(): Promise<Uint8Array> {
@@ -860,7 +872,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
     // folders are top-level globs.
     const excludeArgs = workspaceTarExcludeArgs(
       [...this.state.manifest.ephemeralPersistencePaths()],
-      [".opengeni-old-*", ".opengeni-restore-*"],
+      this.workspaceArchiveExcludedGlobs(),
     );
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(COMPUTE_PRIVATE_ROOT)}
@@ -909,8 +921,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       });
     }
     const archivePath = `${COMPUTE_PRIVATE_ROOT}/restore-${randomUUID()}.tar`;
-    const stagingPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-restore-${randomUUID()}`;
-    const backupPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-old-${randomUUID()}`;
+    const stagingPath = `${COMPUTE_WORKSPACE_ROOT}/${WORKSPACE_RESTORE_STAGING_PREFIX}${randomUUID()}`;
+    const backupPath = `${COMPUTE_WORKSPACE_ROOT}/${WORKSPACE_RESTORE_BACKUP_PREFIX}${randomUUID()}`;
     await this.run(`mkdir -p -- ${shellQuote(COMPUTE_PRIVATE_ROOT)}`, "archive staging");
     await this.writeChunked(archivePath, bytes);
     const excluded = [...this.state.manifest.ephemeralPersistencePaths()].sort().join("\n");

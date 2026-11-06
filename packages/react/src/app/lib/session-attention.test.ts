@@ -105,6 +105,23 @@ describe("attention acknowledgment scheduling", () => {
       ]),
     ).toBe(1);
   });
+
+  test("an answer of exactly NO_REPLY is not attention, as on the server", () => {
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "agent.message.completed", { text: "Answer" }),
+        event(2, "turn.completed", { output: "Answer" }),
+        event(3, "agent.message.completed", { text: "`NO_REPLY`" }),
+        event(4, "turn.completed", { output: "NO_REPLY" }),
+        event(5, "session.status.changed", { status: "idle" }),
+      ]),
+    ).toBe(2);
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "turn.completed", { output: "NO_REPLY", reply: "Please choose" }),
+      ]),
+    ).toBe(1);
+  });
 });
 
 const session = {

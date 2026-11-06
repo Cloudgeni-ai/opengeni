@@ -35,9 +35,12 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-realTest("the restricted inspector observes the still-present legacy schema", async () => {
+realTest("the restricted inspector observes the contracted retired schema", async () => {
   const posture = await assertRuntimeDatabasePosture(client!.db, options);
-  expect(posture.retiringFeatureTablesPresent).toEqual({ subscription: true, variableSets: true });
+  expect(posture.retiringFeatureTablesPresent).toEqual({
+    subscription: false,
+    variableSets: false,
+  });
 });
 
 realTest(
@@ -58,8 +61,8 @@ realTest(
     DROP FUNCTION opengeni_private.subscription_provider_cutover_committed(text) CASCADE;
     DROP FUNCTION opengeni_private.subscription_codex_cutover_v1_active() CASCADE;
     DROP FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() CASCADE;
-    DROP TABLE opengeni_private.variable_set_authority_capabilities CASCADE;
-    DROP FUNCTION opengeni_private.variable_set_authority_capability_active(text) CASCADE;
+    DROP TABLE IF EXISTS opengeni_private.variable_set_authority_capabilities CASCADE;
+    DROP FUNCTION IF EXISTS opengeni_private.variable_set_authority_capability_active(text) CASCADE;
   `);
     for (const signature of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
       (name) =>
@@ -67,7 +70,9 @@ realTest(
         name === "resolve_workspace_codex_subscription_source(uuid, uuid)" ||
         name === "capture_legacy_codex_turn_sources(uuid, uuid)",
     )) {
-      await database!.admin.unsafe(`DROP FUNCTION "${database!.schema}".${signature} CASCADE`);
+      await database!.admin.unsafe(
+        `DROP FUNCTION IF EXISTS "${database!.schema}".${signature} CASCADE`,
+      );
     }
     const posture = await assertRuntimeDatabasePosture(client!.db, options);
     expect(posture.retiringFeatureTablesPresent).toEqual({

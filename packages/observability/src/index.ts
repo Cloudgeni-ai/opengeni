@@ -498,6 +498,9 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // Temporal SDK records (temporal-sdk-logger.ts): the SDK's closed component
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
+  // Optional package-version diagnostics from SDK requests. Never metric labels.
+  ["sdkVersion", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
+  ["opengeni.sdk.version", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
   ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
   // CPU profile summaries: the report file under the temp directory, and
   // sampled code locations (function names and bundle file:line:column,

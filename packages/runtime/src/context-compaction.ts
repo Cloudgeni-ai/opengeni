@@ -28,12 +28,15 @@ import {
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
+  agentInstructionsContextItem,
   collapseRepeatedSessionGoalContexts,
   expandUnchangedSessionGoalContexts,
   formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
+  latestAgentInstructionsContext,
   latestSkillCatalogContext,
   latestWorkspaceGovernanceContext,
+  readAgentInstructionsContext,
   readSkillCatalogContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
@@ -1803,6 +1806,15 @@ export type CompactionTurnContext = {
   itemTurnIds: readonly (string | null | undefined)[];
   /** The turn running this compaction. It may still be working, so its requests stay open. */
   activeTurnId?: string | null;
+  /**
+   * Agent chats only, when the turn running this compaction continues after
+   * it: the agent revision its system prompt carries, or null when its prompt
+   * has no agent layer. Compaction drops agent instruction items, because the
+   * newest revision is folded into the next turn's system prompt; this turn's
+   * prompt cannot change, so a newer edit is re-added for the rest of it.
+   * Omitted: never re-added.
+   */
+  agentPromptRevision?: number | null;
 };
 
 /** A rebuilt history plus the turn each item belongs to (null for compaction-made items). */
@@ -1913,7 +1925,31 @@ function retainedReply(
 }
 
 function isPortableRetentionCandidate(item: CompactionItem): boolean {
-  return isPortableInputMessage(item) && !isCompactionSummary(item) && !isAttachmentCatalog(item);
+  return (
+    isPortableInputMessage(item) &&
+    !isCompactionSummary(item) &&
+    !isAttachmentCatalog(item) &&
+    readAgentInstructionsContext(item) === null
+  );
+}
+
+/**
+ * The newest agent instruction edit, re-added only while the continuing turn's
+ * system prompt still shows something else (see
+ * {@link CompactionTurnContext.agentPromptRevision}).
+ */
+function carriedAgentInstructionsContext(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext | undefined,
+): CompactionItem | undefined {
+  if (turns?.agentPromptRevision === undefined) return undefined;
+  const latest = latestAgentInstructionsContext(items);
+  if (!latest) return undefined;
+  const current =
+    latest.context.kind === "revision"
+      ? latest.context.revision !== turns.agentPromptRevision
+      : turns.agentPromptRevision !== null;
+  return current ? agentInstructionsContextItem(latest.text) : undefined;
 }
 
 function hasAttachmentRefs(item: CompactionItem): boolean {
@@ -2055,15 +2091,19 @@ function rebuildAroundCheckpoint(
   }
   const currentCatalog = latestSkillCatalogContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
+  const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(
     items,
     retained,
     options.attachmentUploadTimes,
   );
-  const prefix = [currentCatalog, currentGovernance, attachmentCatalog].filter(
-    (item): item is CompactionItem => Boolean(item),
-  );
+  const prefix = [
+    currentCatalog,
+    currentGovernance,
+    carriedAgentInstructions,
+    attachmentCatalog,
+  ].filter((item): item is CompactionItem => Boolean(item));
   const history = [...prefix, ...retained];
   // Platform context items before the retained messages belong to no turn.
   const turnIds: (string | null)[] = [
@@ -2164,9 +2204,16 @@ function isTurnOperationalNotice(item: CompactionItem): boolean {
   );
 }
 
-/** Skill catalog and workspace governance snapshots are re-added as the latest copy only. */
+/**
+ * Skill catalog and workspace governance snapshots are re-added as the latest
+ * copy only; agent instruction edits are folded into the system prompt.
+ */
 function isSessionContextSnapshot(item: CompactionItem): boolean {
-  return readSkillCatalogContext(item) !== null || readWorkspaceGovernanceContext(item) !== null;
+  return (
+    readSkillCatalogContext(item) !== null ||
+    readWorkspaceGovernanceContext(item) !== null ||
+    readAgentInstructionsContext(item) !== null
+  );
 }
 
 function isAttachmentCatalog(item: unknown): boolean {

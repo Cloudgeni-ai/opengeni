@@ -32,6 +32,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Workspace/member usage allowances, plan recipes, top-ups, and usage meters | `docs/usage-allowances.md` | `docs/product-integration.md`, architecture, the integration-agent Skill, and public product guides link here; SDK types/contracts and deployed debit/reset behavior remain authoritative. |
 | Organization subscription plan catalog, period credit accounting and human seats | `docs/subscription-plans.md` | Architecture and agent guidance link here; contracts and database entry points remain authoritative. |
 | Stripe subscription mutation retries and duplicate-payment refunds | `docs/billing-subscription-operations.md` | Durable request targets, two-phase receipts and migration activation. |
+| Audited internal credit grants and host-credit monitoring | `docs/internal-credit-operations.md` | Reuses the private ops manual-credit operator; account verification, bounded runway, receipts and monitoring. |
 | Shared connection UI and conversation setup | `docs/connection-presentation.md` | Console and SDK discovery, OAuth details, personal consent, and shared controls. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |

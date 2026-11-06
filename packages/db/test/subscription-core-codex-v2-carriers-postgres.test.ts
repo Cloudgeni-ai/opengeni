@@ -64,13 +64,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex v2 carriers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The seeded organization settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -104,13 +98,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: workspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 /** The owner's personal Codex connection, through the owner-scoped writer. */
@@ -269,7 +256,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("scheduled tasks freeze v2 once at creation; firings copy it, narrowed for another authorizer", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     await personalConnection(org);
     // The owner, in their own Personal workspace: their one current generation.
     const own = await task(org, org.personalWorkspaceId, {
@@ -350,7 +336,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
   test("agent-created schedules inherit their exact causal turn, never fresh personal membership", async () => {
     for (const frozen of [EMPTY, "personal"] as const) {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const source = await session(org, org.personalWorkspaceId);
       const expected = frozen === "personal" ? personal(org) : EMPTY;
       const turnId = await acceptedTurn(
@@ -399,7 +384,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("different frozen Codex values cannot coalesce into the same internal turn", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const target = await session(org, org.personalWorkspaceId);
     const parentTurnId = await acceptedTurn(
       org,
@@ -449,7 +433,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     const org = await organization();
     const target = await session(org, org.personalWorkspaceId);
     await acceptedTurn(org, org.personalWorkspaceId, target.id, org.ownerSubjectId, personal(org));
-    await setCutover(org.accountId, true);
     // The owner's own work keeps the owner's frozen entry ...
     expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toEqual(
       personal(org),
@@ -469,7 +452,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("a delivered update's frozen value is copied onto the internal turn", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const cases = [
       { frozen: personal(org), expected: personal(org) },
       { frozen: undefined, expected: EMPTY },
@@ -515,7 +497,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("child-result notices carry the spawning parent turn's value through the outbox", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     // Copying does not depend on visibility; a private child needs a real
     // parent attempt, so the fixture uses workspace-shared sessions.
     const parent = await session(

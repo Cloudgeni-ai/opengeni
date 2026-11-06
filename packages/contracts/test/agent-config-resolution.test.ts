@@ -678,6 +678,25 @@ describe("effective tools projection", () => {
       source: "first_party",
     });
   });
+  test("goal_resume is offered once the session has a goal, in any state", () => {
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["goal_set", "goal_update", "goal_resume", "goal_pause"] as const;
+    const goalTools = (environment: { sessionGoal?: boolean }) =>
+      resolveAgentToolFamilies(all, environment)
+        .firstPartyTools(selection)
+        .filter((name) => name.startsWith("goal_"));
+    const without = resolveAgentToolFamilies(all, { sessionGoal: false });
+    expect(goalTools({ sessionGoal: false })).toEqual(["goal_set", "goal_update", "goal_pause"]);
+    expect(without.allowsFirstPartyTool("goal_resume")).toBe(false);
+    // A goal in any state, or a goal that is not known, keeps it.
+    for (const environment of [{ sessionGoal: true }, {}]) {
+      expect(goalTools(environment)).toEqual([...selection]);
+    }
+    // Legacy sessions without an agent config are unchanged.
+    expect(
+      resolveAgentToolFamilies(null, { sessionGoal: false }).allowsFirstPartyTool("goal_resume"),
+    ).toBe(true);
+  });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;
     const projection = projectAgentEffectiveTools({

@@ -935,6 +935,8 @@ export const englishMessages = {
   "browserViewer.thisBrowserProfileIsNo":
     "This browser profile is no longer available. Refresh and choose another.",
   "browserViewer.thisChatMovedToAnother": "This chat moved to another computer.",
+  "browserViewer.chatIsOnAnotherComputer":
+    "This chat is working on another computer right now. The browser keeps running on its own computer and is available again when the chat moves back.",
   "browserViewer.thisChromeProfileIsLive":
     "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome.",
   "browserViewer.thisMachineOnly": "This machine only",
@@ -3644,6 +3646,8 @@ export const englishMessages = {
   "native.timeline.decisions.positionOfCurrent": "{position} of {current}",
   "native.timeline.decisions.reject": "Reject",
   "native.timeline.decisions.rejected": "Rejected",
+  /** A summary of a waiting action failed to load; the standard card and a Try again button follow. */
+  "native.timeline.decisions.summaryUnavailable": "Couldn't load the summary of this action.",
   "native.timeline.feedback.commentOptional": "Comment (optional)",
   "native.timeline.feedback.couldnTSendFeedbackDetail": "Couldn't send feedback.{detail}",
   "native.timeline.feedback.tryAgain": "Try again.",
@@ -5556,6 +5560,7 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.sandboxReattached": "Sandbox reattached",
   "timeline.platformActivityPresentation.sandboxRestored": "Sandbox restored",
   "timeline.platformActivityPresentation.sandboxStartupInterrupted": "Sandbox startup interrupted",
+  "timeline.platformActivityPresentation.settingUpNamedSandboxEnvironment": "Setting up {name}",
   "timeline.platformActivityPresentation.settingUpSandboxEnvironment":
     "Setting up sandbox environment",
   "timeline.platformActivityPresentation.spawnedName": "Spawned {name}",

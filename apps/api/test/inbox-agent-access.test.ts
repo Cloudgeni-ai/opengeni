@@ -6,6 +6,8 @@ import {
   createSession,
   listInboxItems,
   setInboxSettings,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -15,7 +17,9 @@ import { registerNotificationTools } from "../src/mcp/notification-tools";
 
 /* The inbox tool against real PostgreSQL: by default an agent sees and tidies
    only notifications; with full access it sees every open item, needs-you
-   first, and can snooze, unsnooze and dismiss any of them without answering. */
+   first, and can snooze, unsnooze and dismiss any of them without answering.
+   It acts for the person whose message started the calling turn, so another
+   member's turn in a shared chat never reaches the chat owner's inbox. */
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -73,33 +77,63 @@ async function setup() {
       payload: { key: "deploy", title: "Deployed", body: "All green", urgency: "normal" },
     },
   ]);
-  const handlers = new Map<string, Handler>();
-  registerNotificationTools({
-    server: {
-      registerTool: (name: string, _config: unknown, handler: Handler) => {
-        handlers.set(name, handler);
-      },
-    } as never,
-    deps: { db, bus: new MemoryEventBus() } as never,
-    grant: grant as never,
-    sessionId: agent.id,
-    authorize: async () => undefined,
-    attempt: () => {
-      throw new Error("not used");
-    },
-    json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
-  });
-  const tidy = async (input: Record<string, unknown> = {}) => {
-    const result = await handlers.get("inbox_tidy")!({
-      dismissItemIds: [],
-      snooze: [],
-      unsnoozeItemIds: [],
-      ...input,
-    });
-    return JSON.parse(result.content[0]!.text) as Record<string, any>;
+  /** A message `sender` sends into the agent's chat; returns its turn. */
+  const send = async (sender: string) => {
+    await withWorkspaceSubjectSessionActivityRls(db, scope.workspaceId, sender, (scoped) =>
+      scoped.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof scoped, {
+          ...scope,
+          sessionId: agent.id,
+          subjectId: sender,
+          actor: { type: "human", subjectId: sender },
+          operationKey: `send-${crypto.randomUUID()}`,
+          delivery: "send",
+          text: "tidy my inbox",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const [turn] = await shared.admin<{ id: string }[]>`
+      select id from session_turns
+      where session_id = ${agent.id} and initiating_human_subject_id = ${sender}
+      order by position desc limit 1`;
+    return turn!.id;
   };
+  /** inbox_tidy as the agent runs it in the turn `turnId`. */
+  const tidyIn = (turnId: string) => {
+    const handlers = new Map<string, Handler>();
+    registerNotificationTools({
+      server: {
+        registerTool: (name: string, _config: unknown, handler: Handler) => {
+          handlers.set(name, handler);
+        },
+      } as never,
+      deps: { db, bus: new MemoryEventBus() } as never,
+      grant: grant as never,
+      sessionId: agent.id,
+      authorize: async () => undefined,
+      attempt: () => ({
+        callerTurnId: turnId,
+        callerExecutionGeneration: 1,
+        callerAttemptId: crypto.randomUUID(),
+      }),
+      json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
+    });
+    return async (input: Record<string, unknown> = {}) => {
+      const result = await handlers.get("inbox_tidy")!({
+        dismissItemIds: [],
+        snooze: [],
+        unsnoozeItemIds: [],
+        ...input,
+      });
+      return JSON.parse(result.content[0]!.text) as Record<string, any>;
+    };
+  };
+  const tidy = tidyIn(await send(subjectId));
   const owner = { accountId: scope.accountId, subjectId };
-  return { db, owner, tidy };
+  return { db, owner, scope, send, tidyIn, tidy };
 }
 
 describe("agent access to the person's inbox", () => {
@@ -145,5 +179,58 @@ describe("agent access to the person's inbox", () => {
     expect(cleared.dismissed.sort()).toEqual([question, note].sort());
     expect(cleared.items).toEqual([]);
     expect(await listInboxItems(db, owner)).toEqual([]);
+  });
+
+  test("another member's turn in the owner's shared chat reaches only that member's inbox", async () => {
+    const { owner, scope, send, tidyIn, db } = await setup();
+    // Bob, another member of Alice's workspace, with a notification of his own.
+    const bob = `user:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${scope.accountId}, ${scope.workspaceId}, ${bob})`;
+    const bobs = await createSession(db, {
+      ...scope,
+      initialMessage: "bob's own",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: bob, label: "Bob" },
+      createdByContext: { label: "Bob" },
+    });
+    await appendSessionEvents(db, scope.workspaceId, bobs.id, [
+      {
+        type: "session.notification.posted",
+        payload: { key: "bob-build", title: "Bob's build", body: "Done", urgency: "normal" },
+      },
+    ]);
+    const bobOwner = { accountId: scope.accountId, subjectId: bob };
+    // Both let agents tidy everything; Alice's own inbox has a question and a note.
+    await setInboxSettings(db, { ...owner, tidyPolicy: "full_access" });
+    await setInboxSettings(db, { ...bobOwner, tidyPolicy: "full_access" });
+    const alicesBefore = await listInboxItems(db, owner);
+    expect(alicesBefore.map((item) => item.title).sort()).toEqual(["Deployed", "Which branch?"]);
+
+    // Bob sends a message into Alice's chat; its turn tidies Bob's inbox only.
+    const asBob = tidyIn(await send(bob));
+    const listed = await asBob();
+    expect(listed.items.map((item: any) => item.title)).toEqual(["Bob's build"]);
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const touched = await asBob({
+      dismissItemIds: alicesBefore.map((item) => item.id),
+      snooze: alicesBefore.map((item) => ({ itemId: item.id, until })),
+    });
+    expect(touched.dismissed).toEqual([]);
+    expect(touched.snoozed).toEqual([]);
+    expect(await listInboxItems(db, owner)).toEqual(alicesBefore);
+
+    // Alice's own turn in the same chat still tidies hers.
+    const asAlice = tidyIn(await send(owner.subjectId));
+    expect((await asAlice()).items.map((item: any) => item.title)).toEqual([
+      "Which branch?",
+      "Deployed",
+    ]);
   });
 });

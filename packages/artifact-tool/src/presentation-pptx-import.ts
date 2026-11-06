@@ -28,6 +28,10 @@ import {
   type PresentationTextStyle,
 } from "./presentation";
 import {
+  MAX_PRESENTATION_TABLE_COLUMNS,
+  MAX_PRESENTATION_TABLE_ROWS,
+} from "./presentation-table-limits";
+import {
   PPTX_MEDIA_TYPE,
   PresentationSecurityError,
   type PresentationFidelityIssue,
@@ -1131,13 +1135,24 @@ function parseTable(
   const table = pptxXmlDescendants(frame, "tbl")[0];
   if (!table) throw pptxSecurity("Table frame lacks table data", "invalid-package", partName);
   const grid = requiredChild(table, "tblGrid", partName);
-  const columnWidths = pptxXmlChildren(grid).map((column) =>
+  const gridColumns = pptxXmlChildren(grid);
+  const rowElements = pptxXmlChildren(table).filter((child) => child.localName === "tr");
+  // The occupancy matrix below is rows x columns. Check the declared dimensions against the
+  // model's table caps before allocating it. Every grid slot also needs its own <a:tc>
+  // element, so a grid larger than the XML node budget can never be complete.
+  if (
+    rowElements.length > MAX_PRESENTATION_TABLE_ROWS ||
+    gridColumns.length > MAX_PRESENTATION_TABLE_COLUMNS ||
+    rowElements.length * gridColumns.length > context.limits.xmlNodes
+  ) {
+    throw pptxSecurity("Presentation table exceeds its size limit", "limit-exceeded", partName);
+  }
+  const columnWidths = gridColumns.map((column) =>
     positiveEmu(requiredAttribute(column, "w", partName), partName),
   );
   if (columnWidths.length === 0) {
     throw pptxSecurity("Presentation table has no columns", "invalid-package", partName);
   }
-  const rowElements = pptxXmlChildren(table).filter((child) => child.localName === "tr");
   const rows: PresentationTableCellInput[][] = [];
   const rowHeights: number[] = [];
   const occupied = Array.from(

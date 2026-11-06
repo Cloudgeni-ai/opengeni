@@ -152,7 +152,6 @@ describe("organization MCP action catalog", () => {
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
       "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
-      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
     // An agent with the person's full access approves sign-ins and manages

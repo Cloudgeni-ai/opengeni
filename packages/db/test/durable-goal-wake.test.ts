@@ -1971,8 +1971,6 @@ describe("durable active-goal wake", () => {
   });
 
   test("a shared-core Codex capacity wait blocks synthesis and exposes its durable retry time", async () => {
-    // After the drained cutover (0680) the core waiter is the only Codex
-    // waiter written; the legacy waiter table is frozen.
     const ctx = await runningGoalFixture();
     const goal = await getSessionGoalWithContinuation(
       client.db,
@@ -1997,10 +1995,6 @@ describe("durable active-goal wake", () => {
     });
     expect(armed.action).toBe("waiting");
     if (armed.action !== "waiting") throw new Error("core capacity wait was not armed");
-    const [legacy] = await shared.admin<{ count: number }[]>`
-      select count(*)::int as count from codex_capacity_waiters
-      where session_id = ${ctx.session.id}::uuid`;
-    expect(legacy?.count).toBe(0);
 
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))

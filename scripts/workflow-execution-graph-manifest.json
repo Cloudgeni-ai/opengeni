@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "a32fdc7fcf7442eb5a8861bfdb4eba084d698685ee0fa0ed271cba07ccbe48dd"
+      "sha256": "91fb0610858f1d26d3865915ce01739a825b82e91ac68b17031b5e7024389e93"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1079,13 +1079,19 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "shellcheck",
-      "sha256": "1d4576b9c1c37f34795ddec128e287c4b7fbb9aaf7a493857f7ee0576a244473"
+      "sha256": "59b9b9ce327e3d853d81444df0c14b73ce68067fb4a41a8f224f8b99156d0392"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "Terraform (GCP host fleet)",
       "sha256": "cff12b37177650c612d1bf7fabe8b3fac4c08b8e709521a41c94ba709b93e36a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "the state volume (a host keeps a file system it finds, on loop devices)",
+      "sha256": "663bd53603dfb2e7ea207289762bfb914637b829e1708531baf0051f84b37ed8"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",

@@ -493,6 +493,45 @@ describe("bounded PPTX import and regeneration", () => {
     });
   });
 
+  test("rejects table grids beyond the model caps before allocating occupancy", async () => {
+    const source = await bytesOf(mixedPresentation());
+    // Replace the table with an empty grid of the declared size: a few hundred KB of XML at
+    // most, which the importer must reject from the declared counts alone.
+    const withGrid = (rows: number, columns: number) =>
+      rewriteZipText(source, "ppt/slides/slide1.xml", (xml) => {
+        const start = xml.indexOf("<a:tblGrid>");
+        const end = xml.indexOf("</a:tbl>");
+        expect(start).toBeGreaterThan(0);
+        expect(end).toBeGreaterThan(start);
+        return (
+          xml.slice(0, start) +
+          `<a:tblGrid>${'<a:gridCol w="9525"/>'.repeat(columns)}</a:tblGrid>` +
+          '<a:tr h="9525"/>'.repeat(rows) +
+          xml.slice(end)
+        );
+      });
+
+    for (const [rows, columns] of [
+      [10_001, 1],
+      [1, 1_025],
+      // Within each cap, but the grid needs more <a:tc> slots than the XML node budget allows.
+      [2_000, 1_024],
+    ] as const) {
+      await expect(
+        PresentationFile.importPptx(await withGrid(rows, columns)),
+      ).rejects.toMatchObject({
+        name: "PresentationSecurityError",
+        code: "limit-exceeded",
+        entryName: "ppt/slides/slide1.xml",
+      });
+    }
+    // A grid inside the caps still reaches the ordinary structural checks.
+    await expect(PresentationFile.importPptx(await withGrid(2, 2))).rejects.toMatchObject({
+      name: "PresentationSecurityError",
+      code: "invalid-package",
+    });
+  });
+
   test("rejects namespace-spoofed package roots", async () => {
     const source = await bytesOf(mixedPresentation());
     const spoofed = await rewriteZipText(source, "ppt/presentation.xml", (xml) =>

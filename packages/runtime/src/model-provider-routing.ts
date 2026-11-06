@@ -31,6 +31,7 @@ import {
   chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
+  withArtifactOrigin,
 } from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
@@ -42,7 +43,11 @@ import {
   type ChatReasoning,
 } from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
-import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
+import {
+  CODEX_MODEL_ID_PREFIX,
+  classifyEncryptedArtifactRejection,
+  opaqueProviderArtifactFingerprint,
+} from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
@@ -56,6 +61,7 @@ import {
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
+  IncompleteChatCompletionError,
   UnknownModelFinishReasonError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
@@ -269,8 +275,18 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             text: (reasoning?.text ?? "") + delta.text,
           };
       }
-      if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
-        throw new UnknownModelFinishReasonError();
+      if (event.type === "response_done") {
+        // OpenAI may swallow AbortError and let the SDK synthesize completion.
+        // Intentional cancellation retains its caller-owned reason, not a
+        // misleading provider failure (the Runner handles AbortError itself).
+        request.signal?.throwIfAborted();
+        // The SDK emits response_done even when the iterator simply ends.
+        // Require the primary choice's terminal evidence before releasing
+        // assembled tool calls or treating partial text as a complete answer.
+        if (typeof finishReason !== "string" || !finishReason.trim()) {
+          throw new IncompleteChatCompletionError();
+        }
+        if (isUnknownFinishReason(finishReason)) throw new UnknownModelFinishReasonError();
       }
       yield event.type === "response_done"
         ? {
@@ -303,7 +319,52 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   }
 }
 
+/** Bound on remembered refused artifacts per provider (process-local). */
+const REFUSED_ARTIFACTS_PER_PROVIDER = 4_096;
+const refusedArtifacts = new Map<string, Set<string>>();
+const artifactFingerprints = new WeakMap<object, string | null>();
+
+function artifactFingerprint(item: Record<string, unknown>): string | null {
+  let fingerprint = artifactFingerprints.get(item);
+  if (fingerprint === undefined) {
+    fingerprint = opaqueProviderArtifactFingerprint(item);
+    artifactFingerprints.set(item, fingerprint);
+  }
+  return fingerprint;
+}
+
+function rememberRefusedArtifacts(scope: string, items: readonly Record<string, unknown>[]) {
+  let refused = refusedArtifacts.get(scope);
+  if (!refused) refusedArtifacts.set(scope, (refused = new Set()));
+  for (const item of items) {
+    const fingerprint = artifactFingerprint(item);
+    if (!fingerprint) continue;
+    refused.add(fingerprint);
+    if (refused.size > REFUSED_ARTIFACTS_PER_PROVIDER)
+      refused.delete(refused.values().next().value as string);
+  }
+}
+
+function hasNativeOpaqueReasoning(item: unknown): item is Record<string, unknown> {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  if (record.type !== "reasoning") return false;
+  const metadata =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : undefined;
+  return [
+    record.encrypted_content,
+    record.encryptedContent,
+    metadata?.encrypted_content,
+    metadata?.encryptedContent,
+  ].some((value) => typeof value === "string" && value.length > 0);
+}
+
 export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
+  /** Opaque reasoning the last built request sent natively to this provider. */
+  private lastNativeOpaqueArtifacts: Record<string, unknown>[] = [];
+
   constructor(
     client: OpenAI,
     model: string,
@@ -314,12 +375,76 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
   }
 
   /**
+   * Opaque reasoning can be decrypted only by the provider that issued it.
+   * Record that provider on each such output item so a later request to any
+   * other provider replays it as readable text (see projectHistoryForProvider).
+   */
+  private withArtifactOrigins<T extends { output: unknown[] }>(response: T): T {
+    let changed = false;
+    const output = response.output.map((item) => {
+      const tagged = withArtifactOrigin(item, this.provider.id);
+      changed ||= tagged !== item;
+      return tagged;
+    });
+    return changed ? { ...response, output } : response;
+  }
+
+  /**
+   * A provider refused ciphertext the request carried (for example opaque
+   * reasoning another provider issued before origins were recorded). Remember
+   * those items as unreadable for this provider so the retry, and every later
+   * request in this process, sends their readable text instead. Codex has its
+   * own account-aware recovery and keeps it.
+   */
+  private refusedNativeArtifacts(error: unknown): boolean {
+    if (this.provider.kind === "codex-subscription") return false;
+    if (!classifyEncryptedArtifactRejection(error)) return false;
+    const sent = this.lastNativeOpaqueArtifacts;
+    if (sent.length === 0) return false;
+    rememberRefusedArtifacts(this.provider.id, sent);
+    this.lastNativeOpaqueArtifacts = [];
+    return true;
+  }
+
+  override async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    let response: ModelResponse;
+    try {
+      response = await super.getResponse(request);
+    } catch (error) {
+      if (!this.refusedNativeArtifacts(error)) throw error;
+      response = await super.getResponse(request);
+    }
+    return this.withArtifactOrigins(response);
+  }
+
+  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+    for (let attempt = 0; ; attempt += 1) {
+      let started = false;
+      try {
+        for await (const event of this.preemptibleStream(request)) {
+          started = true;
+          if (event.type !== "response_done") {
+            yield event;
+            continue;
+          }
+          const response = this.withArtifactOrigins(event.response);
+          yield response === event.response ? event : { ...event, response };
+        }
+        return;
+      } catch (error) {
+        // Only a request refused before any output is resent.
+        if (started || attempt > 0 || !this.refusedNativeArtifacts(error)) throw error;
+      }
+    }
+  }
+
+  /**
    * A Steer can cut the stream short (see streamWithPreemption). End it with
    * the assistant messages the provider already marked done
    * (`response.output_item.done`) instead of failing the request. Usage is
    * unknown: Responses reports it only on the terminal event.
    */
-  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+  private async *preemptibleStream(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let responseId: string | undefined;
     const completed: unknown[] = [];
     try {
@@ -439,12 +564,25 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     let outcome: "completed" | "failed" = "completed";
     try {
       request = withDeclaredReasoning(request, this.declaredReasoning);
+      const scope = this.provider.id;
+      const refused = refusedArtifacts.get(scope);
       const input =
         typeof request.input === "string"
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+              artifactScope: scope,
+              ...(refused?.size
+                ? {
+                    isRejectedArtifact: (item: Record<string, unknown>) => {
+                      const fingerprint = artifactFingerprint(item);
+                      return fingerprint !== null && refused.has(fingerprint);
+                    },
+                  }
+                : {}),
             }) as ModelRequest["input"]);
+      this.lastNativeOpaqueArtifacts =
+        typeof input === "string" ? [] : (input as unknown[]).filter(hasNativeOpaqueReasoning);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
         stream,

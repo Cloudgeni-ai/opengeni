@@ -125,6 +125,13 @@ answer exactly `NO_REPLY` when a run leaves nothing to see or do, and the chat
 then draws neither the run's line, its work nor its answer. A run that asks the
 person something or needs them to connect an account always shows.
 
+Such a run leaves no other trace for the person either: it does not mark the
+chat unread, open an inbox reply item or send a phone notification. It stays
+in the session's history. When a run (or any turn) does answer, its phone
+notification carries that answer, the same text the chat shows; events that
+arrive close together start one run, so they give one answer and one
+notification.
+
 ## Lead the live turn row with your mark
 
 While the agent works, the turn shows one live row, such as "Working · 8s".

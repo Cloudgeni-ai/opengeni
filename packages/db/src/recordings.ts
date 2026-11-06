@@ -46,6 +46,7 @@ import {
   learnConfirmedVoices,
   rejectedVoices,
   rejectVoiceSuggestion,
+  releaseRecordingVoices,
   suggestSpeakersByVoice,
   syncSpeakerVoice,
   type RecordingSpeakerVoice,
@@ -1059,7 +1060,8 @@ export async function nameRecording(
 /**
  * Start deleting a recording: it disappears from every read at once, and the
  * deletion workflow then removes its media objects and its rows. Only the
- * person who recorded it may delete it. Repeating it is harmless.
+ * person who recorded it may delete it. Its speakers' voices leave the
+ * voiceprints they taught in the same step. Repeating it is harmless.
  */
 export async function markRecordingDeleting(
   db: Database,
@@ -1078,6 +1080,12 @@ export async function markRecordingDeleting(
       .for("update");
     if (!row) throw new RecordingNotFoundError();
     if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+    // Also on a retry: a recording marked deleting before this step existed
+    // still releases its voices.
+    await releaseRecordingVoices(tx, {
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+    });
     if (row.state === "deleting") return { ownerSubjectId: row.ownerSubjectId };
     await tx
       .update(schema.recordings)
@@ -1351,22 +1359,12 @@ export type UncompactedRecordingTrack = {
  * Finished meetings' audio tracks, across every workspace, whose kept file
  * is not yet in the kept format (its key does not end in `keptSuffix`) or
  * whose uploaded pieces are still stored beside it (migration 1240).
- * Identity only; the caller acts on each as its owner. Null while the
- * routine's runtime EXECUTE is withheld (runtime-posture
- * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
- * statement, because EXECUTE is checked when a statement starts.
+ * Identity only; the caller acts on each as its owner.
  */
 export async function listUncompactedRecordingTracks(
   db: Database,
   input: { keptSuffix: string; limit?: number },
-): Promise<UncompactedRecordingTrack[] | null> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select coalesce(has_function_privilege(
-        to_regprocedure('opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)')::oid,
-        'EXECUTE'), false) as granted`,
-  );
-  if (grant?.granted !== true) return null;
+): Promise<UncompactedRecordingTrack[]> {
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;

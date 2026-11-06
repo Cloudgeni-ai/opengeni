@@ -136,6 +136,8 @@ type FixtureOptions = {
   bundledSkillIds?: BundledSkillId[] | "omit";
   /** Rendered workspace governance for this turn. */
   workspaceGovernance?: string;
+  /** The agent revision in the chat's system prompt (sessions.agent_prompt_revision). */
+  agentPrompt?: BuildTurnAgentDeps["agentPrompt"];
   /** The session started unattended (frozen in its metadata) and still is. */
   unattended?: boolean;
   /** Above zero: a child session, which a parent agent can answer. */
@@ -149,6 +151,8 @@ type FixtureOptions = {
    * admitted for this turn (no accepted account binding).
    */
   productSignInNotAdmitted?: boolean;
+  /** The goal frozen with the turn; omitted leaves it unknown. */
+  goal?: "none" | "paused";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -226,6 +230,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const governanceWrites: Array<string | null> = [];
+  const agentInstructionChecks: Array<NonNullable<BuildTurnAgentDeps["agentPrompt"]>> = [];
   let preparationPhase: "tool-preparation" | "agent-build" = "tool-preparation";
   const metadataReads = { skillDescriptors: 0, videoPolicy: 0 };
   const persistence = [
@@ -267,6 +272,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
       governanceWrites.push(input.governance);
       return input.governance;
+    }),
+    spyOn(db, "ensureSessionAgentInstructions").mockImplementation(async (_db, input) => {
+      agentInstructionChecks.push(input.prompt);
+      return null;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
     ...(typeof db.sessionHasToolRouterHistory === "function"
@@ -414,6 +423,22 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         : { kind: "subject", subjectId: "user:fixture-human" },
     resources: [],
     tools: session.tools,
+    ...(options.goal === "none"
+      ? { goalSnapshot: { state: "none", capturedAt: "2026-01-01T00:00:00.000Z" } }
+      : options.goal === "paused"
+        ? {
+            goalSnapshot: {
+              state: "paused",
+              goalId: "77777777-7777-4777-8777-777777777777",
+              objectiveRevision: 1,
+              text: "Finish the migration",
+              successCriteria: null,
+              rootConstraints: [],
+              mutationPolicy: "preserve_intent",
+              capturedAt: "2026-01-01T00:00:00.000Z",
+            },
+          }
+        : {}),
     personalConnectionDelegations: [],
     mcpAccountBindings: [],
   } as BuildTurnAgentDeps["turn"];
@@ -518,6 +543,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       ...(options.workspaceGovernance !== undefined
         ? { workspaceGovernance: options.workspaceGovernance }
         : {}),
+      agentPrompt: options.agentPrompt ?? null,
       input,
       db: {} as BuildTurnAgentDeps["db"],
       runtime: runtime as OpenGeniRuntime,
@@ -654,6 +680,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       modelVisibleSkillCatalogText: built.modelVisibleSkillCatalogText,
       skillCatalogWrites,
       governanceWrites,
+      agentInstructionChecks,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
       settings,
       session,
@@ -870,6 +897,36 @@ describe("agent configuration reaches the production model request", () => {
       expect(governed.request.systemInstructions).toBe(other.request.systemInstructions);
       expect(governed.request.systemInstructions).not.toContain("Workspace rule");
       expect(governed.governanceWrites).toEqual(["Workspace rule: answer in English."]);
+    },
+  );
+
+  test.each(["legacy", "all"] as const)(
+    "an agent chat's instructions are a system-prompt layer; edits are checked each turn (%s config)",
+    async (from) => {
+      const agent = from === "all" ? agentConfig("all") : null;
+      const prompt = { agentId: crypto.randomUUID(), revision: 3 };
+      const bound = await captureWorkerRequest({
+        agent,
+        agentPrompt: { ...prompt, instructions: "Agent rule: answer as a pirate." },
+      });
+      expect(bound.request.systemInstructions).toContain(
+        "# Instructions for this agent\n\nThe agent's editors wrote these.",
+      );
+      expect(bound.request.systemInstructions).toContain("Agent rule: answer as a pirate.");
+      expect(bound.agentInstructionChecks).toEqual([
+        { ...prompt, instructions: "Agent rule: answer as a pirate." },
+      ]);
+      // A plain chat neither gets the layer nor checks for edits; a deleted
+      // agent checks (to withdraw an earlier edit) and runs as a plain chat.
+      const plain = await captureWorkerRequest({ agent });
+      expect(plain.agentInstructionChecks).toEqual([]);
+      const deleted = await captureWorkerRequest({
+        agent,
+        agentPrompt: { ...prompt, instructions: null },
+      });
+      expect(deleted.agentInstructionChecks).toHaveLength(1);
+      expect(deleted.request.systemInstructions).toBe(plain.request.systemInstructions);
+      expect(plain.request.systemInstructions).not.toContain("Instructions for this agent");
     },
   );
 
@@ -1112,6 +1169,29 @@ describe("agent configuration reaches the production model request", () => {
       }
     },
   );
+});
+
+// goal_resume acts only on an existing goal, so a configured session whose
+// frozen goal is none is not sent it; any goal, or an unknown one, keeps it.
+describe("goal_resume follows the session's goal", () => {
+  const resume = "opengeni__goal_resume";
+  test("a configured session without a goal has no goal_resume or its guidance", async () => {
+    const captured = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
+    expect(captured.names).toContain("opengeni__goal_set");
+    expect(captured.names).toContain("opengeni__goal_pause");
+    expect(captured.names).not.toContain(resume);
+    expect(captured.request.systemInstructions).not.toContain("goal_resume");
+  });
+
+  test.each([
+    ["a paused goal", { agent: agentConfig("all"), goal: "paused" }],
+    ["an unknown goal", { agent: agentConfig("all") }],
+    ["a legacy session without a goal", { agent: null, goal: "none" }],
+  ] as const)("%s keeps goal_resume", async (_label, options) => {
+    const captured = await captureWorkerRequest(options);
+    expect(captured.names).toContain(resume);
+    expect(captured.request.systemInstructions).toContain("goal_resume");
+  });
 });
 
 describe("effective-tools projection agrees with actual model preparation", () => {
@@ -1898,7 +1978,7 @@ const INVENTORY = {
     "## Final answer": 434,
     "### Formatting rules": 127,
     "# Rules for getting work done": 682,
-    "## Autonomy and persistence": 3089,
+    "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
     "## New messages while you work": 805,

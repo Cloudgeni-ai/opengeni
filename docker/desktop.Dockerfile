@@ -351,6 +351,10 @@ ENV LC_ALL=C.UTF-8
 # from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
 # poppler-utils gives PDF text page by page (pdftotext -f N -l N, pdfinfo),
 # which AnyDoc's Markdown does not mark.
+# The small general tools agents reach for without checking first, as in
+# docker/sandbox.Dockerfile: GNU time (`/usr/bin/time -v`), zip, iproute2
+# (ss, ip), binutils (strings, objdump, readelf), bc and patch. The last build
+# step (docker/check-default-commands.sh) proves every default command is present.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     printf '%s\n' \
@@ -360,6 +364,7 @@ RUN set -eux; \
         bash ca-certificates coreutils curl gpg git jq openssh-client poppler-utils postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
         apt-transport-https net-tools netcat-openbsd sudo util-linux uuid-runtime xxd file \
+        bc binutils iproute2 patch time zip \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -688,6 +693,9 @@ RUN set -eux; \
                /usr/local/lib/opengeni/opengeni-computer-native \
                /usr/local/bin/opengeni-agent; \
     opengeni-agent --version; \
+    # bunx is Bun started under that name, as in the official Bun images.
+    ln -s bun /usr/local/bin/bunx; \
+    test "$(bunx --version)" = "$(bun --version)"; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \
@@ -713,6 +721,11 @@ RUN set -eux; \
 # docker/sandbox.Dockerfile): anything a deployment, user or repository sets wins.
 RUN git config --system user.name "Opengeni Agent" \
     && git config --system user.email agent@opengeni.invalid
+
+# Last build step: every default command an agent may reach for is present
+# and runs (docker/check-default-commands.sh), so a regression fails the build.
+RUN --mount=type=bind,source=docker/check-default-commands.sh,target=/opt/opengeni-check/check-default-commands.sh \
+    sh /opt/opengeni-check/check-default-commands.sh
 
 ENV HOME=/workspace
 ENV DISPLAY=:0

@@ -28,8 +28,11 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
 
 // Agent requests are billed like their chat; its frozen origin is read once.
 let turnOrigin: ReturnType<typeof spyOn<typeof db, "readTurnBillingOrigin">>;
+// Most attempts here belong to sessions no private Slack interaction owns.
+let slackOwner: ReturnType<typeof spyOn<typeof db, "getSlackPrivateSessionOwnerSubjectId">>;
 beforeEach(() => {
   turnOrigin = spyOn(db, "readTurnBillingOrigin").mockResolvedValue("app");
+  slackOwner = spyOn(db, "getSlackPrivateSessionOwnerSubjectId").mockResolvedValue(null);
 });
 afterEach(() => {
   mock.restore();
@@ -106,6 +109,37 @@ describe("access-grant session RLS context", () => {
         initiatingHumanSubjectId: "user:owner",
         privateFileOwnerSubjectId: "user:owner",
       },
+    ]);
+  });
+
+  test("an attempt in a private Slack session produces its owner's files, not workspace files", async () => {
+    const actors: unknown[] = [];
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (actor, fn) => {
+      actors.push(actor);
+      return await fn();
+    });
+    // The Knowledge destination stays the workspace; only file ownership follows Slack.
+    spyOn(db, "freezeAgentLearningPolicy").mockResolvedValue({
+      defaultScope: "workspace",
+      subjectId: null,
+    } as never);
+    slackOwner.mockResolvedValue("user:slack-owner");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      initiatingHumanSubjectId: "user:slack-owner",
+    } as never);
+    const access = grant({
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      metadata: { sessionId },
+    });
+
+    await withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => "ok");
+    expect(slackOwner).toHaveBeenCalledWith({}, workspaceId, sessionId);
+    expect(actors).toEqual([
+      expect.objectContaining({ privateFileOwnerSubjectId: "user:slack-owner" }),
     ]);
   });
 

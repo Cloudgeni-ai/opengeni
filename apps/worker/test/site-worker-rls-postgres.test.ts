@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
+import { agentPrivateFileOwnerSubjectId } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   applySessionTurnSettlement,
@@ -62,6 +63,8 @@ function workerActor(sessionId: string, rootSessionId: string, attemptId: string
     "attempt",
     "fileAuthoritySubjectId",
     "learning",
+    "slackPrivateOwnerSubjectId",
+    "agentPrivateFileOwnerSubjectId",
     `return (${source.slice(expression.start, expression.end)});`,
   )(
     { sessionId },
@@ -69,6 +72,8 @@ function workerActor(sessionId: string, rootSessionId: string, attemptId: string
     { turnId: crypto.randomUUID(), attemptId, executionGeneration: 1 },
     null,
     { defaultScope: "workspace", subjectId: null },
+    null,
+    agentPrivateFileOwnerSubjectId,
   ) as SessionRlsActorContext;
 }
 

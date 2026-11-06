@@ -445,6 +445,48 @@ describe("session tools on a chat in another workspace", () => {
     expect(hinted.isError).toBe(true);
     expect(hinted.text).toContain("pass the workspaceId from its link");
 
+    // Full access is the person's own: in a turn someone else sent into this
+    // chat, the session tools don't reach the person's other workspace, and
+    // app actions there don't run as the person either.
+    const colleague = `user:${crypto.randomUUID()}`;
+    const sentBy = async (sender: string) =>
+      await shared.admin.begin(async (tx) => {
+        // The turn's accepted authority is immutable in production; this
+        // stands in for a message the colleague sent into the same chat.
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          update session_turns
+          set initiator_subject_id = ${sender}, initiating_human_subject_id = ${sender}
+          where id = ${claimed.turn.id}`;
+        await tx`
+          update session_turn_app_action_grants set subject_id = ${sender}
+          where turn_id = ${claimed.turn.id}`;
+      });
+    await sentBy(colleague);
+    const colleagueRead = await call(withFullAccess(), "session_get", {
+      sessionId: target,
+      workspaceId: other,
+    });
+    expect(colleagueRead.isError).toBe(true);
+    expect(colleagueRead.text).toContain("no longer has full access");
+    expect(colleagueRead.text).not.toContain(target);
+    const colleagueAction = await call(withFullAccess(), "admin_action_call", {
+      id: "listWorkspaceMembers",
+      pathParameters: { workspaceId: other },
+      query: {},
+    });
+    expect(
+      colleagueAction.isError || JSON.parse(colleagueAction.text).status >= 400,
+      colleagueAction.text,
+    ).toBe(true);
+    // The person's own turn reaches it again.
+    await sentBy(subjectId);
+    const ownRead = await call(withFullAccess(), "session_get", {
+      sessionId: target,
+      workspaceId: other,
+    });
+    expect(ownRead.isError, ownRead.text).toBe(false);
+
     // Once the person ends full access, the next call says so.
     expect(
       (

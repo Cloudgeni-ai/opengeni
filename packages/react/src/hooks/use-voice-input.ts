@@ -178,7 +178,8 @@ export type UseVoiceInputResult = {
   transcribe: (audio: Blob, options?: { durationMilliseconds?: number }) => Promise<boolean>;
 };
 
-export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 1_000;
+/** A dictation is uploaded in pieces this long, like a meeting. */
+export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 5_000;
 /** @deprecated Dictations no longer use owner heartbeats. */
 export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
 /** @deprecated Dictations no longer use owner heartbeats. */
