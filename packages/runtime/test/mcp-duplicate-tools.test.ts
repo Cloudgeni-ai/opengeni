@@ -194,41 +194,43 @@ describe("a model name claimed by an MCP tool and a built-in tool", () => {
     };
   }
 
-  test("with distinct identities, each server's call runs only its own tool", async () => {
+  test("the built-in tool keeps the name; the connector's tool is left out, not rerouted", async () => {
     const shared = await prepareShared({ serverId: "interaction", toolName: "observe" });
     try {
+      // Built-in tools claim their model names before any connector lists.
       expect(shared.prepared.attemptToolCatalog!.entries.map((entry) => entry.identity)).toEqual([
-        { serverId: "remote", toolName: "observe" },
+        { serverId: "interaction", toolName: "observe" },
       ]);
-      // The built-in server still advertises the name; its call is refused
-      // instead of running the connector tool that won the name.
-      await expect(shared.localServer.callToolResult!("remote__observe", {})).rejects.toMatchObject(
-        { name: "ToolGatewayToolNotFoundError" },
+      expect((await shared.remoteServer.listTools()).map((tool) => tool.name)).toEqual([]);
+      expect(shared.prepared.unavailableMcpServers.get("remote")).toMatch(
+        /1 of its tools are unavailable this turn .*clash with another integration/,
       );
-      expect(shared.mcp.called).toEqual([]);
-      expect(shared.local).toEqual([]);
-      expect(await shared.remoteServer.callTool("remote__observe", {})).toMatchObject({
-        content: [{ type: "text", text: "ran observe" }],
+      expect(await shared.localServer.callToolResult!("remote__observe", {})).toMatchObject({
+        content: [{ type: "text", text: "observed locally" }],
       });
-      expect(shared.mcp.called).toEqual(["observe"]);
-      expect(shared.local).toEqual([]);
+      expect(shared.local).toEqual(["observe"]);
+      await expect(shared.remoteServer.callTool("remote__observe", {})).rejects.toMatchObject({
+        name: "ToolGatewayToolNotFoundError",
+      });
+      expect(shared.mcp.called).toEqual([]);
     } finally {
       await shared.close();
     }
   });
 
-  test("with one identity, neither server's call runs", async () => {
+  test("with one identity, only the built-in tool runs and the connector's call is refused", async () => {
     const shared = await prepareShared({ serverId: "remote", toolName: "observe" });
     try {
-      expect(shared.prepared.attemptToolCatalog!.entries).toEqual([]);
-      await expect(shared.localServer.callToolResult!("remote__observe", {})).rejects.toMatchObject(
-        { name: "ToolGatewayToolNotFoundError" },
-      );
+      expect(shared.prepared.attemptToolCatalog!.entries).toMatchObject([
+        { identity: { serverId: "remote", toolName: "observe" }, source: "interaction" },
+      ]);
       await expect(shared.remoteServer.callTool("remote__observe", {})).rejects.toMatchObject({
         name: "ToolGatewayToolNotFoundError",
       });
+      expect(await shared.localServer.callToolResult!("remote__observe", {})).toMatchObject({
+        content: [{ type: "text", text: "observed locally" }],
+      });
       expect(shared.mcp.called).toEqual([]);
-      expect(shared.local).toEqual([]);
     } finally {
       await shared.close();
     }

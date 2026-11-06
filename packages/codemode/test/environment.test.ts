@@ -43,6 +43,28 @@ function definition(
 }
 
 describe("AttemptToolEnvironment", () => {
+  test("more tools than the catalog holds are left out and reported, not fatal", () => {
+    // Before: AttemptToolCatalog.parse rejected all 4,097 entries and the turn failed.
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const reported: string[] = [];
+      const definitions = Array.from({ length: 4_097 }, (_, index) =>
+        definition("big", `tool_${index}`),
+      );
+      const { catalog } = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions,
+        onWarnings: (warnings) => reported.push(...warnings.map((warning) => warning.code)),
+      });
+      expect(catalog.entries).toHaveLength(4_096);
+      expect(reported).toEqual(["catalog_entry_limit"]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ event: "tool_catalog_degraded", count: 1 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("internal construction never re-signs a digest smuggled through scope", () => {
     const suppliedScope = { ...scope, digest: "a".repeat(64) };
     expect(() =>
