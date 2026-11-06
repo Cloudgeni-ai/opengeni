@@ -717,7 +717,7 @@ describe("organization MCP browser-only actions", () => {
           for (const tool of ["opengeni_action_describe", "opengeni_action_call"]) {
             expect(await call(tool, { id })).toEqual({
               isError: true,
-              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the web app in a browser.`,
             });
           }
         }
