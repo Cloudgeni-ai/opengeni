@@ -526,6 +526,31 @@ export type ConnectionTokenResolverOptions = {
    * ConnectionNotRefreshableError): only reconnecting fixes those.
    */
   onTransientRefreshFailure?: (failure: { connectionId: string }) => void;
+  /**
+   * Called once, when this resolve is the one that moved an active connection
+   * to `needs_reauth` because its provider rejected the stored grant. A later
+   * resolve of the already-broken connection, a transient failure or a lost
+   * status race never calls it, so the owner can be told exactly once.
+   */
+  onConnectionNeedsReauth?: (broken: ConnectionNeedsReauth) => void | Promise<void>;
+};
+
+/** A connection this resolve just found broken: only reconnecting fixes it. */
+export type ConnectionNeedsReauth = {
+  /** The workspace that holds the connection (a personal account may live elsewhere). */
+  workspaceId: string;
+  connectionId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  httpStatus: number;
+  /** The accepted chat turn whose use found it, when there was one. */
+  use?: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  };
 };
 
 export type RefreshTransportOptions = {
@@ -891,7 +916,7 @@ export function buildConnectionTokenResolver(
             }
           }
           if (!handled) {
-            await deps
+            const transitioned = await deps
               // A personal credential may originate outside the workspace
               // consuming it. Apply the CAS to the same row we refreshed.
               .setStatus(db, cred.workspaceId, "needs_reauth", error.message, {
@@ -899,7 +924,32 @@ export function buildConnectionTokenResolver(
                 version: cred.version,
                 subjectId: cred.subjectId,
               })
-              .catch(() => undefined);
+              .catch(() => false);
+            if (transitioned && options.onConnectionNeedsReauth) {
+              const use = input.connectionUseContext;
+              try {
+                await options.onConnectionNeedsReauth({
+                  workspaceId: cred.workspaceId,
+                  connectionId: cred.id,
+                  subjectId: cred.subjectId,
+                  providerDomain: cred.providerDomain,
+                  httpStatus: error.httpStatus,
+                  ...(use
+                    ? {
+                        use: {
+                          workspaceId: use.workspaceId,
+                          sessionId: use.sessionId,
+                          turnId: use.turnId,
+                          attemptId: use.attemptId,
+                          executionGeneration: use.executionGeneration,
+                        },
+                      }
+                    : {}),
+                });
+              } catch {
+                // Telling the owner never changes the credential result.
+              }
+            }
           }
         } else if (!(error instanceof ConnectionNotRefreshableError)) {
           options.onTransientRefreshFailure?.({ connectionId: cred.id });

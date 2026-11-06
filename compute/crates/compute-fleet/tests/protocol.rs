@@ -27,6 +27,8 @@
 //!   when the host that made them was declared gone, and a copy ahead of
 //!   the archive is never dropped while its sandbox exists. A host
 //!   declared gone that comes back sets such copies aside.
+//! - a sandbox the service forgets, as one whose create its host failed,
+//!   exists nowhere: no host holds a copy of it and it has no archive.
 //!
 //! Now and then an operator declares a host given up on gone, whether or
 //! not it is. At the end faults stop, the hosts that died for good are
@@ -310,6 +312,8 @@ enum Answer {
     Stale,
     NoArchive,
     Busy,
+    /// The host failed the create and kept nothing of it.
+    Broken,
     /// The request reached the host after its window.
     Expired,
 }
@@ -321,7 +325,7 @@ impl Answer {
             Self::Ok => Outcome::Done,
             Self::Full | Self::Unavailable | Self::Expired => Outcome::Refused,
             Self::NotFound => Outcome::NotFound,
-            Self::Stale | Self::NoArchive | Self::Busy => Outcome::Other,
+            Self::Stale | Self::NoArchive | Self::Busy | Self::Broken => Outcome::Other,
         }
     }
 }
@@ -440,6 +444,10 @@ struct Stats {
     /// Hosts that died for good, and the sandboxes lost with them.
     dead_hosts: u64,
     lost_sandboxes: u64,
+    /// Creates their hosts failed, and sandboxes forgotten for existing
+    /// nowhere.
+    broken_creates: u64,
+    forgotten: u64,
     min_stop_gap_ns: Option<u64>,
 }
 
@@ -1227,6 +1235,11 @@ impl Sim {
         }
         if host.capacity().free_memory_mib < SANDBOX_MIB || self.rng.chance(1, 50) {
             return Answer::Full;
+        }
+        // Now and then it fails, as a host that cannot fetch the image does.
+        if self.rng.chance(1, 40) {
+            self.stats.broken_creates += 1;
+            return Answer::Broken;
         }
         self.ghost.created_on.entry(id).or_insert(host.id);
         // One in ten is a runner's.
@@ -2037,6 +2050,27 @@ impl Sim {
                 };
                 self.set_row(id, change.set, why);
             }
+            // It exists nowhere: no host holds a copy and nothing is
+            // archived, or forgetting it loses it.
+            Next::Forget => {
+                let held = self
+                    .hosts
+                    .iter()
+                    .find(|host| !host.dead && host.sandboxes.contains_key(&id));
+                if let Some(host) = held {
+                    self.fail(
+                        id,
+                        &format!("{id:?} forgotten while {:?} holds it", host.id),
+                    );
+                }
+                if self.objects.contains_key(&id) || self.confirmed.contains(&id) {
+                    self.fail(id, &format!("{id:?} forgotten though it was made"));
+                }
+                self.note(id, "forgotten: exists nowhere");
+                self.rows.remove(&id);
+                self.sends.remove(&id);
+                self.stats.forgotten += 1;
+            }
         }
     }
 
@@ -2232,6 +2266,8 @@ fn run_seeds(params: Params) -> Stats {
         total.set_aside += stats.set_aside;
         total.dead_hosts += stats.dead_hosts;
         total.lost_sandboxes += stats.lost_sandboxes;
+        total.broken_creates += stats.broken_creates;
+        total.forgotten += stats.forgotten;
         if let Some(gap) = stats.min_stop_gap_ns {
             let min = total.min_stop_gap_ns.get_or_insert(gap);
             *min = (*min).min(gap);
@@ -2296,6 +2332,9 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
         total.only_copy_runs > 0 && total.orphaned_runs > 0 && total.handovers > 0,
         "{total:?}"
     );
+    // Hosts failed creates, and the wakes that found them nowhere forgot
+    // them rather than asking their hosts again.
+    assert!(total.broken_creates > 0 && total.forgotten > 0, "{total:?}");
 }
 
 #[test]

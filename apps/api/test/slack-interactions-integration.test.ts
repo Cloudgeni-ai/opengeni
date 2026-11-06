@@ -1608,11 +1608,12 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         eventRouteSecret: null,
       });
       // The workspace GitHub App catalog. Every bound repository is offered;
-      // 99 is visible to the App but was never granted to this workspace.
+      // 99 is visible to the App through an installation this workspace never
+      // bound.
       const githubRepository = (
         id: number,
         name: string,
-        extra: { archived?: boolean; sizeKb?: number } = {},
+        extra: { archived?: boolean; sizeKb?: number; installationId?: number } = {},
       ) => ({
         id,
         installationId: 71,
@@ -1642,7 +1643,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           githubRepository(46, "retired", { archived: true, sizeKb: 90 }),
           githubRepository(47, "blank", { archived: false, sizeKb: 0 }),
           githubRepository(48, "automatic"),
-          githubRepository(99, "unbound"),
+          githubRepository(99, "unbound", { installationId: 72 }),
         ],
       };
       // What this person used recently in this workspace: their own website

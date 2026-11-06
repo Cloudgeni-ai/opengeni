@@ -235,7 +235,9 @@ separate budgets so one kind can't use up another:
   messages are ignored as before.
 
 The counters are in memory, so the limits apply per replica and reset on
-restart.
+restart. A reply Teams clearly never received (refused, throttled or
+unreachable) doesn't count. Across replicas, an install's welcome is claimed
+once in the database (see [In-Teams experience](#in-teams-experience)).
 
 ### Entra app configuration
 
@@ -509,8 +511,19 @@ conversation, organization connected or not, account linked or not).
   also gets a "Link account" button. The welcome holds no identity proof, since
   proofs expire after ten minutes and a welcome may be read much later: the button
   sends `link` as the person, whose authenticated message gets a fresh link card.
-  A redelivered install within ten minutes isn't welcomed again (per API process),
-  and messages never repeat it. A linked person's first 1:1 chat adds one line
+  Teams can deliver one install several times and to any API replica, so each
+  replica first claims the chat's welcome in `teams_bot_welcomes` (a hash of the
+  tenant and conversation, no content); an install of the same chat within ten
+  minutes isn't welcomed again on any replica, and messages never repeat it.
+  Claims older than a day are removed as later welcomes are sent. The install
+  never fails once a welcome may
+  have arrived. When Teams clearly refused the send, the claim is given back,
+  and a throttled or unreachable send answers 503 so that Teams redelivers.
+  When the send may have arrived (a timeout, a Teams 5xx), or the replica
+  stopped between claiming and sending, the claim is kept: that install gets no
+  welcome rather than a second one. Teams may accept a message with a card with
+  an empty 202 and no message id; that counts as delivered. A linked person's
+  first 1:1 chat adds one line
   about AI and `help` to the "Started" notice. In an organization that hasn't
   connected Opengeni and has self-serve on, the installer gets the
   "Connect your organization" card instead of this welcome; see

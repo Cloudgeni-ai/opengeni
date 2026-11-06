@@ -56,6 +56,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
+  {
+    pattern: /^\/v1\/github\/personal\/gateway\//,
+    reason: "the GitHub gateway gh uses as the person from a sandbox",
+  },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
   {
     pattern: /^\/v1\/office\/workbook-tickets$/,

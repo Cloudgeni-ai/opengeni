@@ -25,6 +25,11 @@ export type SessionMcpCapabilityCardProps = {
    * may only connect their own account. No ownership choice.
    */
   personalOnly?: boolean;
+  /**
+   * A connection of this person's that stopped working, which the agent asked
+   * to reconnect: the card says Reconnect and signs in to that same account.
+   */
+  reconnectConnectionId?: string | undefined;
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
@@ -82,6 +87,7 @@ function ScopedCard({
   description: hostDescription,
   logoSrc,
   ownershipCopy,
+  reconnectConnectionId,
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
@@ -96,7 +102,9 @@ function ScopedCard({
     dialogOnly,
     onClose,
     personalOnly: configuredPersonalOnly,
+    reconnectConnectionId,
   });
+  const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
   // Your own login, added in another workspace: one click turns it on here.
   const useOwnLoginHere = offHere !== null && !connected && item !== null;
@@ -193,7 +201,9 @@ function ScopedCard({
             ? sessionId
               ? t("sessionMcpCapabilityCard.useInThisConversation")
               : t("sessionMcpCapabilityCard.connected")
-            : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
+            : reconnecting
+              ? t("sessionMcpCapabilityCard.reconnectName", { name: item?.name ?? name })
+              : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
       }
       note={
         ownLoginQuestion ??
@@ -274,7 +284,7 @@ function ScopedCard({
               </>
             ) : !connected ? (
               <>
-                {!item.connectionRef && !personalOnly ? (
+                {!item.connectionRef && !personalOnly && !reconnecting ? (
                   <fieldset disabled={busy}>
                     <legend>
                       {ownershipCopy?.legend ??
@@ -301,17 +311,19 @@ function ScopedCard({
                   </fieldset>
                 ) : null}
                 <p className="og-session-capability-scope">
-                  {personalOnly && ownership === "personal"
-                    ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
-                    : ownershipCopy
-                      ? ownership === "workspace"
-                        ? ownershipCopy.workspace
-                        : ownershipCopy.personal
-                      : ownership === "workspace"
-                        ? sessionId
-                          ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
-                          : t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable2")
-                        : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
+                  {reconnecting
+                    ? t("sessionMcpCapabilityCard.reconnectsTheSameAccount")
+                    : personalOnly && ownership === "personal"
+                      ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
+                      : ownershipCopy
+                        ? ownership === "workspace"
+                          ? ownershipCopy.workspace
+                          : ownershipCopy.personal
+                        : ownership === "workspace"
+                          ? sessionId
+                            ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
+                            : t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable2")
+                          : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
                 </p>
                 <button className="og-session-capability-primary" onClick={flow.signIn}>
                   {flow.retrySignIn

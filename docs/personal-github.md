@@ -96,9 +96,10 @@ then links to the repository chooser. Requests such as "connect my GitHub" or
 "do it as me" map to the personal identity; "install the GitHub app" or "give
 Opengeni access to the org" map to the App. The repositories prompt lists each
 mounted GitHub repository's identity (as the person, with their login when
-known, or as the workspace's GitHub app) and says that on personal repositories the agent
-uses plain git and `github_personal__*` tools: the token never reaches the
-sandbox, so `gh` and raw GitHub API calls do not act as the person.
+known, or as the workspace's GitHub app). In a managed sandbox it says that git and `gh`
+act as the person on personal repositories, through the
+[gh gateway](#gh-in-managed-sandboxes); elsewhere (Connected Machines) the
+agent uses plain git and the `github_personal__*` tools.
 
 The session repository picker is for picking. With your GitHub connected, each
 switched-on repository says who it acts as: **Acts as You (@login)** or **Acts as
@@ -220,10 +221,10 @@ identity, repository identity, and pull/push permission. Provider OAuth tokens
 are decrypted only at that server boundary. Requests use fixed GitHub hosts,
 no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
 A receive-pack transport failure is outcome-unknown and is never automatically
-replayed. `gh` and other provider CLIs never receive the broker bearer and direct
-the agent to GitHub tools instead. The standalone consumer remains default-off
-with personal GitHub OAuth; GitHub App and Connected Machine credential paths
-are unchanged.
+replayed. A push that deletes a branch or tag, or force-updates one, asks the
+person first (see [Git pushes](#git-pushes)); ordinary pushes are unchanged.
+The standalone consumer remains default-off with personal GitHub OAuth; GitHub
+App and Connected Machine credential paths are unchanged.
 
 The default-off GitHub API bridge (`OPENGENI_GITHUB_REST_MCP_ENABLED`) consumes
 that same frozen repository authority without exposing the broad OAuth token.
@@ -263,6 +264,91 @@ changes require `github:manage`, while a Personal policy requires the exact
 authenticated connection owner with `connections:write`. Updates are effective
 for the next attempt snapshot. An approval request that is already open keeps
 its original decision.
+
+## gh in managed sandboxes
+
+In a managed sandbox whose session mounts a repository as the person, `gh`
+acts as the person, as on their own computer: `gh repo list/view/clone`,
+`gh pr create/view/checks/diff/review/comment/merge`, `gh run list/view
+--log/rerun`, `gh workflow run`, `gh issue`, `gh release` and `gh api`. The
+person's token stays in Opengeni; the sandbox holds only the session's
+short-lived broker bearer, which `gh` never sees either.
+
+The sandbox `gh` wrapper chooses the gateway when the repository it runs in is
+mounted as the person, or when it runs outside any GitHub checkout. In an
+Opengeni app repository, and in sessions without a repository mounted as the
+person, `gh` behaves as before. In gateway mode the wrapper starts a small
+local proxy for that one command and points `gh` at it with a private,
+temporary config (`http_unix_socket`). The proxy sends `api.github.com` and
+`uploads.github.com` requests to the API's gateway with the bearer read fresh
+from the binding file; requests to other hosts (for example redirects to
+download logs or archives) go direct, without credentials. Because the
+checkout's remote stays `https://github.com/<owner>/<repo>`, `gh` resolves the
+repository as usual. `gh repo clone` and the Git commands `gh` runs clone and
+push through the same gateway (`git/<owner>/<repo>`), so a clone keeps working
+with plain git afterwards. The person's own `gh` config (aliases) is not used
+in this mode. The static part of this (the proxy and the wrapper logic) is
+one content-addressed file in the wrapper directory, delivered through the
+same private file ingress as the broker bearer, so the per-turn setup program
+stays small; if that delivery fails, `gh` behaves as before for that turn.
+
+The gateway (`/v1/github/personal/gateway/{api,uploads,git}/...`) checks, for
+every request: the bearer, its turn, the delegation's credential binding and
+connection generation, the connection itself, the live repository allowlist,
+and repositories removed from the chat. Repository requests outside the
+allowlist are refused with a 403, and any write (including a comment or a
+fork) needs the repository chosen with write access. Account and organization reads (`gh api
+user`, `gh repo list <org>`) and search pass as the person. GraphQL
+`repository(...)` reads are checked like REST ones, also under
+`organization`, `user`, `repositoryOwner` and `viewer`; `node(id:)` reads are
+not. GraphQL mutations are checked against the repositories their input names
+(node IDs, `repositoryNameWithOwner`, github.com URLs); when those can't be
+found, the request asks. The gateway replaces
+`Authorization` with the person's token, never forwards the bearer, does not
+follow redirects, forwards only the request headers GitHub needs, buffers
+API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,
+and passes only safe response headers back.
+
+### Approvals
+
+Each request is mapped to the GitHub action policy the `github_personal__*`
+tools use, so one setting covers both:
+
+- Reads pass.
+- Ordinary writes (branches, file commits, issues, pull requests, comments,
+  review requests, labels, releases, workflow runs and reruns) follow the
+  person's policy for the matching action, or the strictest of the routine
+  group when no single action matches. Reviews and merges follow their own
+  groups.
+- Destructive or hard-to-undo requests always ask: deleting repositories,
+  branches, tags, releases, comments or other data; force-updating a branch;
+  repository settings, collaborators and teams, secrets and variables,
+  webhooks and deploy keys, branch protection, transfer, archive and
+  visibility, approving deployments or fork workflow runs. So do REST writes
+  and GraphQL mutations the gateway doesn't recognise.
+- Block always wins. Unattended sessions refuse instead of asking.
+
+A request that needs approval is not sent. `gh` prints `Waiting for approval:
+<title>…` (gateway messages don't name the product, like other agent texts),
+the response carries `x-opengeni-approval: pending`, and the turn ends with
+the normal approval card. The approval is
+bound to a digest of the exact request (method, path, query and body bytes); after
+approval, running the same command again sends it once. A declined request
+answers `Declined by the person`. Outcomes are recorded in the same connector
+action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
+is not replayed.
+
+### Git pushes
+
+Pushes through the broker or the gateway are inspected before they reach
+GitHub. A push that deletes a branch or tag, or moves a branch to a commit
+that does not descend from its current tip, asks the person; the approval is
+bound to the exact ref updates. Git reports a waiting push as a rejected ref
+with the same message. When the gateway can't tell whether an update is a
+fast-forward (for example a push over 64 MiB), or can't read the push at all,
+it asks.
+Ordinary fast-forward pushes and new branches follow the existing write
+access.
 
 ## Durable propagation
 

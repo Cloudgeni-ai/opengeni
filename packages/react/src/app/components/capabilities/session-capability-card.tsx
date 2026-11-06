@@ -8,6 +8,7 @@ import {
 } from "./attach-session-capability";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard } from "../../../components/session-mcp-capability-card";
+import { capabilityReconnectConnectionId } from "../../../auth-needed-presentation";
 import { connectionCardSubtitle, showsMcpServerLabel } from "../../../components/mcp-server-label";
 import { capabilityPresentation } from "../../../integration-presentation";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
@@ -212,6 +213,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         capabilityId={capability.id}
         name={capability.name}
         rationale={capability.rationale}
+        reconnectConnectionId={capabilityReconnectConnectionId(item)}
         returnUrl={page.href()}
         onConfigured={props.onConfigured}
       />

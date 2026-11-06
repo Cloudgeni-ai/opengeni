@@ -54,8 +54,21 @@ function fixture(options: { answer?: number; installedFrom?: string } = {}) {
   shell.connectFromLink = async (account: { baseUrl: string }) => {
     connected.push(account.baseUrl);
   };
-  /** Lets the handler's dialog and sign-in steps run. */
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // The handler starts its sign-in without awaiting it. Keep each run so the
+  // test can wait for it to finish rather than for a fixed time: before opening
+  // the browser it reads the computer's name, which on macOS runs `scutil` and
+  // can take longer than any short delay on a cold machine.
+  const runs: Promise<unknown>[] = [];
+  const signInFromLink = shell.signInFromLink;
+  shell.signInFromLink = function (this: unknown, ...args: unknown[]) {
+    const run = signInFromLink.apply(this, args);
+    runs.push(run);
+    return run;
+  };
+  /** Waits until the handler's dialog and sign-in steps are done. */
+  const settle = async () => {
+    while (runs.length) await Promise.all(runs.splice(0));
+  };
   return { shell, store, opened, dialogs, connected, settle };
 }
 

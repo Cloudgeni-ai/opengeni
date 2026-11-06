@@ -122,6 +122,23 @@ test("superseded push cancels only observed old PR CI, not main or batch", async
     "actions/runs/200/cancel",
   ]);
 });
+test("only the same-repository Version PR supersedes Version dispatch CI", async () => {
+  const version = await fixture(true);
+  await runPrCiCommand("superseded", version.env, version.transport);
+  expect(version.calls.filter((c) => c.method === "POST").map((c) => c.path)).toEqual([
+    "actions/runs/200/cancel",
+  ]);
+  for (const impostor of [
+    { head: { repo: { full_name: "contributor/opengeni" } } },
+    { user: { login: "contributor" } },
+  ]) {
+    const f = await fixture(true);
+    if (impostor.head) f.state.pull.head.repo = impostor.head.repo;
+    if (impostor.user) f.state.pull.user = impostor.user;
+    await runPrCiCommand("superseded", f.env, f.transport);
+    expect(f.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  }
+});
 test("changed head before cancellation stops without a mutation", async () => {
   const f = await fixture();
   f.state.changeBeforeCancel = true;

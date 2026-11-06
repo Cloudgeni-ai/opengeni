@@ -3,9 +3,15 @@
 # API image serves from /agent/* (the "agent ships inside the control-plane"
 # decision; agent-distribution).
 #
-# Run this as a CI STEP in the deployed-env API image build
-# (release-candidate.yml here, and operator-controlled per-SHA builds) BEFORE
-# `docker build`.
+#   scripts/bake-agent.sh [build]   compile and checksum every target, unsigned
+#   scripts/bake-agent.sh sign      sign what `build` staged
+#
+# Run both as CI STEPS in the deployed-env API image build
+# (release-candidate.yml, ci.yml's api-image job, and operator-controlled
+# per-SHA builds) BEFORE `docker build`: first install the pinned tools
+# (scripts/install-agent-build-tools.sh zigbuild rsign) and `build`, both
+# without the signing key, then `sign` in a step of its own that alone
+# receives the key.
 # It builds both complete Linux target cohorts with one exact source identity:
 # a portable musl agent embedding browserd, the pinned browser driver, and the
 # native computer helper. All four assets receive checksums and signatures in
@@ -16,41 +22,41 @@
 # here keeps the key in the CI step's masked env only; the build context receives
 # already-signed, public artifacts.
 #
+# WHY a separate signing mode: the build fetches and runs third-party tooling
+# (cargo-zigbuild, zig, Bun, every crate build script). None of it may run
+# while the key is in the environment or on disk, so `build` refuses a key,
+# and `sign` runs only the pinned rsign over artifacts that are already built.
+#
 #   OPENGENI_AGENT_MINISIGN_KEY   the minisign secret key body (same key the
-#                                 install scripts pin). REQUIRED to sign. When
-#                                 ABSENT the script still builds + checksums but
-#                                 SKIPS signing and exits non-zero unless
-#                                 OGE_BAKE_ALLOW_UNSIGNED=1 (so a key-less build
-#                                 fails loud rather than baking an unverifiable
-#                                 binary). An un-baked asset just falls through to
-#                                 the GitHub-Releases redirect at serve time.
+#                                 install scripts pin), for `sign` only; `build`
+#                                 refuses to run with it set. When ABSENT, `sign`
+#                                 exits non-zero unless OGE_BAKE_ALLOW_UNSIGNED=1
+#                                 (so a key-less bake fails loud rather than
+#                                 baking an unverifiable binary). An un-baked
+#                                 asset just falls through to the GitHub-Releases
+#                                 redirect at serve time.
 #   OGE_BAKE_TARGETS              space-separated cargo target triples to bake.
 #                                 Default: the two Linux musl triples install.sh
-#                                 resolves for Linux x86_64/aarch64.
-#   OGE_BAKE_ALLOW_UNSIGNED=1     permit a checksum-only (unsigned) bake.
-#   OPENGENI_RUNTIME_BUILD_ID     exact source commit, required for every target.
+#                                 resolves for Linux x86_64/aarch64. `sign` must
+#                                 get the same targets as `build`.
+#   OGE_BAKE_ALLOW_UNSIGNED=1     let `sign` leave a checksum-only (unsigned) bake.
+#   OPENGENI_RUNTIME_BUILD_ID     exact source commit, required for `build`.
 #
 # Mirrors agent-release.yml's coherent Linux build: glibc helpers embedded in a
 # static musl parent via cargo-zigbuild, signed
 # with rsign2 (pure-Rust minisign). Both tools are pure-Rust so the runner needs no
-# system minisign / musl-gcc.
+# system minisign / musl-gcc. Their exact versions live in
+# scripts/install-agent-build-tools.sh.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BAKED_DIR="$REPO_ROOT/agent/install/baked"
 AGENT_DIR="$REPO_ROOT/agent"
+TOOLS="$REPO_ROOT/scripts/install-agent-build-tools.sh"
+COMPONENTS="opengeni-agent opengeni-browserd opengeni-computer-native"
 
 TARGETS="${OGE_BAKE_TARGETS:-x86_64-unknown-linux-musl aarch64-unknown-linux-musl}"
-RUNTIME_BUILD_ID="${OPENGENI_RUNTIME_BUILD_ID:-}"
-
-# A distributable canary is one exact-source runtime, never a development agent
-# that discovers independently downloaded companions beside itself.
-if [[ ! "$RUNTIME_BUILD_ID" =~ ^[a-f0-9]{40}$ ]] \
-  || [ "$RUNTIME_BUILD_ID" != "$(git -C "$REPO_ROOT" rev-parse HEAD)" ]; then
-  printf '%s\n' 'bake-agent: OPENGENI_RUNTIME_BUILD_ID must be the exact source commit' >&2
-  exit 1
-fi
-export OPENGENI_RUNTIME_BUILD_ID="$RUNTIME_BUILD_ID"
+MODE="${1:-build}"
 
 log() { printf '%s\n' "bake-agent: $*" >&2; }
 
@@ -62,51 +68,104 @@ sha256_of_file() {
   fi
 }
 
+check_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c --status "$1"
+  else
+    shasum -a 256 -c --status "$1"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# sign: sign the staged cohort with the pinned rsign, and run nothing else.
+# ---------------------------------------------------------------------------
+sign() {
+  # Keep the key out of every child's environment; rsign reads it from a file
+  # that exists only for the signing loop.
+  local key="${OPENGENI_AGENT_MINISIGN_KEY:-}"
+  unset OPENGENI_AGENT_MINISIGN_KEY
+  if [ -z "$key" ]; then
+    log "WARNING: OPENGENI_AGENT_MINISIGN_KEY is absent — binaries stay checksum-only (UNSIGNED)."
+    if [ "${OGE_BAKE_ALLOW_UNSIGNED:-0}" != "1" ]; then
+      log "ERROR: refusing to leave unsigned binaries. Set OPENGENI_AGENT_MINISIGN_KEY, or OGE_BAKE_ALLOW_UNSIGNED=1 to override."
+      exit 1
+    fi
+    return
+  fi
+  "$TOOLS" --check rsign
+  # Sign exactly the complete cohort `build` checksummed, nothing partial.
+  for target in $TARGETS; do
+    for component in $COMPONENTS; do
+      asset="$component-$target"
+      test -s "$BAKED_DIR/$asset" || { log "$asset was not built; run \`$0 build\` first"; exit 1; }
+      ( cd "$BAKED_DIR" && check_sha256 "$asset.sha256" ) \
+        || { log "$asset does not match its checksum"; exit 1; }
+    done
+  done
+  STAGE_DIR="$(mktemp -d)"
+  trap 'rm -rf "$STAGE_DIR"' EXIT
+  KEY_FILE="$STAGE_DIR/signing-key"
+  (umask 077 && printf '%s' "$key" > "$KEY_FILE")
+  key=""
+  for target in $TARGETS; do
+    for component in $COMPONENTS; do
+      asset="$component-$target"
+      rsign sign -W -s "$KEY_FILE" -x "$STAGE_DIR/$asset.minisig" "$BAKED_DIR/$asset"
+      test -s "$STAGE_DIR/$asset.minisig"
+    done
+  done
+  rm -f "$KEY_FILE"
+  # Signatures enter the image input directory only once every one exists.
+  for target in $TARGETS; do
+    for component in $COMPONENTS; do
+      cp "$STAGE_DIR/$component-$target.minisig" "$BAKED_DIR/"
+    done
+  done
+  log "signed into $BAKED_DIR:"
+  ls -l "$BAKED_DIR" >&2
+}
+
+case "$MODE" in
+  build) ;;
+  sign)
+    sign
+    exit 0
+    ;;
+  *)
+    log "usage: $0 [build|sign]"
+    exit 2
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# build: compile and checksum every target, never with the key present.
+# ---------------------------------------------------------------------------
+if [ -n "${OPENGENI_AGENT_MINISIGN_KEY:-}" ]; then
+  log "ERROR: OPENGENI_AGENT_MINISIGN_KEY must not be present while building; give it only to \`$0 sign\`."
+  exit 1
+fi
+
+RUNTIME_BUILD_ID="${OPENGENI_RUNTIME_BUILD_ID:-}"
+
+# A distributable canary is one exact-source runtime, never a development agent
+# that discovers independently downloaded companions beside itself.
+if [[ ! "$RUNTIME_BUILD_ID" =~ ^[a-f0-9]{40}$ ]] \
+  || [ "$RUNTIME_BUILD_ID" != "$(git -C "$REPO_ROOT" rev-parse HEAD)" ]; then
+  printf '%s\n' 'bake-agent: OPENGENI_RUNTIME_BUILD_ID must be the exact source commit' >&2
+  exit 1
+fi
+export OPENGENI_RUNTIME_BUILD_ID="$RUNTIME_BUILD_ID"
+
 mkdir -p "$BAKED_DIR"
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 
 # --- Toolchain: cargo-zigbuild gives a robust static musl cross-link with no
 # system musl-gcc (the agent-release.yml pattern). It needs BOTH its own binary
-# AND a `zig` compiler, and the two cache DIFFERENTLY: cargo-zigbuild lands in
-# ~/.cargo/bin (restored by Swatinem/rust-cache), but `zig` comes from the
-# `ziglang` pip wheel, which is NOT part of the cargo cache. Gating the wheel
-# install on the binary's absence (the old behaviour) therefore SKIPPED zig on
-# every warm-cache run → "Error: Failed to find zig". Install each against its
-# OWN presence check so a cached cargo-zigbuild can never mask a missing zig.
-# Idempotent.
-if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-  log "installing cargo-zigbuild"
-  cargo install --locked cargo-zigbuild
-fi
-# cargo-zigbuild resolves zig from PATH or the `python -m ziglang` wheel; ensure
-# one of them is present regardless of the cargo-zigbuild cache state.
-if ! command -v zig >/dev/null 2>&1 \
-  && ! python3 -m ziglang version >/dev/null 2>&1 \
-  && ! python -m ziglang version >/dev/null 2>&1; then
-  log "installing ziglang (pip wheel — provides zig for cargo-zigbuild)"
-  pip install ziglang >/dev/null 2>&1 || pip3 install ziglang >/dev/null 2>&1 \
-    || pip install --user ziglang || pip3 install --user ziglang
-fi
-
-# --- Signing key presence (mirrors agent-release.yml's loud key-absent handling).
-HAVE_KEY=0
-if [ -n "${OPENGENI_AGENT_MINISIGN_KEY:-}" ]; then
-  HAVE_KEY=1
-  if ! command -v rsign >/dev/null 2>&1; then
-    log "installing rsign2 (pure-Rust minisign signer)"
-    cargo install --locked rsign2
-  fi
-  KEY_FILE="$STAGE_DIR/signing-key"
-  umask 077
-  printf '%s' "$OPENGENI_AGENT_MINISIGN_KEY" > "$KEY_FILE"
-else
-  log "WARNING: OPENGENI_AGENT_MINISIGN_KEY is absent — binaries will be checksum-only (UNSIGNED)."
-  if [ "${OGE_BAKE_ALLOW_UNSIGNED:-0}" != "1" ]; then
-    log "ERROR: refusing to bake unsigned binaries. Set OPENGENI_AGENT_MINISIGN_KEY, or OGE_BAKE_ALLOW_UNSIGNED=1 to override."
-    exit 1
-  fi
-fi
+# AND a `zig` compiler (the `ziglang` wheel), which cache differently; the
+# installer checks each exact version on its own, so a cached cargo-zigbuild
+# can never mask a missing or different zig. Idempotent.
+"$TOOLS" zigbuild
 
 for target in $TARGETS; do
   case "$target" in
@@ -158,28 +217,23 @@ for target in $TARGETS; do
       cargo zigbuild --locked --release --target "$target" -p opengeni-agent
   )
   cp "$AGENT_DIR/target/$target/release/opengeni-agent" "$STAGE_DIR/opengeni-agent-$target"
-  for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
+  for component in $COMPONENTS; do
     asset="$component-$target"
     test -s "$STAGE_DIR/$asset"
     chmod 0755 "$STAGE_DIR/$asset"
     ( cd "$STAGE_DIR" && sha256_of_file "$asset" > "$asset.sha256" )
-    if [ "$HAVE_KEY" = "1" ]; then
-      rsign sign -W -s "$KEY_FILE" -x "$STAGE_DIR/$asset.minisig" "$STAGE_DIR/$asset"
-      test -s "$STAGE_DIR/$asset.minisig"
-    fi
   done
 done
 
-# Nothing enters the image input directory until every requested target is built.
+# Nothing enters the image input directory until every requested target is
+# built. A signature from an earlier bake never outlives its binary.
 for target in $TARGETS; do
-  for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
+  for component in $COMPONENTS; do
     asset="$component-$target"
+    rm -f "$BAKED_DIR/$asset.minisig"
     cp "$STAGE_DIR/$asset" "$STAGE_DIR/$asset.sha256" "$BAKED_DIR/"
-    if [ "$HAVE_KEY" = "1" ]; then cp "$STAGE_DIR/$asset.minisig" "$BAKED_DIR/"
-    else rm -f "$BAKED_DIR/$asset.minisig"
-    fi
   done
 done
 
-log "baked into $BAKED_DIR:"
+log "baked into $BAKED_DIR (unsigned until \`$0 sign\`):"
 ls -l "$BAKED_DIR" >&2

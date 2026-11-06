@@ -11,10 +11,12 @@ import {
   discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
   findInaccessibleGitHubAppInstallationRepositories,
+  getGitHubAppInstallationSummary,
   githubAppBotIdentity,
   githubAppBotIdentityWarnings,
   GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING,
   githubOAuthAuthorizeUrl,
+  listGitHubAppRepositories,
   listGitHubAppRepositoryBranches,
   normalizeGitHubAppPrivateKey,
   openPersonalGitHubGitBrokerClaims,
@@ -66,6 +68,7 @@ describe("GitHub app manifest helpers", () => {
       "pull_request_review_comment",
       "push",
       "release",
+      "repository",
       "check_run",
       "check_suite",
       "workflow_run",
@@ -1204,5 +1207,106 @@ describe("findInaccessibleGitHubAppInstallationRepositories", () => {
         ).rejects.toThrow();
       },
     );
+  });
+});
+
+describe("one installation of the deployment's App", () => {
+  async function withInstallations(
+    installations: Record<number, { suspended?: boolean; repositories: number[] }>,
+    run: (requests: string[]) => Promise<void>,
+  ): Promise<void> {
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    const account = { id: 700, login: "acme", type: "Organization" };
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requests.push(url);
+      const single = /\/app\/installations\/(\d+)$/.exec(url);
+      if (single) {
+        const installation = installations[Number(single[1])];
+        if (!installation) return Response.json({ message: "Not Found" }, { status: 404 });
+        return Response.json({
+          id: Number(single[1]),
+          account,
+          suspended_at: installation.suspended ? "now" : null,
+        });
+      }
+      const mint = /\/app\/installations\/(\d+)\/access_tokens$/.exec(url);
+      if (mint) {
+        return Response.json(
+          { token: `token-${mint[1]}`, expires_at: "2099-01-01T00:00:00Z" },
+          { status: 201 },
+        );
+      }
+      return Response.json({ message: `unexpected request ${url}` }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await run(requests);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  test("is read by id, never by paging through every installation", async () => {
+    await withInstallations(
+      { 42: { repositories: [] }, 43: { suspended: true, repositories: [] } },
+      async (requests) => {
+        expect(await getGitHubAppInstallationSummary(authoritySettings(), 42)).toEqual({
+          installationId: 42,
+          accountId: 700,
+          accountLogin: "acme",
+          accountType: "Organization",
+          suspended: false,
+        });
+        expect(await getGitHubAppInstallationSummary(authoritySettings(), 43)).toMatchObject({
+          suspended: true,
+        });
+        // GitHub does not know the installation: it is gone, not an outage.
+        expect(await getGitHubAppInstallationSummary(authoritySettings(), 44)).toBeNull();
+        expect(requests.every((url) => !url.includes("/app/installations?"))).toBe(true);
+      },
+    );
+  });
+
+  test("lists a named installation's repositories with one installation token", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    const account = { id: 700, login: "acme", type: "Organization" };
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/app/installations/42")) {
+        return Response.json({ id: 42, account, suspended_at: null });
+      }
+      if (url.endsWith("/app/installations/43")) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      if (url.endsWith("/app/installations/42/access_tokens")) {
+        return Response.json(
+          { token: "token-42", expires_at: "2099-01-01T00:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.startsWith("https://api.github.com/installation/repositories?")) {
+        return Response.json({
+          repositories: [
+            { id: 1001, full_name: "acme/repo", name: "repo", default_branch: "main" },
+          ],
+        });
+      }
+      return Response.json({ message: `unexpected request ${url}` }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      const repositories = await listGitHubAppRepositories(authoritySettings(), {
+        installationIds: [42, 43],
+      });
+      expect(repositories.map((repository) => [repository.installationId, repository.id])).toEqual([
+        [42, 1001],
+      ]);
+      expect(requests.filter((url) => url.endsWith("/access_tokens"))).toHaveLength(1);
+      expect(requests.every((url) => !url.includes("/app/installations?"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

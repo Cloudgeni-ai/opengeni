@@ -20,6 +20,8 @@ import {
   getSessionHumanInputRequest,
   getWorkspace,
   listTurnCodemodeApprovals,
+  listTurnGitHubGatewayApprovals,
+  isGitHubGatewayApprovalId,
   recordUsageEvent,
   registerPendingSessionToolCallInTransaction,
   registerPendingSessionToolCall,
@@ -128,6 +130,7 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
+import { githubGatewayApproval, githubGatewayContinuationNote } from "../github-gateway-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import type { WorkspaceMutationOptions } from "./sandbox-runtime";
@@ -2295,16 +2298,29 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    const programmaticPending = (
-      await listTurnCodemodeApprovals(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-      })
-    )
-      .filter((operation) => operation.state === "waiting_for_approval")
-      .map(programmaticApproval);
+    const programmaticPending = [
+      ...(
+        await listTurnCodemodeApprovals(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })
+      )
+        .filter((operation) => operation.state === "waiting_for_approval")
+        .map(programmaticApproval),
+      // `gh` and Git requests the personal GitHub gateway held for a decision.
+      ...(
+        await listTurnGitHubGatewayApprovals(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })
+      )
+        .filter((request) => request.status === "pending")
+        .map(githubGatewayApproval),
+    ];
     if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0) {
       await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -2743,16 +2759,33 @@ export async function runTurnStreamAttempt(
       return eventing.codemodeDispatcher;
     },
   );
-  codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
+  const gatewayRequests = await listTurnGitHubGatewayApprovals(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: activeTurnId,
+  });
+  codemodeContinuationNote =
+    [
+      programmaticContinuationNote(codemodeOperations),
+      githubGatewayContinuationNote(gatewayRequests),
+    ]
+      .filter((note): note is string => Boolean(note))
+      .join("\n\n") || undefined;
+  const triggerApprovalId =
+    trigger.type === "user.approvalDecision"
+      ? (trigger.payload as { approvalId?: unknown }).approvalId
+      : undefined;
   programmaticApprovalAcknowledged =
     trigger.type === "user.approvalDecision" &&
-    codemodeOperations.some(
-      (operation) =>
-        operation.operationId === (trigger.payload as { approvalId?: unknown }).approvalId,
-    );
-  const pendingProgrammaticApprovals = codemodeOperations
-    .filter((operation) => operation.state === "waiting_for_approval")
-    .map(programmaticApproval);
+    (codemodeOperations.some((operation) => operation.operationId === triggerApprovalId) ||
+      isGitHubGatewayApprovalId(triggerApprovalId));
+  const pendingProgrammaticApprovals = [
+    ...codemodeOperations
+      .filter((operation) => operation.state === "waiting_for_approval")
+      .map(programmaticApproval),
+    ...gatewayRequests.filter((request) => request.status === "pending").map(githubGatewayApproval),
+  ];
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
     additionalApprovals: pendingProgrammaticApprovals,
     programmaticApprovalAcknowledged,
