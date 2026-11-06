@@ -5935,7 +5935,9 @@ export async function bindAuthorizedGitHubInstallationRepositories(
               authorityCheckedAt: input.authorityCheckedAt,
               authorityExpiresAt: input.authorityExpiresAt,
               authorityNonce: input.authorityNonce,
-              updatedAt: input.authorityCheckedAt,
+              // `updated_at` is the binding's ordering fence for GitHub's
+              // repository lists: a re-bind never moves it back.
+              updatedAt: sql`greatest(${schema.githubInstallations.updatedAt}, ${input.authorityCheckedAt.toISOString()}::timestamptz)`,
             },
           })
           .returning();
@@ -6163,7 +6165,7 @@ export async function listGitHubInstallationBindingWorkspaces(
     await tx.execute(
       sql`select set_config('opengeni.github_installation_id', ${String(installationId)}, true)`,
     );
-    return await tx
+    const rows = await tx
       .select({
         accountId: schema.githubInstallations.accountId,
         workspaceId: schema.githubInstallations.workspaceId,
@@ -6171,6 +6173,9 @@ export async function listGitHubInstallationBindingWorkspaces(
       .from(schema.githubInstallations)
       .where(eq(schema.githubInstallations.installationId, installationId))
       .orderBy(schema.githubInstallations.workspaceId);
+    // A caller's outer transaction must not keep the installation lane open.
+    await tx.execute(sql`select set_config('opengeni.github_installation_id', '', true)`);
+    return rows;
   });
 }
 

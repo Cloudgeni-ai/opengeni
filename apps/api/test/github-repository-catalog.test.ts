@@ -279,6 +279,18 @@ describe("GitHub repository catalog", () => {
     await Bun.sleep(20);
     first.resolve([repo(3, 2)]);
     expect(await waiting).toMatchObject({ repositories: [repo(3, 2)], stale: false });
+
+    // A last good list read before the binding last changed never stands in
+    // for a slow GitHub: the read waits for GitHub's answer.
+    time.advance(60_000);
+    const rebound = deferred<GitHubRepository[]>();
+    const fenced = catalog.readObserved([2], () => rebound.promise, {
+      waitMs: 5,
+      notBefore: time.now(),
+    });
+    await Bun.sleep(20);
+    rebound.resolve([repo(4, 2)]);
+    expect(await fenced).toMatchObject({ repositories: [repo(4, 2)], stale: false });
   });
 
   test("an observed read says when GitHub produced the list and marks a fallback stale", async () => {

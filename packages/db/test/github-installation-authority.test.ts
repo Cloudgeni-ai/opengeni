@@ -420,6 +420,36 @@ describe("GitHub installation allowlists follow GitHub", () => {
     ).toMatchObject({ removed: [5], repositoryIds: [] });
   });
 
+  test("a re-bind never moves the repository-list fence back", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installationId = 7806;
+    await bindAuthorizedGitHubInstallationRepositories(
+      db,
+      authorityInput(workspace, { installationId, repositoryIds: [1] }),
+    );
+    // A removal observed after the proof the next re-bind carries.
+    const removedAt = new Date(Date.now() + 60_000);
+    await applyGitHubInstallationRepositoryObservation(db, {
+      ...workspace,
+      installationId,
+      observation: { kind: "remove", repositoryIds: [1], observedAt: removedAt },
+    });
+    const rebound = await bindAuthorizedGitHubInstallationRepositories(
+      db,
+      authorityInput(workspace, { installationId, repositoryIds: [1, 2] }),
+    );
+    expect(Date.parse(rebound!.updatedAt)).toBe(removedAt.getTime() + 1);
+    // A list read before the removal still cannot apply.
+    expect(
+      await applyGitHubInstallationRepositoryObservation(db, {
+        ...workspace,
+        installationId,
+        observation: { kind: "mirror", repositoryIds: [1, 2, 3], observedAt: removedAt },
+      }),
+    ).toMatchObject({ applied: false });
+  });
+
   test("a binding without an owner proof never follows GitHub", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

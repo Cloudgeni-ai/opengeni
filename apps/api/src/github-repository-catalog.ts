@@ -166,8 +166,9 @@ export function createGitHubRepositoryCatalog(
     try {
       const request = fetchShared(key, load, notBefore);
       const waitMs = readOptions.waitMs;
-      // A slow GitHub is an outage-like answer: the last good list stands in.
-      if (cached && waitMs !== undefined) {
+      // A slow GitHub is an outage-like answer: the last good list stands in,
+      // but only one read since the binding last changed.
+      if (cached && cached.fetchedAt >= notBefore && waitMs !== undefined) {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const slow = new Promise<"slow">((resolve) => {
           timer = setTimeout(() => resolve("slow"), Math.max(0, waitMs));

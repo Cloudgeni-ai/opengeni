@@ -26,9 +26,11 @@ import {
  * - every repository listing, which already reads GitHub's live list
  *   (`listWorkspaceGitHubRepositories`) and applies it.
  *
- * Removals reported by GitHub apply immediately. Additions are never taken
- * from a webhook body: the installation's complete list is read from GitHub,
- * once per installation at a time, and applied with an ordering fence.
+ * Removals reported by GitHub apply immediately, and the removed
+ * repositories stay out of lists read for a few minutes after (GitHub's list
+ * can lag its webhook). Additions are never taken from a webhook body: the
+ * installation's complete list is read from GitHub, once per installation at
+ * a time, and applied with an ordering fence.
  */
 
 type InstallationRepositorySource = {
@@ -71,6 +73,82 @@ function warn(message: string, installationId: number, error?: unknown): void {
   );
 }
 
+/**
+ * How long a repository GitHub reported removed stays out of the lists read
+ * after the removal. GitHub's repository list can lag its own webhook, so the
+ * resync a removal triggers may still name the repository.
+ */
+export const GITHUB_REMOVED_REPOSITORY_TOMBSTONE_MS = 5 * 60_000;
+const TOMBSTONE_INSTALLATIONS_MAX = 10_000;
+/** Per GitHub App source: installation id -> repository id -> removal time (epoch ms). */
+const removedRepositories = new WeakMap<object, Map<number, Map<number, number>>>();
+
+function githubAppSourceKey(deps: ApiRouteDeps): object {
+  return deps.githubAppApi ?? deps.settings;
+}
+
+function rememberRemovedRepositories(
+  deps: ApiRouteDeps,
+  installationId: number,
+  repositoryIds: readonly number[],
+  removedAt: Date,
+): void {
+  if (repositoryIds.length === 0) return;
+  const key = githubAppSourceKey(deps);
+  let byInstallation = removedRepositories.get(key);
+  if (!byInstallation) {
+    byInstallation = new Map();
+    removedRepositories.set(key, byInstallation);
+  }
+  const removed = byInstallation.get(installationId) ?? new Map<number, number>();
+  byInstallation.delete(installationId);
+  byInstallation.set(installationId, removed);
+  for (const repositoryId of repositoryIds) removed.set(repositoryId, removedAt.getTime());
+  if (byInstallation.size > TOMBSTONE_INSTALLATIONS_MAX) {
+    const oldest = byInstallation.keys().next().value;
+    if (oldest !== undefined) byInstallation.delete(oldest);
+  }
+}
+
+/** GitHub shares these repositories again: lists may name them at once. */
+function forgetRemovedRepositories(
+  deps: ApiRouteDeps,
+  installationId: number,
+  repositoryIds: readonly number[],
+): void {
+  const removed = removedRepositories.get(githubAppSourceKey(deps))?.get(installationId);
+  if (!removed) return;
+  for (const repositoryId of repositoryIds) removed.delete(repositoryId);
+}
+
+/**
+ * The repositories of a list GitHub produced at `observedAt`, without those
+ * GitHub reported removed shortly before: a list read soon after a removal
+ * may not reflect it yet.
+ */
+export function withoutRecentlyRemovedGitHubRepositories(
+  deps: ApiRouteDeps,
+  installationId: number,
+  repositoryIds: readonly number[],
+  observedAt: Date,
+): number[] {
+  const byInstallation = removedRepositories.get(githubAppSourceKey(deps));
+  const removed = byInstallation?.get(installationId);
+  if (!removed || removed.size === 0) return [...repositoryIds];
+  const now = Date.now();
+  for (const [repositoryId, removedAt] of removed) {
+    if (now - removedAt >= GITHUB_REMOVED_REPOSITORY_TOMBSTONE_MS) removed.delete(repositoryId);
+  }
+  if (removed.size === 0) byInstallation?.delete(installationId);
+  const observedAtMs = observedAt.getTime();
+  return repositoryIds.filter((repositoryId) => {
+    const removedAt = removed.get(repositoryId);
+    return (
+      removedAt === undefined || observedAtMs - removedAt >= GITHUB_REMOVED_REPOSITORY_TOMBSTONE_MS
+    );
+  });
+}
+
 async function applyToBoundWorkspaces(
   deps: ApiRouteDeps,
   installationId: number,
@@ -109,14 +187,21 @@ async function syncInstallationOnce(deps: ApiRouteDeps, installationId: number):
   );
   if (repositories.length === 0) {
     // GitHub lists nothing for an installation it just suspended or removed
-    // as well; only an installation that is still live really shares nothing.
+    // as well, and a provider may answer an empty list for a failure: only an
+    // installation GitHub confirms is still live really shares nothing.
     const after = await source.installation(installationId);
-    if (after === null || after?.suspended) return;
+    if (!after || after.suspended) return;
   }
+  const repositoryIds = withoutRecentlyRemovedGitHubRepositories(
+    deps,
+    installationId,
+    repositories.map((repository) => repository.id),
+    observedAt,
+  );
   await applyToBoundWorkspaces(
     deps,
     installationId,
-    { kind: "mirror", repositoryIds: repositories.map((repository) => repository.id), observedAt },
+    { kind: "mirror", repositoryIds, observedAt },
     workspaces,
   );
 }
@@ -144,7 +229,7 @@ export function requestGitHubInstallationRepositorySync(
   installationId: number,
   options: { minIntervalMs?: number } = {},
 ): Promise<void> {
-  const sourceKey: object = deps.githubAppApi ?? deps.settings;
+  const sourceKey = githubAppSourceKey(deps);
   let byInstallation = inFlightSyncs.get(sourceKey);
   if (!byInstallation) {
     byInstallation = new Map();
@@ -221,7 +306,7 @@ function repositoryIdOf(payload: Record<string, unknown>): number | null {
 
 /** Events that may change which repositories an installation shares. */
 const RESYNC_INSTALLATION_ACTIONS = new Set(["created", "new_permissions_accepted", "unsuspend"]);
-const RESYNC_REPOSITORY_ACTIONS = new Set(["created", "transferred", "unarchived"]);
+const RESYNC_REPOSITORY_ACTIONS = new Set(["created", "transferred"]);
 
 /**
  * Keep bound workspaces' repository allowlists in line with one verified
@@ -241,6 +326,11 @@ export async function handleVerifiedGitHubAppDelivery(
     if (delivery.event === "installation_repositories") {
       const removed = repositoryIdsAt(payload, "repositories_removed");
       if (removed.length > 0) removal = removed;
+      forgetRemovedRepositories(
+        deps,
+        installationId,
+        repositoryIdsAt(payload, "repositories_added"),
+      );
       resync = true;
     } else if (delivery.event === "installation") {
       if (action === "deleted") removal = "all";
@@ -249,10 +339,15 @@ export async function handleVerifiedGitHubAppDelivery(
       const repositoryId = repositoryIdOf(payload);
       if (action === "deleted" && repositoryId !== null) removal = [repositoryId];
       resync = RESYNC_REPOSITORY_ACTIONS.has(action);
+      if (resync && repositoryId !== null)
+        forgetRemovedRepositories(deps, installationId, [repositoryId]);
     } else {
       return;
     }
     if (removal) {
+      if (removal !== "all") {
+        rememberRemovedRepositories(deps, installationId, removal, delivery.receivedAt);
+      }
       await applyToBoundWorkspaces(deps, installationId, {
         kind: "remove",
         repositoryIds: removal,

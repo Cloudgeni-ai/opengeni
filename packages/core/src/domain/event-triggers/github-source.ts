@@ -193,9 +193,11 @@ export type VerifiedGitHubDelivery = {
  * delivery's repository, so a workspace sees events of exactly the
  * repositories its agents can use.
  *
- * `onVerified` sees every verified delivery before any event source does,
- * even when event triggers are off (the App's installation events keep
- * workspace repository allowlists in line with GitHub). It must not throw.
+ * `onVerified` sees every verified delivery, even when event triggers are
+ * off (the App's installation events keep workspace repository allowlists in
+ * line with GitHub). It runs after the delivery reached the event sources, so
+ * an event that removes a repository still reaches the workspaces that could
+ * use it. It must not throw.
  */
 export async function receiveGitHubWebhook(input: {
   db: Database;
@@ -223,18 +225,34 @@ export async function receiveGitHubWebhook(input: {
   }
   const installationId = githubDeliveryInstallationId(payload);
   const receivedAt = input.receivedAt ?? new Date();
-  if (input.onVerified) {
-    await input.onVerified({
-      event: input.headers.get("x-github-event")?.trim() ?? "",
-      payload,
-      installationId,
-      receivedAt,
-    });
+  try {
+    const deliveries =
+      triggersEnabled && routeSecret
+        ? await deliverToGitHubEventSources(input, routeSecret, payload, installationId, receivedAt)
+        : 0;
+    return { outcome: "received", deliveries };
+  } finally {
+    if (input.onVerified) {
+      await input.onVerified({
+        event: input.headers.get("x-github-event")?.trim() ?? "",
+        payload,
+        installationId,
+        receivedAt,
+      });
+    }
   }
-  if (!triggersEnabled || !routeSecret) return { outcome: "received", deliveries: 0 };
+}
+
+/** Record one verified delivery at every bound workspace's GitHub source. */
+async function deliverToGitHubEventSources(
+  input: { db: Database; settings: Settings; headers: Headers; body: Uint8Array },
+  routeSecret: Uint8Array,
+  payload: Record<string, unknown>,
+  installationId: number | null,
+  receivedAt: Date,
+): Promise<number> {
   const repositoryId = githubDeliveryRepositoryId(payload);
-  if (installationId === null || repositoryId === null)
-    return { outcome: "received", deliveries: 0 };
+  if (installationId === null || repositoryId === null) return 0;
   const routes = await listGitHubEventRoutes(input.db, routeSecret, installationId);
   const bodySha256 = sha256Hex(input.body);
   const githubDeliveryId = input.headers.get("x-github-delivery")?.trim();
@@ -271,5 +289,5 @@ export async function receiveGitHubWebhook(input: {
     });
     deliveries += 1;
   }
-  return { outcome: "received", deliveries };
+  return deliveries;
 }

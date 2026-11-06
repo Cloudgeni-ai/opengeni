@@ -102,8 +102,8 @@ The transaction accepts proof for at most ten minutes, checks the database clock
 before and after all writes, and consumes the nonce globally once. Replays,
 cross-workspace nonce reuse, and concurrent duplicate commits fail closed. One
 GitHub installation may be deliberately bound to multiple Opengeni workspaces,
-but every workspace requires an independent owner proof and owns an independent
-repository allowlist.
+but every workspace requires its own owner proof and has its own binding, and
+its repository allowlist follows the installation's selection on GitHub.
 
 The proof expiry bounds the consent transaction; it is not an automatic expiry
 of the resulting delegation. After a successful owner consent, the binding is a
@@ -132,9 +132,13 @@ GitHub reports changes in two ways, and either repairs the other:
    `installation`, and `repository`; subscribe the App to **Repository** events
    so new repositories of an **All repositories** installation arrive at once).
    They apply whenever `OPENGENI_GITHUB_WEBHOOK_SECRET` is set, even with event
-   triggers off. Removals in the delivery apply before Opengeni answers;
-   additions are never taken from the body. Opengeni reads the installation's
-   complete list from GitHub, one read per installation at a time.
+   triggers off, and after the delivery reaches the workspaces' GitHub event
+   sources. Removals in the delivery apply before Opengeni answers, and the
+   removed repositories stay out of lists that API process reads in the next
+   five minutes (GitHub's list can lag its webhook). Additions are never taken
+   from the body: Opengeni reads the installation's complete list from GitHub,
+   one read per installation at a time. A new binding, or a re-bind, also
+   reads it once committed.
 2. Every repository listing (the composer menu, the GitHub settings page, the
    `github_repositories_list` tool) already reads GitHub's list through the
    short-lived per-process cache. A list GitHub just returned is applied to the
@@ -145,8 +149,14 @@ GitHub reports changes in two ways, and either repairs the other:
    never applied.
 
 The binding's `updated_at` orders these writes: a list read from GitHub before
-the binding last changed is ignored, a removal always advances it, and every
-API replica re-reads GitHub for a binding that changed after its cached list.
+the binding last changed is ignored, a removal always advances it (just past
+the removal, so a list read in the same millisecond loses), a re-bind never
+moves it back, and every API replica re-reads GitHub for a binding that changed
+after its cached list. List times come from the API replica's clock (taken
+before GitHub is asked) and removals use the webhook's receipt time, while a
+bind stamps its proof time; the fence is sound while clock skew between API
+replicas and the database stays far below GitHub's webhook latency, as it does
+with ordinary NTP time sync.
 Cross-workspace lookup by installation uses the read-only installation lane of
 migration 1281 (`opengeni.github_installation_id`); each write runs in its
 workspace's own RLS scope. Suspension needs no allowlist change: the live
@@ -319,8 +329,9 @@ to use their machine's ambient Git authentication.
 The GitHub App integration is optional, but it is the recommended way to give
 agents scoped repository access. It lets the UI list installed repositories and
 lets the worker mint short-lived installation tokens only for repositories
-selected for a session. Each workspace binding owns an independent repository
-allowlist and can be unlinked without uninstalling the App from GitHub.
+selected for a session. Each workspace has its own binding and owner proof; its
+repository allowlist follows the installation's selection on GitHub, and the
+binding can be unlinked without uninstalling the App from GitHub.
 
 From the web app (configured/local deployments):
 

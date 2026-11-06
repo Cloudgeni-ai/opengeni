@@ -23,7 +23,7 @@ import {
   GitHubAppApiError,
   GitHubAppConfigurationError,
   getGitHubAppWebhookSetup,
-  listGitHubAppInstallationSummaries,
+  getGitHubAppInstallationSummary,
   listGitHubAppRepositories,
   listGitHubAppRepositoryBranches,
   setGitHubAppWebhookUrl,
@@ -33,7 +33,10 @@ import {
   createGitHubRepositoryCatalog,
   type GitHubRepositoryCatalog,
 } from "./github-repository-catalog";
-import { requestGitHubInstallationRepositorySync } from "./github-installation-sync";
+import {
+  requestGitHubInstallationRepositorySync,
+  withoutRecentlyRemovedGitHubRepositories,
+} from "./github-installation-sync";
 
 /** How often a passive read may ask GitHub about one installation by itself. */
 const GITHUB_BACKGROUND_SYNC_INTERVAL_MS = 60_000;
@@ -173,11 +176,18 @@ async function readWorkspaceGitHubInstallations(
       );
       lifecycleVerified = true;
     } else if (!deps.githubAppApi) {
+      // Each bound installation is read by id, never by paging through every
+      // installation of the App.
       liveById = new Map(
-        (await listGitHubAppInstallationSummaries(deps.settings)).map((installation) => [
-          installation.installationId,
-          installation,
-        ]),
+        await Promise.all(
+          installations.map(
+            async (installation) =>
+              [
+                installation.installationId,
+                await getGitHubAppInstallationSummary(deps.settings, installation.installationId),
+              ] as const,
+          ),
+        ),
       );
       lifecycleVerified = true;
     }
@@ -371,7 +381,14 @@ async function followGitHubRepositoryLists(
     listed.set(repository.installationId, ids);
   }
   for (const binding of bindings) {
-    const live = new Set(listed.get(binding.installationId) ?? []);
+    const live = new Set(
+      withoutRecentlyRemovedGitHubRepositories(
+        deps,
+        binding.installationId,
+        listed.get(binding.installationId) ?? [],
+        new Date(observed.fetchedAt),
+      ),
+    );
     const stored = allowed.get(binding.installationId) ?? new Set<number>();
     // GitHub also lists nothing for an installation suspended or removed
     // since the lifecycle check above; its webhook says which it was.
