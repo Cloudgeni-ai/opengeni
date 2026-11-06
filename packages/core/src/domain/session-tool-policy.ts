@@ -289,14 +289,30 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   settings: Settings,
   subjectId?: string,
 ): Promise<string[]> {
+  return (await workspaceSessionToolPolicyDefaultServers(db, workspaceId, settings, subjectId)).map(
+    (server) => server.id,
+  );
+}
+
+/**
+ * The same defaults with each connector's display name, so a turn can name a
+ * default connector that is missing from its own registry.
+ */
+export async function workspaceSessionToolPolicyDefaultServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  subjectId?: string,
+): Promise<{ id: string; name: string | undefined }[]> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
   const workspace = await requireWorkspace(db, workspaceId);
+  const names = new Map(runtimeSettings.mcpServers.map((server) => [server.id, server.name]));
   return workspaceSessionToolPolicyDefaultServerIdsFor(
     runtimeSettings.mcpServers,
     workspace.settings,
-  );
+  ).map((id) => ({ id, name: names.get(id) ?? undefined }));
 }
 
 /**

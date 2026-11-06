@@ -368,6 +368,62 @@ describe("own-subscription admission", () => {
     },
   );
 
+  test.each([CODEX_MODEL, SUPERGROK_MODEL])(
+    "with the operator opt-in, API work uses a connected subscription like app work (%s)",
+    async (model) => {
+      const optedIn = settings({ apiConnectedSubscriptionsEnabled: true });
+      const pro = onPlan("pro");
+      try {
+        const result = await admissions(optedIn, model, "api");
+        expect(result.run).toEqual({ allowed: true });
+        expect(result.denial).toBeNull();
+        expect(result.goal).toBeNull();
+        expect(result.call.allowed).toBe(true);
+        expect(result.between).toBeNull();
+        expect(balance).not.toHaveBeenCalled();
+      } finally {
+        pro.mockRestore();
+      }
+      // The opt-in lifts only the API refusal; the paid-plan rule still applies.
+      const free = onPlan("free");
+      try {
+        const result = await admissions(optedIn, model, "api");
+        expect(result.run).toEqual({
+          allowed: false,
+          code: SUBSCRIPTION_PLAN_REQUIRED_CODE,
+          message: SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+        });
+        expect(result.denial).toBe("subscription_plan_required");
+        expect(result.call).toMatchObject({ allowed: false, subscriptionPlanRequired: true });
+        expect(String(result.between)).toContain(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
+      } finally {
+        free.mockRestore();
+      }
+      // Without credit billing (a typical self-hosted deployment) no plan is read.
+      const unread = onPlan(null);
+      try {
+        const result = await admissions(
+          settings({
+            apiConnectedSubscriptionsEnabled: true,
+            billingMode: "disabled",
+            usageLimitsMode: "none",
+            subscriptionPlansEnabled: false,
+          }),
+          model,
+          "api",
+        );
+        expect(result.run).toEqual({ allowed: true });
+        expect(result.denial).toBeNull();
+        expect(result.goal).toBeNull();
+        expect(result.call.allowed).toBe(true);
+        expect(result.between).toBeNull();
+        expect(unread).not.toHaveBeenCalled();
+      } finally {
+        unread.mockRestore();
+      }
+    },
+  );
+
   test("a legacy-billing account (internal) is exempt and its plan is never read", async () => {
     const plan = onPlan("free");
     try {

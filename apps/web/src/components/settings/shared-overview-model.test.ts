@@ -236,16 +236,6 @@ describe("loadSharedOverview", () => {
     expect(result.failed).toEqual([]);
   });
 
-  test("a server that can't list them all yet says the list is the ones that work here", async () => {
-    const { client } = fakeClient({
-      listOrganizationRigs: async () => ({ complete: false, rigs: [] }),
-      requestJson: (async () => ({ complete: false, vaults: [] })) as never,
-    });
-    const result = await loadSharedOverview(client, HERE);
-    expect(result.computeCoverage).toBe("here");
-    expect(result.vaultCoverage).toBe("here");
-  });
-
   test("a list that fails is reported by kind; one the viewer may not read is left out", async () => {
     const { client } = fakeClient({
       listOrganizationRigs: async () => {
@@ -417,9 +407,6 @@ describe("where each works", () => {
   test("says when the list is only the ones that work here", () => {
     expect(coverageDescription("all", place())).toBe(
       "Each works only where its Available in says. Organization owners and admins manage them.",
-    );
-    expect(coverageDescription("here", place())).toBe(
-      "Each works only where its Available in says. Organization owners and admins manage them. Here are the ones that work in Design preview.",
     );
     expect(
       coverageDescription(

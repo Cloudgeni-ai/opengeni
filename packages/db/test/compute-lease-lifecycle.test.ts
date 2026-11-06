@@ -20,6 +20,9 @@ import {
   reapStaleLeaseHoldersGlobal,
   recordAbandonedDirectConnectedMachineCommand,
   recordComputeSandboxPower,
+  readLease,
+  computeHostHandingOff,
+  COMPUTE_HAND_OFF_UNWAKEABLE_MS,
   revokeSandboxEnrollment,
   type Database,
   type DbClient,
@@ -541,6 +544,32 @@ describe("compute warm time follows the sandbox's sleep", () => {
     const tick = await accrue();
     expect(tick.seconds).toBeGreaterThanOrEqual(99);
     expect(tick.seconds).toBeLessThanOrEqual(101);
+  }, 60_000);
+
+  test("a host handing the sandbox off is recorded on its lease until it says it no longer is", async () => {
+    if (!available) return;
+    const { ids, claim } = await sleepingFixture();
+    const report = (asleep: boolean, handingOff: boolean) =>
+      recordComputeSandboxPower(db, { ...claim, sandboxId: "compute-box", asleep, handingOff });
+    const lease = () => readLease(db, ids.workspaceId, ids.sandboxGroupId);
+    expect(await report(true, false)).toEqual({ accepted: true, changed: true });
+    expect(computeHostHandingOff(await lease())).toBe(false);
+    expect(await report(true, true)).toEqual({ accepted: true, changed: true });
+    const handingOff = await lease();
+    expect(handingOff?.computeHandingOffSince).toBeInstanceOf(Date);
+    expect(computeHostHandingOff(handingOff)).toBe(true);
+    expect(await report(true, true)).toEqual({ accepted: true, changed: false });
+    // A report older than any hand-off may refuse wakes counts for nothing.
+    expect(
+      computeHostHandingOff(
+        handingOff,
+        handingOff!.computeHandingOffSince!.getTime() + COMPUTE_HAND_OFF_UNWAKEABLE_MS,
+      ),
+    ).toBe(false);
+    // Waking, or a state without it, clears it.
+    expect(await report(false, false)).toEqual({ accepted: true, changed: true });
+    expect((await lease())?.computeHandingOffSince).toBeNull();
+    expect(computeHostHandingOff(await lease())).toBe(false);
   }, 60_000);
 
   test("only the lease's current sandbox reports for it", async () => {

@@ -14,6 +14,7 @@ import { SessionRow } from "./session-list";
 import { BottomSheet } from "./sheet";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { sessionArchived } from "@opengeni/react/timeline-model";
 
 /** True where the signals share their row (beside the queue): icon chips only. */
 export const CompactSignalsContext = createContext(false);
@@ -179,7 +180,11 @@ function AgentNode(props: {
   const c = theme.colors;
   const [expanded, setExpanded] = useState(false);
   const { session, children } = props.node;
-  const paused = session.status !== "cancelled" && session.effectiveControl.state !== "active";
+  // Cancel and Archive also pause the chat's work; neither reads as paused.
+  const paused =
+    session.status !== "cancelled" &&
+    !sessionArchived(session) &&
+    session.effectiveControl.state !== "active";
   const attention = sessionAgentAttention(t, session, paused);
   const count = children.length;
   return (

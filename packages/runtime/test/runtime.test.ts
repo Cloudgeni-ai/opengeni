@@ -929,6 +929,26 @@ describe("structured human-input runtime boundary", () => {
     });
   });
 
+  test("the parent-agent text follows whether the caller says there is a parent", () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const description = (subSession: boolean | undefined) => {
+      const tool = buildOpenGeniAgent(settings, [], {
+        ...(subSession === undefined ? {} : { subSession }),
+      }).tools.find(
+        (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+      );
+      if (!tool || tool.type !== "function") throw new Error("tool missing");
+      return tool.description;
+    };
+    expect(description(true)).toContain(" Your parent agent also sees this request");
+    expect(description(true)).not.toContain("In a sub-session");
+    // A caller that does not say keeps the text conditioned on a parent.
+    expect(description(undefined)).toContain(
+      " In a sub-session, your parent agent also sees this request",
+    );
+    expect(description(false)).not.toContain("parent agent");
+  });
+
   test("when the person lets the agent decide, the result tells it to choose and say what it chose", async () => {
     const settings = testSettings({ sandboxBackend: "none" });
     const agent = buildOpenGeniAgent(settings, [], {
@@ -942,7 +962,9 @@ describe("structured human-input runtime boundary", () => {
       (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
     );
     if (!tool || tool.type !== "function") throw new Error("tool missing");
-    expect(tool.description).toContain("agentDecides");
+    // The result's note is where the model learns what to do; the description
+    // does not repeat it on every call.
+    expect(tool.description).not.toContain("agentDecides");
     expect(tool.description).toContain("message your parent agent instead");
     const output = JSON.parse(
       String(

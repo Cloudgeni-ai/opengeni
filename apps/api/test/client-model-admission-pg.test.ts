@@ -320,6 +320,22 @@ test("PG: API client config excludes connected subscriptions and rejects an expl
   });
 }, 180_000);
 
+test("PG: with the operator opt-in, API client config lists connected subscriptions and creates on one", async () => {
+  if (!client || !shared) return;
+  const f = await fixture({ apiConnectedSubscriptionsEnabled: true }, "api");
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
+  const config = await f.config();
+  expect(config.allowedModels).toContain("codex/gpt-6-sol");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: "codex/gpt-6-sol",
+    initialMessage: "Test API subscription selection",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  expect((await response.json()).model).toBe("codex/gpt-6-sol");
+}, 180_000);
+
 test("PG: a workspace's own list only narrows its organization's, in list, create and settings", async () => {
   if (!client || !shared) return;
   const f = await fixture();

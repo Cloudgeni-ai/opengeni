@@ -247,7 +247,8 @@ personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check, and 1101 granted it and
-removed that check. 1002 created the
+removed that check. 0988 created the queued-turn hold summary withheld, with
+the same caller check, and 1274 granted it and removed the check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
 inference change function withheld the same way, and 1210 granted it. 1091
@@ -260,17 +261,15 @@ v2 functions withheld; 1239 grants all six to every configured application
 role and removes the privilege probes and v1 caller fallbacks. The v1 SQL
 functions and grants stay intact for rolling binaries. 1239 follows the
 production baseline pin that contains 1107 (`d91058a8b8` or later). 1218
-created the organization vault list
-withheld, with the same caller check; until it is granted the API lists only
-the organization vaults that work in the requested workspace and says the
-list is incomplete. 1211 created the names-only organization member list
+created the organization vault list and 1224 the organization machine and rig
+list withheld, with the same caller check, and 1272 granted both and removed
+the check. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
-list as unavailable. 1224 created the organization machine and rig list
-withheld the same way as the vault list. 1240 created the inventory of
-meeting tracks not yet kept compact withheld, with the same caller check;
-1261 grants it and removes the check, so the retention sweep then converts
-existing meetings' audio as well. 1261 follows the production baseline pin
-that contains 1240 (`2a02889ffe` or later).
+list as unavailable. 1240 created the inventory of meeting tracks not yet
+kept compact withheld, with the same caller check; 1282 grants it and removes
+the check, so the retention sweep then converts existing meetings' audio as
+well. 1282 follows the production baseline pin that contains 1240
+(`2a02889ffe` or later).
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

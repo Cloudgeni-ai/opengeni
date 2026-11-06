@@ -2,7 +2,7 @@
 //! finishable on the next start of the agent or finished.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -10,10 +10,10 @@ use std::time::Duration;
 use compute_engine::{Engine, VmSpec};
 use tokio::time::sleep;
 
-use crate::layout::{Paths, vm_spec};
+use crate::layout::{Paths, aside_dir, create_dir_durably, sync_parent, vm_spec};
 use crate::net::Networks;
 use crate::protocol::Id;
-use crate::state::{Change, Fence, Record, Records};
+use crate::state::{Change, Fence, Record, Records, unix_ms_now};
 use crate::step::LiveMemory;
 use crate::store::{Owned, Store};
 
@@ -28,6 +28,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.unlink(id);
         for waiter in slot.waiters.drain(..) {
             let _ = waiter.reply.send(Err(HostError::Removed(id)));
+        }
+        for waiter in self.restarting.remove(&id.0).unwrap_or_default() {
+            let _ = waiter.send(Err(HostError::Removed(id)));
         }
         let live = slot.vm.take();
         if let Some(live) = &live {
@@ -44,6 +47,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 removers,
                 Some(closing),
                 slot.hand_off,
+                slot.set_aside,
             );
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
@@ -63,21 +67,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         removers: Vec<Reply<()>>,
         holds: Option<Closing>,
     ) {
-        self.remove_recorded_as(record, vm, removers, holds, false);
+        self.remove_recorded_as(record, vm, removers, holds, false, false);
     }
 
     /// Ends the VM of blocked sandbox `id`, held frozen, and removes the
     /// sandbox here, keeping the store's copy, as a hand-off does: the
     /// service gave it to another host, or will adopt it here afresh.
     /// `removers` are answered once its VM is gone and its record with it.
-    pub(super) fn hand_away_frozen(&mut self, record: &Record, removers: Vec<Reply<()>>) {
+    /// Its files are set aside rather than deleted if `aside`.
+    pub(super) fn hand_away_frozen(
+        &mut self,
+        record: &Record,
+        removers: Vec<Reply<()>>,
+        aside: bool,
+    ) {
         let id = record.id;
         self.blocked.remove(&id.0);
         self.retrying.remove(&id.0);
-        self.remove_recorded_as(record, None, removers, None, true);
+        self.remove_recorded_as(record, None, removers, None, true, aside);
     }
 
-    /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`.
+    /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`,
+    /// and this host's too, set aside, if `aside`.
     fn remove_recorded_as(
         &mut self,
         record: &Record,
@@ -85,9 +96,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         removers: Vec<Reply<()>>,
         holds: Option<Closing>,
         hand_off: bool,
+        aside: bool,
     ) {
         let (id, host) = (record.id, record.host());
         self.destroying.insert(id.0, removers);
+        // A copy the service ruled set aside, or whose setting aside
+        // began before a restart, is kept here rather than deleted.
+        let aside = (aside || record.set_aside).then(|| {
+            aside_dir(&self.root).join(format!("{}-e{}-{}", id, record.owner_epoch, unix_ms_now()))
+        });
+        let hand_off = hand_off || aside.is_some();
         if hand_off || record.handed_off {
             self.handing_away.insert(id.0);
         }
@@ -111,6 +129,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 host,
                 hand_off,
+                aside,
             };
             let ended = || {
                 let _ = events.send(Event::VmEnded { id, host });
@@ -165,6 +184,9 @@ struct Removal<'a, E, S> {
     host: Id,
     /// It is handed off: the store's copy stays for its next owner.
     hand_off: bool,
+    /// Where its directory goes instead of being deleted, if it is set
+    /// aside.
+    aside: Option<PathBuf>,
 }
 
 impl<E: Engine, S: Store> Removal<'_, E, S> {
@@ -182,7 +204,9 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         ended: impl FnOnce(),
     ) -> Result<(), HostError> {
         let id = self.id;
-        let begun = if self.hand_off {
+        let begun = if self.aside.is_some() {
+            Change::new().set_aside()
+        } else if self.hand_off {
             Change::new().handed_off()
         } else {
             Change::new().removing()
@@ -229,6 +253,22 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
                 tracing::warn!(%id, own = %record.owner(), %by, "a later owner holds the stored copy; it stays");
             }
         }
+        if record.set_aside
+            && let Some(aside) = &self.aside
+        {
+            // Before the record goes: a directory left without one would
+            // be a stray that recovery deletes.
+            set_aside(dir, aside)
+                .await
+                .map_err(|error| HostError::Io(format!("setting the copy aside: {error}")))?;
+            tracing::error!(
+                %id,
+                own = %record.owner(),
+                aside = %aside.display(),
+                "this host's copy was set aside, not deleted: the service went on without this \
+                 host from an older copy, so this one may hold writes the sandbox no longer has"
+            );
+        }
         self.records.remove(id, record.fence()).await?;
         // The pager of a VM that ended on its own may still be writing its
         // last file here; a moment later the directory is quiet.
@@ -246,6 +286,25 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             }
         }
     }
+}
+
+/// Moves sandbox directory `dir` to `aside`, durably. A directory already
+/// gone was moved by a try a restart cut short.
+async fn set_aside(dir: &Path, aside: &Path) -> io::Result<()> {
+    let (dir, aside) = (dir.to_owned(), aside.to_owned());
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = aside.parent() {
+            create_dir_durably(parent)?;
+        }
+        match std::fs::rename(&dir, &aside) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            moved => moved?,
+        }
+        sync_parent(&aside)?;
+        sync_parent(&dir)
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Deletes what is left of a sandbox that has no record, never had one or

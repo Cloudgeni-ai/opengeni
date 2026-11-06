@@ -94,8 +94,9 @@ impl PostgresStore {
                 client
                     .query_opt(
                         "insert into compute_pointers \
-                         (name, owner_epoch, owner_save, pointer, version) \
-                         values ($1, $2, $3, $4, nextval('compute_pointer_versions')) \
+                         (name, owner_epoch, owner_save, pointer, version, saved_ms) \
+                         values ($1, $2, $3, $4, nextval('compute_pointer_versions'), \
+                         case when octet_length($4::bytea) > 0 then (extract(epoch from clock_timestamp()) * 1000)::bigint end) \
                          on conflict (name) do nothing returning version",
                         &[&name, &epoch, &save, &pointer],
                     )
@@ -105,7 +106,9 @@ impl PostgresStore {
                 client
                     .query_opt(
                         "update compute_pointers set owner_epoch = $2, owner_save = $3, \
-                         pointer = $4, version = nextval('compute_pointer_versions') \
+                         pointer = $4, version = nextval('compute_pointer_versions'), \
+                         saved_ms = case when octet_length($4::bytea) > 0 and pointer <> $4::bytea \
+                         then (extract(epoch from clock_timestamp()) * 1000)::bigint else saved_ms end \
                          where name = $1 and version = $5 returning version",
                         &[&name, &epoch, &save, &pointer, &on],
                     )

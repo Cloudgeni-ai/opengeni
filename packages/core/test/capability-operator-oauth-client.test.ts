@@ -34,11 +34,25 @@ describe("operator OAuth client connectability", () => {
       resolver(JSON.stringify({ "https://accounts.google.com": { clientId: "google" } })),
     );
     expect(projected.runtime.operatorOAuthClient).toEqual({ configured: false });
+    // The agent's setup tools report this note instead of offering a card.
+    expect(projected.runtime.notes).toBe(
+      "New connections are unavailable until this deployment registers an OAuth client with the provider.",
+    );
     // The projection survives the public response contract.
     expect(
       CapabilityCatalogResponse.parse({ items: [projected], installations: [] }).items[0]?.runtime
         .operatorOAuthClient,
     ).toEqual({ configured: false });
+    // An installed row keeps its own status note.
+    const installed = applyOperatorOAuthClientRequirement(
+      item({
+        enabled: true,
+        runtime: { available: false, notes: "This installed connection is unavailable." },
+      }),
+      resolver("{}"),
+    );
+    expect(installed.runtime.operatorOAuthClient).toEqual({ configured: false });
+    expect(installed.runtime.notes).toBe("This installed connection is unavailable.");
   });
 
   test("matches the issuer key the OAuth start uses, ignoring a trailing slash", () => {
@@ -50,6 +64,12 @@ describe("operator OAuth client connectability", () => {
         ).runtime.operatorOAuthClient,
       ).toEqual({ configured: true });
     }
+    expect(
+      applyOperatorOAuthClientRequirement(
+        item(),
+        resolver(JSON.stringify({ "https://app.asana.com": { clientId: "asana" } })),
+      ).runtime.notes,
+    ).toBeNull();
   });
 
   test("leaves rows without a requirement, and non-MCP rows, untouched", () => {

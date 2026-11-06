@@ -69,6 +69,8 @@ export function nextCheckLabel(deadlineAt: string, now: number): string | null {
 
 function lifecycleStatus(session: RailSession, waiting: boolean): SessionHoverFacts["status"] {
   switch (sessionDisplayStatus(session)) {
+    case "archived":
+      return { label: "Archived", tone: "neutral", live: false };
     case "blocked":
       return { label: "Stuck", tone: "danger", live: false };
     case "requires_action":
@@ -92,7 +94,14 @@ function lifecycleStatus(session: RailSession, waiting: boolean): SessionHoverFa
 
 function pauseContext(session: RailSession): string | null {
   const control = session.effectiveControl;
-  if (!control || control.state !== "paused" || session.status === "cancelled") return null;
+  if (
+    !control ||
+    control.state !== "paused" ||
+    session.status === "cancelled" ||
+    sessionDisplayStatus(session) === "archived"
+  ) {
+    return null;
+  }
   if (control.settlement) return "Pausing";
   const blocker = control.primaryBlocker;
   if (blocker?.kind === "workspace") return "Workspace paused";

@@ -222,6 +222,90 @@ describe("native realtime call", () => {
   });
 });
 
+describe("call audio route", () => {
+  // What iOS reports when WebRTC applies its own voice-chat audio configuration
+  // as call audio starts: the category changes and the route falls back to the receiver.
+  const webRtcReconfigures = {
+    type: "routeChanged",
+    route: "receiver",
+    reason: "categoryChange",
+  } as const;
+
+  test("a call started in the app stays on the loudspeaker when its audio comes up", async () => {
+    const { system, hook, status } = await setup();
+    await act(async () => await hook.result.current.start());
+    expect(hook.result.current.speaker).toBe(true);
+    await act(async () => {
+      system.emit({ type: "routeChanged", route: "speaker", reason: "activated" });
+    });
+    await status("active");
+    await act(async () => system.emit(webRtcReconfigures));
+    expect(system.log).toContain("call.speaker:true");
+    expect(hook.result.current.speaker).toBe(true);
+    await act(async () => {
+      system.emit({ type: "routeChanged", route: "speaker", reason: "override" });
+    });
+    expect(hook.result.current.speaker).toBe(true);
+    expect(hook.result.current.route).toBe("speaker");
+  });
+
+  test("an answered system call stays where it started, even when its start was not seen", async () => {
+    const voice = fakeRealtime();
+    const system = fakeCall();
+    const hook = await renderHook(
+      (realtime: NativeCallRealtime) =>
+        useNativeRealtimeCall({
+          realtime,
+          call: system.call,
+          title: "Agent call",
+          answeredCallId: "6F1B3C1E-8C1D-4E59-9E2B-3A3B7D9D5C10",
+        }),
+      voice.realtime,
+    );
+    await act(async () => await hook.result.current.start());
+    await hook.rerender({ ...voice.realtime, snapshot: snapshot("active") });
+    await act(async () => system.emit(webRtcReconfigures));
+    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
+      "call.speaker:true",
+    ]);
+    expect(hook.result.current.speaker).toBe(true);
+  });
+
+  test("the person's own choice stays, and a reconfiguration keeps it", async () => {
+    const { system, hook, status } = await setup();
+    await act(async () => await hook.result.current.start());
+    await status("active");
+    await act(async () => hook.result.current.setSpeaker(false));
+    await act(async () => system.emit(webRtcReconfigures));
+    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
+      "call.speaker:false",
+    ]);
+    expect(hook.result.current.speaker).toBe(false);
+    // Picked on the system call screen: a route override, kept from then on.
+    await act(async () => {
+      system.emit({ type: "routeChanged", route: "speaker", reason: "override" });
+    });
+    await act(async () => system.emit(webRtcReconfigures));
+    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
+      "call.speaker:false",
+      "call.speaker:true",
+    ]);
+    expect(hook.result.current.speaker).toBe(true);
+  });
+
+  test("AirPods and headphones are left alone", async () => {
+    const { system, hook, status } = await setup();
+    await act(async () => await hook.result.current.start());
+    await status("active");
+    await act(async () => {
+      system.emit({ type: "routeChanged", route: "bluetooth", reason: "categoryChange" });
+    });
+    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([]);
+    expect(hook.result.current.route).toBe("bluetooth");
+    expect(hook.result.current.speaker).toBe(false);
+  });
+});
+
 describe("native call events and models", () => {
   test("parses native events and drops unknown ones", () => {
     expect(parseNativeCallEvent({ type: "ended", callId: "a" })).toEqual({
@@ -232,6 +316,12 @@ describe("native call events and models", () => {
       type: "routeChanged",
       route: "other",
     });
+    expect(
+      parseNativeCallEvent({ type: "routeChanged", route: "receiver", reason: "categoryChange" }),
+    ).toEqual({ type: "routeChanged", route: "receiver", reason: "categoryChange" });
+    expect(
+      parseNativeCallEvent({ type: "routeChanged", route: "speaker", reason: "wakeFromSleep" }),
+    ).toEqual({ type: "routeChanged", route: "speaker", reason: "other" });
     expect(parseNativeCallEvent({ type: "startRequested" })).toEqual({
       type: "startRequested",
       target: null,

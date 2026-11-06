@@ -19,7 +19,10 @@ not automatic channel-type detection. The separate Microsoft Teams tools connect
 agent call Microsoft Graph under its selected user connection. Installing the
 bot does not grant Graph access or authorize an Opengeni workspace.
 
-Bot setup belongs to the deployment operator. Workspace binding belongs to an
+Bot registration belongs to the deployment operator. Connecting a Teams
+organization (tenant) belongs either to an operator-approved installer or, with
+self-serve setup on, to that organization's own Microsoft 365 Global
+Administrator or Teams Administrator. Workspace binding belongs to an
 authorized Opengeni administrator. User account linking must establish the exact
 Teams tenant/user and Opengeni human; matching email, display name, or a Teams
 app installation alone is not that proof.
@@ -70,6 +73,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS` | Exact operator-verified standard channels as `tenantId:channelId`; empty denies all channels |
 | `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS` | Exact approved group chats as `tenantId:conversationId`; empty denies all groups, independently of broad rollout |
 | `OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS` | Explicit operator-approved `tenantId:actorObjectId` installer pairs |
+| `OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED` | Lets a tenant administrator of an admitted tenant connect it after a Microsoft sign-in; default false |
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
 | `OPENGENI_TEAMS_BOT_TENANT_ID` | Home tenant used to acquire bot service tokens |
@@ -118,6 +122,134 @@ rollout change. If a restricted reviewer environment is needed, use exact
 pilot/reviewer tenant and workspace entries with its broad switches false; never
 broaden access merely to get a submission reviewed. Keep reviewer accounts,
 tenant IDs and credentials outside the repository.
+
+## Self-serve organization setup
+
+With `OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=true`, an organization that adds
+the app (for example from the Teams Store) connects itself. Admission still
+comes first: `OPENGENI_TEAMS_BOT_ENABLED=true` admits every tenant (the Store
+setting), while broad rollout off with `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS`
+admits only listed tenants (a staged rollout). Production keeps both off until
+ops turns them on. Operator-approved installers keep working alongside it.
+
+1. A person whose tenant has no active connection messages the bot in a 1:1
+   chat, or adds it in the personal scope. They get a welcome that says a
+   Microsoft 365 Global Administrator or Teams Administrator connects Opengeni
+   once for everyone, with a **Connect your organization** link. The link holds
+   a signed proof (one hour, enough to sign up for Opengeni and create a shared
+   workspace first) of the Teams tenant, the Teams user and the 1:1 chat. Group chats and channels never get this reply.
+2. The setup page requires the Opengeni browser sign-in of a human and a shared
+   workspace they administer. Choosing **Connect workspace** starts a Microsoft
+   sign-in (authorization code with PKCE) through the bot's Entra app, at the
+   tenant-specific authority of the Teams tenant. The signed state binds the
+   setup proof, the tenant, the Teams user, the Opengeni person and the
+   workspace; the PKCE verifier and OIDC nonce are derived from it on the server
+   and never pass through the browser.
+3. Microsoft returns to the setup page, which sends the code and state with the
+   setup proof in the person's own authenticated request. The API checks the
+   state's binding against the proof and the browser session, redeems the code,
+   and verifies the ID token signature from Microsoft's published keys, issuer
+   `https://login.microsoftonline.com/<tenant>/v2.0`, audience (the bot client
+   ID), expiry and nonce. `tid` must equal the Teams tenant, `oid` the Teams
+   user, and `wids` must contain Global Administrator
+   (`62e90394-69f5-4237-9190-012177145e10`) or Teams Administrator
+   (`69091246-20e8-4a56-aa4d-066075b2a7a8`).
+4. The tenant is bound to the workspace and the installer is linked, as with an
+   operator-approved setup, and the bot confirms in the installer's 1:1 chat.
+
+People without either role see why on the setup page: ask your Microsoft 365 or
+Teams admin to message Opengeni in Teams and connect it. `wids` lists only
+active role assignments, so an administrator whose role is eligible through
+Privileged Identity Management activates it first. Microsoft personal accounts
+(tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) can never self-serve.
+
+An operator-approved installer (`OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS`) gets the
+setup link without the Microsoft sign-in only in reply to their own 1:1
+message, never on an install event, whose sender needn't be the person whose
+chat it is.
+
+What self-serve cannot do: bind a tenant the person doesn't administer (the
+Microsoft sign-in must be the same Teams user and hold an administrator role in
+that tenant), replace, take over or move an active connection, or bind a
+workspace that is already bound to another tenant. Even two setups racing never
+rotate an active installation.
+
+What a tenant administrator can do with a connection that already exists:
+
+- **Active**: nothing through self-serve, and there is no operator transfer
+  either. An Opengeni administrator of the bound workspace disconnects it there
+  first; until then a Teams administrator can block the app in the Teams admin
+  center.
+- **Disconnected, same workspace**: a Global Administrator or Teams
+  Administrator who is an Opengeni administrator of that workspace reconnects
+  it.
+- **Disconnected, another workspace**: only a Global Administrator can move it.
+  The removal of the old binding and the new connection are one transaction, so
+  a failed move changes nothing. The old binding is deleted together with its
+  account links, routes and their delivery records (inbox and outbox, including
+  unknown or failed sends); the Opengeni sessions and their history remain. The
+  old workspace gets a `connection.disconnected` audit record with reason
+  `released_by_tenant_administrator`, the counts of removed links and routes,
+  and the Microsoft administrator as `microsoft:<tenant ID>:<object ID>` (not
+  the Opengeni identity in the new workspace). This keeps a binding left behind
+  by a departed admin, consultant or trial from locking the organization out.
+
+A setup proof is single-use (its nonce is recorded at install), and Microsoft
+codes are single-use and PKCE-bound.
+
+Replies to tenants that have not connected are bounded on each API replica, in
+separate budgets so one kind can't use up another:
+
+- Connect cards for people who message the bot: one per person per ten minutes,
+  six per person and 200 per tenant per day, 2,000 per hour overall.
+- Welcomes when someone installs the app: one per person and 25 per tenant per
+  day, 500 per hour overall. A tenant that pre-installs the app for everyone
+  gets only a few.
+- With self-serve on, people in a tenant that isn't admitted get a short
+  not-available notice when they message the bot: one per person and 20 per
+  tenant per day, 200 per hour overall, never for installs. With it off, such
+  messages are ignored as before.
+
+The counters are in memory, so the limits apply per replica and reset on
+restart.
+
+### Entra app configuration
+
+Self-serve sign-in uses the bot's own Entra application
+(`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do not reuse
+the Microsoft 365 tools connector app. On that app registration:
+
+- **Supported account types**: accounts in any organizational directory
+  (multi-tenant).
+- **Authentication → Add a platform → Web → Redirect URI**:
+  `<web base URL>/teams/connect`, where the web base URL is
+  `OPENGENI_WEB_BASE_URL` (or `OPENGENI_PUBLIC_BASE_URL` when unset), for example
+  `https://app.example.com/teams/connect`. No implicit-grant or ID-token boxes
+  are needed.
+- **Token configuration → Add groups claim → Directory roles**, for the ID
+  token. This sets `groupMembershipClaims` to `DirectoryRole` in the manifest
+  (`All` also works). Without it Microsoft omits `wids` and every sign-in is
+  treated as a non-administrator.
+- **API permissions**: Microsoft Graph delegated `openid` and `profile`. These
+  need no administrator consent. Complete publisher verification before a Store
+  launch: some tenants block people from consenting to unverified multi-tenant
+  apps, and then only a Global Administrator can sign in.
+
+Staging acceptance for self-serve, in the dedicated test tenant:
+
+1. Setting off: a non-allowlisted person in an unconnected admitted tenant gets
+   no reply, and setup without operator approval is refused.
+2. Setting on: the person gets the welcome once; a repeat within ten minutes
+   gets nothing.
+3. A non-administrator completes the Microsoft sign-in and sees the ask-your-admin
+   message; nothing is connected.
+4. Signing in to Microsoft as a different user than the Teams sender is refused.
+5. A Teams Administrator (or Global Administrator) connects a shared workspace
+   they administer, gets the confirmation in Teams, and can start work.
+6. After connection, other people get the account-link card rather than a setup
+   link.
+7. After disconnecting, a Teams Administrator can reconnect only in the original
+   workspace; a Global Administrator can move it to another shared workspace.
 
 ## Generate a package
 
@@ -221,7 +353,8 @@ Required acceptance cases:
    verify old pending replies stop and a newly accepted audience gets fresh history.
    Verify inline `text/html` representations accompanying canonical `activity.text`
    are accepted without parsing or fetching HTML. Files, images, URL-backed HTML,
-   mixed attachment arrays and invoke activities remain rejected.
+   mixed attachment arrays and every invoke other than the feedback
+   `message/submitAction` remain rejected.
    Private/shared channel type is not classified automatically: verify each
    allowed channel is standard. A channel absent from its exact allowlist must
    be denied even with broad rollout enabled. Remove an entry and verify pending
@@ -241,8 +374,88 @@ Required acceptance cases:
    returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
+   Check the first-run and AI experience described in
+   [In-Teams experience](#in-teams-experience): one welcome on personal install,
+   `help` answered without agent work, typing while a reply is produced, rendered
+   Markdown, the AI generated label and feedback buttons on agent replies (web and
+   desktop only), and `unlink` with its confirmation.
 
 Reference: [custom app upload](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload).
+
+## In-Teams experience
+
+Everything the bot says outside agent replies is fixed text in
+`apps/api/src/integrations/teams-experience.ts`; none of it calls a model. The
+welcome and help content is chosen by the person's state (personal or shared
+conversation, organization connected or not, account linked or not).
+
+- **Welcome.** Adding the bot in personal scope (an authenticated
+  `conversationUpdate` naming the bot in `membersAdded`) sends one welcome: what
+  Opengeni does, that replies are AI-generated, the account requirement, the main
+  limitations and how to get help. An unlinked person in a connected organization
+  also gets a "Link account" button. The welcome holds no identity proof, since
+  proofs expire after ten minutes and a welcome may be read much later: the button
+  sends `link` as the person, whose authenticated message gets a fresh link card.
+  A redelivered install within ten minutes isn't welcomed again (per API process),
+  and messages never repeat it. A linked person's first 1:1 chat adds one line
+  about AI and `help` to the "Started" notice. In an organization that hasn't
+  connected Opengeni and has self-serve on, the installer gets the
+  "Connect your organization" card instead of this welcome; see
+  [Self-serve organization setup](#self-serve-organization-setup).
+  The bot only answers in tenants enabled for rollout, so a tenant used to
+  review the app must be in
+  `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS` (or broad rollout must be on).
+- **Commands.** Commands run after the tenant and channel or group allowlist
+  checks. A whole message of `help` (or `commands`) gets the help text in the
+  same conversation, for linked and unlinked people, without starting agent work.
+  `link` gives an unlinked person the usual link card and tells a linked person
+  they already are. In a 1:1 chat, `unlink` (or `disconnect`) asks for
+  confirmation; its button
+  sends `unlink confirm`, which removes the person's Teams link with the same
+  logic as the web unlink. Anyone may always remove their own link. In shared
+  conversations `unlink` points to the 1:1 chat.
+- **Typing.** After a message is queued, the bot sends Teams typing activities
+  about every three seconds until the reply, request for input or failure of
+  the turn that answers it is queued for Teams, the message is refused, or five
+  minutes pass. Admission records that turn on the inbox row (`turn_id`) and the
+  drain stamps `replied_at` when it queues that turn's output, so in a busy chat
+  an earlier turn finishing doesn't end typing for a later message. A message
+  admitted without a known turn (by an older release) falls back to the chat:
+  any reply, request or failure after it was queued (the route's
+  `relevant_event_sequence` moving past its value at queue time). A cancelled
+  turn queues nothing, so typing for it ends at the five minutes. One loop runs
+  per chat; a newer message takes it over and restarts the five minutes. A
+  redelivered message starts none. The loop lives in the process that accepted
+  the message and is best-effort.
+- **Markdown.** Messages are sent with `textFormat: "markdown"`. Agent Markdown
+  Teams can't show in text messages is rewritten: tables become one list item per
+  row, headings below level three become bold lines, setext headings become ATX
+  headings, images become links and horizontal rules are dropped. Text that
+  looks like an HTML tag (`List<string>`) is backslash-escaped outside code so
+  Teams doesn't swallow it; autolinks, link targets and `<br>` are kept. Code is
+  left as written: fenced blocks (including fences nested in list items),
+  indented code blocks and code spans. Lines over 4 KB get only that escaping.
+  A code block split across 20,000-byte parts is
+  closed and reopened with only its fence and language, and room for the closing
+  fence is kept, so no part exceeds the limit. Verify tag-like text on desktop,
+  web and mobile during acceptance.
+- **AI label and feedback.** Agent replies (from `turn.completed`) carry the
+  schema.org `AIGeneratedContent` message entity and `channelData.feedbackLoop`.
+  The authenticated `message/submitAction` feedback invoke passes the same tenant
+  and channel or group allowlist checks as messages, and is accepted only for a
+  delivered agent reply in the same conversation and installation generation,
+  from a linked person with the permissions the HTTP feedback route requires
+  (`workspace:read`, `sessions:create` and `sessions:read`) and session access to
+  that chat (only its owner for a 1:1 chat). It is recorded through the ordinary
+  Opengeni feedback store (`feedback_submissions`) on the chat and turn (on the
+  chat alone if the turn is gone), with an idempotency key derived from the
+  Teams activity, so a redelivered invoke records once. Each rating is its own
+  row, so a person who changes their rating leaves both; the latest is current.
+  Written feedback is kept up to 4,000 UTF-16 code units, the feedback store's
+  limit, without splitting a character. A chat whose session is gone, or that
+  the person may no longer see, answers the invoke and records nothing. The
+  reply is found by its Teams message id through the partial index
+  `teams_bot_outbox_delivered_message`, then its chat by primary key.
 
 ## Publisher verification and Store submission
 
@@ -282,9 +495,11 @@ References: [publisher verification](https://learn.microsoft.com/en-us/entra/ide
 
 ## Disable and recover
 
-The initial release keeps each tenant/workspace binding fixed. Disconnect pauses
-that binding; reconnect uses the same tenant and workspace. Disconnect does not
-permit transferring either side to another binding.
+Each tenant/workspace binding stays fixed while active. Disconnect pauses that
+binding; reconnect uses the same tenant and workspace. With self-serve setup, a
+Global Administrator of the tenant can move a disconnected binding to another
+workspace (see Self-serve organization setup); nothing else transfers either
+side.
 
 Remove the pilot/reviewer allowlists and keep broad switches false to close
 admission. Revoke a compromised credential at its Microsoft authority and rotate
@@ -305,8 +520,9 @@ Microsoft delivery.
 
 
 Disconnect disables the existing tenant/workspace binding and cancels pending work.
-Reconnect uses that same binding. Moving a Teams organization to a different
-workspace, or replacing the Teams organization bound to a workspace, is not supported.
+Reconnect uses that same binding. Replacing the Teams organization bound to a
+workspace is not supported; only a Global Administrator's self-serve setup moves
+a disconnected organization to a different workspace.
 The retained binding preserves existing conversation and delivery history.
 
 ## Approved group chats

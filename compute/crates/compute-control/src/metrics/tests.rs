@@ -40,6 +40,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             sandboxes: 5,
             pointers_in_service: true,
             reads_packs: true,
+            sets_aside: true,
             info: None,
         },
     }

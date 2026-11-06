@@ -2131,7 +2131,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator("[data-sonner-toast]")
         .filter({ hasText: "Archived “Archive undo target”" });
       await notification.waitFor();
-      await notification.getByText(/can't be restored/).waitFor();
+      await notification.getByText(/restore it from there/).waitFor();
       const undoRequest = page.waitForRequest(
         (request) => new URL(request.url()).pathname === archivePath,
       );
@@ -2231,7 +2231,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }, 90_000);
   }
 
-  test("Undo after the undo window says the archive is final", async () => {
+  test("Undo after the undo window still brings the chat back", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -2254,15 +2254,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await shared.admin`update sessions set archived_at = archived_at - interval '1 minute'
         where id = ${target.id}`;
       const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
-      const conflict = page.waitForResponse(
-        (response) => response.url() === `${sessionUrl}/archive` && response.status() === 409,
+      const unarchived = page.waitForResponse(
+        (response) => response.url() === `${sessionUrl}/archive` && response.ok(),
       );
       await notification.getByRole("button", { name: "Undo", exact: true }).click();
-      await conflict;
-      await page.getByText("Couldn't undo the archive.", { exact: true }).waitFor();
-      const current = await (await page.request.get(sessionUrl)).json();
-      expect(current.archived).toBe(true);
-      expect(await page.getByText("Archive undone.", { exact: true }).count()).toBe(0);
+      // Past the window the archive is no longer a one-way door: the chat
+      // returns at once, or from long-term storage if it already moved there.
+      const body = await (await unarchived).json();
+      expect(body.archived === false || body.retention?.archive?.restoring === true).toBe(true);
+      await page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: /Archive undone\.|Restoring “Archive final”/ })
+        .first()
+        .waitFor();
+      expect(await page.getByText("Couldn't undo the archive.", { exact: true }).count()).toBe(0);
     } finally {
       await context.close();
     }

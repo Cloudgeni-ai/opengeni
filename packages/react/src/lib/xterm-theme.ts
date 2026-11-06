@@ -72,9 +72,10 @@ const DARK_ANSI: AnsiPalette = {
   brightMagenta: "oklch(0.8 0.13 305)",
   brightCyan: "oklch(0.83 0.1 200)",
   brightWhite: "oklch(0.97 0 0)",
-  selectionBackground: "oklch(0.8 0 0 / 0.3)",
+  // Selection matches --og-color-text-selection (tokens.css).
+  selectionBackground: "#488ceb70",
   selectionForeground: "oklch(0.985 0 0)",
-  selectionInactiveBackground: "oklch(0.72 0 0 / 0.2)",
+  selectionInactiveBackground: "#488ceb40",
 };
 
 const LIGHT_ANSI: AnsiPalette = {
@@ -94,9 +95,9 @@ const LIGHT_ANSI: AnsiPalette = {
   brightMagenta: "oklch(0.54 0.17 305)",
   brightCyan: "oklch(0.54 0.11 210)",
   brightWhite: "oklch(0.3 0 0)",
-  selectionBackground: "oklch(0.45 0 0 / 0.2)",
+  selectionBackground: "#3884ff52",
   selectionForeground: "oklch(0.21 0 0)",
-  selectionInactiveBackground: "oklch(0.6 0 0 / 0.14)",
+  selectionInactiveBackground: "#3884ff2e",
 };
 
 /** The designed ANSI-16 palette for a theme mode. Pure. */

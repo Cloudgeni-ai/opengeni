@@ -2985,3 +2985,159 @@ test("each provider connection carries the host's current conversation language 
     controller.close();
   }
 });
+
+describe("reply audio without a host audio element", () => {
+  // A host that supplies no element must still hear the replies whose
+  // transcript arrives: silence beside a transcript is the failure.
+  function fakeAudioElements() {
+    const elements: Array<{ srcObject: unknown; muted: boolean; plays: number }> = [];
+    let rejectNext = 0;
+    class FakeAudio {
+      autoplay = false;
+      muted = false;
+      srcObject: unknown = null;
+      plays = 0;
+      constructor() {
+        elements.push(this);
+      }
+      async play(): Promise<void> {
+        this.plays += 1;
+        if (rejectNext > 0) {
+          rejectNext -= 1;
+          throw new DOMException("play() needs a user gesture", "NotAllowedError");
+        }
+      }
+      pause(): void {}
+    }
+    return { FakeAudio, elements, rejectNextPlay: () => (rejectNext += 1) };
+  }
+
+  function replyController(model: SessionRealtimeMode["model"]) {
+    const browser = rotatingBrowserFixture();
+    let current = mode({ model });
+    let uuid = 900;
+    const synced: SyncSessionRealtimeLedgerRequest[] = [];
+    const options = {
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: () => `74000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      ...timerFixture(),
+      client: {
+        beginSessionRealtime: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: { operationId: string; browserInstanceId: string },
+        ) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: CodexRealtimeWebrtcRequest,
+        ): Promise<CodexRealtimeWebrtcResponse> => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: model as CodexRealtimeWebrtcResponse["model"],
+          connectionId: "75000000-0000-4000-8000-000000000001",
+          connectionEpoch: request.expectedConnectionEpoch,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (
+          _workspaceId: string,
+          _sessionId: string,
+          _realtimeId: string,
+          request: SyncSessionRealtimeLedgerRequest,
+        ) => {
+          synced.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended" }),
+          replay: false,
+        }),
+      },
+    };
+    return { browser, options, synced };
+  }
+
+  async function speakReply(
+    controller: ReturnType<typeof createCodexRealtimeController>,
+    browser: ReturnType<typeof rotatingBrowserFixture>,
+  ): Promise<void> {
+    // A browser fires the provider's reply track while it applies the answer.
+    browser.peers[0]!.dispatchRemoteTrack();
+    await controller.ingestProviderEvent(
+      JSON.stringify({ type: "session.started", session: { id: "provider-session" } }),
+    );
+    await controller.ingestProviderEvent(
+      JSON.stringify({
+        type: "turn.done",
+        event_id: "reply-final",
+        turn: { id: "reply", role: "assistant", transcript: "Loud and clear." },
+      }),
+    );
+  }
+
+  for (const model of ["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"] as const) {
+    test(`${model}: a reply with a transcript is also played`, async () => {
+      const audio = fakeAudioElements();
+      const previousAudio = globalThis.Audio;
+      globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+      const { browser, options, synced } = replyController(model);
+      const { createSessionRealtimeController } = await import("../src/realtime");
+      const controller = createSessionRealtimeController({ ...options, model });
+      try {
+        await controller.start();
+        expect(controller.snapshot().status).toBe("active");
+        await speakReply(controller, browser);
+        await eventually(() => controller.snapshot().audibleOutput === "audible", "no audio");
+
+        expect(synced.flatMap((request) => request.entries ?? [])).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ kind: "assistant_transcript", text: "Loud and clear." }),
+          ]),
+        );
+        expect(audio.elements).toHaveLength(1);
+        expect(audio.elements[0]).toMatchObject({ muted: false, plays: 1 });
+        expect(audio.elements[0]!.srcObject).not.toBeNull();
+      } finally {
+        controller.close();
+        globalThis.Audio = previousAudio;
+      }
+    });
+  }
+
+  test("a blocked reply says so and plays once the person asks", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    audio.rejectNextPlay();
+    const { browser, options } = replyController("gpt-live-1-boulder-alpha");
+    const controller = createCodexRealtimeController(options);
+    try {
+      await controller.start();
+      await speakReply(controller, browser);
+      await eventually(() => controller.snapshot().audibleOutput === "blocked", "not blocked");
+      expect(controller.snapshot().diagnostic).toMatchObject({ kind: "autoplay_blocked" });
+
+      expect(await controller.retryAudibleOutput()).toBe(true);
+      expect(controller.snapshot().audibleOutput).toBe("audible");
+      expect(audio.elements[0]).toMatchObject({ plays: 2 });
+    } finally {
+      controller.close();
+      globalThis.Audio = previousAudio;
+    }
+  });
+});

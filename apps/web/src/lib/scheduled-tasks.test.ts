@@ -6,7 +6,6 @@ import {
   applyScheduledTaskCadence,
   formStateFromScheduledTask,
   groupScheduledTasksForList,
-  knowledgeSyncSourceLabel,
   newScheduledTaskFormState,
   nextScheduledRunAt,
   nextScheduledRunLabel,
@@ -29,7 +28,6 @@ import {
   scheduledTaskRunTriggerIsRedundant,
   scheduledTaskRunTriggerLabel,
   scheduledTaskStateLabel,
-  summarizeLastRun,
   taskMetadataFromFormState,
 } from "./scheduled-tasks";
 
@@ -116,50 +114,8 @@ describe("scheduled task form projection", () => {
     expect(saved.tools.map((tool) => tool.id)).toEqual(["linear"]);
   });
 
-  test("labels on-demand connector cadence and summarizes deterministic sync counts", () => {
+  test("labels on-demand cadence", () => {
     expect(scheduleLabel({ type: "manual" })).toBe("On demand");
-    expect(
-      summarizeLastRun([
-        {
-          id: connectionId,
-          accountId: scheduledTask().accountId,
-          workspaceId: scheduledTask().workspaceId,
-          taskId: scheduledTask().id,
-          taskAuthorityRevision: null,
-          taskExecutionDigest: null,
-          status: "succeeded",
-          triggerType: "manual",
-          scheduledAt: null,
-          firedAt: new Date(0).toISOString(),
-          sessionId: null,
-          triggerEventId: null,
-          actionKind: "knowledge_source_sync",
-          knowledgeSyncRunId: null,
-          knowledgeSummary: {
-            phase: "completed",
-            scanned: 5,
-            imported: 2,
-            unchanged: 3,
-            skipped: 0,
-            failed: 0,
-            bytes: 10,
-            providerRequests: 2,
-            elapsedMs: 250,
-            indexed: 2,
-            aclPending: 2,
-            retryable: false,
-            limitReached: null,
-            checkpointed: false,
-            reconnectRequired: false,
-            failures: [],
-          },
-          completedAt: new Date(1).toISOString(),
-          error: null,
-          createdAt: new Date(0).toISOString(),
-          updatedAt: new Date(1).toISOString(),
-        },
-      ])?.label,
-    ).toContain("imported 2, unchanged 3, failed 0");
   });
 
   test("keeps successful run text out of collapsed-card summaries", () => {
@@ -172,7 +128,7 @@ describe("scheduled task form projection", () => {
     });
   });
 
-  test("keeps user pause distinct and reads every saved source sync as retired", () => {
+  test("keeps user pause distinct from active", () => {
     const task = scheduledTask();
     expect(scheduledTaskStateLabel(task)).toMatchObject({
       label: "Active",
@@ -181,49 +137,6 @@ describe("scheduled task form projection", () => {
     expect(scheduledTaskStateLabel({ ...task, status: "paused" })).toMatchObject({
       label: "Paused",
       reason: "user_paused",
-    });
-    expect(
-      scheduledTaskStateLabel({
-        ...task,
-        action: {
-          kind: "knowledge_source_sync",
-          sourceId: connectionId,
-          sourceGeneration: 0,
-          sourceLifecycleGeneration: 1,
-          sourceConfigGeneration: 1,
-          controlWorkspaceId: task.workspaceId,
-          providerCoordinationKey: "onedrive:consumer:my-drive",
-          connection: {
-            connectionId,
-            connectionVersion: 1,
-            providerDomain: "graph.microsoft.com",
-            kind: "oauth2",
-            ownerSubjectId: "subject-a",
-          },
-          destination: {
-            kind: "workspace",
-            workspaceId: task.workspaceId,
-            subjectId: null,
-          },
-          initiatingSubjectId: "subject-a",
-          allDescendants: true,
-          limits: {
-            maxItems: 500,
-            maxBytes: 500_000_000,
-            maxFileBytes: 100_000_000,
-            maxProviderRequests: 1_000,
-            maxElapsedSeconds: 300,
-            maxConcurrency: 4,
-            maxFailureDetails: 25,
-          },
-        },
-        metadata: {
-          knowledgeSourceSync: { sourceEnabled: true, connectionPaused: true },
-        },
-      }),
-    ).toMatchObject({
-      label: "Sync retired",
-      reason: "provider_retired",
     });
   });
 
@@ -533,41 +446,6 @@ describe("scheduled task form projection", () => {
   });
 });
 
-function knowledgeSyncAction(
-  overrides: Partial<Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>> = {},
-): Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }> {
-  const workspaceId = scheduledTask().workspaceId;
-  return {
-    kind: "knowledge_source_sync",
-    sourceId: connectionId,
-    sourceGeneration: 0,
-    sourceLifecycleGeneration: 1,
-    sourceConfigGeneration: 1,
-    controlWorkspaceId: workspaceId,
-    providerCoordinationKey: "google-drive:google-consumer:my-drive",
-    connection: {
-      connectionId,
-      connectionVersion: 1,
-      providerDomain: "googleapis.com",
-      kind: "oauth2",
-      ownerSubjectId: "subject-a",
-    },
-    destination: { kind: "workspace", workspaceId, subjectId: null },
-    initiatingSubjectId: "subject-a",
-    allDescendants: true,
-    limits: {
-      maxItems: 500,
-      maxBytes: 500_000_000,
-      maxFileBytes: 100_000_000,
-      maxProviderRequests: 1_000,
-      maxElapsedSeconds: 300,
-      maxConcurrency: 4,
-      maxFailureDetails: 25,
-    },
-    ...overrides,
-  };
-}
-
 function scheduledTaskRun(overrides: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
   const task = scheduledTask();
   return {
@@ -727,42 +605,20 @@ describe("groupScheduledTasksForList", () => {
     expect(groups.paused).toEqual([]);
   });
 
-  test("separates every schedule that will not fire, including retired syncs", () => {
+  test("separates every schedule that will not fire", () => {
     const active = { ...scheduledTask(), id: "task-active" };
     const userPaused = {
       ...scheduledTask(),
       id: "task-user-paused",
       status: "paused" as const,
     };
-    const connectionPaused = {
-      ...scheduledTask(),
-      id: "task-retired-sync",
-      action: knowledgeSyncAction(),
-      metadata: {
-        knowledgeSourceSync: { sourceEnabled: true, connectionPaused: true },
-      },
-    };
-    const sourceDisabled = {
-      ...scheduledTask(),
-      id: "task-retired-disabled-sync",
-      action: knowledgeSyncAction(),
-      metadata: {
-        knowledgeSourceSync: { sourceEnabled: false, connectionPaused: false },
-      },
-    };
-
-    const groups = groupScheduledTasksForList(
-      [userPaused, active, connectionPaused, sourceDisabled],
-      { [userPaused.id]: "2024-07-01T00:00:00.000Z" },
-    );
+    const groups = groupScheduledTasksForList([userPaused, active], {
+      [userPaused.id]: "2024-07-01T00:00:00.000Z",
+    });
 
     expect(groups.active.map((task) => task.id)).toEqual(["task-active"]);
     // The user-paused row ran most recently, so it leads its own section.
-    expect(groups.paused.map((task) => task.id)).toEqual([
-      "task-user-paused",
-      "task-retired-sync",
-      "task-retired-disabled-sync",
-    ]);
+    expect(groups.paused.map((task) => task.id)).toEqual(["task-user-paused"]);
   });
 });
 
@@ -800,46 +656,13 @@ describe("scheduled task run rows", () => {
     );
     expect(scheduledTaskRunSessionAccess(stripped, { canReadSessionIds: true })).toBe("none");
 
-    // A connector sync never has a session, and a run that never dispatched has
-    // nothing to link to either way.
-    const sync = scheduledTaskRun({
-      actionKind: "knowledge_source_sync",
-      sessionId: null,
-    });
-    expect(scheduledTaskRunSessionAccess(sync, { canReadSessionIds: false })).toBe("none");
+    // A run that never dispatched has nothing to link to either way.
     const skipped = scheduledTaskRun({ status: "skipped", sessionId: null });
     expect(scheduledTaskRunSessionAccess(skipped, { canReadSessionIds: false })).toBe("none");
   });
 });
 
 describe("malformed scheduled tasks degrade instead of throwing", () => {
-  test("describes a knowledge sync without printing its source uuid", () => {
-    const label = knowledgeSyncSourceLabel(knowledgeSyncAction());
-    expect(label).toBe("Workspace scope · googleapis.com · with descendants");
-    expect(label).not.toContain(connectionId.slice(0, 8));
-
-    expect(
-      knowledgeSyncSourceLabel(
-        knowledgeSyncAction({
-          destination: {
-            kind: "personal",
-            workspaceId: null,
-            subjectId: "subject-a",
-          },
-          allDescendants: false,
-        }),
-      ),
-    ).toBe("Personal scope · googleapis.com · selected only");
-  });
-
-  test("survives an action missing its destination and connection", () => {
-    const partial = {
-      kind: "knowledge_source_sync",
-      allDescendants: false,
-    } as unknown as Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>;
-    expect(knowledgeSyncSourceLabel(partial)).toBe("Unknown scope · selected only");
-  });
-
   test("survives a task with no action or metadata at all", () => {
     const partial = {
       ...scheduledTask(),
@@ -878,33 +701,6 @@ test("session schedule navigation includes matches beyond the first page", async
   );
   expect(offsets).toEqual([0, 100, 200]);
   expect(result).toEqual(tasks);
-});
-
-test("historical Drive task inspection preserves its source binding and private learning scope", () => {
-  const task = scheduledTask();
-  const source = knowledgeSyncAction({
-    destination: {
-      kind: "personal",
-      workspaceId: task.workspaceId,
-      subjectId: "user:owner",
-    },
-  });
-  task.agentConfig.knowledgeSource = source;
-  task.metadata.knowledgeSourceSync = {
-    sourceEnabled: true,
-    connectionPaused: true,
-  };
-  const form = formStateFromScheduledTask(task);
-  expect(form.knowledgeSource).toEqual(source);
-  expect(
-    agentConfigFromFormState({ ...form, prompt: "Read changes and retain useful decisions" }, task)
-      .knowledgeSource,
-  ).toEqual(source);
-  expect(scheduledTaskStateLabel(task)).toMatchObject({
-    active: false,
-    label: "Sync retired",
-    reason: "provider_retired",
-  });
 });
 
 describe("scheduled task access in plain words", () => {
@@ -1065,43 +861,6 @@ describe("scheduledTaskAwaitingHumanText", () => {
     ).toContain("the scheduler rejects it automatically");
   });
 });
-
-test.each([
-  ["Atlassian", "api.atlassian.com", "atlassian-mcp"],
-  ["Google Drive", "googleapis.com", "google-drive-mcp"],
-  ["Google Drive", "www.googleapis.com", "google-drive-mcp"],
-  ["OneDrive", "graph.microsoft.com", "microsoft-onedrive"],
-])(
-  "historical %s schedules are retired while hosted MCP tasks remain active",
-  (_name, providerDomain, serverId) => {
-    const task = scheduledTask();
-    const source = { connection: { providerDomain } };
-    const retired = {
-      ...task,
-      agentConfig: { ...task.agentConfig, knowledgeSource: source },
-    } as ScheduledTask;
-    for (const status of ["active", "paused"] as const) {
-      expect(scheduledTaskStateLabel({ ...retired, status })).toEqual({
-        label: "Sync retired",
-        active: false,
-        reason: "provider_retired",
-      });
-    }
-    expect(groupScheduledTasksForList([retired], {})).toMatchObject({
-      active: [],
-      paused: [retired],
-    });
-    expect(
-      scheduledTaskStateLabel({
-        ...task,
-        agentConfig: {
-          ...task.agentConfig,
-          tools: [{ kind: "mcp", id: serverId }],
-        },
-      }),
-    ).toMatchObject({ active: true });
-  },
-);
 
 test("workspace execution defaults round-trip without a stale pinned target", () => {
   const task = scheduledTask();

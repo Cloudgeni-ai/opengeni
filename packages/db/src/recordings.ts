@@ -3634,6 +3634,41 @@ export const MEETING_SUMMARY_POLICY_ROLE = "meeting_summary";
 export const MEETING_SUMMARY_RECORDING_METADATA_KEY = "meetingSummaryRecordingId";
 export const MEETING_SUMMARY_TOOLS = ["meeting_read", "meeting_notes_save"] as const;
 
+/**
+ * The built-in summary chats of a meeting that nobody has written in and that
+ * are not archived yet. A deleted meeting's summary chat has nothing left to
+ * read, so the deletion archives these; a chat someone wrote in is theirs and
+ * stays. Read as the meeting's owner, who sees its Only me summary chat.
+ */
+export async function listUntouchedMeetingSummarySessions(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await tx
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.createdByKind, "service"),
+          eq(schema.sessions.createdBySubjectId, MEETING_SUMMARY_SUBJECT_ID),
+          eq(schema.sessions.policyRole, MEETING_SUMMARY_POLICY_ROLE),
+          sql`${schema.sessions.metadata} ->> ${MEETING_SUMMARY_RECORDING_METADATA_KEY} = ${input.recordingId}`,
+          isNull(schema.sessions.parentSessionId),
+          isNull(schema.sessions.archivedAt),
+          isNull(schema.sessions.contentArchiveState),
+          sql`not exists (
+            select 1 from ${schema.sessionTurns}
+            where ${schema.sessionTurns.workspaceId} = ${schema.sessions.workspaceId}
+              and ${schema.sessionTurns.sessionId} = ${schema.sessions.id}
+              and ${schema.sessionTurns.initiatorKind} <> 'service')`,
+        ),
+      );
+    return rows.map((row) => row.id);
+  });
+}
+
 export type MeetingSummaryCandidate =
   | {
       start: true;

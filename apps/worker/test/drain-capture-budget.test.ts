@@ -196,6 +196,109 @@ async function drainingModalLease(epoch: number, instanceId: string) {
   return ids;
 }
 
+/** A new session on the drained box whose turn waits on its rotation. The
+ * first such turn asked to replace the box because it cannot start programs. */
+async function waitOnReplacement(
+  ids: { accountId: string; workspaceId: string; groupId: string },
+  epoch: number,
+  options: { requestReplacement: boolean } = { requestReplacement: true },
+) {
+  const session = await dbModule.createSession(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    initialMessage: "my box lost its shell",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "modal",
+    sandboxGroupId: ids.groupId,
+  });
+  const sessionId = session.id;
+  if (options.requestReplacement) {
+    // The turn's replacement request fenced the box for rotation.
+    await shared!.admin`
+      update sandbox_leases
+      set rotation_requested_at = now(), rotation_reason = 'operator'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    await dbModule.appendSessionEvents(db, ids.workspaceId, sessionId, [
+      {
+        type: "sandbox.operation.started",
+        payload: {
+          name: dbModule.SANDBOX_PROCESS_START_RESTART_OPERATION,
+          reason: "process_start_failed",
+          sandboxGroupId: ids.groupId,
+          leaseEpoch: epoch,
+        },
+      },
+    ]);
+  }
+  const attemptId = crypto.randomUUID();
+  const workflowId = `session-${sessionId}`;
+  await dbModule.enqueueSessionTurn(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sessionId,
+    triggerEventId: crypto.randomUUID(),
+    temporalWorkflowId: workflowId,
+    source: "api",
+    prompt: "run something",
+    resources: [],
+    tools: [],
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "modal",
+    metadata: {},
+    initiator: { kind: "service", subjectId: "service:drain-capture-budget-test" },
+  });
+  const workflowRunId = crypto.randomUUID();
+  const dispatchId = `dispatch-${crypto.randomUUID()}`;
+  const claim = await dbModule.claimSessionWorkForAttempt(db, ids.workspaceId, {
+    sessionId,
+    workflowId,
+    workflowRunId,
+    attemptId,
+    dispatchId,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed")
+    throw new Error(
+      `Turn not claimed: ${JSON.stringify(claim)} ${JSON.stringify(await dbModule.peekSessionWork(db, ids.workspaceId, sessionId))}`,
+    );
+  const wait = {
+    version: 1 as const,
+    sandboxGroupId: ids.groupId,
+    leaseEpoch: epoch,
+    reason: "rotation_in_progress" as const,
+  };
+  const recovery = await dbModule.requestSessionTurnRecovery(db, ids.workspaceId, {
+    sessionId,
+    turnId: claim.turn.id,
+    triggerEventId: claim.turn.triggerEventId,
+    attemptId,
+    reason: "sandbox_lifecycle_transition",
+    detail: { sandboxGroupId: ids.groupId, leaseEpoch: epoch },
+    sandboxLifecycleWait: wait,
+  });
+  expect(recovery.action).toBe("recovering");
+  await dbModule.markSessionAttemptQuiesced(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sessionId,
+    attemptId,
+    temporalWorkflowId: workflowId,
+    temporalWorkflowRunId: workflowRunId,
+    temporalActivityId: dispatchId,
+  });
+  expect(await dbModule.peekSessionWork(db, ids.workspaceId, sessionId)).toEqual({
+    kind: "sandbox-lifecycle-wait",
+    ref: wait,
+  });
+  return sessionId;
+}
+
 /** The earlier attempt's capture: the real provider drain whose own wait has
  * timed out while the provider-native capture keeps running. */
 async function startTimedOutCapture(
@@ -291,6 +394,7 @@ describe("drain retry while an earlier capture is settling", () => {
       const epoch = 6;
       const instanceId = "sb-no-shell-save-fails";
       const ids = await drainingModalLease(epoch, instanceId);
+      const sessionId = await waitOnReplacement(ids, epoch);
       // Rejects only once the drain awaits it, so the rejection is never unhandled.
       const failingCapture = {
         then: (_resolve: unknown, reject: (error: Error) => void) =>
@@ -330,15 +434,26 @@ describe("drain retry while an earlier capture is settling", () => {
         sandboxGroupId: ids.groupId,
         leaseEpoch: epoch,
       });
+      expect(await release.mock.results[0]?.value).toBe(1);
       const lease = await readLease(db, ids.workspaceId, ids.groupId);
       expect(lease).toMatchObject({ liveness: "draining", leaseEpoch: epoch, instanceId });
       // The next drain waits out the backoff after that failed save without
-      // saving again; turns that started waiting since are released too.
+      // saving again. The turn it already released is not released again.
       await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
         "next attempt in",
       );
       expect(release).toHaveBeenCalledTimes(2);
       expect(release.mock.calls[1]?.[1]).toEqual(release.mock.calls[0]?.[1]);
+      expect(await release.mock.results[1]?.value).toBe(0);
+      // A turn that started waiting since the first failed save (another
+      // session on the same box) is released.
+      const sibling = await waitOnReplacement(ids, epoch, { requestReplacement: false });
+      expect(sibling).not.toBe(sessionId);
+      await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+        "next attempt in",
+      );
+      expect(release).toHaveBeenCalledTimes(3);
+      expect(await release.mock.results[2]?.value).toBe(1);
     } finally {
       release.mockRestore();
     }

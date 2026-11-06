@@ -101,6 +101,7 @@ import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
   parseAgentParam,
+  parseAutoConnectIssuerParam,
   parseServiceAccountParam,
   parseDeveloperView,
   parseWebhookParam,
@@ -957,6 +958,7 @@ const workspaceOrganizationRoute = createRoute({
     workspace?: string;
     webhook?: string;
     agent?: string;
+    issuer?: string;
     serviceAccount?: string;
     connector?: string;
   } & InsightsRawSearch &
@@ -985,6 +987,8 @@ const workspaceOrganizationRoute = createRoute({
               : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
+    const issuer =
+      section === "agents" && !agent ? parseAutoConnectIssuerParam(search.issuer) : undefined;
     const connector =
       section === "integrations" ? parseConnectorParam(search.connector) : undefined;
     const serviceAccount =
@@ -1010,6 +1014,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
       ...(agent ? { agent } : {}),
+      ...(issuer ? { issuer } : {}),
       ...(serviceAccount ? { serviceAccount } : {}),
       ...(connector ? { connector } : {}),
       ...(section === "insights"
@@ -1574,6 +1579,7 @@ function Organization() {
     workspace,
     webhook,
     agent,
+    issuer,
     serviceAccount,
     connector,
     from,
@@ -1600,6 +1606,7 @@ function Organization() {
           : undefined
       }
       connectedAgent={page === "agents" ? agent : undefined}
+      autoConnectIssuer={page === "agents" ? issuer : undefined}
       connectors={
         page === "integrations"
           ? connectorLocation({ connector, view: parseConnectorView(view) })

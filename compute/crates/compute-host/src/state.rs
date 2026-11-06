@@ -177,6 +177,12 @@ pub(crate) struct Record {
     /// or was handed on: the host drops only what it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
+    /// Its removal, a hand-off, keeps this host's copy aside instead of
+    /// deleting it: the service declared this host gone and went on
+    /// without it from an older copy, so this one may hold writes nothing
+    /// else has (see [`crate::layout::aside_dir`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub set_aside: bool,
     /// Until when the host keeps the room of its first wake booked, in
     /// milliseconds since the Unix epoch: set as it is created, claimed
     /// or adopted here, so an agent that starts before then and finds it
@@ -227,6 +233,7 @@ impl Record {
             owner_epoch: OwnerEpoch::FIRST.0,
             saves: 0,
             handed_off: false,
+            set_aside: false,
             first_wake_by_ms: None,
         }
     }
@@ -314,6 +321,7 @@ pub(crate) struct Change {
     backed_up_ms: Option<u64>,
     next_save: bool,
     handed_off: bool,
+    set_aside: bool,
     woke: bool,
     owner: Option<OwnerEpoch>,
     /// The agent link the control service sent last, `None` inside for none;
@@ -414,6 +422,13 @@ impl Change {
         self
     }
 
+    /// [`Self::handed_off`], keeping this host's copy aside rather than
+    /// deleting it.
+    pub fn set_aside(mut self) -> Self {
+        self.set_aside = true;
+        self.handed_off()
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -444,6 +459,7 @@ impl Change {
             record.saves += 1;
         }
         record.handed_off |= self.handed_off;
+        record.set_aside |= self.set_aside;
         if self.woke {
             record.first_wake_by_ms = None;
         }
@@ -1012,6 +1028,7 @@ impl Records {
                     owner_epoch: owner.0,
                     saves: 0,
                     handed_off: false,
+                    set_aside: false,
                     // Made from a ready sandbox, which is never saved.
                     only_copy: true,
                     first_wake_by_ms: Some(first_wake_by_ms),

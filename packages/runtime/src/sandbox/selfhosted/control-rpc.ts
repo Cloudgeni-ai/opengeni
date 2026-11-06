@@ -499,6 +499,36 @@ export function commandOutcomeUnknownAfterReplacementAgentError(options: {
   };
 }
 
+/** Detail key of the error of a command whose start its agent left
+ *  unanswered for the op stream's bound (`OP_START_UNANSWERED_MS`): the
+ *  milliseconds waited. Reserved (never sent by the agent). */
+export const AGENT_UNRESPONSIVE_DETAIL_KEY = "_agent_unresponsive_ms";
+/** Detail key set beside `AGENT_UNRESPONSIVE_DETAIL_KEY`: what kind of machine
+ *  stopped answering ("compute" or "connected_machine"). */
+export const AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY = "_agent_unresponsive_machine";
+/** Detail key set beside `AGENT_UNRESPONSIVE_DETAIL_KEY`: what was done about
+ *  it (an `UnresponsiveAgentRecovery`, or "none"). */
+export const AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY = "_agent_unresponsive_recovery";
+
+/** What was done about a machine whose agent stopped answering a command:
+ *  - `restarted`: the machine was restarted (files kept, programs stopped);
+ *  - `restarting`: a restart was asked for and has not finished yet;
+ *  - `already_restarted`: it was already restarted once this turn, so not again;
+ *  - `restart_failed`: a restart was tried and failed;
+ *  - `restart_unavailable`: no restart could be arranged (it could not be
+ *    recorded, so none was made);
+ *  - `answering`: its agent answered again before a restart, so none was made;
+ *  - `host_busy`: its host is busy with it, as handing it off to another host,
+ *    and refuses to wake it for a short while, so no restart was made. */
+export type UnresponsiveAgentRecovery =
+  | "restarted"
+  | "restarting"
+  | "already_restarted"
+  | "restart_failed"
+  | "restart_unavailable"
+  | "answering"
+  | "host_busy";
+
 /** The reserved `detail` key the transport sets to "1" when a no-responder fault
  *  comes after it already waited out its reconnect window for that exact process.
  *  Re-issuing would only wait the same window again. Reserved (never sent by the

@@ -21,9 +21,9 @@ export function canArchiveChat(
 }
 
 /**
- * "Archive" where this person can archive the chat, otherwise null: an
- * archived chat cannot be restored, and people without session control
- * cannot archive.
+ * "Archive" where this person can archive the chat, otherwise null: people
+ * without session control cannot archive, and an archived chat is restored
+ * from its own notice (see ReadOnlySessionNotice).
  */
 export function archiveActionLabel(
   context: Pick<AppContextValue, "accessContext">,
@@ -35,8 +35,17 @@ export function archiveActionLabel(
 /** How long Undo is offered; the server accepts it for a little longer. */
 export const ARCHIVE_UNDO_MS = 10_000;
 
-/** What keeps a chat live on purpose (the server's `session_archive_blocked`). */
-type ArchiveBlocker = { kind: string; sessionId: string };
+/**
+ * What keeps a chat live (the server's `session_archive_blocked`): a setting
+ * on purpose, or a sub-chat still in use (`active_sub_chat`, with its title
+ * and why).
+ */
+type ArchiveBlocker = {
+  kind: string;
+  sessionId: string;
+  title?: string | null;
+  reason?: string;
+};
 
 function archiveBlockers(error: unknown): ArchiveBlocker[] | null {
   if (apiErrorFacts(error).code !== "session_archive_blocked") return null;
@@ -63,6 +72,44 @@ const KEPT_ACTIVE_MEMORY_MS = 60_000;
 
 function archiveKey(chat: Pick<SessionListRow, "id" | "workspaceId">) {
   return `${chat.workspaceId}/${chat.id}`;
+}
+
+/**
+ * Sub-chats in use that the person chose to archive too ("Archive all" on the
+ * notice), by workspace and chat. The archive that `rerun` starts takes them
+ * synchronously, like the keep-live entries.
+ */
+const confirmedActiveSubChats = new Map<string, string[]>();
+
+function takeConfirmedActiveSubChats(chat: Pick<SessionListRow, "id" | "workspaceId">) {
+  const key = archiveKey(chat);
+  const ids = confirmedActiveSubChats.get(key);
+  confirmedActiveSubChats.delete(key);
+  return ids;
+}
+
+const ACTIVE_REASON: Record<string, string> = {
+  running: "running",
+  waiting: "waiting for input",
+  goal: "working on a goal",
+  messaged: "in use",
+};
+
+/** How many sub-chats in use the notice names; the rest are counted. */
+const ACTIVE_SUB_CHATS_NAMED = 3;
+
+/** "“Owner” (in use), “Worker” (running) and 2 more", for the notice. */
+export function activeSubChatsSentence(blockers: readonly ArchiveBlocker[]): string {
+  const named = blockers.slice(0, ACTIVE_SUB_CHATS_NAMED).map((blocker) => {
+    const reason = ACTIVE_REASON[blocker.reason ?? ""] ?? "in use";
+    const name = blocker.title?.trim() ? quotedChatName(blocker.title) : "An untitled chat";
+    return `${name} (${reason})`;
+  });
+  const more = blockers.length - named.length;
+  if (more > 0) named.push(`${more} more`);
+  return named.length > 1
+    ? `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`
+    : (named[0] ?? "");
 }
 
 function takeKeptActive(chat: Pick<SessionListRow, "id" | "workspaceId">) {
@@ -146,11 +193,13 @@ async function turnOffKeepLiveAndArchive(
 }
 
 /**
- * Archive a chat for everyone, or undo that (`archived: false`) within the
- * few seconds Undo is offered. Archiving shows a notice with Undo; once it
- * closes, the chat moves to long-term storage for good. When only "Keep this
- * chat active" keeps it live, the notice offers one action that turns that
- * off and archives through `rerun`. Other errors are thrown for the caller;
+ * Archive a chat for everyone, or bring it back (`archived: false`): Undo
+ * within the few seconds it is offered, or Restore later, which puts stored
+ * content back in the background. Archiving shows a notice with Undo. When
+ * only "Keep this chat active" keeps it live, the notice offers one action
+ * that turns that off and archives through `rerun`. When sub-chats are still
+ * in use, the notice says how many and which, and archives them too only if
+ * the person chooses "Archive all". Other errors are thrown for the caller;
  * a refusal that says what keeps the chat live is thrown as that sentence.
  */
 export async function requestSessionArchive(
@@ -168,10 +217,12 @@ export async function requestSessionArchive(
   const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
   if (!accepted) return null;
   const turnedOff = archived ? takeKeptActive(chat) : undefined;
+  const confirmActiveSubChats = archived ? takeConfirmedActiveSubChats(chat) : undefined;
   let updated: Awaited<ReturnType<AppContextValue["client"]["updateSessionArchive"]>>;
   try {
     updated = await context.client.updateSessionArchive(chat.workspaceId, chat.id, {
       archived,
+      ...(confirmActiveSubChats?.length ? { confirmActiveSubChats } : {}),
     });
   } catch (error) {
     // The setting was turned off only to archive; put it back.
@@ -200,8 +251,39 @@ export async function requestSessionArchive(
       });
       return null;
     }
+    const active = blockers?.filter((blocker) => blocker.kind === "active_sub_chat") ?? [];
+    if (archived && rerun && active.length > 0 && active.length === blockers?.length) {
+      if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
+      const sessionIds = active.map((blocker) => blocker.sessionId);
+      let chosen = false;
+      const count = active.length === 1 ? "A sub-chat is" : `${active.length} sub-chats are`;
+      toast.warning(`${count} still in use.`, {
+        description: `${activeSubChatsSentence(active)}. Archiving ${quotedChatName(chatTitle)} stops ${active.length === 1 ? "it" : "them"} too.`,
+        // Stays until the person decides; it is not a passing notice.
+        duration: Number.POSITIVE_INFINITY,
+        action: {
+          label: "Archive all",
+          onClick: () => {
+            if (chosen || !context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
+            chosen = true;
+            confirmedActiveSubChats.set(archiveKey(chat), sessionIds);
+            rerun(true);
+            // Still there: that archive didn't start, so nothing is confirmed.
+            confirmedActiveSubChats.delete(archiveKey(chat));
+          },
+        },
+        cancel: { label: "Keep them", onClick: () => undefined },
+      });
+      return null;
+    }
     const { code, serverMessage } = apiErrorFacts(error);
-    if (serverMessage && (blockers || code === "session_archive_final")) {
+    if (
+      serverMessage &&
+      (blockers ||
+        code === "session_archive_final" ||
+        code === "session_archive_busy" ||
+        code === "session_archive_restore_root")
+    ) {
       throw userFacingError(error, serverMessage);
     }
     throw error;
@@ -211,7 +293,7 @@ export async function requestSessionArchive(
     if (turnedOff) rememberKeptActive(chat, turnedOff);
     toast(`Archived ${quotedChatName(chatTitle)}`, {
       description:
-        "In a few seconds it moves to long-term storage and can't be restored. You can still read and search it under Archived.",
+        "In a few seconds it moves to long-term storage. You can still read and search it under Archived, and restore it from there.",
       duration: ARCHIVE_UNDO_MS,
       ...(rerun ? { action: { label: "Undo", onClick: () => rerun(false) } } : {}),
     });
@@ -219,7 +301,11 @@ export async function requestSessionArchive(
     // Undo returns the chat as it was, "Keep this chat active" included. The
     // chat comes back at once; the setting follows, and only a failure says so.
     const kept = takeKeptActive(chat);
-    if (!kept?.length) toast.success("Archive undone.");
+    if (updated.retention?.archive?.restoring) {
+      toast.success(`Restoring ${quotedChatName(chatTitle)}`, {
+        description: "Its content is coming back from long-term storage. It can continue soon.",
+      });
+    } else if (!kept?.length) toast.success("Archive undone.");
     else {
       void restoreKeepLive(context, chat.workspaceId, kept).then((restored) => {
         if (restored) toast.success("Archive undone.");

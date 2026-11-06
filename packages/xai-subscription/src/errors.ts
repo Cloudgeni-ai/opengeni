@@ -1,3 +1,5 @@
+import { parseXaiClientVersionRejection } from "./client-version";
+
 export type XaiSubscriptionErrorKind =
   | "invalid_response"
   | "not_enabled"
@@ -31,6 +33,100 @@ export class XaiSubscriptionTransientError extends XaiSubscriptionError {
     super("transient", message, status);
     this.name = "XaiSubscriptionTransientError";
   }
+}
+
+export const XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE = "xai_client_outdated";
+
+/**
+ * xAI refused the Grok client version Opengeni presented, and adopting the
+ * minimum it named did not help (it named none, or refused that too). This
+ * is a platform release problem, never a fault of the connected account, so
+ * it must not mark the account unauthorized or forbidden.
+ */
+export class XaiSubscriptionClientOutdatedError extends XaiSubscriptionError {
+  readonly code = XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE;
+
+  constructor(
+    readonly sentVersion: string,
+    readonly requiredVersion: string,
+    status?: number,
+  ) {
+    super(
+      "provider_rejected",
+      `SuperGrok refused the Grok client version this Opengeni release presents (${sentVersion}); xAI requires ${requiredVersion} or newer. Grok models stay unavailable until Opengeni is updated.`,
+      status,
+    );
+    this.name = "XaiSubscriptionClientOutdatedError";
+  }
+
+  static fromText(text: string | null | undefined, status?: number) {
+    const rejection = parseXaiClientVersionRejection(text);
+    return rejection
+      ? new XaiSubscriptionClientOutdatedError(rejection.sent, rejection.required, status)
+      : null;
+  }
+}
+
+/**
+ * Find an outdated-client refusal anywhere on an error chain: the typed error,
+ * or the provider's refusal sentence carried by an SDK API error (its
+ * message or parsed body) after the transport's one adopt-and-retry failed.
+ */
+export function classifyXaiSubscriptionClientOutdatedError(
+  error: unknown,
+): XaiSubscriptionClientOutdatedError | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof XaiSubscriptionClientOutdatedError) return current;
+    const value = current as Record<string, unknown>;
+    const status = typeof value.status === "number" ? value.status : undefined;
+    const candidates: unknown[] = [value.message, value.error];
+    if (value.error && typeof value.error === "object") {
+      const body = value.error as Record<string, unknown>;
+      candidates.push(body.message, body.error);
+    }
+    for (const candidate of candidates) {
+      const outdated =
+        typeof candidate === "string"
+          ? XaiSubscriptionClientOutdatedError.fromText(candidate, status)
+          : null;
+      if (outdated) return outdated;
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
+/** The first bytes of an error response body as text; never throws. */
+export async function readBoundedXaiErrorText(
+  response: Response,
+  maxBytes = 16 * 1024,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < maxBytes) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      chunks.push(chunk.value);
+      size += chunk.value.byteLength;
+    }
+  } catch {
+    // A broken error body is still an error; the status decides.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const bytes = new Uint8Array(Math.min(size, maxBytes));
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= bytes.byteLength) break;
+    const slice = chunk.subarray(0, bytes.byteLength - offset);
+    bytes.set(slice, offset);
+    offset += slice.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export class XaiSubscriptionHostedToolContinuationError extends XaiSubscriptionError {

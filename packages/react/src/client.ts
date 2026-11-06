@@ -251,7 +251,7 @@ export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
 
 /** Exact client surface required by {@link useFileAttachments}. */
 export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile"> &
-  Partial<Pick<OpenGeniClient, "createFileDownloadUrl">>;
+  Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "getFile">>;
 
 /** Exact client surface required by structured human-input hooks. */
 export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &

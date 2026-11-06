@@ -119,6 +119,9 @@ struct Truth {
     copied: Option<At>,
     /// When it last started running.
     running_since: At,
+    /// A restart is under way: its VM must end without a save and its
+    /// memory image be forgotten before it runs again.
+    restarting: bool,
 }
 
 impl Truth {
@@ -156,9 +159,22 @@ impl Truth {
     }
 
     /// Applies a loss computed by the model and expects it to be reported.
+    /// A restart ends programs on purpose: nothing is reported then.
     fn settle(&mut self, (state, lost): (State, bool)) {
         self.state = state;
-        self.unreported_losses += u32::from(lost);
+        self.unreported_losses += u32::from(lost && !self.restarting);
+    }
+
+    /// A restart is done once nothing could bring its old programs back:
+    /// no VM, no memory image, and no step under way but a boot.
+    fn settle_restart(&mut self) {
+        let stepping = self.op.is_some_and(|(_, step)| step != Step::Boot);
+        if self.broken
+            || self.op.is_some_and(|(_, step)| step == Step::Boot)
+            || (!stepping && !self.state.level.has_process() && !self.state.memory_saved)
+        {
+            self.restarting = false;
+        }
     }
 }
 
@@ -185,6 +201,11 @@ struct World {
     started: [u64; Step::COUNT],
     /// Losses of running programs, to prove failures were exercised.
     losses: u64,
+    /// Sandboxes whose VM the core asked to end for a restart, ended once
+    /// the actions of the input that asked are carried out.
+    ending: Vec<SandboxId>,
+    /// Restarts that ended their VM, to prove the path was exercised.
+    restart_ends: u64,
 }
 
 impl World {
@@ -215,6 +236,8 @@ impl World {
             next_hold: 0,
             started: [0; Step::COUNT],
             losses: 0,
+            ending: Vec::new(),
+            restart_ends: 0,
         }
     }
 
@@ -229,6 +252,27 @@ impl World {
             self.act(action);
         }
         self.check();
+        for sandbox in std::mem::take(&mut self.ending) {
+            self.end_for_restart(sandbox);
+        }
+    }
+
+    /// Ends a VM the core asked to end for a restart, as the host does.
+    fn end_for_restart(&mut self, sandbox: SandboxId) {
+        let now = self.now;
+        let Some(truth) = self.live.get_mut(&sandbox) else {
+            return;
+        };
+        assert!(truth.restarting, "{sandbox:?} ended with no restart");
+        assert!(truth.op.is_none(), "{sandbox:?} ended under a step");
+        if !truth.state.level.has_process() {
+            return;
+        }
+        truth.settle(truth.state.without_process());
+        truth.update_wake(now);
+        truth.settle_restart();
+        self.restart_ends += 1;
+        self.send(Input::Lost { sandbox });
     }
 
     fn act(&mut self, action: Action) {
@@ -247,7 +291,10 @@ impl World {
                     "{step:?} cannot start from {:?}",
                     truth.state
                 );
-                if step == Step::Checkpoint {
+                if truth.restarting {
+                    // Nothing may keep or bring back its programs.
+                    assert_eq!(step, Step::Forget, "{sandbox:?} restarting");
+                } else if step == Step::Checkpoint {
                     // Only once due: its running time since the later of
                     // its newest copy and its wake.
                     let after = truth
@@ -297,6 +344,7 @@ impl World {
             | Action::Bound { sandbox, .. } => {
                 panic!("{sandbox:?} bounded, but this host has no rule for outgrowth")
             }
+            Action::EndForRestart { sandbox } => self.ending.push(sandbox),
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
                     return;
@@ -379,7 +427,16 @@ impl World {
             if std::mem::take(&mut truth.process_lost) {
                 truth.settle(truth.state.without_process());
             }
+            // A restart whose memory image could not be forgotten ends; the
+            // sandbox wakes from its last save.
+            if pending.step == Step::Forget
+                && matches!(outcome, Outcome::Failed(_))
+                && truth.state.memory_saved
+            {
+                truth.restarting = false;
+            }
             truth.update_wake(now);
+            truth.settle_restart();
             // A sleep step meets a request once nobody waits for a wake.
             if !pending.step.wakes()
                 && !truth.wake_pending
@@ -449,6 +506,11 @@ impl World {
             assert_eq!(view.step, truth.op.map(|(_, step)| step), "{id:?} step");
             assert_eq!(view.broken, truth.broken, "{id:?} broken");
             assert_eq!(
+                self.host.restarting(*id),
+                truth.restarting,
+                "{id:?} restarting"
+            );
+            assert_eq!(
                 view.requested,
                 truth.requested.unwrap_or(Level::Running),
                 "{id:?} sleep request"
@@ -479,6 +541,7 @@ impl World {
                 resident: if state.level.has_process() { GIB } else { 0 },
                 copied: (state.durability == Durability::Remote).then_some(self.now),
                 running_since: self.now,
+                restarting: false,
             },
         );
         self.send(Input::Add {
@@ -523,7 +586,11 @@ impl World {
         match self.rng.below(100) {
             0..30 => {
                 let truth = self.live.get_mut(&id).unwrap();
-                if truth.state.level != Level::Running || truth.op.is_some() {
+                // A use during a checkpoint finds it awake already, and
+                // asks for nothing more should the checkpoint lose it.
+                if truth.state.level != Level::Running
+                    || truth.op.is_some_and(|(_, step)| step != Step::Checkpoint)
+                {
                     truth.wake_pending = true;
                 }
                 truth.requested = None;
@@ -570,6 +637,7 @@ impl World {
                     } else {
                         truth.settle(truth.state.without_process());
                         truth.update_wake(now);
+                        truth.settle_restart();
                     }
                     self.send(Input::Lost { sandbox: id });
                 }
@@ -588,8 +656,14 @@ impl World {
                 self.send(Input::Remove { sandbox: id });
             }
             90..95 => self.add(),
-            95..98 => {
+            95..97 => {
                 self.request_sleep(id);
+            }
+            97..98 => {
+                let truth = self.live.get_mut(&id).unwrap();
+                truth.restarting = !truth.broken;
+                truth.settle_restart();
+                self.send(Input::Restart { sandbox: id });
             }
             98..100 => {
                 // One sweep of processor readings arrives as one batch.
@@ -606,9 +680,9 @@ impl World {
     }
 }
 
-/// Runs one seeded simulation and returns how often each step started and
-/// how many times running programs were lost.
-fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
+/// Runs one seeded simulation and returns how often each step started, how
+/// many times running programs were lost, and how many restarts ended a VM.
+fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64, u64) {
     let mut world = World::new(seed);
     for _ in 0..8 {
         world.add();
@@ -648,6 +722,11 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
         );
     }
     for (id, truth) in &world.live {
+        assert!(
+            !truth.restarting,
+            "seed {seed}: {id:?} never finished restarting at {:?}",
+            truth.state
+        );
         if !truth.broken {
             let settled = Duration::from_secs(300 * 86_400);
             assert_eq!(
@@ -686,15 +765,17 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
             truth.state
         );
     }
-    (world.started, world.losses)
+    (world.started, world.losses, world.restart_ends)
 }
 
 #[test]
 fn random_interleavings_keep_every_invariant() {
     let mut started = [0; Step::COUNT];
     let mut losses = 0;
+    let mut restart_ends = 0;
     for seed in 0..400 {
-        let (counts, lost) = run(seed, 600);
+        let (counts, lost, ended) = run(seed, 600);
+        restart_ends += ended;
         for (total, count) in started.iter_mut().zip(counts) {
             *total += count;
         }
@@ -709,4 +790,8 @@ fn random_interleavings_keep_every_invariant() {
         );
     }
     assert!(losses >= 100, "only {losses} losses");
+    assert!(
+        restart_ends >= 100,
+        "only {restart_ends} restarts ended a VM"
+    );
 }

@@ -9,7 +9,7 @@
      ?section=models&view=connect-org:codex              one provider's step
      ?section=models&workspace=<id>                      one workspace's model page
      ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
-     ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
+     ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only (any provider)
      ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
      ?section=models&account=...&view=model-access       Models an account can serve
      ?section=models&view=account-rule-locks             What workspaces can change
@@ -40,24 +40,22 @@ export type ModelsView =
   | "account-rule-locks"
   | "model-access";
 
+/**
+ * Every provider has both steps: `connect-org:` connects it for the
+ * organization (owners and admins, who choose where it's available), and
+ * `connect:` connects it as one workspace's own (that workspace's admins).
+ * The step is the same page either way; only where the account lives differs.
+ */
 const PROVIDERS: readonly ModelsProvider[] = [
   "codex",
   "supergrok",
   "vercel",
   "openrouter",
   "opper",
-  "anthropic",
-  "claude_subscription",
-];
-
-/**
- * Connected for the organization only: a workspace's own OpenAI or Azure key is
- * a direct connection with its own section. An OpenAI-compatible endpoint is
- * always the organization's; it can connect several.
- */
-const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = [
   "openai",
   "azure_openai",
+  "anthropic",
+  "claude_subscription",
   "openai_compatible",
 ];
 
@@ -65,9 +63,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect",
   "connect-workspace",
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
-  ...[...PROVIDERS, ...ORGANIZATION_ONLY_PROVIDERS].map(
-    (provider) => `connect-org:${provider}` as const,
-  ),
+  ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
   "compaction",
   "account-rule-locks",
