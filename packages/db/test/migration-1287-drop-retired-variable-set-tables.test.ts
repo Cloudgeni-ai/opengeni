@@ -17,7 +17,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
+import { assertRuntimeDatabasePostureForLedger } from "./helpers/runtime-posture-for-ledger";
 import { attachLegacyVariableSets } from "./helpers/legacy-variable-sets";
 
 const migration = "1287_drop_retired_variable_set_tables.sql";
@@ -256,9 +256,9 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
       select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname in ('public', 'opengeni_private') and p.prokind in ('f', 'p') and p.prosrc ~ ${pattern}`,
     ).toHaveLength(0);
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, { rlsStrategy: "force" });
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, { rlsStrategy: "force" });
     const rig = await createRig(client!.db, {
       ...scope,
       name: "post-contract",

@@ -10,7 +10,8 @@ import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { assertRuntimeDatabasePosture, RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
+import { RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
+import { assertRuntimeDatabasePostureForLedger } from "./helpers/runtime-posture-for-ledger";
 
 const migration = "1273_drop_retired_automation_and_pr_review.sql";
 const sourceDirectory = join(import.meta.dir, "../drizzle");
@@ -80,7 +81,7 @@ async function assertNotApplied() {
   const [receipt] = await owned!.admin<{ present: boolean }[]>`
     select exists(select 1 from schema_migrations where name = ${migration}) as present`;
   expect(receipt?.present).toBe(false);
-  await assertRuntimeDatabasePosture(client!.db, options);
+  await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
 }
 
 describe.skipIf(!realDatabase)("retired automation and PR-review contraction", () => {
@@ -143,10 +144,10 @@ describe.skipIf(!realDatabase)("retired automation and PR-review contraction", (
       createdBy: { kind: "subject", subjectId: "contract-test-owner" },
     });
     expect(session.workspaceId).toBe(scope.workspaceId);
-    await assertRuntimeDatabasePosture(client!.db, options);
+    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
-    await assertRuntimeDatabasePosture(client!.db, options);
+    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
     await migrate(owned!.ownerUrl);
-    await assertRuntimeDatabasePosture(client!.db, options);
+    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
   }, 180_000);
 });
