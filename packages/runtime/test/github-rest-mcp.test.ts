@@ -171,6 +171,27 @@ describe("GitHubRestMcpServer", () => {
     });
   });
 
+  test("keeps line breaks and tabs in Markdown bodies", async () => {
+    const markdown = "## Summary\n\n- one\n- two\r\n\n```ts\n\tcode\n```";
+    const server = buildServer(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual({ body: markdown });
+      return response({ id: 5, body: markdown, user: { id: 7, login: "bendik" } });
+    });
+    const result = await server.callToolResult("pull_request_comment", {
+      repository: repository.fullName,
+      pullNumber: 17,
+      body: markdown,
+    });
+    expect(result.isError).toBeFalsy();
+    const rejected = await server.callToolResult("pull_request_comment", {
+      repository: repository.fullName,
+      pullNumber: 17,
+      body: "bell \u0007",
+    });
+    expect(rejected.isError).toBe(true);
+    expect(githubRestConnectorActionOutcome(rejected)).toBe("not_executed");
+  });
+
   test("requires review text for comments and change requests before provider I/O", async () => {
     let calls = 0;
     const server = buildServer(async () => {

@@ -659,7 +659,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           "POST",
           compact({
             title: requiredString(args.title, "title", 256),
-            body: optionalString(args.body, "body", MAX_TEXT),
+            body: optionalText(args.body, "body", MAX_TEXT),
             labels: optionalStringArray(args.labels, "labels", 20, 128),
             assignees: optionalStringArray(args.assignees, "assignees", 20, 128),
           }),
@@ -674,7 +674,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           requireMutationFields(
             compact({
               title: optionalString(args.title, "title", 256),
-              body: optionalString(args.body, "body", MAX_TEXT),
+              body: optionalText(args.body, "body", MAX_TEXT),
               state: optionalEnum(args.state, "state", ["open", "closed"]),
               labels: optionalStringArray(args.labels, "labels", 20, 128),
               assignees: optionalStringArray(args.assignees, "assignees", 20, 128),
@@ -689,7 +689,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           `/repos/${repository.fullName}/issues/${positiveInteger(args.issueNumber, "issueNumber")}/comments`,
           "POST",
           {
-            body: requiredString(args.body, "body", MAX_TEXT),
+            body: requiredText(args.body, "body", MAX_TEXT),
           },
           projectComment,
         );
@@ -703,7 +703,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
             title: requiredString(args.title, "title", 256),
             head: requiredString(args.head, "head", 512),
             base: requiredString(args.base, "base", 512),
-            body: optionalString(args.body, "body", MAX_TEXT),
+            body: optionalText(args.body, "body", MAX_TEXT),
             draft: optionalBoolean(args.draft, "draft"),
           }),
           projectPullRequest,
@@ -717,7 +717,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           requireMutationFields(
             compact({
               title: optionalString(args.title, "title", 256),
-              body: optionalString(args.body, "body", MAX_TEXT),
+              body: optionalText(args.body, "body", MAX_TEXT),
               state: optionalEnum(args.state, "state", ["open", "closed"]),
               base: optionalString(args.base, "base", 512),
             }),
@@ -731,7 +731,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           `/repos/${repository.fullName}/issues/${positiveInteger(args.pullNumber, "pullNumber")}/comments`,
           "POST",
           {
-            body: requiredString(args.body, "body", MAX_TEXT),
+            body: requiredText(args.body, "body", MAX_TEXT),
           },
           projectComment,
         );
@@ -768,7 +768,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
             merge_method: optionalEnum(args.method, "method", ["merge", "squash", "rebase"]),
             sha: optionalSha(args.expectedHeadSha, "expectedHeadSha"),
             commit_title: optionalString(args.commitTitle, "commitTitle", 256),
-            commit_message: optionalString(args.commitMessage, "commitMessage", MAX_TEXT),
+            commit_message: optionalText(args.commitMessage, "commitMessage", MAX_TEXT),
           }),
           projectMerge,
         );
@@ -1487,6 +1487,21 @@ function requiredString(value: unknown, name: string, max: number): string {
 function optionalString(value: unknown, name: string, max: number): string | undefined {
   return value === undefined ? undefined : requiredString(value, name, max);
 }
+/** Markdown text such as a body or commit message: tabs and line breaks are kept. */
+function requiredText(value: unknown, name: string, max: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > max ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+  ) {
+    throw new GitHubRestInputError(`${name} is invalid`);
+  }
+  return value;
+}
+function optionalText(value: unknown, name: string, max: number): string | undefined {
+  return value === undefined ? undefined : requiredText(value, name, max);
+}
 function optionalBoolean(value: unknown, name: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "boolean") throw new GitHubRestInputError(`${name} is invalid`);
@@ -1572,7 +1587,7 @@ function requireMutationFields(input: Record<string, unknown>): Record<string, u
 }
 function reviewSubmissionBody(args: Record<string, unknown>): Record<string, unknown> {
   const event = requiredEnum(args.event, "event", ["COMMENT", "APPROVE", "REQUEST_CHANGES"]);
-  const body = optionalString(args.body, "body", MAX_TEXT);
+  const body = optionalText(args.body, "body", MAX_TEXT);
   if ((event === "COMMENT" || event === "REQUEST_CHANGES") && !body) {
     throw new GitHubRestInputError(`body is required when event is ${event}`);
   }
