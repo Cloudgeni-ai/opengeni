@@ -2172,6 +2172,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 3
             : 0) +
+          // 1294 Teams install welcome claims: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1241 current billing recipients: one runtime read-only FORCE-RLS projection.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
@@ -2279,7 +2285,8 @@ describe("runtime database posture evaluator", () => {
         4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
         3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
         1 + // 1295 model call credit holds: full-DML, FORCE-RLS.
-        2; // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
+        2 + // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
+        1; // 1294 Teams install welcome claims: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
