@@ -30,12 +30,14 @@ import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
 import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
 import { createWithOpeningContext } from "./lib/message-context";
+import { personalGitHubAllRepositoriesEffectiveAccess } from "@opengeni/contracts/personal-github";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import type {
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   UpdateSessionRequest,
 } from "@opengeni/sdk";
@@ -1713,12 +1715,31 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ...(cursor ? { cursor } : {}),
             limit: 100,
           });
-          repositories.push(...page.repositories);
+          repositories.push(...page.repositories.map(usablePersonalGitHubRepository));
           selection = page.selection;
           cursor = page.nextCursor ?? undefined;
         } while (cursor !== undefined && repositories.length < 1_000);
         if (signal?.aborted || !ownsRefresh()) return;
-        setPersonalGitHubRepositories(repositories);
+        setPersonalGitHubRepositories((current) => {
+          // In All my repositories, repositories found by search past the
+          // listed pages stay available.
+          const allRepositoriesAccess =
+            status.allRepositoriesAvailable === false ? null : selection?.allRepositoriesAccess;
+          if (!allRepositoriesAccess) return repositories;
+          const listed = new Set(repositories.map((repository) => repository.repositoryId));
+          // Their access follows the mode as it is now, not as it was found.
+          const found = current.flatMap((repository) => {
+            if (listed.has(repository.repositoryId)) return [];
+            const access = personalGitHubAllRepositoriesEffectiveAccess(
+              allRepositoriesAccess,
+              repository,
+            );
+            return access
+              ? [{ ...repository, selectedAccess: access, effectiveAccess: access }]
+              : [];
+          });
+          return [...repositories, ...found];
+        });
         setPersonalGitHubSelection(selection);
         setPersonalGitHubAuthorityCache((current) =>
           selection &&
@@ -1844,9 +1865,32 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  async function searchPersonalGitHubRepositories(
+    workspaceId: string,
+    query: string,
+  ): Promise<void> {
+    const connection = personalGitHubStatus?.connection;
+    const trimmed = query.trim();
+    if (!connection || connection.status !== "active" || trimmed.length < 2) return;
+    const page = await client.listPersonalGitHubRepositories(workspaceId, connection.id, {
+      query: trimmed,
+      limit: 50,
+    });
+    if (page.repositories.length === 0) return;
+    setPersonalGitHubRepositories((current) => {
+      const known = new Set(current.map((repository) => repository.repositoryId));
+      const added = page.repositories
+        .filter((repository) => !known.has(repository.repositoryId))
+        .map(usablePersonalGitHubRepository);
+      return added.length > 0 ? [...current, ...added] : current;
+    });
+  }
+
   async function savePersonalGitHubRepositories(
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ): Promise<boolean> {
     const connection = personalGitHubStatus?.connection;
     const selection = personalGitHubSelection;
@@ -1858,6 +1902,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedSelectionGeneration: selection.selectionGeneration,
         idempotencyKey: crypto.randomUUID(),
         repositories,
+        ...(allRepositoriesAccess !== undefined ? { allRepositoriesAccess } : {}),
       });
       await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
@@ -2683,6 +2728,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   );
   const contextDisconnectPersonalGitHub = useLatestCallback(disconnectPersonalGitHub);
   const contextSavePersonalGitHubRepositories = useLatestCallback(savePersonalGitHubRepositories);
+  const contextSearchPersonalGitHubRepositories = useLatestCallback(
+    searchPersonalGitHubRepositories,
+  );
   const contextEnsurePersonalGitHubAuthority = useLatestCallback(ensurePersonalGitHubAuthority);
   const contextTogglePersonalGitHubRepository = useLatestCallback(togglePersonalGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
@@ -2796,6 +2844,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           reconnectPersonalGitHub: contextReconnectPersonalGitHub,
           disconnectPersonalGitHub: contextDisconnectPersonalGitHub,
           savePersonalGitHubRepositories: contextSavePersonalGitHubRepositories,
+          searchPersonalGitHubRepositories: contextSearchPersonalGitHubRepositories,
           ensurePersonalGitHubAuthority: contextEnsurePersonalGitHubAuthority,
           togglePersonalGitHubRepository: contextTogglePersonalGitHubRepository,
           refreshWorkspaceMcpServers,
@@ -2830,6 +2879,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextRenameWorkspace,
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
+    contextSearchPersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
     contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,
@@ -2968,4 +3018,18 @@ function submitGitHubManifest(
   // A same-tab post leaves the page anyway; a new-tab post must not leave the
   // manifest behind in the host page.
   if (newTab) form.remove();
+}
+
+/**
+ * The console's catalog keeps the access Opengeni may use now in
+ * `selectedAccess`, which is what the pickers read. The saved choice is the
+ * selection state's `repositories`.
+ */
+function usablePersonalGitHubRepository(
+  repository: PersonalGitHubRepositoryCatalogItem,
+): PersonalGitHubRepositoryCatalogItem {
+  if (repository.effectiveAccess === undefined) return repository;
+  return repository.effectiveAccess === repository.selectedAccess
+    ? repository
+    : { ...repository, selectedAccess: repository.effectiveAccess };
 }

@@ -3,6 +3,7 @@
 import type {
   CreateSessionRequest,
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
@@ -223,10 +224,14 @@ export type AppContextValue = {
   connectPersonalGitHub: (workspaceId: string) => Promise<void>;
   reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
   disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;
+  /** `allRepositoriesAccess` turns All my repositories on or off (null); omitted keeps it. */
   savePersonalGitHubRepositories: (
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ) => Promise<boolean>;
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  searchPersonalGitHubRepositories: (workspaceId: string, query: string) => Promise<void>;
   ensurePersonalGitHubAuthority: (
     workspaceId: string,
   ) => Promise<McpConnectionAccountSelection | null>;

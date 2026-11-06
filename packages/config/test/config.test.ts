@@ -930,6 +930,12 @@ describe("personal GitHub OAuth settings", () => {
   test("is disabled by default and loads a separate managed client when enabled", () => {
     expect(withEnv({}, () => getSettings()).githubRestMcpEnabled).toBe(false);
     expect(withEnv({}, () => getSettings()).githubPersonalOauthEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).githubPersonalAllRepositoriesEnabled).toBe(false);
+    expect(
+      withEnv({ ...enabled, OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED: "true" }, () =>
+        getSettings(),
+      ).githubPersonalAllRepositoriesEnabled,
+    ).toBe(true);
     expect(withEnv(enabled, () => getSettings())).toMatchObject({
       githubRestMcpEnabled: true,
       githubPersonalOauthEnabled: true,

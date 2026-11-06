@@ -29,6 +29,13 @@ function selected(fullName: string, id: string, access: "read" | "write" = "writ
   };
 }
 
+const connectionMetadata = {
+  credentialBindingId: "00000000-0000-4000-8000-000000000001",
+  providerPrincipalId: "7",
+  githubUserId: "7",
+  githubLogin: "person",
+} as PersonalGitHubGatewayAuthority["metadata"];
+
 function authority(
   overrides: Partial<PersonalGitHubGatewayAuthority> = {},
 ): PersonalGitHubGatewayAuthority {
@@ -36,7 +43,7 @@ function authority(
     claims,
     identity: { claims, initiator: { kind: "human", subjectId: "person" }, unattended: false },
     providerPrincipalId: "7",
-    metadata: {} as PersonalGitHubGatewayAuthority["metadata"],
+    metadata: connectionMetadata,
     selection: {
       connectionAuthorityGeneration: 1,
       credentialBindingId: "00000000-0000-4000-8000-000000000001",
@@ -431,7 +438,7 @@ describe("personal GitHub gateway review fixes", () => {
     expect((await send("/graphql", { method: "POST", body: query("other") })).status).toBe(403);
     const viewer = harness({
       authority: authority({
-        metadata: { githubLogin: "acme" } as PersonalGitHubGatewayAuthority["metadata"],
+        metadata: { ...connectionMetadata, githubLogin: "acme" },
       }),
     });
     const own = JSON.stringify({
@@ -493,6 +500,60 @@ describe("gateway repository allowlist", () => {
     expect(
       gatewayRepositoryDecision(removed, { kind: "name", owner: "ACME", name: "widgets" }, "read"),
     ).toEqual({ allowed: false, message: "ACME/widgets was removed from this chat." });
+  });
+
+  test("All my repositories allows a repository that was not picked, minus ones removed from the chat", () => {
+    const all = authority({
+      selection: {
+        ...authority().selection,
+        repositories: [],
+        allRepositoriesAccess: "write",
+      } as PersonalGitHubGatewayAuthority["selection"],
+      removedRepositories: [
+        {
+          resource: { kind: "repository", uri: "https://github.com/acme/widgets", ref: "main" },
+        } as unknown as PersonalGitHubGatewayAuthority["removedRepositories"][number],
+      ],
+    });
+    expect(
+      gatewayRepositoryDecision(all, { kind: "name", owner: "other", name: "tool" }, "write"),
+    ).toEqual({ allowed: true });
+    expect(
+      gatewayRepositoryDecision(all, { kind: "name", owner: "acme", name: "widgets" }, "read"),
+    ).toEqual({ allowed: false, message: "acme/widgets was removed from this chat." });
+  });
+
+  test("without All my repositories only the picked repositories are allowed, at their access", () => {
+    expect(
+      gatewayRepositoryDecision(
+        authority(),
+        { kind: "name", owner: "other", name: "tool" },
+        "read",
+      ),
+    ).toEqual({
+      allowed: false,
+      message: "other/tool is not one of the repositories the person allowed under Your GitHub.",
+    });
+    expect(
+      gatewayRepositoryDecision(
+        authority(),
+        { kind: "name", owner: "acme", name: "docs" },
+        "write",
+      ),
+    ).toEqual({ allowed: false, message: "acme/docs may only be read as the person." });
+  });
+
+  test("a changed connection is refused", () => {
+    const changed = authority({
+      metadata: {
+        ...connectionMetadata,
+        credentialBindingId: "00000000-0000-4000-8000-000000000009",
+      },
+    });
+    expect(
+      gatewayRepositoryDecision(changed, { kind: "name", owner: "acme", name: "widgets" }, "read")
+        .allowed,
+    ).toBe(false);
   });
 
   test("repositories are matched by ID too", () => {

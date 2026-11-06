@@ -12,7 +12,7 @@ import {
   resourcesIncludeRepository,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { personalGitHubRepositoryAuthority, type ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
@@ -20,9 +20,11 @@ import {
   getPersonalGitHubRepositorySelectionState,
   getSessionAuthorityProjection,
   getSessionGitHubGatewayState,
+  getSessionRepositoryMembershipForAuthority,
   getSessionResourcesForAuthority,
   getSessionTurnForAttempt,
   resolveAcceptedConnectionUse,
+  sessionRepositoryRemoved,
 } from "@opengeni/db";
 import {
   openPersonalGitHubGitBrokerClaims,
@@ -60,6 +62,8 @@ export type BrokerAuthority = {
   providerPrincipalId: string;
   /** Who decides pushes that need the person's approval. */
   identity?: GatewayDecisionIdentity;
+  /** The accepted work had All my repositories at this access. */
+  allRepositoriesAccess?: "read" | "write" | undefined;
 };
 
 export type PersonalGitHubGitBrokerServices = {
@@ -436,11 +440,18 @@ async function resolveBrokerAuthority(
 ): Promise<BrokerAuthority> {
   const { delegation, initiator } = await resolvePersonalGitHubPassTurn(deps, claims);
   const repository = exactRouteRepository(secret, claims, delegation, routeId);
-  const providerIdentity = await assertCurrentConnectionAndSelection(deps, claims, repository);
+  const allRepositoriesAccess = delegation.personalGitHubRepositorySelection?.allRepositoriesAccess;
+  const providerIdentity = await assertCurrentConnectionAndSelection(
+    deps,
+    claims,
+    repository,
+    allRepositoriesAccess,
+  );
   const session = await getSessionGitHubGatewayState(deps.db, claims.workspaceId, claims.sessionId);
   return {
     claims,
     repository,
+    allRepositoriesAccess,
     ...providerIdentity,
     identity: { claims, initiator, unattended: session?.unattended ?? false },
   };
@@ -491,7 +502,7 @@ async function authorizeBrokerProviderRequest(
   destinationUrl: string,
   operation: "identity_verify" | "repository_verify" | BrokerOperation,
 ): Promise<string> {
-  const { claims, repository } = authority;
+  const { claims, repository, allRepositoriesAccess } = authority;
   return await authorizePersonalGitHubProviderRequest(deps, {
     claims,
     providerPrincipalId: authority.providerPrincipalId,
@@ -500,7 +511,8 @@ async function authorizeBrokerProviderRequest(
     // Re-read every mutable connection/repository fence before this physical
     // provider request. A previous request's successful check grants nothing to
     // this one.
-    recheck: async () => await assertCurrentConnectionAndSelection(deps, claims, repository),
+    recheck: async () =>
+      await assertCurrentConnectionAndSelection(deps, claims, repository, allRepositoriesAccess),
   });
 }
 
@@ -655,32 +667,65 @@ async function assertCurrentConnectionAndSelection(
   deps: ApiRouteDeps,
   claims: PersonalGitHubGitBrokerClaims,
   repository: BrokerRepository,
+  allRepositoriesAccess?: "read" | "write" | undefined,
 ): Promise<{ providerPrincipalId: string }> {
   // Session membership is live authority: a repository removed from the chat
   // (or from the parent chat of this child) stops on its next Git request,
   // even for a turn or goal continuation that captured an older snapshot.
-  const sessionResources = await getSessionResourcesForAuthority(
-    deps.db,
-    claims.workspaceId,
-    claims.sessionId,
-  );
-  if (!sessionResources || !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)) {
-    throw new BrokerRepositoryRemovedError();
+  // All my repositories reaches every repository the person can use, so
+  // there the chat's list does not limit it, but a repository a person
+  // removed from the chat stays refused.
+  if (allRepositoriesAccess) {
+    const membership = await getSessionRepositoryMembershipForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !membership ||
+      sessionRepositoryRemoved(membership, {
+        uris: [repository.canonicalUrl, `https://github.com/${repository.fullName}`],
+        githubRepositoryId: repository.repositoryId,
+      })
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
+  } else {
+    const sessionResources = await getSessionResourcesForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !sessionResources ||
+      !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
   }
   const { selection, metadata } = await assertCurrentPersonalGitHubConnection(deps, claims);
-  const current = selection.repositories.find(
-    (candidate) => candidate.repositoryId === repository.repositoryId,
-  );
+  // The shared Your GitHub allowlist decision. In All my repositories the
+  // per-request live GitHub repository check in the handler confirms the
+  // person's own permission.
+  const decision = personalGitHubRepositoryAuthority({
+    current: { ...selection, allRepositoriesAccess: selection.allRepositoriesAccess ?? null },
+    metadata,
+    accepted: {
+      credentialBindingId: claims.credentialBindingId,
+      connectionAuthorityGeneration: claims.connectionAuthorityGeneration,
+      selectionGeneration: claims.selectionGeneration,
+      ...(allRepositoriesAccess ? { allRepositoriesAccess } : {}),
+      repositories: [repository],
+    },
+    repository: { repositoryId: repository.repositoryId, fullName: repository.fullName },
+    access: repository.access,
+  });
   if (
-    selection.selectionGeneration !== claims.selectionGeneration ||
-    !current ||
-    current.fullName !== repository.fullName ||
-    current.canonicalUrl !== repository.canonicalUrl ||
-    current.selectionGeneration !== repository.selectionGeneration ||
-    current.disabled ||
-    !canRead(current.permissions) ||
-    (repository.access === "write" &&
-      (current.selectedAccess !== "write" || current.archived || !canWrite(current.permissions)))
+    !decision.allowed ||
+    (decision.mode === "selected" &&
+      (decision.selected.fullName !== repository.fullName ||
+        decision.selected.canonicalUrl !== repository.canonicalUrl ||
+        decision.selected.selectionGeneration !== repository.selectionGeneration))
   ) {
     throw new Error("personal GitHub repository selection changed");
   }

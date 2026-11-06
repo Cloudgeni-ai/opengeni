@@ -83,6 +83,18 @@ only sign-in status, a searchable repository allowlist, read/write choice,
 reconnect, and disconnect. Without personal OAuth, the sheet keeps the single
 Opengeni app layout.
 
+The chooser's first control picks the mode: **Choose repositories** (the
+allowlist above) or **All my repositories**, with **Read only** or **Read and
+write**. **All my repositories** works like `gh` on the person's own
+computer: any repository they can currently reach on GitHub is usable, and
+the status reads `Connected as @login · All repos`. The explicit list is kept
+while the mode is on, so switching back restores it. Write still needs push
+(or higher) permission on GitHub and a repository that is not archived; with
+**Read only**, every repository is read-only. Searching in the chooser and the
+session repository picker also asks GitHub (`GET
+/v1/workspaces/{id}/integrations/github/personal/repositories?query=`), so
+results are not limited to the first 100 repositories.
+
 `/workspaces/<workspaceId>/plugins?open=integration%3Agithub&github=personal`
 opens the sheet on **Your GitHub**: the repository chooser when connected,
 otherwise the focused **Connect** action (it does not start the OAuth redirect
@@ -118,6 +130,73 @@ through one identity cannot also be mounted through the other at the same path.
 Existing-session pickers keep repositories already in the chat visible as
 **In chat**: people who may change the chat can switch them off, and a new
 chat changes their branch.
+
+## All my repositories
+
+The mode lives on the connection's selection head
+(`all_repositories_access`: `read`, `write` or null). Turning it on or off,
+or changing its access, advances the selection generation like any other
+selection edit and records it in `all_repositories_generation`. Work accepted
+under the mode keeps working while the mode is unchanged; work accepted before
+the mode last changed stops, so turning it off and on again, or narrowing and
+widening it, never revives earlier work.
+
+Catalog items keep `selectedAccess` as the saved per-repository choice and add
+`effectiveAccess`: the access usable now, which in this mode is the mode's
+access lowered to GitHub's permission on the repository. Every check uses the shared
+`personalGitHubRepositoryAuthority` and `checkPersonalGitHubRepositoryAccess`
+in `@opengeni/core` (`packages/core/src/domain/personal-github-repository-access.ts`):
+
+- Session admission freezes `allRepositoriesAccess` into the personal
+  delegation. A chat may then mount any repository; write needs mode
+  `write`. A chat started with no repositories still gets the
+  `github_personal__*` tools when the mode is on.
+- The git broker, token minting and the REST bridge accept a repository when
+  the mode is still on, its access still covers the request, and GitHub's
+  live repository answer grants it (cached for 60 seconds, by id and by
+  name). A renamed repository's redirect to `/repositories/<id>` on
+  `api.github.com` is followed once. Editing the explicit list does not
+  interrupt running work; turning the mode off, narrowing it to read,
+  reconnecting or disconnecting does.
+- A repository a person removed from a chat (or from its parent chat) stays
+  refused in that chat in this mode too, by the git broker and the REST
+  bridge, until a person attaches it again.
+- The [gh gateway](#gh-in-managed-sandboxes) uses the same decision for every
+  repository a `gh` request names, after its removed-from-chat check; GitHub
+  enforces the person's own permission on the request.
+
+Rollout: releases older than this change reject a delegation with the mode or
+without repositories. The mode is therefore offered only when
+`OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is on (status
+`allRepositoriesAvailable`); turn it on once every API and worker runs this
+release. While it is off, the replace route refuses to turn the mode on (409),
+admission, branch listing, the catalog and the pickers ignore a stored mode;
+the person can still keep or turn off a stored mode.
+
+## Read tools
+
+These `github_personal__*` tools work in chats without a sandbox, as the
+person, through the same REST bridge and action policy (all are reads):
+
+- `organizations_list`: the organizations whose repositories the person can
+  reach. The connection has only the `repo` scope, which `/user/orgs` does not
+  accept, so the list comes from the person's repositories; `complete` is
+  false when the scan stopped early.
+- `owner_repositories_list`: repositories of a user or organization, with
+  `filter` (name search through GitHub search) and pagination.
+- `workflow_runs_list`: Actions runs, filtered by workflow, branch, pull
+  request (its head commit), head SHA, event and status.
+- `workflow_run_get`: one run with its jobs and steps.
+- `workflow_job_logs_get`: one job's log, the end by default or from
+  `offset`, at most 256 KB per call (32 KB by default), returning
+  `nextOffset` to page. GitHub answers with a redirect to a signed log URL;
+  the bridge follows it only to an `https` URL and sends no token or GitHub
+  headers there. It asks the storage for just the needed bytes with an HTTP
+  range (the end for the default read) and falls back to reading the stream.
+
+The account tools (`organizations_list`, `owner_repositories_list`) need the
+connection only. The repository tools need the repository to be selected or
+the mode to be on.
 
 ## Authority contract
 

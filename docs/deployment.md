@@ -742,8 +742,11 @@ accepted in local/test, while non-local environments require HTTPS. Keep device
 flow disabled and store each client secret only in that environment's secret
 manager. Runtime
 artifacts pass through `OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED`,
-`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`, and
-`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`; enabling the feature also
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`,
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`, and (when set)
+`OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED`, which offers "All my
+repositories" once every API and worker runs a release that supports it;
+enabling the feature also
 requires integrations state signing and environment encryption. See
 [`personal-github.md`](personal-github.md) for the authority and rollout
 contract. Repository delivery does not create the external OAuth Apps or write

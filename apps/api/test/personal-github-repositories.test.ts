@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  clearPersonalGitHubRepositorySearchCache,
   listLivePersonalGitHubRepositoryBranches,
   personalGitHubRepositoryCanRead,
   personalGitHubRepositoryCanWrite,
@@ -8,6 +9,7 @@ import {
   parsePersonalGitHubProviderJson,
   parsePersonalGitHubRepository,
   requirePersonalGitHubRepositoryConnection,
+  searchLivePersonalGitHubRepositories,
   type PersonalGitHubRepositoryBranchServices,
 } from "../src/integrations/personal-github-repositories";
 
@@ -91,6 +93,154 @@ describe("personal GitHub repository capabilities", () => {
       }),
     ]);
     expect(states).toHaveLength(0);
+  });
+
+  test("All my repositories lists branches of any repository the person can read", async () => {
+    const selection = {
+      connectionAuthorityGeneration: 4,
+      credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      providerPrincipalId: "123456",
+      selectionGeneration: 7,
+      allRepositoriesAccess: "read" as const,
+      repositories: [],
+    };
+    const urls: string[] = [];
+    const authorities: unknown[] = [];
+    const services: PersonalGitHubRepositoryBranchServices = {
+      requireConnection: async () =>
+        ({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        }) as never,
+      getSelectionState: async () => selection,
+      providerJson: async (input) => {
+        urls.push(input.url.toString());
+        authorities.push(input.options.expectedRepositoryAuthority);
+        return input.url.pathname.startsWith("/repositories/")
+          ? {
+              id: 77,
+              full_name: "acme/widgets",
+              default_branch: "trunk",
+              visibility: "private",
+              private: true,
+              archived: false,
+              disabled: false,
+              permissions: {
+                pull: true,
+                push: false,
+                admin: false,
+                maintain: false,
+                triage: false,
+              },
+            }
+          : [{ name: "trunk" }];
+      },
+    };
+    const input = {
+      accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      subjectId: "user:owner",
+      connectionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      repositoryId: "77",
+      query: { cursor: 1, limit: 30 },
+    };
+    await expect(
+      listLivePersonalGitHubRepositoryBranches(
+        { db: {}, settings: { githubPersonalAllRepositoriesEnabled: true } } as never,
+        input,
+        services,
+      ),
+    ).resolves.toEqual({ branches: [{ name: "trunk", isDefault: true }], nextCursor: null });
+    expect(urls).toEqual([
+      "https://api.github.com/repositories/77",
+      "https://api.github.com/repos/acme/widgets/branches?page=1&per_page=30",
+    ]);
+    expect(authorities[1]).toEqual({
+      selectionGeneration: 7,
+      repositoryId: "77",
+      fullName: "acme/widgets",
+      allRepositories: true,
+    });
+    // Turned off meanwhile: nothing is returned.
+    const off = { ...selection, allRepositoriesAccess: null };
+    const states = [selection, off];
+    await expect(
+      listLivePersonalGitHubRepositoryBranches(
+        { db: {}, settings: { githubPersonalAllRepositoriesEnabled: true } } as never,
+        input,
+        {
+          ...services,
+          getSelectionState: async () => states.shift() ?? null,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "repository_selection_changed" });
+  });
+
+  test("search finds repositories past the first page, and an exact name directly", async () => {
+    clearPersonalGitHubRepositorySearchCache();
+    const github = (id: number, fullName: string) => ({
+      id,
+      full_name: fullName,
+      default_branch: "main",
+      visibility: "private",
+      private: true,
+      archived: false,
+      disabled: false,
+      permissions: { pull: true, push: true, admin: false, maintain: false, triage: false },
+    });
+    // Page 1 is full, page 2 ends the list.
+    const pages = [
+      Array.from({ length: 100 }, (_, index) => github(index + 1, `acme/repo-${index + 1}`)),
+      [github(500, "acme/widgets"), github(501, "acme/widget-docs")],
+    ];
+    const urls: string[] = [];
+    const services: Pick<
+      PersonalGitHubRepositoryBranchServices,
+      "requireConnection" | "providerJson"
+    > = {
+      requireConnection: async () =>
+        ({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        }) as never,
+      providerJson: async ({ url }) => {
+        urls.push(`${url.pathname}${url.search}`);
+        if (url.pathname === "/user/repos") {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return pages[Number(url.searchParams.get("page")) - 1] ?? [];
+        }
+        if (url.pathname === "/repos/other/public") return github(900, "other/public");
+        throw new PersonalGitHubRepositoryProviderError("repository_not_found");
+      },
+    };
+    const search = (query: string) =>
+      searchLivePersonalGitHubRepositories(
+        { db: {}, settings: {} } as never,
+        {
+          accountId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          workspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          subjectId: "user:owner",
+          connectionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          expectedConnectionAuthorityGeneration: 4,
+          query,
+          limit: 50,
+        },
+        services,
+      );
+    // Concurrent searches share one scan.
+    const [widget, other] = await Promise.all([search("widget"), search("other/public")]);
+    expect(widget.repositories.map((repository) => repository.fullName)).toEqual([
+      "acme/widgets",
+      "acme/widget-docs",
+    ]);
+    expect(other.repositories.map((repository) => repository.fullName)).toEqual(["other/public"]);
+    expect(urls.filter((url) => url.startsWith("/user/repos"))).toHaveLength(2);
+    // An unknown exact name is an empty answer, served from the cached scan.
+    expect((await search("acme/missing")).repositories).toEqual([]);
+    expect(urls.filter((url) => url.startsWith("/user/repos"))).toHaveLength(2);
+    clearPersonalGitHubRepositorySearchCache();
   });
 
   test("fails before provider use for unselected repositories and discards in-flight changes", async () => {
