@@ -119,7 +119,10 @@ describe.skipIf(!realDatabase)("retired automation and PR-review contraction", (
         missingTables: true,
       });
       for (const table of missing![1]!.split(", ")) {
-        const created = new RegExp(`create table (?:if not exists )?(?:public\\.)?${table}\\b`, "i");
+        const created = new RegExp(
+          `create table (?:if not exists )?(?:public\\.)?${table}\\b`,
+          "i",
+        );
         expect({ table, createdLater: created.test(laterSql) }).toEqual({
           table,
           createdLater: true,
