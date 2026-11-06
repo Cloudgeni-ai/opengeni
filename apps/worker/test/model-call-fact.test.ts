@@ -528,7 +528,8 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: 7000,
-      equivalentCreditCostMicros: null,
+      // The reviewed list rate's equivalent-credit comparison (+5% margin).
+      equivalentCreditCostMicros: 7350,
       pricingSource: "configured_list_price",
       listByClassMicros: null,
       listByClassApprox: false,
