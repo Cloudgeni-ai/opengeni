@@ -77,6 +77,102 @@ describe("Teams app package", () => {
     expect(wire).not.toContain(env.OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS);
   });
 
+  test("names the publisher, configurable, with Opengeni's partner ID by default", () => {
+    const manifest = buildTeamsAppManifest(options);
+    expect(manifest.developer).toMatchObject({ name: "Opengeni", mpnId: "7181379" });
+    const custom = buildTeamsAppManifest({ ...options, developerName: "Example AS", mpnId: "42" });
+    expect(custom.developer).toMatchObject({ name: "Example AS", mpnId: "42" });
+    expect(
+      buildTeamsAppManifest({ ...options, developerName: " Example AS " }).developer.name,
+    ).toBe("Example AS");
+    expect(buildTeamsAppManifest({ ...options, mpnId: null }).developer).not.toHaveProperty(
+      "mpnId",
+    );
+    for (const developerName of ["", "  ", "x".repeat(33)])
+      expect(() => buildTeamsAppManifest({ ...options, developerName })).toThrow("developerName");
+    for (const mpnId of ["", "MPN-1", "12345678901"])
+      expect(() => buildTeamsAppManifest({ ...options, mpnId })).toThrow("mpnId");
+
+    const env = {
+      OPENGENI_TEAMS_APP_ID: options.appId,
+      OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+      OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+      OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+      OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+      OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+    };
+    expect(teamsManifestOptionsFromEnv(env)).toMatchObject({
+      developerName: undefined,
+      mpnId: undefined,
+    });
+    expect(
+      teamsManifestOptionsFromEnv({
+        ...env,
+        OPENGENI_TEAMS_DEVELOPER_NAME: " Example AS ",
+        OPENGENI_TEAMS_MPN_ID: "42",
+      }),
+    ).toMatchObject({ developerName: "Example AS", mpnId: "42" });
+    expect(teamsManifestOptionsFromEnv({ ...env, OPENGENI_TEAMS_MPN_ID: "none" }).mpnId).toBeNull();
+    expect(
+      teamsManifestOptionsFromEnv({ ...env, OPENGENI_TEAMS_MPN_ID: "" }).mpnId,
+    ).toBeUndefined();
+  });
+
+  test("describes the app, its AI, its requirements and its limits within Store limits", () => {
+    for (const variant of [options, { ...options, groupChats: true }]) {
+      const { short, full } = buildTeamsAppManifest(variant).description;
+      expect(short.length).toBeLessThanOrEqual(80);
+      expect(full.length).toBeLessThanOrEqual(4000);
+      expect(short).toContain("Microsoft Teams");
+      expect(short).not.toContain("Opengeni");
+      expect(short).not.toMatch(/\bapp\b/i);
+      expect(full).not.toContain(short);
+      // The first mention of Teams is "Microsoft Teams".
+      expect(full.indexOf("Teams")).toBe(full.indexOf("Microsoft Teams") + "Microsoft ".length);
+      expect(full).toContain("AI");
+      expect(full).toContain("Opengeni account");
+      expect(full).toContain("Limitations:");
+      expect(full).toContain('"help"');
+      // A way to sign up, and the one-time admin setup, are in the description.
+      expect(full).toContain(`Visit ${options.websiteUrl} to sign up`);
+      expect(full).toContain("an administrator must first connect");
+      expect(full).toContain("account with access to that workspace");
+      expect(full).toContain("thumbs down");
+    }
+    expect(buildTeamsAppManifest({ ...options, groupChats: true }).description.full).toContain(
+      "every participant must have linked an Opengeni account with access to that workspace",
+    );
+    expect(buildTeamsAppManifest(options).description.full).not.toContain("group chat");
+  });
+
+  test("lists help, account commands and prompt starters for personal chats", () => {
+    const personal = buildTeamsAppManifest(options).bots[0]!.commandLists;
+    expect(personal).toHaveLength(1);
+    expect(personal[0]!.scopes).toEqual(["personal"]);
+    expect(personal[0]!.commands.map((command) => command.title)).toEqual([
+      "help",
+      "link",
+      "unlink",
+      "Research a topic",
+      "Draft a message",
+      "Plan a project",
+    ]);
+    const shared = buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]!.commandLists;
+    expect(shared[1]).toEqual({
+      scopes: ["groupchat"],
+      commands: [{ title: "help", description: "See what Opengeni can do in this conversation" }],
+    });
+    // Kept within Teams' documented display limits (stricter than the 1.25
+    // schema): 10 commands per list, titles of 32 characters, descriptions of 128.
+    for (const list of shared) {
+      expect(list.commands.length).toBeLessThanOrEqual(10);
+      for (const command of list.commands) {
+        expect(command.title.length).toBeLessThanOrEqual(32);
+        expect(command.description.length).toBeLessThanOrEqual(128);
+      }
+    }
+  });
+
   test("builds real correctly sized brand PNGs and refuses overwriting a package", async () => {
     const parent = await mkdtemp(join(tmpdir(), "opengeni-teams-package-"));
     const output = join(parent, "package");

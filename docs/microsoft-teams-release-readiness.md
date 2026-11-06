@@ -266,8 +266,63 @@ export OPENGENI_TEAMS_PRIVACY_URL='https://YOUR_APPROVED_PRIVACY_PAGE'
 export OPENGENI_TEAMS_TERMS_URL='https://YOUR_APPROVED_TERMS_PAGE'
 export OPENGENI_TEAMS_APP_VERSION='1.0.0'
 export OPENGENI_TEAMS_APP_NAME='Opengeni'
+# Optional: the publisher name and Microsoft AI Cloud Partner Program ID.
+export OPENGENI_TEAMS_DEVELOPER_NAME='Opengeni'
+export OPENGENI_TEAMS_MPN_ID='7181379'
 bun scripts/generate-teams-app-manifest.ts --package-dir /absolute/private/path/teams-package
 ```
+
+For the Opengeni Store listing the legal URLs are `https://opengeni.ai`,
+`https://opengeni.ai/privacy` and `https://opengeni.ai/terms`; the generator
+still requires them explicitly. `developer.name` defaults to `Opengeni`, the
+Partner Center publisher name (the legal entity is Cloudgeni AS), and must match
+the publisher shown in Partner Center; set `OPENGENI_TEAMS_DEVELOPER_NAME` (at
+most 32 characters) for another publisher. `developer.mpnId` defaults to
+Opengeni's PartnerGlobal ID `7181379`; set `OPENGENI_TEAMS_MPN_ID` to another
+numeric ID, or to `none` to leave it out (for example for a private staging
+package); an empty value uses the default. Anyone publishing their own
+deployment's package must set both to their own publisher, or `none` for the
+partner ID. The descriptions and command text name the product, Opengeni, even
+when `OPENGENI_TEAMS_APP_NAME` changes the app's display name; a deployment
+that rebrands must change that copy in the generator too, because the Store
+requires the name to be consistent across the metadata.
+
+The short and full descriptions are generated for the enabled scopes. They name
+Microsoft Teams on first reference, say that Opengeni is an AI agent whose
+replies can be wrong and how to report one, state the one-time administrator
+setup, the Opengeni account with access to the connected workspace and the
+account link, with the website as the way to sign up, and list the main
+limitations (text messages only; approvals and private information requests
+open Opengeni in a web browser). Copy `description.short` and
+`description.full` verbatim from the submitted `manifest.json` into Partner
+Center, and update both whenever you regenerate the package (the copy depends
+on the group-chat flag, website URL and generator version):
+the Store requires them to match.
+
+The bot declares `commandLists`: in personal chats `help`, `link`, `unlink` and
+three prompt starters (`Research a topic`, `Draft a message`, `Plan a project`);
+in enabled group chats, `help`. In a connected organization the bot
+answers `help` and `unlink` itself, without starting agent work, and `link`
+replies with the account-link card (or says the account is already linked);
+prompt starters are ordinary messages to the agent.
+
+Store submission gate: don't submit until every listed command and prompt
+starter gets a reply with a way forward in every tenant and account state.
+Today these cases still get no reply or no way forward:
+
+- A tenant that isn't enabled for rollout gets no reply at all, including no
+  welcome.
+- In a tenant that is enabled but not connected, the bot answers only `help`
+  and `unlink`; `link` and prompt starters from anyone other than a setup
+  administrator get no reply, and the welcome gives no way to sign up or get
+  access.
+- A linked person whose workspace access doesn't allow starting chats gets no
+  reply to prompt starters.
+- A group chat or channel that isn't on the allowlist answers nothing,
+  including `help`.
+
+Keep the package personal-only (the default) until conversations that aren't
+enabled get a reply.
 
 The output directory must not exist. The generator writes `manifest.json`,
 `color.png` (192 × 192), and `outline.png` (32 × 32, white on transparent),

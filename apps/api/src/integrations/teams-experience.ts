@@ -51,7 +51,7 @@ const ABOUT =
 const LIMITS = [
   "You need an Opengeni account, and your organization must connect Opengeni to Microsoft Teams.",
   "I read text messages. Files and images sent in Teams aren't supported yet.",
-  "Approvals and requests for private information open in the Opengeni app.",
+  "Approvals and requests for private information open Opengeni in your web browser.",
 ];
 
 /**
@@ -111,7 +111,7 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
   const tips = [
     ...LIMITS,
     state.personal
-      ? "In group chats and channels, mention me to ask for help."
+      ? "In a group chat or channel where Opengeni is enabled, mention me to give me a task."
       : "Mention me in this conversation to give me a task.",
     "Use the thumbs up or down on a reply to tell us how it went.",
   ];
