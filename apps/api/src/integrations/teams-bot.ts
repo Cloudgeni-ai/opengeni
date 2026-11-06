@@ -492,8 +492,22 @@ function experienceState(
   personal: boolean,
   i: TeamsInstallation | null,
   grant: AccessGrant | null,
+  sharedConversations = false,
 ): TeamsExperienceState {
-  return { personal, installation: i?.active ? "active" : "unavailable", linked: Boolean(grant) };
+  return {
+    personal,
+    installation: i?.active ? "active" : "unavailable",
+    linked: Boolean(grant),
+    sharedConversations,
+  };
+}
+/** Whether any group chat or channel of this tenant is on the allowlists. */
+function teamsSharedConversationsEnabled(deps: ApiRouteDeps, tenantId: string): boolean {
+  const prefix = `${tenantId}:`;
+  return [
+    ...deps.settings.teamsBotAllowedGroupChatIds,
+    ...deps.settings.teamsBotAllowedChannelIds,
+  ].some((id) => id.startsWith(prefix));
 }
 /**
  * The welcome for someone who just added the bot for themselves. In an
@@ -562,7 +576,14 @@ async function answerTeamsCommand(
     await sendTeamsReply(
       app,
       m,
-      teamsHelp(experienceState(m.personal, active, grant)),
+      teamsHelp(
+        experienceState(
+          m.personal,
+          active,
+          grant,
+          teamsSharedConversationsEnabled(deps, m.tenantId),
+        ),
+      ),
       active ? () => proofLink(deps, m, active) : undefined,
     );
     return "help_sent";

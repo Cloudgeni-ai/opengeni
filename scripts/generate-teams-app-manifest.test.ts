@@ -27,7 +27,7 @@ describe("Teams app package", () => {
     expect(manifest.bots[0]?.scopes).toEqual(["personal"]);
     expect(buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]?.scopes).toEqual([
       "personal",
-      "groupchat",
+      "groupChat",
     ]);
     expect(manifest.manifestVersion).toBe("1.25");
     expect(manifest.validDomains).toEqual(["pilot.example.com"]);
@@ -159,9 +159,13 @@ describe("Teams app package", () => {
     ]);
     const shared = buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]!.commandLists;
     expect(shared[1]).toEqual({
-      scopes: ["groupchat"],
+      scopes: ["groupChat"],
       commands: [{ title: "help", description: "See what Opengeni can do in this conversation" }],
     });
+    // The v1.25 schema accepts only these scope spellings (not "groupchat").
+    const bot = buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]!;
+    for (const scope of [...bot.scopes, ...bot.commandLists.flatMap((list) => list.scopes)])
+      expect(["team", "personal", "groupChat", "copilot"]).toContain(scope);
     // Kept within Teams' documented display limits (stricter than the 1.25
     // schema): 10 commands per list, titles of 32 characters, descriptions of 128.
     for (const list of shared) {

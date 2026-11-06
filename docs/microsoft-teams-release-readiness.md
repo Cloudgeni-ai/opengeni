@@ -308,18 +308,29 @@ prompt starters are ordinary messages to the agent.
 
 Store submission gate: don't submit until every listed command and prompt
 starter gets a reply with a way forward in every tenant and account state.
-Today these cases still get no reply or no way forward:
+With self-serve setup on (`OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED`), a
+person in an admitted work or school tenant that isn't connected gets the
+Connect your organization card when installing the app and for any 1:1
+message, and a 1:1 message from a tenant that isn't admitted gets the
+not-available notice. Today these cases still get no reply or no way forward:
 
-- A tenant that isn't enabled for rollout gets no reply at all, including no
-  welcome.
-- In a tenant that is enabled but not connected, the bot answers only `help`
-  and `unlink`; `link` and prompt starters from anyone other than a setup
-  administrator get no reply, and the welcome gives no way to sign up or get
-  access.
+- With self-serve setup off, a tenant that isn't admitted gets no reply at all,
+  and an admitted tenant that isn't connected answers only `help` and `unlink`:
+  `link` and prompt starters from anyone other than a setup administrator get
+  no reply, and the welcome gives no way to sign up or get access.
+- Installing the app in a tenant that isn't admitted sends no welcome; the
+  not-available notice only answers a message.
+- Onboarding replies are limited per person, per tenant and per process; once
+  a limit is spent, further messages from a tenant that isn't connected get no
+  reply.
+- A Microsoft personal (consumer) account's tenant can't be connected through
+  self-serve setup, so `link` and prompt starters get no reply and the welcome
+  gives no way forward.
+- In a tenant that isn't connected, `link` and prompts sent in a group chat get
+  no reply.
 - A linked person whose workspace access doesn't allow starting chats gets no
   reply to prompt starters.
-- A group chat or channel that isn't on the allowlist answers nothing,
-  including `help`.
+- A group chat that isn't on the allowlist answers nothing, including `help`.
 
 Keep the package personal-only (the default) until conversations that aren't
 enabled get a reply.
@@ -585,7 +596,7 @@ The retained binding preserves existing conversation and delivery history.
 Group chats are opt-in through `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS`:
 exact tenant UUID and conversation ID pairs, separated by commas. Tenant admission
 alone never enables a group. Set `OPENGENI_TEAMS_APP_GROUP_CHATS=true` when generating
-an internal package to advertise personal and groupchat scopes. Default packages
+an internal package to advertise personal and `groupChat` scopes. Default packages
 advertise personal chats only; no unsupported all-channel feature is claimed.
 
 Only explicit bot mentions are admitted. Each participant must link their own

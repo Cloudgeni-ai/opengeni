@@ -96,7 +96,7 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
     ...(options.groupChats
       ? [
           {
-            scopes: ["groupchat"],
+            scopes: ["groupChat"],
             commands: [
               { title: "help", description: "See what Opengeni can do in this conversation" },
             ],
@@ -123,7 +123,7 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
     bots: [
       {
         botId: guid(options.botId, "botId"),
-        scopes: options.groupChats ? ["personal", "groupchat"] : ["personal"],
+        scopes: options.groupChats ? ["personal", "groupChat"] : ["personal"],
         isNotificationOnly: false,
         supportsFiles: false,
         commandLists,
