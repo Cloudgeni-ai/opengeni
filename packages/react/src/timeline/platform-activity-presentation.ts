@@ -158,19 +158,6 @@ export function startupDuration(durationMs: number | null): string | null {
 }
 
 /**
- * How long a still-running startup step has taken so far, in whole seconds
- * so a once-a-second tick reads steadily. Null before its first second.
- */
-export function startupElapsed(startedAt: string, nowMs: number): string | null {
-  const elapsedMs = nowMs - Date.parse(startedAt);
-  if (!Number.isFinite(elapsedMs) || elapsedMs < 1_000) return null;
-  const totalSeconds = Math.floor(elapsedMs / 1_000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
-}
-
-/**
  * A title that names an agent: the words around the name stay quiet and the
  * name carries the emphasis. `name` is null when no title is known, and
  * `text` is then the generic fallback.

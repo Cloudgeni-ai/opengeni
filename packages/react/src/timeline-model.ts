@@ -101,7 +101,6 @@ export type {
 export {
   namedAgentTitle,
   sandboxRowTitle,
-  startupElapsed,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,

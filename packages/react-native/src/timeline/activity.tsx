@@ -11,7 +11,7 @@ import {
   pathDirname,
   presentsToolOutputPreview,
   sandboxRowTitle,
-  startupElapsed,
+  formatElapsed,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
@@ -26,7 +26,7 @@ import {
   type WebSearchResult,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
 import {
@@ -38,6 +38,7 @@ import {
   ShimmerText,
   TermBlock,
   ROW_MIN_HEIGHT,
+  useLiveNow,
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
@@ -603,20 +604,20 @@ function StartupPhaseRow({
   const failed = item.status === "failed";
   const t = useOpenGeniText();
   const running = item.status === "running";
-  const nowMs = useSecondTick(running);
-  // A running step shows how long it has taken so far; a settled one its duration.
-  const duration = running
-    ? startupElapsed(item.startedAt, nowMs)
-    : startupDuration(item.durationMs);
+  const nowMs = useLiveNow(running);
+  const duration = startupDuration(item.durationMs);
+  const title = item.blockedReason
+    ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
+    : startupPhaseTitle(t, item.phase, item.status, item.outcome, item.subject);
+  // A running step says how long it has run so far, as the turn header does.
+  const startedMs = Date.parse(item.startedAt);
+  const elapsed =
+    running && Number.isFinite(startedMs) ? formatElapsed(t, Math.max(0, nowMs - startedMs)) : null;
   return (
     <ActivityDisclosure
       icon="bot"
       iconTone={failed ? "failed" : running ? "running" : "muted"}
-      title={
-        item.blockedReason
-          ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
-          : startupPhaseTitle(t, item.phase, item.status, item.outcome, item.subject)
-      }
+      title={elapsed ? `${title} · ${elapsed}` : title}
       preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
       failed={failed}
@@ -626,18 +627,6 @@ function StartupPhaseRow({
       compact={compact}
     />
   );
-}
-
-/** The current time, refreshed once a second while `live`. */
-function useSecondTick(live: boolean): number {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!live) return;
-    setNowMs(Date.now());
-    const timer = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, [live]);
-  return nowMs;
 }
 
 function WorkerRow({ item, compact }: { item: WorkerItem; compact: boolean }) {

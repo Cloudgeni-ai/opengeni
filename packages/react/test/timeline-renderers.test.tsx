@@ -4182,10 +4182,10 @@ describe("StartupPhaseRow", () => {
     try {
       await flush();
       const text = () => r.container.textContent ?? "";
-      expect(text()).toContain("Setting up the cloudgeni environment");
-      expect(text()).toMatch(/(^|[^0-9])41s/);
+      // The time runs in the title, as in the turn header; no gutter chip.
+      expect(text()).toContain("Setting up cloudgeni · 41s");
       await flush(1_100);
-      expect(text()).toMatch(/(^|[^0-9])42s/);
+      expect(text()).toContain("Setting up cloudgeni · 42s");
 
       // Settled, the step shows its recorded duration and the ordinary title.
       await r.rerender(
@@ -4202,6 +4202,7 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(text()).toContain("Sandbox Environment ready");
+      expect(text()).not.toContain("·");
       expect(text()).toContain("1m 06s");
     } finally {
       await r.unmount();

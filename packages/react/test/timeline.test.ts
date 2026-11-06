@@ -3561,6 +3561,16 @@ describe("buildTimeline", () => {
       (item): item is StartupPhaseItem => item.kind === "startup-phase",
     );
     expect(unnamed?.subject).toBeUndefined();
+
+    // A later attempt replaces the failed one's row, name included.
+    const retried = buildTimeline(englishText, [
+      event("rig.setup.started", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.failed", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.started", { attemptId: "attempt-2" }, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]).toMatchObject({ phase: "rig", status: "running" });
+    expect(retried[0]?.subject).toBeUndefined();
   });
 
   test("warm reuse and setup failure retain their distinct outcomes", () => {

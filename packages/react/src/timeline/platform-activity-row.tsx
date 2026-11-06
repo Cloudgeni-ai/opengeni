@@ -1,11 +1,11 @@
 import {
   sandboxRowTitle,
-  startupElapsed,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
 } from "./platform-activity-presentation";
 import { useToolDetails } from "./tool-details";
+import { formatElapsed } from "./turn-summary-model";
 import type { ReasoningItem, SandboxItem, StartupPhaseItem } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
 import { useEffect, useState } from "react";
@@ -89,10 +89,17 @@ export default function PlatformActivityRow({
 
   const failed = item.status === "failed";
   const running = item.status === "running";
-  // A running step shows how long it has taken so far; a settled one its duration.
-  const duration = running
-    ? startupElapsed(item.startedAt, nowMs)
-    : startupDuration(item.durationMs);
+  const duration = startupDuration(item.durationMs);
+  const title = item.blockedReason
+    ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
+    : startupPhaseTitle(msg, item.phase, item.status, item.outcome, item.subject);
+  // A running step says how long it has run so far, as the turn header does;
+  // the right edge stays clean until it settles.
+  const startedMs = Date.parse(item.startedAt);
+  const elapsed =
+    running && Number.isFinite(startedMs)
+      ? formatElapsed(msg, Math.max(0, nowMs - startedMs))
+      : null;
   // A failed step's recorded error is diagnostic detail: behind the row, never
   // its title, and absent where the host hides raw technical detail.
   const detail = failed && !plainDetails ? item.detail : undefined;
@@ -103,9 +110,7 @@ export default function PlatformActivityRow({
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
-    title: item.blockedReason
-      ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
-      : startupPhaseTitle(msg, item.phase, item.status, item.outcome, item.subject),
+    title: elapsed ? `${title} · ${elapsed}` : title,
     preview: note,
     running,
     failed,

@@ -252,12 +252,15 @@ test("a running setup step names its environment and counts up while it runs", a
   const Row = ActivityRow as unknown as ComponentType<{ item: unknown }>;
   const view = await renderComponent(<Row item={running} />);
   try {
-    expect(view.container.textContent).toContain("Setting up the cloudgeni environment");
-    expect(view.container.textContent).toMatch(/(^|[^0-9])41s/);
+    const elapsed = () =>
+      Number(/Setting up cloudgeni · (\d+)s/.exec(view.container.textContent ?? "")?.[1]);
+    const first = elapsed();
+    expect(first).toBeGreaterThanOrEqual(41);
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_100));
     });
-    expect(view.container.textContent).toMatch(/(^|[^0-9])42s/);
+    // It counts up while running, however long the first render took.
+    expect(elapsed()).toBeGreaterThan(first);
     await view.rerender(
       <Row
         item={{

@@ -395,6 +395,7 @@ export function buildTimeline(
         outcome,
         blockedReason,
         detail: undefined,
+        subject: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
