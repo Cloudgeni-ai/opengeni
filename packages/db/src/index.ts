@@ -96913,6 +96913,7 @@ export {
 } from "./codex-token-resolver";
 
 export {
+  ConnectionNotRefreshableError,
   ConnectionRefreshHttpError,
   isPrivateAddress,
   normalizeBearerScheme,

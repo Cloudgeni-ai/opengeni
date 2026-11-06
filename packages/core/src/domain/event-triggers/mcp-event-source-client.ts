@@ -6,6 +6,7 @@ import {
   listEnabledMcpCapabilityServers,
   type Database,
   type EventSourceRecord,
+  type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { boundMcpResponseBody, MCP_MAX_RESPONSE_BYTES } from "@opengeni/runtime/mcp-network";
 import { settingsWithMcpCapabilityServers } from "../capabilities";
@@ -118,9 +119,29 @@ export async function ownerConnectionBindings(
 }
 
 /**
+ * Why a sign-in could not be used, as the error the subscription loop acts on.
+ * A refresh the resolver reports as transient means the provider's sign-in
+ * service did not answer. That is retried like any outage, and reported as the
+ * service not answering if it lasts, instead of asking the person to reconnect
+ * a connection that still works. Anything else (a rejected grant, a token that
+ * cannot be refreshed, a missing or revoked connection) asks to reconnect.
+ */
+export function connectionCredentialFailure(
+  result: Exclude<ResolveConnectionCredentialResult, { status: "ok" }>,
+  reconnect: string,
+  transientRefreshFailure: boolean,
+): Error {
+  if (result.reason === "refresh_failed" && transientRefreshFailure) {
+    return new Error("The sign-in service did not answer while refreshing the connection");
+  }
+  return new McpEventSourceUnavailableError("reconnect", reconnect);
+}
+
+/**
  * Request headers for `destinationUrl`, signed in with one of the owner's
  * connections. A credential that cannot be resolved means the owner has to
- * reconnect: `reconnect` says so.
+ * reconnect: `reconnect` says so. A sign-in service that is only down is
+ * retried instead (see connectionCredentialFailure).
  */
 export function ownerConnectionHeaders(
   deps: Pick<McpEventSourceClientDeps, "db" | "settings">,
@@ -129,8 +150,13 @@ export function ownerConnectionHeaders(
   binding: McpConnectionAccountBinding,
   request: { toolName: string; destinationUrl: string; reconnect: string },
 ): (forceRefresh: boolean) => Promise<Record<string, string>> {
-  const resolve = buildConnectionTokenResolver(deps.db, deps.settings);
   return async (forceRefresh) => {
+    let transientRefreshFailure = false;
+    const resolve = buildConnectionTokenResolver(deps.db, deps.settings, undefined, {
+      onTransientRefreshFailure: () => {
+        transientRefreshFailure = true;
+      },
+    });
     const result = await resolve({
       workspaceId: binding.originWorkspaceId,
       ...(binding.subjectScope === "subject" ? { subjectId: owner.ownerSubjectId } : {}),
@@ -141,7 +167,7 @@ export function ownerConnectionHeaders(
       ...(forceRefresh ? { forceRefresh: true } : {}),
     });
     if (result.status !== "ok") {
-      throw new McpEventSourceUnavailableError("reconnect", request.reconnect);
+      throw connectionCredentialFailure(result, request.reconnect, transientRefreshFailure);
     }
     return { ...server.headers, ...result.headers };
   };
