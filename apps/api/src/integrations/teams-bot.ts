@@ -554,9 +554,9 @@ async function welcomeTeamsInstall(
  */
 function teamsSendFailure(error: unknown): { refused: boolean; retry: boolean } {
   const e = error as { response?: { status?: unknown }; code?: unknown } | null | undefined;
-  const status = e?.response?.status;
-  if (typeof status === "number")
-    return { refused: status >= 400 && status < 500, retry: status === 429 };
+  const httpStatus = e?.response?.status;
+  if (typeof httpStatus === "number")
+    return { refused: httpStatus >= 400 && httpStatus < 500, retry: httpStatus === 429 };
   const code = e?.code;
   // Thrown before any request, such as a rejected service URL.
   if (typeof code !== "string") return { refused: true, retry: false };
