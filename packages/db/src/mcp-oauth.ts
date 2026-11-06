@@ -21,11 +21,16 @@ export class McpOAuthClientRegistrationRateLimitError extends Error {
   readonly code = "mcp_oauth_client_registration_rate_limited";
 }
 
+export type McpOAuthGrantType =
+  | "authorization_code"
+  | "refresh_token"
+  | "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
 export type McpOAuthClient = {
   clientId: string;
   redirectUris: string[];
   clientName: string | null;
-  grantTypes: Array<"authorization_code" | "refresh_token">;
+  grantTypes: McpOAuthGrantType[];
   responseTypes: ["code"];
   createdAt: Date;
 };
@@ -84,7 +89,7 @@ export async function registerMcpOAuthClient(
     clientId: string;
     redirectUris: string[];
     clientName: string | null;
-    grantTypes: Array<"authorization_code" | "refresh_token">;
+    grantTypes: McpOAuthGrantType[];
     responseTypes: ["code"];
     registrationScopeHash: string;
   },
@@ -127,6 +132,42 @@ export async function getMcpOAuthClient(
       limit 1`,
   );
   return row ? mapClient(row) : null;
+}
+
+/**
+ * A client identified by its Client ID Metadata Document URL needs no
+ * registration: its document, fetched and checked by the caller, is stored
+ * as the client (and refreshed on each fetch).
+ */
+export async function upsertMcpOAuthMetadataDocumentClient(
+  db: Database,
+  input: {
+    clientId: string;
+    redirectUris: string[];
+    clientName: string | null;
+    grantTypes: McpOAuthGrantType[];
+  },
+): Promise<McpOAuthClient> {
+  const [row] = await rawRows<ClientRow>(
+    db,
+    sql`insert into mcp_oauth_clients (
+      client_id, redirect_uris, client_name, token_endpoint_auth_method, grant_types,
+      response_types, registration_scope_hash, expires_at
+    ) values (
+      ${input.clientId}, ${JSON.stringify(input.redirectUris)}::jsonb, ${input.clientName}, 'none',
+      ${JSON.stringify(input.grantTypes)}::jsonb, '["code"]'::jsonb,
+      encode(sha256(convert_to(${`cimd:${input.clientId}`}, 'UTF8')), 'hex'),
+      clock_timestamp() + interval '31 days'
+    )
+    on conflict (client_id) do update set
+      redirect_uris = excluded.redirect_uris,
+      client_name = excluded.client_name,
+      grant_types = excluded.grant_types,
+      expires_at = greatest(mcp_oauth_clients.expires_at, excluded.expires_at)
+    returning client_id, redirect_uris, client_name, grant_types, response_types, created_at`,
+  );
+  if (!row) throw new Error("MCP OAuth metadata document client was not persisted");
+  return mapClient(row);
 }
 
 async function extendMcpOAuthClientRetention(db: Database, clientId: string): Promise<void> {
@@ -551,6 +592,11 @@ export type OrganizationMcpConnection = {
   connectedAt: Date;
   lastUsedAt: Date | null;
   expiresAt: Date;
+  /**
+   * Connected automatically by a trusted issuer (an ID-JAG), with no sign-in
+   * screen. Its access is the issuer's and changes only there.
+   */
+  autoConnect: { trustedIssuerId: string; issuerName: string | null } | null;
 };
 
 /** Live organization connections, newest first. Pass subjectId for one person's own. */
@@ -570,11 +616,12 @@ export async function listOrganizationMcpConnections(
     created_at: Date | string;
     expires_at: Date | string;
     last_used_at: Date | string | null;
+    trusted_issuer_id: string | null;
   }>(
     db,
     sql`select refresh.family_id, refresh.account_id, refresh.subject_id, refresh.client_id,
         client.client_name, client.redirect_uris, refresh.organization_access,
-        refresh.connected_at, refresh.created_at, refresh.expires_at,
+        refresh.connected_at, refresh.created_at, refresh.expires_at, refresh.trusted_issuer_id,
         (select max(access.created_at) from mcp_oauth_access_tokens access
           where access.refresh_family_id = refresh.family_id) as last_used_at
       from mcp_oauth_refresh_tokens refresh
@@ -587,6 +634,29 @@ export async function listOrganizationMcpConnections(
         ${input.connectionId === undefined ? sql`` : sql`and refresh.family_id = ${input.connectionId}::uuid`}
       order by coalesce(refresh.connected_at, refresh.created_at) desc, refresh.family_id`,
   );
+  const issuerIds = [
+    ...new Set(rows.flatMap((row) => (row.trusted_issuer_id ? [row.trusted_issuer_id] : []))),
+  ];
+  const issuerNames = new Map<string, string>();
+  if (issuerIds.length > 0) {
+    const issuers = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: null },
+      (scoped) =>
+        rawRows<{ id: string; name: string }>(
+          scoped,
+          sql`select id, name from organization_mcp_trusted_issuers
+            where account_id = ${input.accountId}::uuid
+              and id in (${sql.join(
+                issuerIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )})`,
+        ),
+      undefined,
+      "none",
+    );
+    for (const issuer of issuers) issuerNames.set(issuer.id, issuer.name);
+  }
   return rows.map((row) => ({
     id: row.family_id,
     accountId: row.account_id,
@@ -598,6 +668,12 @@ export async function listOrganizationMcpConnections(
     connectedAt: new Date(row.connected_at ?? row.created_at),
     lastUsedAt: row.last_used_at === null ? null : new Date(row.last_used_at),
     expiresAt: new Date(row.expires_at),
+    autoConnect: row.trusted_issuer_id
+      ? {
+          trustedIssuerId: row.trusted_issuer_id,
+          issuerName: issuerNames.get(row.trusted_issuer_id) ?? null,
+        }
+      : null,
   }));
 }
 
@@ -624,6 +700,7 @@ export async function updateOrganizationMcpConnectionAccess(
         where family_id = ${input.connectionId}::uuid
           and account_id = ${input.accountId}
           and organization_access is not null
+          and trusted_issuer_id is null
           and revoked_at is null
         returning token_hash`,
     );

@@ -30,6 +30,7 @@ import {
   CompatibleModelApi,
   CompatibleModelBaseUrl,
   CompatibleModelName,
+  DirectModelName,
   CompatibleModelReasoning,
 } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
@@ -190,6 +191,7 @@ export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./interaction-action-deadline";
@@ -3959,6 +3961,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
        * its `/openai/v1` URL). Arbitrary proxy endpoints are refused.
        */
       endpoint: AzureOpenAIEndpoint.optional(),
+      /**
+       * OpenAI and Azure OpenAI only: models (Azure deployment names) to offer
+       * with the connection. Each is checked with a short request using this
+       * key (or sign-in) before anything is saved, then saved with the
+       * connection in one step. Models it already offers are kept as they are.
+       */
+      models: z.array(DirectModelName).min(1).max(16).optional(),
       claudeIdentity: z
         .object({
           accountUuid: primitives.uuid,
@@ -12765,6 +12774,10 @@ export type KnowledgeSourceSyncConnectionAuthority = z.infer<
   typeof KnowledgeSourceSyncConnectionAuthority
 >;
 
+/**
+ * @deprecated Integration Knowledge sync was removed. The shape stays in the
+ * public schema until the next SDK major; requests carrying it return 410.
+ */
 export const KnowledgeSourceSyncAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -12784,16 +12797,6 @@ export const KnowledgeSourceSyncAction = /* @__PURE__ */ /* @__PURE__ */ defineS
     .strict(),
 );
 export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
-
-export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      sourceEnabled: KnowledgeSourceSyncEnabled,
-      connectionPaused: KnowledgeSourceSyncDisabled,
-    })
-    .strict(),
-);
-export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
 
 export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -13119,8 +13122,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     .strict();
   return {
     bundledSkillIds: BundledSkillSelection.optional(),
-    // Frozen with the ordinary scheduled run. This selects a connector source;
-    // fetching happens only through that run's live agent tool.
+    /** @deprecated Integration Knowledge sync was removed; a request carrying it returns 410. */
     knowledgeSource: KnowledgeSourceSyncAction.optional(),
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
@@ -13310,39 +13312,6 @@ export const ScheduledTaskAgentConfig = /* @__PURE__ */ /* @__PURE__ */ defineSc
     .superRefine(refineScheduledTaskAgentConfig),
 );
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
-
-/** Legacy actions are readable for migration/cleanup, never new dispatch. */
-export function scheduledTaskKnowledgeSource(task: {
-  action: ScheduledTaskAction;
-  agentConfig: { knowledgeSource?: KnowledgeSourceSyncAction | undefined };
-}): KnowledgeSourceSyncAction | null {
-  return task.action.kind === "knowledge_source_sync"
-    ? task.action
-    : (task.agentConfig.knowledgeSource ?? null);
-}
-
-export function requireScheduledTaskKnowledgeSource(
-  task: Parameters<typeof scheduledTaskKnowledgeSource>[0],
-): KnowledgeSourceSyncAction {
-  const source = scheduledTaskKnowledgeSource(task);
-  if (!source) throw new Error("Scheduled task has no selected Knowledge source");
-  return source;
-}
-
-export function knowledgeSourceAgentConfig(
-  source: KnowledgeSourceSyncAction,
-  existing?: ScheduledTaskAgentConfig,
-): ScheduledTaskAgentConfig {
-  return {
-    prompt:
-      "Fetch the selected source with knowledge_source_fetch. Read the retained source content and save useful facts, decisions, requirements or incidents with knowledge_save, linking evidence and relevant groups. Correct existing knowledge when the source changes. Continue fetching when the tool reports more content. Follow this task's Agent learning settings and summarize what changed.",
-    resources: [],
-    tools: [],
-    metadata: {},
-    ...existing,
-    knowledgeSource: source,
-  };
-}
 
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
@@ -14298,7 +14267,14 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ /* @__PURE
         action: { kind: "agent_turn" as const },
         runMode: "new_session_per_run" as const,
         targetSessionId: null,
-        agentConfig: knowledgeSourceAgentConfig(value.action),
+        // Integration Knowledge sync was removed; core refuses this shape with 410.
+        agentConfig: {
+          prompt: "Integration Knowledge sync was removed.",
+          resources: [],
+          tools: [],
+          metadata: {},
+          knowledgeSource: value.action,
+        } satisfies ScheduledTaskAgentConfig as ScheduledTaskAgentConfig,
         rigId: null,
       })),
 );
@@ -15208,7 +15184,13 @@ export const IntegrationClientMetadata = /* @__PURE__ */ defineSchema(() =>
     client_name: z.enum(["Opengeni", "OpenGeni"]),
     redirect_uris: z.array(z.string().url()),
     token_endpoint_auth_method: z.literal("none"),
-    grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
+    grant_types: z.array(
+      z.enum([
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      ]),
+    ),
     response_types: z.array(z.literal("code")),
   }),
 );

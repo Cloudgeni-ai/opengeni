@@ -130,7 +130,11 @@ export class AttachedBrowserBridgeClient {
     }
   }
 
-  async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+  /** `timeoutMs` shortens this request's wait below the connection's own. */
+  async request<T = unknown>(
+    payload: Readonly<Record<string, unknown>>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<T> {
     if (this.failure) throw this.failure;
     if (this.pending.size >= MAX_PENDING_REQUESTS) {
       throw new AttachedBrowserBridgeError(
@@ -140,13 +144,17 @@ export class AttachedBrowserBridgeClient {
       );
     }
     const requestId = randomUUID();
+    const timeoutMs =
+      options.timeoutMs === undefined
+        ? this.timeoutMs
+        : Math.max(1, Math.min(this.timeoutMs, Math.ceil(options.timeoutMs)));
     return await new Promise<T>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         rejectRequest(
           new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
         );
-      }, this.timeoutMs);
+      }, timeoutMs);
       timer.unref?.();
       this.pending.set(requestId, {
         resolve: (value) => resolveRequest(value as T),

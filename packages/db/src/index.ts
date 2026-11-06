@@ -678,10 +678,6 @@ import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
-import {
-  scheduledTaskKnowledgeSource,
-  requireScheduledTaskKnowledgeSource,
-} from "@opengeni/contracts";
 import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
@@ -1376,7 +1372,6 @@ export * from "./scoped-knowledge";
 export * from "./company-brain";
 export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
-export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./session-share-links";
 export * from "./work-claims";
@@ -1596,6 +1591,58 @@ function parsedPersonalConnectionDelegations(
     throw new Error(`Invalid personal MCP delegation snapshot at ${context}`);
   }
   return parsed.data.map((delegation) => ({ ...delegation }));
+}
+
+/** A resolver offered a compaction turn a personal account its person may not lend. */
+class CompactionConnectionAccountRefusal extends Error {
+  constructor() {
+    super("Personal connection owner does not match the compacted turn's person");
+    this.name = "CompactionConnectionAccountRefusal";
+  }
+}
+
+/**
+ * Why a compaction turn runs without connection accounts, for the worker to
+ * report. Only the error's class and SQLSTATE are kept, never its message.
+ */
+function unresolvedConnectionAccountsRecord(
+  error: unknown,
+  failure: "resolution_failed" | "acceptance_refused" = "resolution_failed",
+): {
+  reason: "owner_mismatch" | "resolution_failed" | "acceptance_refused";
+  errorName?: string;
+  sqlState?: string;
+} {
+  if (error instanceof CompactionConnectionAccountRefusal) return { reason: "owner_mismatch" };
+  const errorName =
+    error instanceof Error && /^[A-Za-z0-9_$]{1,64}$/.test(error.name) ? error.name : undefined;
+  const sqlState = nestedPostgresSqlState(error) ?? undefined;
+  return {
+    reason: failure,
+    ...(errorName ? { errorName } : {}),
+    ...(sqlState ? { sqlState } : {}),
+  };
+}
+
+/**
+ * Whether accepted work runs under a credential restriction (for example
+ * developer setup). Work continuing it may not borrow its connection
+ * authority. Unreadable policy counts as restricted.
+ */
+function carriesCredentialRestriction(initiatorContext: unknown, metadata: unknown): boolean {
+  if (
+    initiatorContext &&
+    typeof initiatorContext === "object" &&
+    Object.prototype.hasOwnProperty.call(initiatorContext, "credentialRestriction")
+  ) {
+    return true;
+  }
+  try {
+    const policy = readTurnExecutionPolicyV1(metadata);
+    return policy.kind === "valid" && policy.policy.credentialRestriction !== undefined;
+  } catch {
+    return true;
+  }
 }
 
 /** Raised when a durable session tool-policy write lost its version fence. */
@@ -5003,22 +5050,6 @@ export async function settleTemporalScheduleCleanup(
     `,
   );
   return row?.settled === true;
-}
-
-/** Persist the connector half of a combined cleanup before attempting Temporal. */
-export async function completeTemporalScheduleConnectorCleanup(
-  db: Database,
-  input: { id: string; claimId: string },
-): Promise<boolean> {
-  const [row] = await rawRows<{ completed: boolean }>(
-    db,
-    sql`
-      select opengeni_private.complete_temporal_schedule_connector_cleanup(
-        ${input.id}, ${input.claimId}
-      ) as completed
-    `,
-  );
-  return row?.completed === true;
 }
 
 export async function createApiKey(
@@ -12383,7 +12414,9 @@ function organizationCustomCatalogItem(
     surfaceType: null,
     transport: null,
     mcpUrl: null,
-    authKind: organizationConnectorLogin(connector.config) === "each_person" ? "oauth2" : null,
+    authKind: ["each_person", "auto_connect"].includes(organizationConnectorLogin(connector.config))
+      ? "oauth2"
+      : null,
     credentialFacts: [],
     tier: null,
     provenance: null,
@@ -21491,85 +21524,10 @@ export async function listActiveScheduledTasksWithPinnedAccounts(
   });
 }
 
-/**
- * Internal connector-control traversal. Keep the whole keyset walk on one
- * repeatable-read snapshot so task creation/update performed after discovery
- * cannot make an older row move between offset pages or hide a matching task.
- */
-export async function listKnowledgeSourceSyncTasksForConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  pageSize = 500,
-): Promise<Array<ScheduledTask>> {
-  const boundedPageSize = Math.max(1, Math.min(1_000, Math.trunc(pageSize)));
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      const tasks: Array<ScheduledTask> = [];
-      let cursor: { createdAt: Date; id: string } | null = null;
-      for (;;) {
-        const rows: Array<typeof schema.scheduledTasks.$inferSelect> = await scopedDb
-          .select()
-          .from(schema.scheduledTasks)
-          .where(
-            and(
-              eq(schema.scheduledTasks.workspaceId, workspaceId),
-              isNull(schema.scheduledTasks.deletedAt),
-              sql`coalesce(${schema.scheduledTasks.agentConfig}->'knowledgeSource',
-                CASE WHEN ${schema.scheduledTasks.action}->>'kind'='knowledge_source_sync' THEN ${schema.scheduledTasks.action} END)->'connection'->>'connectionId' = ${connectionId}`,
-              cursor
-                ? or(
-                    gt(schema.scheduledTasks.createdAt, cursor.createdAt),
-                    and(
-                      eq(schema.scheduledTasks.createdAt, cursor.createdAt),
-                      gt(schema.scheduledTasks.id, cursor.id),
-                    ),
-                  )
-                : undefined,
-            ),
-          )
-          .orderBy(asc(schema.scheduledTasks.createdAt), asc(schema.scheduledTasks.id))
-          .limit(boundedPageSize);
-        for (const row of rows) {
-          const task = mapScheduledTask(row);
-          if (!scheduledTaskKnowledgeSource(task)) {
-            throw new Error("Knowledge source task query returned a non-sync action");
-          }
-          tasks.push(task);
-        }
-        const last: typeof schema.scheduledTasks.$inferSelect | undefined = rows.at(-1);
-        if (!last || rows.length < boundedPageSize) return tasks;
-        const nextCursor: { createdAt: Date; id: string } = {
-          createdAt: last.createdAt,
-          id: last.id,
-        };
-        if (
-          cursor &&
-          (nextCursor.createdAt < cursor.createdAt ||
-            (nextCursor.createdAt.getTime() === cursor.createdAt.getTime() &&
-              nextCursor.id <= cursor.id))
-        ) {
-          throw new Error("Knowledge source scheduled-task keyset did not advance");
-        }
-        cursor = nextCursor;
-      }
-    },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
-  );
-}
-
 export async function deleteScheduledTask(
   db: Database,
   workspaceId: string,
   taskId: string,
-  options: {
-    connectorCleanupSubjectId?: string;
-    connectorCleanupCompleted?: boolean;
-    expectedAuthorityRevision?: number;
-    expectedExecutionDigest?: string;
-  } = {},
 ): Promise<{ cleanup: TemporalScheduleCleanupClaim | null; changed: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (txRaw) => {
@@ -21586,26 +21544,7 @@ export async function deleteScheduledTask(
         .for("update")
         .limit(1);
       if (!task) return { cleanup: null, changed: false };
-      const mappedTask = mapScheduledTask(task);
       const changed = task.deletedAt === null;
-      const connectorCleanupSubjectId = options.connectorCleanupSubjectId ?? null;
-      if (connectorCleanupSubjectId) {
-        if (
-          task.authorityRevision !== options.expectedAuthorityRevision ||
-          task.executionDigest !== options.expectedExecutionDigest
-        ) {
-          throw new Error("scheduled task changed after connector cleanup preflight");
-        }
-        if (
-          !scheduledTaskKnowledgeSource(mappedTask) ||
-          requireScheduledTaskKnowledgeSource(mappedTask).initiatingSubjectId !==
-            connectorCleanupSubjectId ||
-          requireScheduledTaskKnowledgeSource(mappedTask).connection.ownerSubjectId !==
-            connectorCleanupSubjectId
-        ) {
-          throw new Error("scheduled task connector cleanup requires the exact causal subject");
-        }
-      }
       if (!task.deletedAt) {
         await tx
           .update(schema.scheduledTasks)
@@ -21624,37 +21563,16 @@ export async function deleteScheduledTask(
           );
       }
       const claimId = randomUUID();
-      let [cleanup] = await tx
+      const [cleanup] = await tx
         .insert(schema.temporalScheduleCleanupOutbox)
         .values({
           accountId: task.accountId,
           workspaceId: task.workspaceId,
           temporalScheduleId: task.temporalScheduleId,
-          scheduledTaskId: connectorCleanupSubjectId ? task.id : null,
-          connectorCleanupSubjectId,
-          connectorCleanupSnapshot:
-            connectorCleanupSubjectId && Boolean(scheduledTaskKnowledgeSource(mappedTask))
-              ? {
-                  version: 1,
-                  taskId: mappedTask.id,
-                  accountId: mappedTask.accountId,
-                  workspaceId: mappedTask.workspaceId,
-                  connectorKind: mappedTask.metadata.connectorKind,
-                  connectionId:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-                  connectionVersion:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-                  sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-                  sourceLifecycleGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-                  sourceConfigGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-                  externalSourceId: mappedTask.metadata.externalSourceId,
-                  subjectId: connectorCleanupSubjectId,
-                }
-              : null,
-          connectorCleanupCompletedAt:
-            connectorCleanupSubjectId && options.connectorCleanupCompleted ? new Date() : null,
+          scheduledTaskId: null,
+          connectorCleanupSubjectId: null,
+          connectorCleanupSnapshot: null,
+          connectorCleanupCompletedAt: null,
           claimId,
           claimUntil: sql<Date>`now() + interval '15 seconds'`,
           attemptCount: 1,
@@ -21674,65 +21592,6 @@ export async function deleteScheduledTask(
             schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
           attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
         });
-      if (
-        !cleanup &&
-        connectorCleanupSubjectId &&
-        Boolean(scheduledTaskKnowledgeSource(mappedTask))
-      ) {
-        const connectorCleanupSnapshot = {
-          version: 1,
-          taskId: mappedTask.id,
-          accountId: mappedTask.accountId,
-          workspaceId: mappedTask.workspaceId,
-          connectorKind: mappedTask.metadata.connectorKind,
-          connectionId: requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-          connectionVersion:
-            requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-          sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-          sourceLifecycleGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-          sourceConfigGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-          externalSourceId: mappedTask.metadata.externalSourceId,
-          subjectId: connectorCleanupSubjectId,
-        };
-        const [upgraded] = await rawRows<{ upgraded: boolean }>(
-          tx,
-          sql`
-            select opengeni_private.upgrade_temporal_schedule_connector_cleanup(
-              ${task.accountId}::uuid,
-              ${task.workspaceId}::uuid,
-              ${task.temporalScheduleId},
-              ${task.id}::uuid,
-              ${connectorCleanupSubjectId},
-              ${JSON.stringify(connectorCleanupSnapshot)}::jsonb,
-              ${claimId}::uuid
-            ) as upgraded
-          `,
-        );
-        if (upgraded?.upgraded) {
-          [cleanup] = await tx
-            .select({
-              id: schema.temporalScheduleCleanupOutbox.id,
-              accountId: schema.temporalScheduleCleanupOutbox.accountId,
-              workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
-              temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
-              scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
-              connectorCleanupSubjectId:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
-              connectorCleanupSnapshot:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
-              connectorCleanupCompletedAt:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
-              attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
-            })
-            .from(schema.temporalScheduleCleanupOutbox)
-            .where(
-              eq(schema.temporalScheduleCleanupOutbox.temporalScheduleId, task.temporalScheduleId),
-            )
-            .limit(1);
-        }
-      }
       return {
         cleanup: cleanup ? { ...cleanup, claimId } : null,
         changed,
@@ -32894,7 +32753,6 @@ async function createSessionInTransaction(
           workspaceId: input.workspaceId,
           runId: input.scheduledSourceRunId,
         });
-        const source = accepted?.task.agentConfig.knowledgeSource;
         // The run must be this exact accepted scheduler occurrence, creating
         // the chat its generated-session binding names.
         const acceptedRun =
@@ -32907,18 +32765,7 @@ async function createSessionInTransaction(
             ? accepted
             : null;
         let scheduledOwner: string | null = null;
-        if (acceptedRun && source) {
-          // A personal-knowledge source run belongs to its connection owner.
-          if (
-            acceptedRun.task.runMode === "new_session_per_run" &&
-            source.destination.kind === "personal" &&
-            source.destination.subjectId === source.initiatingSubjectId &&
-            source.connection.ownerSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanAuthority?.subjectId === source.initiatingSubjectId
-          )
-            scheduledOwner = source.initiatingSubjectId;
-        } else if (acceptedRun) {
+        if (acceptedRun) {
           // An Only me schedule's chats belong to its owner, the human its
           // accepted run was admitted for. The capability below re-proves that
           // person may still create Only me chats here.
@@ -67005,6 +66852,17 @@ export type EnrollmentRecord = {
   agentUpdateChannel: "stable" | "beta" | null;
   agentCapabilities: Record<string, boolean>;
   agentUpdate: EnrollmentAgentUpdateRecord | null;
+  /** When the current run of unsuccessful update attempts first postponed
+   * the update for managed browsers in use, or null. A run continues while
+   * the latest attempt failed retryably or was postponed. */
+  agentUpdateBrowsersWaitSince: string | null;
+  /** Attempts of the current run for the current target that failed for a
+   * reason other than a busy machine (`update_busy_*`), before the current
+   * operation. */
+  agentUpdateFailedAttempts: number;
+  /** The announced time at which an automatic update closes an older
+   * agent's managed browsers, or null. */
+  agentUpdateBrowsersCloseAt: string | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -67081,6 +66939,9 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
             completedAt: row.agentUpdateCompletedAt?.toISOString() ?? null,
           }
         : null,
+    agentUpdateBrowsersWaitSince: row.agentUpdateBrowsersWaitSince?.toISOString() ?? null,
+    agentUpdateFailedAttempts: row.agentUpdateFailedAttempts ?? 0,
+    agentUpdateBrowsersCloseAt: row.agentUpdateBrowsersCloseAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -68875,6 +68736,21 @@ export async function beginEnrollmentAgentUpdate(
     connectionGeneration: number;
     operationId: string;
     targetVersion: string;
+    /** Announce that this update closes the machine's managed browsers at
+     * this time, or clear an announcement (null). Otherwise an announced time
+     * is kept while the run continues. */
+    browsersCloseAt?: Date | null;
+    /** For a postponement for browsers in use: `start` keeps the run's wait
+     * or begins it now, `restart` begins it again now. Otherwise the wait is
+     * kept while the run continues. */
+    browsersWait?: "start" | "restart";
+    /** The target is newer than the one the latest attempt was for, so the
+     * run's failed attempts no longer count. */
+    newerTarget?: boolean;
+    /** Reserve only while the machine's latest operation is still this one
+     * (null: none), so a decision made from an older read of the machine
+     * never replaces a newer record. */
+    expectedOperationId?: string | null;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -68882,6 +68758,13 @@ export async function beginEnrollmentAgentUpdate(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
+      // A run of unsuccessful attempts continues while the latest one failed
+      // retryably or was postponed (`update_busy_*`); a success, a
+      // non-retryable failure or a first attempt starts a new one.
+      const previousFailureWasBusy = sql`starts_with(coalesce(${schema.enrollments.agentUpdateErrorCode}, ''), 'update_busy')`;
+      const continuesRun = sql`(${schema.enrollments.agentUpdateStatus} = 'failed'
+        and (${schema.enrollments.agentUpdateRetryable} or ${previousFailureWasBusy}))`;
+      const nowSql = sql`${now.toISOString()}::timestamptz`;
       const rows = await scopedDb
         .update(schema.enrollments)
         .set({
@@ -68898,6 +68781,36 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateRequestedAt: now,
           agentUpdateUpdatedAt: now,
           agentUpdateCompletedAt: null,
+          agentUpdateBrowsersWaitSince:
+            input.browsersWait === "restart"
+              ? now
+              : input.browsersWait === "start"
+                ? sql`case
+                    when ${continuesRun}
+                      then coalesce(${schema.enrollments.agentUpdateBrowsersWaitSince}, ${nowSql})
+                    else ${nowSql}
+                  end`
+                : sql`case
+                    when ${continuesRun} then ${schema.enrollments.agentUpdateBrowsersWaitSince}
+                    else null
+                  end`,
+          agentUpdateFailedAttempts:
+            input.newerTarget === true
+              ? 0
+              : sql`case
+                  when ${continuesRun} and not ${previousFailureWasBusy}
+                    then ${schema.enrollments.agentUpdateFailedAttempts} + 1
+                  when ${continuesRun}
+                    then ${schema.enrollments.agentUpdateFailedAttempts}
+                  else 0
+                end`,
+          agentUpdateBrowsersCloseAt:
+            input.browsersCloseAt !== undefined
+              ? input.browsersCloseAt
+              : sql`case
+                  when ${continuesRun} then ${schema.enrollments.agentUpdateBrowsersCloseAt}
+                  else null
+                end`,
           updatedAt: now,
         })
         .where(
@@ -68913,6 +68826,9 @@ export async function beginEnrollmentAgentUpdate(
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
             ),
+            input.expectedOperationId === undefined
+              ? undefined
+              : sql`${schema.enrollments.agentUpdateOperationId} is not distinct from ${input.expectedOperationId}::uuid`,
           ),
         )
         .returning();
@@ -79941,6 +79857,140 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               [session],
             );
+            const compactionInitiatingHumanSubjectId =
+              latestStarted?.initiatingHumanSubjectId ??
+              (latestStarted?.initiatorKind === "subject"
+                ? latestStarted.initiatorSubjectId
+                : null);
+            // Compaction continues the turn it compacts after, so it runs with
+            // that person's current connection accounts, resolved like an
+            // internal update continuing the same turn. The request then
+            // carries the same connector and personal tools as the turn before
+            // it and reuses its cached prompt prefix. A carried principal that
+            // is not the turn's person, or not a private session's owner, never
+            // lends personal accounts. A compaction turn cannot carry an
+            // external link's permission ceiling or a credential restriction
+            // forward, so a turn with either gives it no connection accounts
+            // and no intent at all.
+            let compactionPersonalConnectionDelegations: McpPersonalConnectionDelegation[] = [];
+            let compactionMcpAccountBindings: McpConnectionAccountBinding[] = [];
+            let compactionConnectionAccountMetadata: Record<string, unknown> = {};
+            // A stored intent the current schema no longer reads lends nothing
+            // and is not carried forward; it never fails the claim.
+            let compactionConnectionAccountIntent: ConnectionAccountIntent | null = null;
+            try {
+              compactionConnectionAccountIntent = latestStarted
+                ? parseConnectionAccountIntent(latestStarted.connectionAccountIntent)
+                : null;
+            } catch (error) {
+              compactionConnectionAccountMetadata = {
+                connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+              };
+            }
+            // In a savepoint, so a failed read lends nothing instead of
+            // failing the claim.
+            const compactedTurnHasNoExternalLink = async (compactedTurnId: string) => {
+              try {
+                const rows = await tx.transaction(
+                  async (savepoint) =>
+                    await savepoint.execute<{ present: number }>(sql`
+                      select 1 as present from external_link_turn_authorities
+                      where account_id = ${session.accountId}
+                        and workspace_id = ${workspaceId}
+                        and turn_id = ${compactedTurnId}
+                      limit 1
+                    `),
+                );
+                return rows.length === 0;
+              } catch (error) {
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+                return false;
+              }
+            };
+            const compactionAuthorityBorrowable =
+              latestStarted !== null &&
+              compactionConnectionAccountIntent !== null &&
+              !carriesCredentialRestriction(
+                latestStarted.initiatorContext,
+                latestStarted.metadata,
+              ) &&
+              !carriesCredentialRestriction(null, session.metadata) &&
+              (await compactedTurnHasNoExternalLink(latestStarted.id));
+            if (
+              compactionAuthorityBorrowable &&
+              compactionConnectionAccountIntent &&
+              input.resolveContinuedConnectionAccounts
+            ) {
+              const resolveContinuedConnectionAccounts = input.resolveContinuedConnectionAccounts;
+              const claimedSession = session;
+              const principal = compactionConnectionAccountIntent.principal;
+              const principalMayLend =
+                principal.kind === "subject" &&
+                principal.subjectId === compactionInitiatingHumanSubjectId &&
+                (claimedSession.visibility !== "user_private" ||
+                  principal.subjectId === claimedSession.ownerSubjectId?.trim());
+              const intent: ConnectionAccountIntent =
+                principal.kind === "subject" && !principalMayLend
+                  ? { ...compactionConnectionAccountIntent, principal: { kind: "none" } }
+                  : compactionConnectionAccountIntent;
+              const lendingSubjectId =
+                intent.principal.kind === "subject" ? intent.principal.subjectId : null;
+              try {
+                // A savepoint, so a failed resolution leaves the claim usable.
+                // Maintenance is never blocked by connection accounts: without
+                // them it runs as before, with only the session's shared tools.
+                const resolved = await tx.transaction(async (savepoint) => {
+                  const connectorMetadata = await sessionMcpServerMetadataForSessions(
+                    savepoint as unknown as Database,
+                    workspaceId,
+                    [sessionId],
+                  );
+                  const result = await resolveContinuedConnectionAccounts(
+                    savepoint as unknown as Database,
+                    {
+                      sessionId,
+                      session: mapSession(
+                        claimedSession,
+                        serializeEffectiveSessionControl(effectiveControl),
+                        connectorMetadata.get(sessionId) ?? [],
+                      ),
+                      intent,
+                    },
+                  );
+                  const delegations = parsedPersonalConnectionDelegations(
+                    result.personalConnectionDelegations,
+                    `session_turns:${workspaceId}:${sessionId}:${turnId}:compaction`,
+                  );
+                  const bindings = parseAcceptedMcpAccountBindings(result.mcpAccountBindings) ?? [];
+                  if (
+                    delegations.some(
+                      (delegation) => delegation.ownerSubjectId !== lendingSubjectId,
+                    ) ||
+                    bindings.some(
+                      (binding) =>
+                        binding.subjectScope === "subject" &&
+                        binding.ownerSubjectId !== lendingSubjectId,
+                    )
+                  ) {
+                    throw new CompactionConnectionAccountRefusal();
+                  }
+                  return { delegations, bindings, gaps: (result.gaps ?? []).slice(0, 32) };
+                });
+                compactionPersonalConnectionDelegations = resolved.delegations;
+                compactionMcpAccountBindings = resolved.bindings;
+                if (resolved.gaps.length > 0) {
+                  compactionConnectionAccountMetadata = { connectionAccountGaps: resolved.gaps };
+                }
+              } catch (error) {
+                // A lost connection fails the turn insert below instead. The
+                // worker reports this record; it never carries the message.
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(error),
+                };
+              }
+            }
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const sharedCompactionPool = latestStarted
               ? null
@@ -79948,75 +79998,134 @@ export async function claimSessionWorkForAttempt(
                   tx as unknown as Database,
                   workspaceId,
                 );
-            const [compactionTurn] = await tx
-              .insert(schema.sessionTurns)
-              .values(
-                withLosslessContentWriteVersion(
-                  {
-                    id: turnId,
-                    accountId: session.accountId,
-                    workspaceId,
-                    sessionId,
-                    triggerEventId,
-                    temporalWorkflowId: workflowId,
-                    status: "running",
-                    executionGeneration: 1,
-                    activeAttemptId: input.attemptId,
-                    source: "compaction",
-                    // Maintenance continues the session's work; keep the
-                    // surface of the turn it compacts after.
-                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
-                    position: Number(position),
-                    prompt: "",
-                    resources: [],
-                    tools: [],
-                    model: effectivePolicy!.model,
-                    reasoningEffort: reasoningEffortForMetadata(
-                      { reasoningEffort: effectivePolicy!.reasoningEffort },
-                      session.reasoningEffort as ReasoningEffort,
-                    ),
-                    latencyMode: latencyModeForMetadata(
-                      { latencyMode: effectivePolicy!.latencyMode },
-                      session.latencyMode as LatencyMode,
-                    ),
-                    sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
-                    sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-                    metadata: metadataWithTurnDispatchAttempt(
-                      { executionKind: "context_compaction" },
-                      {
-                        id: input.dispatchId,
-                        generation: dispatchGeneration,
-                        triggerEventId,
-                      },
-                    ),
-                    ...initiatorColumns(compactionInitiator),
-                    initiatingHumanSubjectId:
-                      latestStarted?.initiatingHumanSubjectId ??
-                      (latestStarted?.initiatorKind === "subject"
-                        ? latestStarted.initiatorSubjectId
-                        : null),
-                    personalConnectionDelegations: [],
-                    mcpAccountBindings: [],
-                    xaiProviderAccountAuthoritySnapshot:
-                      latestStarted?.xaiProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.xai,
-                    claudeProviderAccountAuthoritySnapshot:
-                      latestStarted?.claudeProviderAccountAuthoritySnapshot ??
-                      sharedCompactionPool!.claude,
-                    // The immutable v2 accepted authority of the turn this
-                    // compacts after (NULL without a Codex cutover, so the
-                    // legacy path is unchanged). A session with no started
-                    // turn has none: shared capacity only.
-                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
-                    startedAt: now,
-                    createdAt: now,
-                    updatedAt: now,
-                  },
-                  "prompt",
-                  "promptCodecVersion",
-                ),
-              )
-              .returning();
+            const compactionIntent = compactionAuthorityBorrowable
+              ? compactionConnectionAccountIntent
+              : null;
+            type CompactionAccounts = {
+              delegations: McpPersonalConnectionDelegation[];
+              bindings: McpConnectionAccountBinding[];
+              metadata: Record<string, unknown>;
+            };
+            const insertCompactionTurn = async (writer: typeof tx, accounts: CompactionAccounts) =>
+              await writer
+                .insert(schema.sessionTurns)
+                .values(
+                  withLosslessContentWriteVersion(
+                    {
+                      id: turnId,
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      triggerEventId,
+                      temporalWorkflowId: workflowId,
+                      status: "running",
+                      executionGeneration: 1,
+                      activeAttemptId: input.attemptId,
+                      source: "compaction",
+                      // Maintenance continues the session's work; keep the
+                      // surface of the turn it compacts after.
+                      surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
+                      position: Number(position),
+                      prompt: "",
+                      resources: [],
+                      tools: [],
+                      model: effectivePolicy!.model,
+                      reasoningEffort: reasoningEffortForMetadata(
+                        { reasoningEffort: effectivePolicy!.reasoningEffort },
+                        session.reasoningEffort as ReasoningEffort,
+                      ),
+                      latencyMode: latencyModeForMetadata(
+                        { latencyMode: effectivePolicy!.latencyMode },
+                        session.latencyMode as LatencyMode,
+                      ),
+                      sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
+                      sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                      metadata: metadataWithTurnDispatchAttempt(
+                        {
+                          executionKind: "context_compaction",
+                          ...accounts.metadata,
+                        },
+                        {
+                          id: input.dispatchId,
+                          generation: dispatchGeneration,
+                          triggerEventId,
+                        },
+                      ),
+                      ...initiatorColumns(compactionInitiator),
+                      initiatingHumanSubjectId: compactionInitiatingHumanSubjectId,
+                      personalConnectionDelegations: accounts.delegations,
+                      mcpAccountBindings: accounts.bindings,
+                      // Only a borrowable turn's intent is carried, so later
+                      // work continuing this compaction never resolves accounts
+                      // the compacted turn could not lend.
+                      connectionAccountIntent: compactionIntent,
+                      xaiProviderAccountAuthoritySnapshot:
+                        latestStarted?.xaiProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.xai,
+                      claudeProviderAccountAuthoritySnapshot:
+                        latestStarted?.claudeProviderAccountAuthoritySnapshot ??
+                        sharedCompactionPool!.claude,
+                      // The immutable v2 accepted authority of the turn this
+                      // compacts after (NULL without a Codex cutover, so the
+                      // legacy path is unchanged). A session with no started
+                      // turn has none: shared capacity only.
+                      subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
+                      startedAt: now,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                    "prompt",
+                    "promptCodecVersion",
+                  ),
+                )
+                .returning();
+            let compactionTurn:
+              | Awaited<ReturnType<typeof insertCompactionTurn>>[number]
+              | undefined;
+            if (
+              compactionPersonalConnectionDelegations.length > 0 ||
+              compactionMcpAccountBindings.length > 0
+            ) {
+              try {
+                // Acceptance re-checks live authority in the turn's triggers.
+                // A refusal falls back to no accounts instead of failing the
+                // claim, so the pending request can still run.
+                [compactionTurn] = await tx.transaction(async (savepoint) => {
+                  if (compactionPersonalConnectionDelegations.length > 0) {
+                    // Transaction-local: released with the savepoint, it stays
+                    // set for the rest of the claim (as on the internal-update
+                    // path); rolled back with it on refusal.
+                    await savepoint.execute(sql`
+                      SELECT set_config(
+                        'opengeni.initiating_human_subject_id',
+                        ${compactionInitiatingHumanSubjectId},
+                        true
+                      )
+                    `);
+                  }
+                  return await insertCompactionTurn(savepoint as unknown as typeof tx, {
+                    delegations: compactionPersonalConnectionDelegations,
+                    bindings: compactionMcpAccountBindings,
+                    metadata: compactionConnectionAccountMetadata,
+                  });
+                });
+              } catch (error) {
+                compactionTurn = undefined;
+                compactionConnectionAccountMetadata = {
+                  connectionAccountsUnresolved: unresolvedConnectionAccountsRecord(
+                    error,
+                    "acceptance_refused",
+                  ),
+                };
+              }
+            }
+            compactionTurn ??= (
+              await insertCompactionTurn(tx, {
+                delegations: [],
+                bindings: [],
+                metadata: compactionConnectionAccountMetadata,
+              })
+            )[0];
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
             await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
               { kind: "session_turn", workspaceId, id: compactionTurn.id },
@@ -96462,6 +96571,8 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
+export * from "./id-jag-issuer";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
 export * from "./workspace-member-execution-defaults";

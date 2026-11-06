@@ -17,6 +17,7 @@ import {
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
   ownModelFunding,
   ownSubscriptionPlanAllows,
 } from "./byok-platform-fee";
@@ -202,7 +203,10 @@ export async function checkLimit(
   // credits cannot make an API request eligible for a connected subscription.
   if (
     isCostlyAction(input.action) &&
-    chargeBillingOrigin(input.billingOrigin) === "api" &&
+    connectedSubscriptionsRefusedForOrigin(
+      deps.settings,
+      chargeBillingOrigin(input.billingOrigin),
+    ) &&
     ownModelFunding(
       input.model ? resolveModelProviderForTurn(deps.settings, input.model)?.model : null,
     ) === "subscription"
@@ -349,7 +353,7 @@ export async function checkOwnSubscriptionPlan(
   accountId: string,
   billingOrigin?: BillingOrigin | null,
 ): Promise<LimitDecision> {
-  if (chargeBillingOrigin(billingOrigin) === "api") {
+  if (connectedSubscriptionsRefusedForOrigin(deps.settings, chargeBillingOrigin(billingOrigin))) {
     return {
       allowed: false,
       code: SUBSCRIPTION_API_UNAVAILABLE_CODE,

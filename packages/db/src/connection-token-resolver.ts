@@ -41,6 +41,11 @@ import { Buffer } from "node:buffer";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
 import { withConnectionRefreshLock } from "./connection-refresh-lock";
+import {
+  IdJagExchangeError,
+  isIdJagCredential,
+  refreshIdJagConnectionCredential,
+} from "./id-jag-issuer";
 import type {
   AcceptedConnectionUseContext,
   AcceptedConnectionUseResolution,
@@ -648,7 +653,9 @@ export function buildConnectionTokenResolver(
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
     const refreshed = await measureMcpPhase("oauth_refresh", () =>
-      deps.refresh(cred, ref, settings, options.refreshTransport),
+      isIdJagCredential(cred.credential)
+        ? refreshAutoConnectedCredential(lockedDb, settings, cred, ref, options.refreshTransport)
+        : deps.refresh(cred, ref, settings, options.refreshTransport),
     );
     const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
@@ -842,7 +849,8 @@ export function buildConnectionTokenResolver(
           cred.expiresAt.getTime() <= now.getTime() &&
           !(
             input.preflightAcceptsRefreshableExpiry === true &&
-            stringValue((cred.credential as { refresh_token?: unknown }).refresh_token)
+            (stringValue((cred.credential as { refresh_token?: unknown }).refresh_token) ||
+              isIdJagCredential(cred.credential))
           )))
     ) {
       return authNeeded(ref, "refresh_failed", cred.id);
@@ -1068,6 +1076,36 @@ function isPermanentRefreshError(error: unknown): error is ConnectionRefreshHttp
     error.httpStatus !== 408 &&
     error.httpStatus !== 429
   );
+}
+
+/**
+ * An auto-connected login has no refresh token: a new ID-JAG is signed for
+ * its owner and redeemed. The app refusing it is permanent, like a refused
+ * refresh token; not reaching the app is not.
+ */
+async function refreshAutoConnectedCredential(
+  db: Database,
+  settings: Settings,
+  cred: ConnectionCredentialForBroker,
+  ref: McpServerConnectionRef,
+  transport: RefreshTransportOptions | undefined,
+): Promise<{
+  credential: Record<string, unknown>;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  metadata?: Record<string, unknown>;
+}> {
+  try {
+    return await refreshIdJagConnectionCredential(db, settings, cred, ref, transport ?? {});
+  } catch (error) {
+    if (error instanceof IdJagExchangeError)
+      throw new ConnectionRefreshHttpError(
+        error.httpStatus === 0 ? 503 : error.httpStatus,
+        error.oauthErrorCode,
+        error.message,
+      );
+    throw error;
+  }
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {

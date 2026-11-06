@@ -352,24 +352,12 @@ test("Claude subscription row has its logo and plan, never API-key billing", asy
 });
 
 test("workspace connect offers workspace Claude setup only when permitted", async () => {
-  const { PROVIDER_CONNECTION_CONFIGS } = await import("../ai-gateway-connection");
-  const gateways = {
-    claude_subscription: {
-      config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
-      canManageConnection: true,
-      connected: false,
-    },
-  } as unknown as Partial<Record<"claude_subscription", ProviderConnection>>;
   const { ConnectPickerPage } = await import("./workspace-models-page");
   const pick = mock(() => {});
   await act(async () =>
     root.render(
       <ConnectPickerPage
-        codexAvailable={false}
-        grok="hidden"
-        claude="available"
-        gateways={gateways}
-        target="workspace"
+        choices={{ claude_subscription: "available" }}
         title="Connect account"
         subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
@@ -386,9 +374,7 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
   await act(async () =>
     root.render(
       <ConnectPickerPage
-        codexAvailable={false}
-        grok="hidden"
-        target="workspace"
+        choices={{}}
         title="Connect account"
         subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}

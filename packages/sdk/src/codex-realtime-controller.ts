@@ -16,6 +16,7 @@ import {
   acquireCodexRealtimeMicrophone,
   codexRealtimeMicrophoneHealthy,
   CodexRealtimeMicrophoneError,
+  defaultRealtimeRemoteAudio,
   startCodexRealtimeWebrtc,
 } from "./codex-realtime";
 import type {
@@ -267,6 +268,10 @@ export type CreateCodexRealtimeControllerOptions = {
   workspaceId: string;
   sessionId: string;
   storage?: CodexRealtimeOwnerStorage | undefined;
+  /**
+   * Element that plays the voice's replies. Optional: without one the
+   * controller plays them through its own detached audio element.
+   */
   remoteAudio?: HTMLAudioElement | undefined;
   createPeerConnection?: (() => RTCPeerConnection) | undefined;
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
@@ -383,6 +388,11 @@ export function createCodexRealtimeController(
     options.ownerStorageNamespace,
   );
   const model = options.model ?? "gpt-live-1-boulder-alpha";
+  // Every connection of this controller plays through one element, so a
+  // rotation hands playback over instead of opening a second output.
+  let ownRemoteAudio: HTMLAudioElement | undefined;
+  const remoteAudio = (): HTMLAudioElement | undefined =>
+    options.remoteAudio ?? (ownRemoteAudio ??= defaultRealtimeRemoteAudio());
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const now = options.now ?? (() => new Date());
   const scheduleInterval =
@@ -1056,7 +1066,7 @@ export function createCodexRealtimeController(
         ? await options.startTransport(commonTransportInput)
         : await startCodexRealtimeWebrtc({
             ...commonTransportInput,
-            remoteAudio: options.remoteAudio,
+            remoteAudio: remoteAudio(),
             activateRemoteAudio: false,
             createPeerConnection: options.createPeerConnection,
             getUserMedia: options.getUserMedia,

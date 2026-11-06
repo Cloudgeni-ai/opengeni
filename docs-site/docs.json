@@ -73,6 +73,7 @@
           "guides/connect-a-machine",
           "guides/webhooks-and-credentials",
           "guides/connected-vaults",
+          "guides/auto-connect",
           "guides/usage-allowances",
           "guides/task-usage-limits",
           "guides/insights",

@@ -54,6 +54,9 @@ import {
   type BrowserControlHttpOutcome,
 } from "../browser-control-http";
 import {
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
   agentErrorToControlError,
   commandOutcomeUnknownAfterReplacementAgentError,
   drainingExhaustedError,
@@ -63,6 +66,7 @@ import {
   subjectFor,
   timeoutAgentError,
   type ControlRpc,
+  type UnresponsiveAgentRecovery,
 } from "./control-rpc";
 import {
   decideSelfhostedRetry,
@@ -297,6 +301,9 @@ export interface SelfhostedOpStreamDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** How long a command's start may go unanswered (op-stream.ts
+   *  `OP_START_UNANSWERED_MS`). */
+  startUnansweredMs?: number;
   /** The live runner serves `OpRelease` (Hello `capabilities.op_release`;
    * every compute agent does): stored output is released in one answered
    * exchange instead of a final ACK. */
@@ -966,6 +973,14 @@ export class SelfhostedSession {
     return "";
   }
 
+  /** What this session does about a machine whose agent left a command's
+   *  start unanswered for the op stream's bound. A Connected Machine is the
+   *  person's own, so nothing: they are told it is offline. A compute box may
+   *  be restarted (see `ComputeSandboxSession`). */
+  protected async recoverUnresponsiveAgent(): Promise<UnresponsiveAgentRecovery | null> {
+    return null;
+  }
+
   /** Whether the live runner honors per-request `runAs` right now. */
   protected async liveRunAsSupported(): Promise<boolean> {
     return (await this.admitOperation(false)).runAsSupported;
@@ -1057,6 +1072,9 @@ export class SelfhostedSession {
         ? { silenceTimeoutMs: stream.silenceTimeoutMs }
         : {}),
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
+      ...(stream.startUnansweredMs !== undefined
+        ? { startUnansweredMs: stream.startUnansweredMs }
+        : {}),
       ...(connectionCurrent ? { connectionCurrent } : {}),
       ...(stream.outputReleaseSupported === true ? { outputReleaseSupported: true } : {}),
       ...(stream.connectionGeneration !== undefined
@@ -1755,6 +1773,19 @@ export class SelfhostedSession {
       // The op stream marks a failure never-sent only when no OpStart
       // reached any agent: nothing of it ran, so nothing needs custody.
       if (controlError.neverSent) notDispatched = true;
+      if (controlError.detail[AGENT_UNRESPONSIVE_DETAIL_KEY] !== undefined) {
+        // The agent answered nothing for the bound: say what kind of machine
+        // stopped answering and what was done about it, after the command's
+        // custody is settled above.
+        const recovery = await this.recoverUnresponsiveAgent().catch(
+          () => "restart_failed" as const,
+        );
+        controlError = withDetail(controlError, {
+          [AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY]:
+            this.backendId === "compute" ? "compute" : "connected_machine",
+          [AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]: recovery ?? "none",
+        });
+      }
       throw controlError;
     } finally {
       // An observer failure does not prove that the exact provider operation
@@ -3241,6 +3272,28 @@ function mediaTypeFromPath(path: string): string | undefined {
   if (p.endsWith(".tif") || p.endsWith(".tiff")) return "image/tiff";
   if (p.endsWith(".svg") || p.endsWith(".svgz")) return "image/svg+xml";
   return undefined;
+}
+
+/** The same error with `extra` added to its detail. */
+function withDetail(
+  error: SelfhostedControlError,
+  extra: Record<string, string>,
+): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message: error.message,
+    code: error.code,
+    reason: error.reason,
+    retryable: error.retryable,
+    fenced: error.fenced,
+    draining: error.draining,
+    agentOffline: error.agentOffline,
+    osNotFound: error.osNotFound,
+    payloadTooLarge: error.payloadTooLarge,
+    neverSent: error.neverSent,
+    connectionReplaced: error.connectionReplaced,
+    controlRequestId: error.controlRequestId,
+    detail: { ...error.detail, ...extra },
+  });
 }
 
 /** How many times an exec whose start reached no agent before its

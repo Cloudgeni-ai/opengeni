@@ -95,6 +95,7 @@ unread-chat / Following up markers (`session-update`: light `#0f766e`, dark `#5a
 | `surface` / `surface-2` / `surface-3` | `#ffffff` / `#eeeeee` / `#e5e5e5` | `#333333` / `#383838` / `#404040` |
 | `hover` | `fg` at 6% (`rgb(36 36 36 / 0.06)`) | `fg` at 8% (`rgb(230 230 230 / 0.08)`) |
 | `selection` | `#e2e2e2` | `#484848` |
+| `text-selection` (selected text, not rows) | `#3884ff52` | `#488ceb70` |
 | `border` / `border-strong` | `#dedede` / `#bdbdbd` | `#454545` / `#555555` |
 | `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#242424` / `#3a3a3a` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#d4d4d4` / `#b8b8b8` / `#a3a3a3` |
 | `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#242424` |

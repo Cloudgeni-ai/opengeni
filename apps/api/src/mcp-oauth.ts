@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  ID_JAG_GRANT_PROFILE,
+  JWT_BEARER_GRANT_TYPE,
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
   MCP_OAUTH_CONSENT_TTL_SECONDS,
@@ -57,6 +59,12 @@ import {
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
 import {
+  redeemIdJagGrant,
+  registerMcpAutoConnectRoutes,
+  resolveMcpOAuthClient,
+  type McpAutoConnectHelpers,
+} from "./mcp-auto-connect";
+import {
   assertOAuthConsentContentFlowAllowed,
   requireCallingWorkspaceContentExchange,
 } from "./mcp/workspace-content-flow";
@@ -85,7 +93,20 @@ export type McpOAuthRouteAccess = {
   allowedToolIdentities: ToolGatewayIdentity[];
 };
 
+/** What the auto-connect routes share with the sign-in flow. */
+const AUTO_CONNECT_HELPERS: McpAutoConnectHelpers = {
+  issuer: (deps) => mcpOAuthIssuer(deps),
+  organizationResource: (deps) => `${mcpOAuthIssuer(deps)}${ORGANIZATION_MCP_PATH}`,
+  accessToken: () => opaque(ACCESS_PREFIX),
+  tokenHash: (value) => tokenHash(value),
+  validateRedirectUri: (value) => validateRedirectUri(value),
+  oauthError: (c, error, status, description) => oauthError(c, error, status, description),
+};
+
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
+  // First: the organization issuer's RFC 8414 metadata sits under the
+  // authorization server metadata wildcard below.
+  registerMcpAutoConnectRoutes(app, deps, AUTO_CONNECT_HELPERS);
   // RFC 8414 path-aware discovery: MCP clients (Claude among them) ask for the
   // metadata at /.well-known/oauth-authorization-server/<resource path> first
   // and give up on anything but JSON. Serve the same document at both.
@@ -100,11 +121,15 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         token_endpoint: `${issuer}/oauth/token`,
         registration_endpoint: `${issuer}/oauth/register`,
         response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
+        // The JWT bearer grant redeems an ID-JAG from an issuer an
+        // organization trusts (auto-connect).
+        grant_types_supported: ["authorization_code", "refresh_token", JWT_BEARER_GRANT_TYPE],
+        authorization_grant_profiles_supported: [ID_JAG_GRANT_PROFILE],
         code_challenge_methods_supported: ["S256"],
         token_endpoint_auth_methods_supported: ["none"],
         scopes_supported: [MCP_OAUTH_SCOPE],
         authorization_response_iss_parameter_supported: true,
+        client_id_metadata_document_supported: true,
       }),
     );
   };
@@ -486,6 +511,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const grantType = form.get("grant_type");
+    if (grantType === JWT_BEARER_GRANT_TYPE)
+      return await redeemIdJagGrant(c, deps, AUTO_CONNECT_HELPERS, form);
     const clientId = form.get("client_id") ?? "";
     const resource = form.get("resource");
     const client = await getMcpOAuthClient(deps.db, clientId);
@@ -662,7 +689,10 @@ async function requireAuthorizationClient(deps: ApiRouteDeps, query: URLSearchPa
     });
   }
   const clientId = query.get("client_id") ?? "";
-  const client = await getMcpOAuthClient(deps.db, clientId);
+  // A registered client, or one named by its Client ID Metadata Document URL.
+  const client = await resolveMcpOAuthClient(deps, AUTO_CONNECT_HELPERS, clientId, {
+    redirectUri: query.get("redirect_uri"),
+  });
   if (!client || !client.grantTypes.includes("authorization_code")) {
     throw new HTTPException(400, { message: "invalid OAuth client" });
   }
@@ -1024,10 +1054,10 @@ function escapeHtml(value: string): string {
   );
 }
 
-function oauthError(c: Context, error: string, status: 400 | 401 | 429) {
+function oauthError(c: Context, error: string, status: 400 | 401 | 429, description?: string) {
   c.header("cache-control", "no-store");
   c.header("pragma", "no-cache");
-  return c.json({ error }, status);
+  return c.json(description ? { error, error_description: description } : { error }, status);
 }
 
 /* ----------------------------------------------------------------------------

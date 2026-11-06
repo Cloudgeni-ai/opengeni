@@ -36,6 +36,7 @@ import {
   type PreparedToolGatewayCall,
   type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
+  type ToolGatewayCatalogWarning,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { CodemodeConnectionError, describeCodemodeConnectionFailure } from "./connection-failure";
@@ -88,6 +89,8 @@ export type CreateAttemptToolEnvironmentInput = {
   confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
   /** Trusted secret-reference resolution; runs after approval, before execution. */
   resolveArguments?: ToolGatewayArgumentResolver;
+  /** Also receives the builder's warnings after they are logged, e.g. to tell the model. */
+  onWarnings?: (warnings: readonly ToolGatewayCatalogWarning[]) => void;
 };
 
 export type ModelAttemptToolCall = {
@@ -762,7 +765,7 @@ export function createAttemptToolEnvironment(
       }),
     ),
     {
-      onWarnings: (warnings) =>
+      onWarnings: (warnings) => {
         console.warn("[codemode] attempt tool catalog built without some tools as listed", {
           event: "tool_catalog_degraded",
           workspaceId: input.scope.workspaceId,
@@ -771,7 +774,13 @@ export function createAttemptToolEnvironment(
           attemptId: input.scope.attemptId,
           count: warnings.length,
           warnings: warnings.slice(0, 32),
-        }),
+        });
+        try {
+          input.onWarnings?.(warnings);
+        } catch {
+          // Reporting must never fail the catalog build.
+        }
+      },
     },
   );
   const unsigned = {

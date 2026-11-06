@@ -564,6 +564,15 @@ holds no provider-specific configuration. A new OpenAI-compatible provider is
 one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
 aliases of the same handler for older clients.
 
+These providers delegate through one `delegate_to_session` function tool. The
+browser answers that call at once with a fixed "running, answer not known yet"
+output and later sends the agent's answer as its own `<execution_result>` user
+item plus a response request; progress is held as `<execution_progress>`. A
+delegation is never left as an open tool call while the agent works: Eleven
+Realtime waits only about 20 seconds for a tool result before letting the model
+continue without one (which then invented answers) and drops a later result
+for that call. Canonical: `packages/sdk/src/realtime-websocket-transport.ts`.
+
 Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
 and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
 API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The

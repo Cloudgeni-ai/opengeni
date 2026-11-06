@@ -4177,7 +4177,7 @@ export const englishMessages = {
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
-    "Resume audio to hear the existing voice connection.",
+    "Your browser didn't let the replies play. Tap to hear them.",
   "realtime.realtimeControl.resumeVoiceAudio": "Resume voice audio",
   "realtime.realtimeControl.retryConnection": "Retry connection",
   "realtime.realtimeControl.retryVoiceConnection": "Retry voice connection",
@@ -4189,6 +4189,7 @@ export const englishMessages = {
   "realtime.realtimeControl.startVoice": "Start voice",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
   "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
+  "realtime.realtimeControl.tapToHearReplies": "Tap to hear replies",
   "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
   "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
   "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
@@ -4813,6 +4814,11 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
+  "sessionMcpCapabilityCard.details": "Details",
+  "sessionMcpCapabilityCard.detailsAbout": "About",
+  "sessionMcpCapabilityCard.detailsAccess": "Access",
+  "sessionMcpCapabilityCard.detailsAddress": "Address",
+  "sessionMcpCapabilityCard.detailsType": "Type",
   "sessionMcpCapabilityCard.done": "Done",
   "sessionMcpCapabilityCard.everyoneInThisWorkspace": "Everyone in this workspace",
   "sessionMcpCapabilityCard.finishingYourConnection": "Finishing your connection…",
@@ -4822,6 +4828,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
