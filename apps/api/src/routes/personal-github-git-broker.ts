@@ -514,10 +514,10 @@ async function assertCurrentConnectionAndSelection(
     );
     if (
       !membership ||
-      sessionRepositoryRemoved(membership, [
-        repository.canonicalUrl,
-        `https://github.com/${repository.fullName}`,
-      ])
+      sessionRepositoryRemoved(membership, {
+        uris: [repository.canonicalUrl, `https://github.com/${repository.fullName}`],
+        githubRepositoryId: repository.repositoryId,
+      })
     ) {
       throw new BrokerRepositoryRemovedError();
     }

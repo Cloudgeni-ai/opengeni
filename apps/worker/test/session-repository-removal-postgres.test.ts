@@ -215,7 +215,7 @@ describe("removed repositories and credential minting (real PostgreSQL)", () => 
         sessionId,
       );
       expect(membership).not.toBeNull();
-      return sessionRepositoryRemoved(membership!, [uri]);
+      return sessionRepositoryRemoved(membership!, { uris: [uri] });
     };
     for (const session of [parent, child]) {
       expect(await removedIn(session.id, groceryBot.uri)).toBe(false);
@@ -244,15 +244,24 @@ describe("removed repositories and credential minting (real PostgreSQL)", () => 
       removedAt: new Date().toISOString(),
       sandboxCleanupPending: false,
     } as Parameters<typeof sessionRepositoryRemoved>[0]["removedRepositories"][number];
+    const removed = (
+      resources: ResourceRef[],
+      repository: { uris: string[]; githubRepositoryId?: string },
+    ) => sessionRepositoryRemoved({ resources, removedRepositories: [record] }, repository);
+    expect(removed([docs], { uris: [groceryBot.uri] })).toBe(true);
+    expect(removed([groceryBot], { uris: [groceryBot.uri] })).toBe(false);
+    // A renamed or transferred repository is still the removed one by id.
     expect(
-      sessionRepositoryRemoved({ resources: [docs], removedRepositories: [record] }, [
-        groceryBot.uri,
-      ]),
+      removed([docs], { uris: ["https://github.com/acme/renamed"], githubRepositoryId: "72" }),
     ).toBe(true);
     expect(
-      sessionRepositoryRemoved({ resources: [groceryBot], removedRepositories: [record] }, [
-        groceryBot.uri,
-      ]),
+      removed([docs], { uris: ["https://github.com/acme/renamed"], githubRepositoryId: "73" }),
+    ).toBe(false);
+    expect(
+      removed([{ ...groceryBot, uri: "https://github.com/acme/renamed.git" }], {
+        uris: ["https://github.com/acme/renamed"],
+        githubRepositoryId: "72",
+      }),
     ).toBe(false);
   });
 

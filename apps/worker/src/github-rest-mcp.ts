@@ -345,10 +345,10 @@ async function assertRepositoryNotRemoved(
   );
   if (
     !membership ||
-    sessionRepositoryRemoved(membership, [
-      repository.canonicalUrl,
-      `https://github.com/${repository.fullName}`,
-    ])
+    sessionRepositoryRemoved(membership, {
+      uris: [repository.canonicalUrl, `https://github.com/${repository.fullName}`],
+      githubRepositoryId: repository.repositoryId,
+    })
   ) {
     throw new GitHubRestRepositoryDetachedError(
       `${repository.fullName} was removed from this chat`,

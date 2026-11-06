@@ -113,19 +113,36 @@ export async function getSessionRepositoryMembershipForAuthority(
   });
 }
 
+/** The GitHub repository id a github.com repository resource carries, if any. */
+function githubRepositoryIdOf(resource: ResourceRef): string | null {
+  if (resource.kind !== "repository") return null;
+  if (!repositoryMembershipKey(resource.uri)?.startsWith("https://github.com/")) return null;
+  const id = resource.repositoryId ?? resource.githubRepositoryId;
+  return id === undefined ? null : String(id);
+}
+
 /**
- * Whether a person removed the repository at any of `uris` from the session
- * and it is not attached again. A removal record that outlived a re-attach
- * never refuses a repository the session attaches.
+ * Whether a person removed the repository (at any of `uris`, or with this
+ * GitHub repository id, so a rename or transfer does not undo the removal)
+ * from the session and it is not attached again. A removal record that
+ * outlived a re-attach never refuses a repository the session attaches.
  */
 export function sessionRepositoryRemoved(
   membership: SessionRepositoryMembership,
-  uris: readonly string[],
+  repository: { uris: readonly string[]; githubRepositoryId?: string | undefined },
 ): boolean {
-  return uris.some(
-    (uri) =>
-      findSessionRemovedRepository(membership.removedRepositories, uri) !== undefined &&
-      !resourcesIncludeRepository(membership.resources, uri),
+  const id = repository.githubRepositoryId;
+  const matches = (resource: ResourceRef) =>
+    (resource.kind === "repository" &&
+      repository.uris.some(
+        (uri) =>
+          repositoryMembershipKey(uri) !== null &&
+          repositoryMembershipKey(uri) === repositoryMembershipKey(resource.uri),
+      )) ||
+    (id !== undefined && githubRepositoryIdOf(resource) === id);
+  return (
+    membership.removedRepositories.some((entry) => matches(entry.resource)) &&
+    !membership.resources.some(matches)
   );
 }
 
