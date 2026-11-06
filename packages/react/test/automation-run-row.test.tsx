@@ -39,7 +39,7 @@ function automationRun(member: Record<string, unknown>, answer: string): Session
     event("turn.started"),
     event("agent.toolCall.created", { id: "call-1", name: "get_ticket", arguments: {} }),
     event("agent.toolCall.output", { id: "call-1", output: "{}" }),
-    event("agent.message.completed", { phase: "final", text: answer }),
+    event("agent.message.completed", { phase: "final_answer", text: answer }),
     event("turn.completed"),
   ];
 }
@@ -52,6 +52,14 @@ const named = {
     eventCount: 1,
   },
 };
+
+/** A turn's work row, in the chat's readable turns and in the plain timeline. */
+const WORK_ROW = "[data-og-work-id], [data-og-work-header]";
+const TIMELINES = [
+  { turnSummary: { rolling: true } },
+  { turnSummary: { rolling: true }, agentSignals: false },
+  {},
+] as const;
 
 describe("an automation run in the chat", () => {
   test("reads as one line saying what happened, then the answer", async () => {
@@ -77,22 +85,48 @@ describe("an automation run in the chat", () => {
     await r.unmount();
   });
 
-  test("a run with nothing for the person is not drawn", async () => {
-    const r = await renderComponent(<MessageTimeline events={automationRun(named, "NO_REPLY")} />);
-    expect(r.container.querySelector("[data-og-automation-run]")).toBeNull();
-    expect(r.container.textContent).not.toContain("NO_REPLY");
-    await r.unmount();
+  test("a run with nothing to say is only its line", async () => {
+    for (const props of TIMELINES) {
+      const r = await renderComponent(
+        <MessageTimeline events={automationRun(named, "NO_REPLY")} {...props} />,
+      );
+      expect(r.container.querySelector("[data-og-automation-run]")?.textContent).toContain(
+        "Ticket assigned to you: T-4907 Refund request",
+      );
+      expect(r.container.querySelector(WORK_ROW)).toBeNull();
+      expect(r.container.textContent).not.toContain("NO_REPLY");
+      await r.unmount();
+    }
   });
 
-  test("without agent signals there is no work row under it", async () => {
+  test("a run's work is never drawn under its line", async () => {
     const events = automationRun(named, "Contoso wants a refund.");
-    const full = await renderComponent(<MessageTimeline events={events} />);
-    expect(full.container.querySelector("[data-og-work-header]")).not.toBeNull();
-    await full.unmount();
-    const simple = await renderComponent(<MessageTimeline events={events} agentSignals={false} />);
-    expect(simple.container.querySelector("[data-og-automation-run]")).not.toBeNull();
-    expect(simple.container.querySelector("[data-og-work-header]")).toBeNull();
-    expect(simple.container.textContent).toContain("Contoso wants a refund.");
-    await simple.unmount();
+    for (const props of TIMELINES) {
+      const r = await renderComponent(<MessageTimeline events={events} {...props} />);
+      expect(r.container.querySelector("[data-og-automation-run]")).not.toBeNull();
+      expect(r.container.querySelector(WORK_ROW)).toBeNull();
+      expect(r.container.textContent).toContain("Contoso wants a refund.");
+      await r.unmount();
+    }
+  });
+
+  test("a turn a person started keeps its work row", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          event("user.message", { text: "Check T-2" }, "chat"),
+          event("turn.started", {}, "chat"),
+          event("agent.toolCall.created", { id: "c2", name: "get_ticket", arguments: {} }, "chat"),
+          event("agent.toolCall.output", { id: "c2", output: "{}" }, "chat"),
+          event("agent.message.completed", { phase: "final_answer", text: "Open." }, "chat"),
+          event("turn.completed", {}, "chat"),
+          ...automationRun(named, "Contoso wants a refund."),
+        ]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    expect(r.container.querySelectorAll("[data-og-work-id]")).toHaveLength(1);
+    expect(r.container.querySelector("[data-og-automation-run]")).not.toBeNull();
+    await r.unmount();
   });
 });

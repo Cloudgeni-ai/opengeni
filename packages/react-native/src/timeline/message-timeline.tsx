@@ -238,8 +238,8 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const t = useOpenGeniText();
   const items = useMemo(() => {
     const built = props.items ?? buildTimeline(t, props.events ?? []);
-    // A person who never sees the agent's work reads an automation run as
-    // its line and its answer only.
+    // An automation run is its line and its answer either way; for a person
+    // who never sees the agent's work a failed run is only its line too.
     return props.agentSignals === false ? automationRunOutcomesOnly(built) : built;
   }, [t, props.items, props.events, props.agentSignals]);
   const pauses = useTimelinePauses(props.events, props.pause);

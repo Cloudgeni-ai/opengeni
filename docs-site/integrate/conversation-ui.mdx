@@ -104,26 +104,28 @@ often don't need these. Turn them off with `agentSignals={false}`:
 
 Queued messages, approvals and the agent's questions still show. Each turn's
 work row reads only as its status ("Working · 8s", "Worked for 36s"), without
-step previews or your `turnSummary` facets. An automation run shows as its
-one line and its answer, with no work row; a run that is still working, or
-ends with a failure only an operator can fix, shows nothing. React Native's
-`NativeSessionScreen` takes the same `agentSignals={false}` for all of this,
-and to hide its goal, agents and commands chips.
+step previews or your `turnSummary` facets. An automation run that ends with a
+failure only an operator can fix reads as a plain finish: just its line. React
+Native's `NativeSessionScreen` takes the same `agentSignals={false}` for all of
+this, and to hide its goal, agents and commands chips.
 
 ## Automation runs in the chat
 
 When an automation (a schedule or an event trigger) acts in a chat, the chat
-shows one centered line saying what happened, then the agent's answer. The line
+shows one centered line saying what happened, then the agent's answer, and
+never the run's work: no steps, narration or work row, while it runs or after.
+Turns a person started keep their work row. The line
 is the automation's name and what the event that started it says, for example
 "Ticket assigned to you: T-4907 Refund request from Contoso", or just the name
 for a scheduled run. Name automations for the person reading the chat. The
 automation's instructions are never shown; runs recorded before Opengeni kept
 the name read "Automation run".
 
-A run with nothing for the person stays out of the chat. The agent is told to
-answer exactly `NO_REPLY` when a run leaves nothing to see or do, and the chat
-then draws neither the run's line, its work nor its answer. A run that asks the
-person something or needs them to connect an account always shows.
+Every run keeps its line, so the chat shows that the automation ran even when
+it found nothing. The agent is told to answer exactly `NO_REPLY` when a run
+leaves nothing to see or do, and the chat then draws only the line. A run that
+asks the person something or needs them to connect an account shows that under
+its line. A failed run shows its work and the failure, so it can be fixed.
 
 Such a run leaves no other trace for the person either: it does not mark the
 chat unread, open an inbox reply item or send a phone notification. It stays

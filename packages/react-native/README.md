@@ -52,12 +52,13 @@ Above the composer, `NativeSessionScreen` shows how the agent works: chips for
 the session goal, helper agents and running commands. For people to whom a
 paused goal or a count of helper agents means nothing, pass
 `agentSignals={false}`. Queued messages, approvals and the agent's questions
-still show, turn rows show only their status, and an automation run shows as
-its one line and its answer.
+still show, turn rows show only their status, and a failed automation run
+reads as a plain finish.
 
 An automation run reads as one line saying what happened (the automation's
-name and what its event says), never its instructions, and a run whose answer
-is exactly `NO_REPLY` is not drawn.
+name and what its event says), never its instructions, with only its answer
+under it and never its work. A run whose answer is exactly `NO_REPLY` is only
+its line.
 
 ```tsx
 <NativeSessionScreen controller={controller} agentSignals={false} />

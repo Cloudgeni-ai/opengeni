@@ -273,7 +273,7 @@ function automationRunEvents() {
   push(
     "agent.message.completed",
     {
-      phase: "final",
+      phase: "final_answer",
       text:
         scenario === "automation-quiet"
           ? legacyRun

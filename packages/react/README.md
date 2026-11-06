@@ -225,11 +225,15 @@ someone else's product with zero styling:
   `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
   `OpenGeniChat`). Queued messages, approvals and the agent's questions still
   show, and the goal is not read at all. Turn rows then show only their status,
-  and an automation run shows as its one line and its answer.
+  and a failed automation run reads as a plain finish.
 - **Automation runs read as what happened**: a run shows one line, the
   automation's name and what the event that started it says, never its
-  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
-  person) is not drawn at all.
+  instructions, and under it only what it has for the person: its answer and
+  anything waiting on them. Its work (steps, narration, the work row) is not
+  drawn, so a run whose answer is exactly `NO_REPLY` (nothing for the person)
+  is only its line, and it marks nothing unread and opens no inbox item. A
+  failed run shows its work so the failure can be read. Turns a person started
+  keep their work row.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available

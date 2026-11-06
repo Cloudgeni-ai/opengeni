@@ -2183,71 +2183,29 @@ export function buildTimeline(
       item.text = stripOpaqueCitationTokens(item.text);
     }
   }
-  return withoutQuietReplies(items);
+  return automationRunsAsOutcomes(withoutNoReplyAnswers(items), "shown");
 }
-
-/** What a quiet automation run may hold and still leave the chat. */
-const QUIET_RUN_ITEM_KINDS: ReadonlySet<TimelineItem["kind"]> = new Set([
-  "agent-message",
-  "reasoning",
-  "tool-call",
-  "worker",
-  "sandbox",
-  "startup-phase",
-  "machine-input-batch",
-  "context-compaction",
-  "memory",
-  "knowledge",
-  "turn-end",
-  "turn-steps",
-]);
 
 /**
  * A final answer of exactly `NO_REPLY` means "nothing for the person here",
  * so the token itself is never drawn (nor its first letters while it
- * streams). An automation run that settles with it leaves the chat
- * entirely: its line saying what happened, its work and its answer. A run
- * that holds anything for the reader (a question, a connect card, a failure)
- * stays, without the token.
+ * streams). The rest of its turn stays.
  */
-function withoutQuietReplies(items: TimelineItem[]): TimelineItem[] {
+function withoutNoReplyAnswers(items: TimelineItem[]): TimelineItem[] {
   const answers = new Map<string, AgentMessageItem>();
-  const automationTurns = new Set<string>();
-  const loudTurns = new Set<string>();
   for (const item of items) {
-    const turnId = "turnId" in item ? item.turnId : null;
-    if (!turnId) continue;
-    if (item.kind === "agent-message" && item.phase !== "commentary") answers.set(turnId, item);
-    if (
-      item.kind === "machine-input-batch" &&
-      item.members.length > 0 &&
-      item.members.every((member) => member.kind === "scheduled_occurrence")
-    ) {
-      automationTurns.add(turnId);
-    }
-    if (
-      !QUIET_RUN_ITEM_KINDS.has(item.kind) ||
-      (item.kind === "turn-end" && item.outcome !== "complete")
-    ) {
-      loudTurns.add(turnId);
+    if (item.kind === "agent-message" && item.turnId && item.phase !== "commentary") {
+      answers.set(item.turnId, item);
     }
   }
-  const hiddenAnswers = new Set<AgentMessageItem>();
-  const quietTurns = new Set<string>();
-  for (const [turnId, answer] of answers) {
+  const hidden = new Set<AgentMessageItem>();
+  for (const answer of answers.values()) {
     if (answer.streaming ? mayBecomeNoReplyText(answer.text) : isNoReplyText(answer.text)) {
-      hiddenAnswers.add(answer);
-      if (!answer.streaming && automationTurns.has(turnId) && !loudTurns.has(turnId)) {
-        quietTurns.add(turnId);
-      }
+      hidden.add(answer);
     }
   }
-  if (hiddenAnswers.size === 0) return items;
-  return items.filter((item) => {
-    if (item.kind === "agent-message" && hiddenAnswers.has(item)) return false;
-    const turnId = "turnId" in item ? item.turnId : null;
-    return !(turnId && quietTurns.has(turnId));
-  });
+  if (hidden.size === 0) return items;
+  return items.filter((item) => !(item.kind === "agent-message" && hidden.has(item)));
 }
 
 function automationRunTurnIds(items: readonly TimelineItem[]): Set<string> {
@@ -2266,43 +2224,83 @@ function automationRunTurnIds(items: readonly TimelineItem[]): Set<string> {
 }
 
 /**
- * Automation runs as a person who never sees the agent's work reads them
- * (`agentSignals: false`): the line saying what happened and the answer,
- * plus anything that waits on them (a question, an approval, a connect
- * card). Steps, narration, working rows and plain failures stay out; the
- * line appears only once there is something under it, so a run that is
- * still working or ends with nothing for the person never shows.
+ * The agent's work in a turn: steps, narration and what makes a work row. A
+ * message still streaming without a declared phase may turn out to be
+ * narration, so it waits until it settles or says it is the answer.
  */
-export function automationRunOutcomesOnly(items: TimelineItem[]): TimelineItem[] {
+function isRunWork(item: TimelineItem): boolean {
+  if (isActivityItem(item) || isAgentWorkHumanInput(item)) return true;
+  switch (item.kind) {
+    case "agent-message":
+      return item.phase === "commentary" || (item.streaming && item.phase !== "final_answer");
+    case "turn-steps":
+    case "context-compaction":
+    case "worker-completion":
+      return true;
+    case "notice":
+      return !!item.capacityWait;
+    default:
+      return false;
+  }
+}
+
+/**
+ * An automation run reads as its line (the automation's name and what
+ * started it) and what it has for the person: its answer, and anything that
+ * waits on them (a question, an approval, a connect card). Its work (steps,
+ * narration, the work row) stays out while it runs and once it ends, so a
+ * run with nothing to say is only its line. Turns a person started are left
+ * as they are.
+ *
+ * A failed run keeps its work so the failure can be read (`"shown"`, as
+ * {@link buildTimeline} draws it). With `"plain"`, a failure reads as a
+ * plain finish, for a reader who could not act on it anyway.
+ */
+function automationRunsAsOutcomes(
+  items: TimelineItem[],
+  failures: "shown" | "plain",
+): TimelineItem[] {
   const runs = automationRunTurnIds(items);
   if (runs.size === 0) return items;
-  const runOf = (item: TimelineItem): string | null => {
-    const turnId = "turnId" in item ? item.turnId : null;
-    return turnId && runs.has(turnId) ? turnId : null;
-  };
-  const shown = (item: TimelineItem): boolean => {
-    if (item.kind === "machine-input-batch" || item.kind === "turn-end") return false;
-    if (item.kind === "agent-message") return item.phase !== "commentary";
-    return !QUIET_RUN_ITEM_KINDS.has(item.kind);
-  };
-  const runsWithOutcome = new Set<string>();
-  for (const item of items) {
-    const run = runOf(item);
-    if (run && shown(item)) runsWithOutcome.add(run);
+  const failedRuns = new Set<string>();
+  if (failures === "shown") {
+    for (const item of items) {
+      if (
+        item.kind === "turn-end" &&
+        item.turnId &&
+        runs.has(item.turnId) &&
+        item.outcome === "failed" &&
+        !item.resumedAt
+      ) {
+        failedRuns.add(item.turnId);
+      }
+    }
   }
-  return items.flatMap((item): TimelineItem[] => {
-    const run = runOf(item);
-    if (!run || shown(item)) return [item];
-    if (item.kind === "machine-input-batch") return runsWithOutcome.has(run) ? [item] : [];
-    // The run's end stays so the chat knows it finished, as a plain
-    // completion: a failure only an operator can act on draws nothing.
-    if (item.kind === "turn-end") {
-      if (item.outcome !== "failed") return [item];
+  let changed = false;
+  const projected = items.flatMap((item): TimelineItem[] => {
+    const turnId = "turnId" in item ? item.turnId : null;
+    if (!turnId || !runs.has(turnId) || failedRuns.has(turnId)) return [item];
+    if (failures === "plain" && item.kind === "turn-end" && item.outcome === "failed") {
+      changed = true;
       const { failureDetail: _detail, ...end } = item;
       return [{ ...end, outcome: "complete", failureText: null }];
     }
+    if (!isRunWork(item)) return [item];
+    changed = true;
     return [];
   });
+  return changed ? projected : items;
+}
+
+/**
+ * Automation runs for a person who never sees the agent's work
+ * (`agentSignals: false`): as {@link buildTimeline} draws them (the line and
+ * what the run has for the person, never its work), and a failure only an
+ * operator can act on reads as a plain finish. Returns `items` itself when
+ * nothing changes.
+ */
+export function automationRunOutcomesOnly(items: TimelineItem[]): TimelineItem[] {
+  return automationRunsAsOutcomes(items, "plain");
 }
 
 /**

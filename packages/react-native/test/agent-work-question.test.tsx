@@ -497,7 +497,11 @@ function automationRun(member: Record<string, unknown>, answer: string): Session
     event("turn.started", {}, "run"),
     event("agent.toolCall.created", { id: "call-1", name: "get_ticket", arguments: {} }, "run"),
     event("agent.toolCall.output", { id: "call-1", output: "{}" }, "run"),
-    event("agent.message.completed", { messageId: "m1", phase: "final", text: answer }, "run"),
+    event(
+      "agent.message.completed",
+      { messageId: "m1", phase: "final_answer", text: answer },
+      "run",
+    ),
     event("turn.completed", {}, "run"),
   ];
 }
@@ -543,33 +547,36 @@ test("an older run never shows its instructions", async () => {
   }
 });
 
-test("a run with nothing for the person is not drawn", async () => {
-  const view = await renderComponent(<MessageTimeline events={automationRun(named, "NO_REPLY")} />);
-  try {
-    const text = view.container.textContent ?? "";
-    expect(text).not.toContain("Ticket assigned to you");
-    expect(text).not.toContain("NO_REPLY");
-  } finally {
-    await view.unmount();
+test("a run with nothing to say is only its line", async () => {
+  for (const agentSignals of [true, false]) {
+    const view = await renderComponent(
+      <MessageTimeline events={automationRun(named, "NO_REPLY")} agentSignals={agentSignals} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Ticket assigned to you: T-4907 Refund request");
+      expect(text).not.toContain("NO_REPLY");
+      expect(workRow(view.container)).toBeUndefined();
+    } finally {
+      await view.unmount();
+    }
   }
 });
 
-test("without agent signals there is no work row under the line", async () => {
+test("a run's work is never drawn under its line", async () => {
   const events = automationRun(named, "Contoso wants a refund.");
-  const full = await renderComponent(<MessageTimeline events={events} />);
-  try {
-    expect(workRow(full.container)).toBeDefined();
-  } finally {
-    await full.unmount();
-  }
-  const simple = await renderComponent(<MessageTimeline events={events} agentSignals={false} />);
-  try {
-    expect(workRow(simple.container)).toBeUndefined();
-    const text = simple.container.textContent ?? "";
-    expect(text).toContain("Ticket assigned to you: T-4907 Refund request");
-    expect(text).toContain("Contoso wants a refund.");
-  } finally {
-    await simple.unmount();
+  for (const agentSignals of [true, false]) {
+    const view = await renderComponent(
+      <MessageTimeline events={events} agentSignals={agentSignals} />,
+    );
+    try {
+      expect(workRow(view.container)).toBeUndefined();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Ticket assigned to you: T-4907 Refund request");
+      expect(text).toContain("Contoso wants a refund.");
+    } finally {
+      await view.unmount();
+    }
   }
 });
 

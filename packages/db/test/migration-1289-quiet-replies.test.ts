@@ -62,7 +62,7 @@ const db = () => client!.db;
  * A person signed in to the phone app with alerts for replies, who keeps
  * replies in their inbox, and their session with its first turn.
  */
-async function person(label: string) {
+async function person(label: string, source: "user" | "system" = "user") {
   const userId = crypto.randomUUID();
   const subjectId = `user:${userId}`;
   await owned!.admin`
@@ -128,7 +128,7 @@ async function person(label: string) {
         trigger_event_id, temporal_workflow_id, status, source, position, prompt, model,
         reasoning_effort, latency_mode, sandbox_backend, finished_at)
       values (${turnId}::uuid, ${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
-        ${session.id}::uuid, gen_random_uuid(), ${`quiet-${turnId}`}, 'completed', 'user', 1,
+        ${session.id}::uuid, gen_random_uuid(), ${`quiet-${turnId}`}, 'completed', ${source}, 1,
         'go', 'scripted-model', 'medium', 'standard', 'none', now())`,
     );
   });
@@ -238,6 +238,53 @@ describe("1289 a quiet run leaves no trace for the person", () => {
       select count(*)::integer as count from session_events
       where session_id = ${owner.session.id} and payload ->> 'text' = 'NO_REPLY'`;
     expect(kept!.count).toBe(1);
+  });
+
+  test("an automation run with nothing to say marks nothing unread and opens no inbox item", async () => {
+    if (!client) return;
+    const owner = await person("automation", "system");
+    const before = await unreadFrontier(owner);
+    // The run's line (the update that started it), its work and its answer.
+    await appendSessionEvents(db(), owner.scope.workspaceId, owner.session.id, [
+      {
+        type: "system.update.delivered",
+        payload: {
+          members: [
+            {
+              id: crypto.randomUUID(),
+              kind: "scheduled_occurrence",
+              sourceId: crypto.randomUUID(),
+              classification: "info",
+              summary: "Ticket assigned to you",
+              automation: {
+                name: "Ticket assigned to you",
+                eventSummaries: ["T-1"],
+                eventCount: 1,
+              },
+            },
+          ],
+        },
+        turnId: owner.turnId,
+      },
+      { type: "turn.started", payload: {}, turnId: owner.turnId },
+      {
+        type: "agent.toolCall.created",
+        payload: { id: "call-1", name: "get_ticket", arguments: {} },
+        turnId: owner.turnId,
+      },
+      {
+        type: "agent.toolCall.output",
+        payload: { id: "call-1", output: "{}" },
+        turnId: owner.turnId,
+      },
+    ]);
+    await finish(owner, [
+      { text: "Checking the ticket.", phase: "commentary" },
+      { text: "NO_REPLY", phase: "final_answer" },
+    ]);
+    expect(await unreadFrontier(owner)).toBe(before);
+    expect(await replyItems(owner)).toEqual([]);
+    expect(await pushes(owner)).toEqual([]);
   });
 
   test("a wrapped token is quiet too", async () => {

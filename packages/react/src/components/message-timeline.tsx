@@ -723,8 +723,8 @@ export function MessageTimeline({
   const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
     const builtItems = items ?? buildTimeline(t, events ?? []);
-    // A person who never sees the agent's work reads an automation run as
-    // its line and its answer only.
+    // An automation run is its line and its answer either way; for a person
+    // who never sees the agent's work a failed run is only its line too.
     const projectedItems = agentSignals ? builtItems : automationRunOutcomesOnly(builtItems);
     if (!shouldRenderAuthNeeded) {
       return projectedItems;
