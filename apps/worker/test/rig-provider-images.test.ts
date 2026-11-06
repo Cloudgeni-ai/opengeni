@@ -613,6 +613,19 @@ describe("compute environment templates", () => {
     expect(running.reason).toBe("not_ready");
     // A failed build of this exact content waits for the content to change.
     expect(select({ ...current, status: "failed", imageId: null }).reason).toBe("not_ready");
+    // Without setup a template saves nothing: never selected or rebuilt.
+    const noSetup = { ...base, setupScript: "" };
+    for (const image of [current, { ...earlier }, { ...current, status: "failed" as const }]) {
+      const selection = resolveRigProviderImageSelection(
+        settings,
+        { ...noSetup, providerImages: { compute: image } },
+        "compute",
+        image.providerBindingKeyHash,
+        now,
+      );
+      expect(selection.reason).toBe("missing");
+      expect(selection.settings.computeTemplate).toBeUndefined();
+    }
     // The window matches the build claim's, so a rebuild can take the claim over.
     expect(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toBe(RIG_VERIFICATION_OWNER_TTL_MS);
   });
@@ -638,13 +651,16 @@ describe("compute environment templates", () => {
       current?: (claimed: RigProviderImage) => RigProviderImage | null;
       currentThrows?: boolean;
       abortDuringColdBoot?: boolean;
+      definition?: RigVersion;
     }) {
       const deleted: string[] = [];
+      let builds = 0;
       const finalized: RigProviderImage[] = [];
       const stop = new AbortController();
       let claimed: RigProviderImage | null = null;
       const dependencies: BuildVerifiedRigProviderImageDependencies = {
         buildImage: async () => {
+          builds += 1;
           if (options.buildFails) throw new Error("capture failed");
           return {
             provider: "compute",
@@ -686,7 +702,7 @@ describe("compute environment templates", () => {
             accountId: "33333333-3333-4333-8333-333333333333",
             workspaceId: "44444444-4444-4444-8444-444444444444",
             existingVersionId: VERSION_ID,
-            definition,
+            definition: options.definition ?? definition,
             target: { kind: "version", id: VERSION_ID },
             established: {
               backendId: "compute",
@@ -706,8 +722,18 @@ describe("compute environment templates", () => {
           },
           dependencies,
         );
-      return { run, deleted, finalized };
+      return { run, deleted, finalized, builds: () => builds };
     }
+
+    test("an environment without setup is not captured, and a template it replaced is deleted", async () => {
+      const replaced = { ...readyTemplate(settings, definition), imageId: "tpl-old" };
+      const noSetup = harness({ replaced, definition: version({ setupScript: " " }) });
+      const result = await noSetup.run();
+      expect(result.status).toBe("unsupported");
+      expect(result.error?.code).toBe("provider_image_build_unsupported");
+      expect(noSetup.builds()).toBe(0);
+      expect(noSetup.deleted).toEqual(["tpl-old"]);
+    });
 
     test("publishing deletes the template it replaced and keeps its own", async () => {
       const replaced = { ...readyTemplate(settings, definition), imageId: "tpl-old" };
@@ -856,6 +882,49 @@ describe("compute environment templates", () => {
       },
     );
     expect(busy).toBe(false);
+
+    const deleteFails = await recordComputeEnvironmentVerificationFailure(
+      {
+        settings,
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        version: definition,
+        message: "x",
+      },
+      {
+        claim: async (_db, input) => ({ status: "claimed", image: input.image, replaced }),
+        finalize: async () => true,
+        deleteComputeTemplate: async () => {
+          throw new Error("control service unavailable");
+        },
+      },
+    );
+    expect(deleteFails).toBe(true);
+
+    expect(
+      await recordComputeEnvironmentVerificationFailure(
+        {
+          settings,
+          db: {} as never,
+          observability: { warn: () => undefined } as never,
+          workspaceId: "44444444-4444-4444-8444-444444444444",
+          version: version({ setupScript: "" }),
+          message: "x",
+        },
+        {
+          claim: async () => {
+            throw new Error("not asked");
+          },
+          finalize: async () => {
+            throw new Error("not asked");
+          },
+          deleteComputeTemplate: async () => {
+            throw new Error("not asked");
+          },
+        },
+      ),
+    ).toBe(false);
   });
 
   test("a template's cold-boot proof boots the template, with no Modal settings", async () => {

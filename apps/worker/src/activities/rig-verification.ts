@@ -1080,9 +1080,14 @@ export async function buildVerifiedRigProviderImage(
   dependencies: BuildVerifiedRigProviderImageDependencies = defaultBuildVerifiedRigProviderImageDependencies,
 ): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
+  // A compute template only saves the setup script's work, and a sandbox
+  // from a template boots cold, so an environment without setup is not
+  // captured.
+  const computeWithoutSetup = backend === "compute" && !(input.definition.setupScript ?? "").trim();
   const providerSupportsBuild =
     providerSupportsImmutableImageBuild(backend) &&
-    rigProviderImageBuildSupported(input.settings, backend);
+    rigProviderImageBuildSupported(input.settings, backend) &&
+    !computeWithoutSetup;
   const sourceImage = rigProviderImageContentSourceImage(input.settings, backend);
   const contentHash = rigProviderImageContentHash({
     backend,
@@ -1185,19 +1190,39 @@ export async function buildVerifiedRigProviderImage(
   };
 
   if (!providerSupportsBuild) {
-    return await finalize({
+    const unsupported = await finalize({
       ...building,
       status: "unsupported",
       finishedAt: new Date().toISOString(),
       error: {
         code: "provider_image_build_unsupported",
         message:
-          backend === "compute"
-            ? "compute builds need a configured compute image and a deployment revision that identifies it"
-            : `sandbox backend ${backend} does not support immutable provider image builds`,
+          computeWithoutSetup
+            ? "compute builds only Sandbox Environments with a setup script"
+            : backend === "compute"
+              ? "compute builds need a configured compute image and a deployment revision that identifies it"
+              : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
     });
+    if (
+      unsupported.status === "unsupported" &&
+      replaced?.backend === "compute" &&
+      replaced.status === "ready" &&
+      replaced.imageId
+    ) {
+      // The record no longer names the template it replaced.
+      const template = replaced.imageId;
+      await dependencies
+        .deleteComputeTemplate(input.settings, template)
+        .catch((error: unknown) => {
+          input.observability.warn("replaced compute environment template was not deleted", {
+            template,
+            error: errorMessage(error),
+          });
+        });
+    }
+    return unsupported;
   }
 
   throwIfAborted(input.signal);
@@ -1452,7 +1477,11 @@ export async function recordComputeEnvironmentVerificationFailure(
   > = defaultBuildVerifiedRigProviderImageDependencies,
 ): Promise<boolean> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
-  if (backend !== "compute" || !rigProviderImageBuildSupported(input.settings, backend)) {
+  if (
+    backend !== "compute" ||
+    !rigProviderImageBuildSupported(input.settings, backend) ||
+    !(input.version.setupScript ?? "").trim()
+  ) {
     return false;
   }
   try {
@@ -1506,7 +1535,13 @@ export async function recordComputeEnvironmentVerificationFailure(
     });
     const stale = claim.replaced;
     if (recorded && stale?.backend === "compute" && stale.status === "ready" && stale.imageId) {
-      await dependencies.deleteComputeTemplate(input.settings, stale.imageId);
+      const template = stale.imageId;
+      await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+        input.observability.warn("replaced compute environment template was not deleted", {
+          template,
+          error: errorMessage(error),
+        });
+      });
     }
     return recorded;
   } catch (error) {

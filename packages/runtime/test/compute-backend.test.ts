@@ -1893,6 +1893,32 @@ describe("compute environment templates", () => {
     expect(lookups).toBe(1);
   });
 
+  test("a build never inherits a turn's lookup that fails", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return new Response("down", { status: 503 });
+      },
+    });
+    try {
+      const own = {
+        computeApiUrl: `http://127.0.0.1:${server.port}`,
+        computeApiKey: "shared-key",
+      } as never;
+      const turn = resolveComputeProviderBinding(own).catch((error: unknown) => error);
+      const build = await resolveComputeProviderBinding(own, {
+        linkKeys: async () => ({ team: "team-b", keys: [] }),
+      });
+      expect(build.binding.team).toBe("team-b");
+      expect(await turn).toBeInstanceOf(Error);
+      // A resolved team is then shared with turns.
+      expect((await resolveComputeProviderBinding(own)).binding.team).toBe("team-b");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("a turn's failed team lookup is asked once and remembered briefly", async () => {
     let asks = 0;
     const server = Bun.serve({

@@ -76,9 +76,18 @@ export async function resolveComputeProviderBinding(
 ): Promise<{ key: string; binding: ComputeProviderBinding }> {
   const apiUrl = (settings.computeApiUrl ?? "").replace(/\/+$/u, "");
   const cacheKey = `${apiUrl}\0${settings.computeApiKey ?? ""}`;
-  const cached = computeBindings.get(cacheKey);
-  if (cached) return await cached;
   const turnLookup = control === undefined;
+  const cached = computeBindings.get(cacheKey);
+  if (cached) {
+    if (turnLookup) return await cached;
+    // A build uses a resolved team, but never inherits a turn's short
+    // lookup failing: it asks with its own client.
+    try {
+      return await cached;
+    } catch {
+      // Ask below.
+    }
+  }
   if (turnLookup) {
     const failed = failedComputeBindings.get(cacheKey);
     if (failed && now() - failed.at < COMPUTE_BINDING_FAILURE_CACHE_MS) throw failed.error;

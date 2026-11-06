@@ -303,11 +303,11 @@ function computeRebuildReason(
   expectedContentHash: string,
   nowMs: number,
 ): "unbuilt" | "build_abandoned" | "content_mismatch" | "missing" | null {
-  if (!image || image.status === "unsupported") {
-    // Never built for compute, or recorded before compute could build:
-    // worth building once when there is setup to skip.
-    return (version.setupScript ?? "").trim() ? "unbuilt" : "missing";
-  }
+  // Without setup a template saves nothing, and its sandboxes boot cold:
+  // the plain image is used and nothing is built.
+  if (!(version.setupScript ?? "").trim()) return "missing";
+  // Never built for compute, or recorded before compute could build.
+  if (!image || image.status === "unsupported") return "unbuilt";
   if (image.status === "ready") return null;
   // A record for other content: an earlier release's build that failed or
   // stopped. It must not hold back this release's build.
