@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "c39fbd686cef9d18961a0dabf677da27c4dec960fe8d80b76880074234343e0d"
+      "sha256": "98a2bef7fc68945f6ecbd3bfbfbc8828658e4d2e1001cd1c1a1169c33572357c"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "bba061f8884f35364bda444edc55e2d39305ef4e8b21654549fcb970d4a7e002"
+      "sha256": "1690604efe0fd95425154c596b467907f6dab69aa0df100d1c9848e7cffa2150"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -126,7 +126,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "c8aec435a575cc6b93b3af4fbd28c64a5b26b618696a28fa7077189bd389c34b"
+      "sha256": "95fc4e4747e50abcb5503858247d0ba338aee7f6c5702ce261b84fa5cdac5f35"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -353,7 +353,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build (Linux musl static)",
-      "sha256": "8810a8bf5f3a5eeb73a3c555c8fdbd799f0c07181f62621a59f4913c8b5976d0"
+      "sha256": "734a28ec3623f5d16241587d54a30b9c816d6c98305fabc70572450aa397012d"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -406,6 +406,12 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
+      "step": "Install the pinned signing tools",
+      "sha256": "c28b37fbdc82b5f16018b3d513c81f4179e5b4deeb2b8da373f29ace1b6b3f54"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "build",
       "step": "Install workspace dependencies",
       "sha256": "8087ab5145312bf0747fbb8f871326960427169b20a5eff1b178cdc3704fe5ff"
     },
@@ -425,13 +431,13 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS assemble + sign + notarize .app bundle (if creds present)",
-      "sha256": "5d7997716534dc046b8f268009e68c514bff834f1169de17c48e8ccdf1226232"
+      "sha256": "60e1683d8efc64336cd5022f5fba31f2a092f7986d2f1d5f51bd9d029855143e"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS codesign + notarize (if creds present)",
-      "sha256": "e969d335e54c74e801ac8817faf163438be50da56e81560b9b13e26f604d327d"
+      "sha256": "ff7d743aa4be6825cb6bea2f83f79be40388cc9826e0ef5200d49e381575060a"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -443,7 +449,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "minisign-sign + sha256 the artifact",
-      "sha256": "09ab3ac90d9efcd5cc3cf991fbcef5fd3fa474f8acd193dd434998cf71bd192b"
+      "sha256": "6b0d276f46e950e0c47c0618f8fdfa98fbfe9a4cd87acd866a84c6cd59a8ac6f"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -479,13 +485,19 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Build and sign the stable update manifest",
-      "sha256": "b7d30577e17094d0ea6011f9821ed2f123d7cf7f6715bb58a0de159319e62a33"
+      "sha256": "f4e470248982ad1260998166c1b3e49f17489f3b01797ad9f4668794e630a5b7"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Detect signing creds",
       "sha256": "bbb7ba46dfc89ae6888dd3e917b71d50d34db4c95256728f2982db03fccc813a"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "publish",
+      "step": "Install the pinned signing tool",
+      "sha256": "8aef7180aeec64d43c7811d7dac6d45a8857a71437389d09e12567457dd2769b"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -497,7 +509,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Sign SHA256SUMS (if the key is present)",
-      "sha256": "baf152da95882ffab53a0fa3f530623802a8d20c66f89620e99c184530b6fd7c"
+      "sha256": "7971410990bd08d1f099e7ecd379b342714e1cc090bbd339c70abbc7b6c86690"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -628,14 +640,20 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
-      "step": "Bake and sign exact-SHA canary agent",
-      "sha256": "03fd91b69ce97d2511822327d8817352c28329ca4a08f876a6598a24517a91e8"
+      "step": "Bake exact-SHA canary agent",
+      "sha256": "f264206803d4a233919c8fc7d67caf59e58aff9db2031ec0f2947cd343443b18"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Install canary interaction dependencies",
       "sha256": "6f5ba06f7f25a87d374e077e5a840ee49feb8af5033ca04085e9b1675f033ce7"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "api-image",
+      "step": "Install pinned canary agent build and signing tools",
+      "sha256": "16186339ea3ccb7f77d602a4181a3b761a8b6f43a584f39120c128f646726513"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -648,6 +666,12 @@
       "job": "api-image",
       "step": "Require complete exact-SHA canary agent bake",
       "sha256": "304658cc9fca82a63ac9dfc4e93ed82aa55f305ac93e0c578fb64fd46476759a"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "api-image",
+      "step": "Sign exact-SHA canary agent",
+      "sha256": "77954dc5c9c0699273884edf550595e8000aafe4f29238e3d3bb9c22e5529165"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1762,14 +1786,20 @@
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
-      "step": "Bake and sign per-SHA agent binaries",
-      "sha256": "a55dc65d595363acc75ad1763daca817354d49d9317410ba56397af74f32ccc7"
+      "step": "Bake per-SHA agent binaries",
+      "sha256": "98a04f7bc7ae59e47c5ba7ac68362a5837c8b4741d2bfe0f0b6c0b7c768f722c"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Freeze candidate producer identity",
       "sha256": "5f30aa97d3c41528bdf284b19ff68599187ce5bce3273c41c0d5780be602498f"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
+      "step": "Install pinned agent build and signing tools",
+      "sha256": "5880d90169c5cbbbde1085dddf01adac17fdbf1677a52b416c68378f643a8a35"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1878,6 +1908,12 @@
       "job": "candidate",
       "step": "Resolve worker candidate digest",
       "sha256": "6d69ec8f79a7cd9fd4c46f2a1ad1acd55486c859122aeac146000d554b5043fc"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
+      "step": "Sign per-SHA agent binaries",
+      "sha256": "df1d4e44ce445b5c78b96e5514c7eb85d5af02907410ede854c3fb2df57564c7"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",

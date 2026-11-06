@@ -167,9 +167,15 @@ describe("release image workflow contract", () => {
         installName: "Install source interaction dependencies",
       },
     ];
+    const keyed = (step: WorkflowStep | undefined) =>
+      JSON.stringify(step ?? {}).includes("OPENGENI_AGENT_MINISIGN_KEY");
     const validConsumer = (consumer: (typeof consumers)[number]) => {
       const steps = consumer.steps;
-      const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh");
+      const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh build");
+      const tools = steps.findIndex(
+        (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+      );
+      const sign = steps.findIndex((step) => step.run === "scripts/bake-agent.sh sign");
       const install = steps.findIndex((step) => step.name === consumer.installName);
       const setup = steps.findLastIndex(
         (step, index) => index < bake && step.uses?.startsWith("oven-sh/setup-bun@"),
@@ -188,7 +194,18 @@ describe("release image workflow contract", () => {
         [undefined, "."].includes(steps[install]?.["working-directory"]) &&
         steps[install]?.if === steps[bake]?.if &&
         steps[setup]?.if === steps[bake]?.if &&
-        steps[bake]?.env?.OPENGENI_RUNTIME_BUILD_ID === consumer.buildId
+        steps[bake]?.env?.OPENGENI_RUNTIME_BUILD_ID === consumer.buildId &&
+        // Pinned tools install and the build runs before, and without, the
+        // signing key; the signing step alone receives it.
+        tools > install &&
+        bake > tools &&
+        sign > bake &&
+        steps[tools]?.if === steps[bake]?.if &&
+        steps[sign]?.if === steps[bake]?.if &&
+        steps[sign]?.env?.OPENGENI_AGENT_MINISIGN_KEY ===
+          "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}" &&
+        Object.keys(steps[sign]?.env ?? {}).length === 1 &&
+        steps.filter(keyed).length === 1
       );
     };
     for (const consumer of consumers) {
@@ -207,8 +224,29 @@ describe("release image workflow contract", () => {
           steps.push(...steps.splice(install, 1));
         },
         (steps: WorkflowStep[]) => {
-          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh")!;
+          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh build")!;
           delete bake.env!.OPENGENI_RUNTIME_BUILD_ID;
+        },
+        (steps: WorkflowStep[]) => {
+          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh build")!;
+          bake.env!.OPENGENI_AGENT_MINISIGN_KEY = "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}";
+        },
+        (steps: WorkflowStep[]) => {
+          const tools = steps.find(
+            (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+          )!;
+          tools.env = { OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}" };
+        },
+        (steps: WorkflowStep[]) => {
+          const sign = steps.findIndex((step) => step.run === "scripts/bake-agent.sh sign");
+          const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh build");
+          steps.splice(bake, 0, ...steps.splice(sign, 1));
+        },
+        (steps: WorkflowStep[]) => {
+          const tools = steps.findIndex(
+            (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+          );
+          steps.splice(tools, 1);
         },
       ]) {
         const invalid = structuredClone(consumer);
@@ -218,7 +256,7 @@ describe("release image workflow contract", () => {
     }
     const wrongControllerIdentity = structuredClone(consumers[1]!);
     wrongControllerIdentity.steps.find(
-      (step) => step.run === "scripts/bake-agent.sh",
+      (step) => step.run === "scripts/bake-agent.sh build",
     )!.env!.OPENGENI_RUNTIME_BUILD_ID = "${{ github.sha }}";
     expect(validConsumer(wrongControllerIdentity)).toBe(false);
   });
@@ -1055,13 +1093,25 @@ describe("release image workflow contract", () => {
       });
     }
     const apiSteps = parsed.jobs["api-image"]?.steps ?? [];
-    const bake = apiSteps.find((step) => step.name === "Bake and sign exact-SHA canary agent");
-    expect(bake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
-    expect(bake?.env).toEqual({
+    const mainPush = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+    const tools = apiSteps.find(
+      (step) => step.name === "Install pinned canary agent build and signing tools",
+    );
+    expect(tools?.if).toBe(mainPush);
+    expect(tools?.env).toBeUndefined();
+    expect(tools?.run).toBe("scripts/install-agent-build-tools.sh zigbuild rsign");
+    const bake = apiSteps.find((step) => step.name === "Bake exact-SHA canary agent");
+    expect(bake?.if).toBe(mainPush);
+    expect(bake?.env).toEqual({ OPENGENI_RUNTIME_BUILD_ID: "${{ github.sha }}" });
+    expect(bake?.run).toBe("scripts/bake-agent.sh build");
+    const sign = apiSteps.find((step) => step.name === "Sign exact-SHA canary agent");
+    expect(sign?.if).toBe(mainPush);
+    expect(sign?.env).toEqual({
       OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}",
-      OPENGENI_RUNTIME_BUILD_ID: "${{ github.sha }}",
     });
-    expect(bake?.run).toBe("scripts/bake-agent.sh");
+    expect(sign?.run).toBe("scripts/bake-agent.sh sign");
+    expect(apiSteps.indexOf(tools!)).toBeLessThan(apiSteps.indexOf(bake!));
+    expect(apiSteps.indexOf(bake!)).toBeLessThan(apiSteps.indexOf(sign!));
     const requireBake = apiSteps.find(
       (step) => step.name === "Require complete exact-SHA canary agent bake",
     );
@@ -1070,9 +1120,7 @@ describe("release image workflow contract", () => {
     );
     expect(requireBake?.run).toContain("x86_64-unknown-linux-musl aarch64-unknown-linux-musl");
     expect(requireBake?.run).toContain('test -s "$asset.minisig"');
-    expect(apiSteps.indexOf(bake!)).toBeLessThan(
-      apiSteps.findIndex((step) => step.name === "Build API image"),
-    );
+    expect(apiSteps.indexOf(sign!)).toBeLessThan(apiSteps.indexOf(requireBake!));
     expect(apiSteps.indexOf(requireBake!)).toBeLessThan(
       apiSteps.findIndex((step) => step.name === "Build API image"),
     );

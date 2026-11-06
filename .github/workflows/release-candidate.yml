@@ -303,11 +303,20 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --no-self-update
           rustup default 1.97.1
 
-      - name: Bake and sign per-SHA agent binaries
+      # Third-party tools install and the build runs before, and without, the
+      # signing key; only the final signing step receives it.
+      - name: Install pinned agent build and signing tools
+        run: scripts/install-agent-build-tools.sh zigbuild rsign
+
+      - name: Bake per-SHA agent binaries
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ inputs.source_sha }}
+        run: scripts/bake-agent.sh build
+
+      - name: Sign per-SHA agent binaries
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
-          OPENGENI_RUNTIME_BUILD_ID: ${{ inputs.source_sha }}
-        run: scripts/bake-agent.sh
+        run: scripts/bake-agent.sh sign
 
       - name: Build and push API candidate
         id: build-api
