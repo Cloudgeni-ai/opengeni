@@ -5,8 +5,10 @@ import {
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
+  ensureSessionAgentInstructions,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
+  type SessionAgentPrompt,
   SUBSCRIPTION_CORE_XAI,
   turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
@@ -138,6 +140,8 @@ export type BuildTurnAgentDeps = {
   leases: ReturnType<typeof createTurnCredentialLeases>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  /** The agent revision in the system prompt; null for chats without one. */
+  agentPrompt: SessionAgentPrompt | null;
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
@@ -214,6 +218,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     leases,
     turn,
     session,
+    agentPrompt,
     fileAuthoritySubjectId,
     capabilitySettings,
     humanInputResume,
@@ -720,6 +725,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
   });
+  // An agent edit made since this chat's system prompt was built reaches the
+  // model the same way, so the cached prompt stays intact until compaction
+  // folds it in. A deleted agent continues as a plain chat.
+  if (agentPrompt) {
+    await ensureSessionAgentInstructions(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      prompt: agentPrompt,
+    });
+  }
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(
     modelVisibleSkillCatalogText,
     deps.skillCatalog,
@@ -865,6 +884,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
             }
           : {}),
+        ...(agentPrompt?.instructions ? { agentInstructions: agentPrompt.instructions } : {}),
         ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability
           ? { agentPromptToolAvailability: promptToolAvailability }

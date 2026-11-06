@@ -22714,7 +22714,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+        "$": "enum=[\"\\\"agent_instructions\\\"\",\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
       }
     },
     "ModelContextInstructionModule": {

@@ -7,6 +7,7 @@ import {
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
+  readSessionAgentPrompt,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
@@ -1376,6 +1377,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ),
               ),
             );
+          // The agent revision in this chat's system prompt, read once so every
+          // compaction and the turn itself use the same instructions. The
+          // turn's first attempt records it, so retries build the same prompt.
+          const agentPrompt = await readSessionAgentPrompt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const compactionPrep = await prepareCompaction({
             entitlements,
             input,
@@ -1397,6 +1411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             portableModelSwitchPending,
             resolvedModel,
@@ -1824,6 +1839,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leases,
             turn,
             session,
+            agentPrompt,
             fileAuthoritySubjectId,
             capabilitySettings,
             humanInputResume,
@@ -1979,6 +1995,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,

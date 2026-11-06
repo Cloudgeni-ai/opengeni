@@ -227,6 +227,7 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   sandbox_filesystem: "Sandbox filesystem",
   sent_system_instructions: "Sent system instructions",
   identity: "Identity",
+  agent_instructions: "Agent instructions",
 };
 
 export function joinPersistentAgentInstructionLayers(

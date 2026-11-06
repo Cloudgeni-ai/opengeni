@@ -5908,6 +5908,9 @@ describe("transient provider error classifier", () => {
     });
     for (const [sqlState, reason] of [
       ["P0002", "database_claim_rejected"],
+      // Claim protocol guards (filesystem discontinuity, agent instructions):
+      // an older worker parks the work for an explicit recheck, never fails it.
+      ["55000", "database_claim_rejected"],
       ["OG001", "initiator_membership_required"],
       ["OG002", "personal_resource_grant_required"],
     ] as const) {

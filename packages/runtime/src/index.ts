@@ -479,6 +479,7 @@ import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   agentSharesWorkspace,
+  agentInstructionsLayerContent,
   composeModularAgentInstructions,
   NEUTRAL_AGENT_IDENTITY,
   resolveAgentIdentity,
@@ -493,7 +494,9 @@ import {
   type WorkspaceEnvironmentContext,
 } from "./agent-instructions";
 export {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
+  agentInstructionsLayerContent,
   DEFAULT_AGENT_IDENTITY,
   NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
@@ -2751,6 +2754,14 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
+  /**
+   * The instructions of the agent revision this chat is bound to
+   * (`sessions.agent_prompt_revision`), composed as their own layer after the
+   * Codemode/code-search directives and before Git bindings, memory and
+   * session instructions. Omitted for every chat not bound to an agent
+   * revision, whose instructions stay byte-identical.
+   */
+  agentInstructions?: string;
 
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
@@ -3124,6 +3135,7 @@ function inspectModularAgentInstructions(
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
@@ -3157,19 +3169,11 @@ export function inspectPersistentAgentInstructions(
     ),
     settings,
   );
-  if (settings.experimentSystemPromptCacheSplit) {
-    // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every interactive session; a workspace
-    // persona is not.
-    recordStableSystemPromptPrefix(
-      personaTemplate === settings.agentInstructionsTemplate &&
-        !options.workspaceEnvironment &&
-        !options.rig &&
-        !options.unattended
-        ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
-        : OPENGENI_OPERATIONAL_INSTRUCTIONS,
-    );
-  }
+  const sharedPersona =
+    personaTemplate === settings.agentInstructionsTemplate &&
+    !options.workspaceEnvironment &&
+    !options.rig &&
+    !options.unattended;
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
       id: "operational_contract",
@@ -3178,6 +3182,14 @@ export function inspectPersistentAgentInstructions(
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
   ];
+  const agentLayer = agentInstructionsLayerContent(options.agentInstructions);
+  // The agent layer is a Markdown section: it and the layer after it start on
+  // their own paragraph. Chats without one keep the historical joins.
+  let paragraphBreakNext = false;
+  const add = (layer: PersistentAgentInstructionLayerDraft) => {
+    layers.push(paragraphBreakNext ? { ...layer, joinBefore: "\n\n" } : layer);
+    paragraphBreakNext = layer.id === "agent_instructions";
+  };
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
     title: string,
@@ -3185,21 +3197,31 @@ export function inspectPersistentAgentInstructions(
   ) => {
     const trimmed = content?.trim();
     if (!trimmed) return;
-    layers.push({ id, title, content: trimmed });
+    add({ id, title, content: trimmed });
+  };
+  const pushAgentInstructions = () => {
+    if (agentLayer)
+      add({
+        id: "agent_instructions",
+        title: "Agent instructions",
+        content: agentLayer,
+        joinBefore: "\n\n",
+      });
   };
   if (!options.workspaceGovernance?.trim()) {
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
+    pushAgentInstructions();
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
@@ -3210,28 +3232,50 @@ export function inspectPersistentAgentInstructions(
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
+    // Directives follow the session text on this path, so the agent layer
+    // sits right after the persona to stay ahead of session instructions.
+    pushAgentInstructions();
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
     if (skillCatalogLayerApplies(options))
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+  }
+  if (settings.experimentSystemPromptCacheSplit) {
+    // The deployment persona with no workspace environment or sandbox
+    // environment is shared by every interactive session; a workspace
+    // persona is not. An agent chat extends it through the agent's
+    // instructions, which every chat of that agent shares.
+    let stable = sharedPersona
+      ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
+      : OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    if (sharedPersona && agentLayer) {
+      const through = layers.findIndex((layer) => layer.id === "agent_instructions");
+      const directives = layers.slice(2, through);
+      if (
+        through > 1 &&
+        directives.every((layer) => layer.id === "codemode" || layer.id === "code_search")
+      )
+        stable = joinPersistentAgentInstructionLayers(layers.slice(0, through + 1));
+    }
+    recordStableSystemPromptPrefix(stable);
   }
   return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }

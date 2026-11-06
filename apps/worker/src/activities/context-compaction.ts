@@ -39,7 +39,7 @@ import {
   type CompactionProviderRejection,
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
-import type { SessionEvent } from "@opengeni/contracts";
+import { latestAgentInstructionsContext, type SessionEvent } from "@opengeni/contracts";
 import { projectRejectedProviderArtifacts } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
@@ -111,6 +111,42 @@ type CompactionInputRecoveryPayload = {
   modelSwitchEarlierItemsOmitted?: number;
 };
 
+/**
+ * A chat bound to an agent revision (`sessions.agent_prompt_revision`).
+ * Compaction drops the agent instruction edit items it summarizes and folds
+ * the newest revision they showed into the system prompt from the next turn
+ * on, atomically with the replacement.
+ */
+export type AgentPromptCompaction = {
+  /** `sessions.agent_prompt_revision` as this attempt read it. */
+  revision: number;
+  /**
+   * Only when this turn continues after compaction: the revision its system
+   * prompt shows, or null when its prompt has no agent layer (deleted agent).
+   * A newer edit is then re-added to the rebuilt history for the rest of the
+   * turn, whose system prompt cannot change.
+   */
+  inPrompt?: number | null;
+};
+
+function agentPromptTurnContext(agentPrompt: AgentPromptCompaction | undefined): {
+  agentPromptRevision?: number | null;
+} {
+  return agentPrompt?.inPrompt !== undefined ? { agentPromptRevision: agentPrompt.inPrompt } : {};
+}
+
+/** The newest revision the summarized items showed, when it is not already in the prompt. */
+function foldedAgentPromptRevision(
+  summarized: readonly CompactionItem[],
+  agentPrompt: AgentPromptCompaction | undefined,
+): { agentPromptRevision?: number } {
+  if (!agentPrompt) return {};
+  const latest = latestAgentInstructionsContext(summarized);
+  return latest?.context.kind === "revision" && latest.context.revision !== agentPrompt.revision
+    ? { agentPromptRevision: latest.context.revision }
+    : {};
+}
+
 export async function maybeCompactContext(
   db: Database,
   settings: Settings,
@@ -154,6 +190,8 @@ export async function maybeCompactContext(
     projectModelInput?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
     /** A typed pre-dispatch size rejection parks the newest complete work unit. */
     requestSizeRecovery?: { maxBytes: number; size: AnthropicRequestSize };
+    /** Agent chats only; see {@link AgentPromptCompaction}. */
+    agentPrompt?: AgentPromptCompaction;
   } = {},
 ): Promise<MaybeCompactResult> {
   if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
@@ -533,6 +571,7 @@ async function compactContextRemoteV2(
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
     inputRecoveryPayload?: CompactionInputRecoveryPayload;
+    agentPrompt?: AgentPromptCompaction;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -569,7 +608,11 @@ async function compactContextRemoteV2(
     compactionItem,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
     await attachmentUploadTimes(db, scope.workspaceId, canonicalItems),
-    { itemTurnIds: canonicalTurnIds, activeTurnId: scope.turnId },
+    {
+      itemTurnIds: canonicalTurnIds,
+      activeTurnId: scope.turnId,
+      ...agentPromptTurnContext(options.agentPrompt),
+    },
   );
   const replacementHistory = replacement.history;
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
@@ -598,6 +641,7 @@ async function compactContextRemoteV2(
       : {}),
     summaryItem: tailItem as Record<string, unknown>,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...foldedAgentPromptRevision(canonicalItems, options.agentPrompt),
     eventPayload: {
       trigger: options.trigger ?? "auto",
       implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
@@ -676,6 +720,7 @@ async function compactContextPortable(
     inputRecoveryPayload?: CompactionInputRecoveryPayload;
     /** Rebuilding a Codex remote_v2 chat's context from its stored transcript. */
     portableModelSwitch?: boolean;
+    agentPrompt?: AgentPromptCompaction;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -756,6 +801,7 @@ async function compactContextPortable(
     {
       itemTurnIds: canonicalTurnIds.slice(0, summarizedItems.length),
       activeTurnId: scope.turnId,
+      ...agentPromptTurnContext(options.agentPrompt),
     },
   );
   const replacementHistory = replacement.history;
@@ -818,6 +864,7 @@ async function compactContextPortable(
     summaryItem: summaryItem as Record<string, unknown>,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     ...(options.portableModelSwitch ? { switchToPortableCompaction: true } : {}),
+    ...foldedAgentPromptRevision(summarizedItems, options.agentPrompt),
     eventPayload: {
       trigger: options.trigger ?? "auto",
       ...(options.portableModelSwitch
