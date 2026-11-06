@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { parseAppLink } from "@opengeni/sdk/app-links";
 
 import { desktopReturnAppLink, desktopReturnTarget } from "./desktop-return";
 
@@ -36,5 +37,28 @@ describe("desktop hand-back page", () => {
 
   test("opens the page in the app through its link", () => {
     expect(desktopReturnAppLink(page)).toBe(`opengeni://open?url=${encodeURIComponent(page)}`);
+  });
+
+  test("the desktop app reads the hand-off to a connector's plugins page, outcome included", () => {
+    const back = `/workspaces/w1/plugins?connect_item=${encodeURIComponent("mcp:integrations:mail")}`;
+    const search = `?${new URLSearchParams({
+      url: back,
+      integration_oauth: "success",
+      connectionId: "c1",
+      providerDomain: "mail.example.com",
+      ownership: "personal",
+    })}`;
+    const target = desktopReturnTarget(search, origin)!;
+    const link = parseAppLink(desktopReturnAppLink(target), { anyPage: true });
+    expect(link).toMatchObject({ origin, workspaceId: "w1", sessionId: null });
+    const opened = new URL(link!.webUrl);
+    expect(opened.pathname).toBe("/workspaces/w1/plugins");
+    expect(Object.fromEntries(opened.searchParams)).toEqual({
+      connect_item: "mcp:integrations:mail",
+      integration_oauth: "success",
+      connectionId: "c1",
+      providerDomain: "mail.example.com",
+      ownership: "personal",
+    });
   });
 });

@@ -928,9 +928,13 @@ export class DesktopShell {
       else void this.signInFromLink(computerLink);
       return;
     }
+    // The window shows the whole web app, so a link to any of its pages opens
+    // there: a sign-in finished in the browser returns to the page it started
+    // on (plugins, settings…) with its outcome, not to whatever was showing.
     const link = parseAppLink(raw, {
       scheme: this.config.scheme,
       paths: this.paths,
+      anyPage: true,
     });
     if (!link) {
       this.reveal();
