@@ -1117,7 +1117,7 @@ export async function buildVerifiedRigProviderImage(input: {
       };
     }
     building = claim.image;
-    replaced = claim.replaced;
+    if (claim.status === "claimed") replaced = claim.replaced;
   }
 
   const finalize = async (image: RigProviderImage): Promise<RigProviderImage> => {
