@@ -9,6 +9,8 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Internal grants reuse the private ops ledger operator:
+[internal credit operations](internal-credit-operations.md).
 Organization subscription plans (runtime catalog, period credit and seats):
 [foundation contract](subscription-plans.md). No plan row preserves existing behavior.
 `apps/api/src/billing-subscriptions.ts` owns Stripe subscription synchronization;
