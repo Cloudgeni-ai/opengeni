@@ -14801,7 +14801,7 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
  * than spinning. Only repository selecting global options (`-C`,
  * `--git-dir`, `--work-tree`) are replayed for the identity lookup.
  */
-export const GIT_COMMAND_WRAPPER_SCRIPT = [
+const GIT_COMMAND_WRAPPER_HEAD_LINES = [
   "#!/bin/sh",
   "# Opengeni git wrapper: per-repository commit identity.",
   '[ "${OPENGENI_GIT_WRAPPER_PID:-}" = "$$" ] || OPENGENI_GIT_WRAPPERS_SEEN=',
@@ -14861,6 +14861,10 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    fi",
   "  fi",
   "fi",
+];
+
+// Only in sessions where `gh` reaches GitHub as the person.
+const GIT_COMMAND_WRAPPER_GATEWAY_LINES = [
   // Under `gh` as the person: gh reads `git remote -v` to find the GitHub
   // repository, so it sees the configured github.com URLs rather than the
   // Opengeni Git routes they are rewritten to; a clone keeps the rewrite.
@@ -14900,13 +14904,26 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    done",
   "  fi",
   "fi",
+];
+
+const GIT_COMMAND_WRAPPER_TAIL_LINES = [
   'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
   "OPENGENI_GIT_WRAPPER_PID=$$",
   "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
   'exec "$real_git" "$@"',
-].join("\n");
+];
 
-function gitCommandWrapperCommandLines(): string[] {
+function gitCommandWrapperScript(ghGateway: boolean): string {
+  return [
+    ...GIT_COMMAND_WRAPPER_HEAD_LINES,
+    ...(ghGateway ? GIT_COMMAND_WRAPPER_GATEWAY_LINES : []),
+    ...GIT_COMMAND_WRAPPER_TAIL_LINES,
+  ].join("\n");
+}
+
+export const GIT_COMMAND_WRAPPER_SCRIPT = gitCommandWrapperScript(false);
+
+function gitCommandWrapperCommandLines(ghGateway = false): string[] {
   return [
     // Record the box's creation-time env identity (if any) so the wrapper can
     // tell it apart from an identity a command sets on purpose.
@@ -14921,7 +14938,7 @@ function gitCommandWrapperCommandLines(): string[] {
     'git_wrapper="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/git"',
     'mkdir -p "$(dirname "$git_wrapper")"',
     "cat > \"$git_wrapper.tmp.$$\" <<'GIT_WRAPPER_EOF'",
-    GIT_COMMAND_WRAPPER_SCRIPT,
+    gitCommandWrapperScript(ghGateway),
     "GIT_WRAPPER_EOF",
     'chmod 0755 "$git_wrapper.tmp.$$"',
     'mv -f "$git_wrapper.tmp.$$" "$git_wrapper"',
@@ -15441,9 +15458,14 @@ function gitCredentialHelperCommandLines(
     "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
-    `gh_gateway_base=${shellQuote(personalGateway?.base ?? "")}`,
-    `gh_gateway_binding=${shellQuote(personalGateway?.bindingHash ?? "")}`,
-    ...GH_GATEWAY_WRAPPER_LINES,
+    // `gh` as the person, only when this session has a personal GitHub gateway.
+    ...(personalGateway
+      ? [
+          `gh_gateway_base=${shellQuote(personalGateway.base)}`,
+          `gh_gateway_binding=${shellQuote(personalGateway.bindingHash)}`,
+          ...GH_GATEWAY_WRAPPER_LINES,
+        ]
+      : []),
     'if [ -n "$provider" ]; then',
     "  binding_hash=",
     '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
@@ -15515,7 +15537,7 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
-    ...gitCommandWrapperCommandLines(),
+    ...gitCommandWrapperCommandLines(personalGateway !== null),
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
