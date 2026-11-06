@@ -2142,6 +2142,12 @@ describe("runtime database posture evaluator", () => {
               : tables === RUNTIME_READ_INSERT_TABLES
                 ? 1
                 : 0) +
+          // 1258 Teams conversation context: messages and join cutoffs, two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2220,7 +2226,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
         5 + // 1263 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
         4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
-        3; // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
+        3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
+        2; // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

@@ -124,6 +124,64 @@ function cardActions(activity: Record<string, unknown>): unknown[] {
   return attachments?.[0]?.content.actions ?? [];
 }
 
+test("unmentioned channel messages are kept as context and follow edits and deletions, without starting work", async () => {
+  const f = await fixture();
+  const root = `root-${crypto.randomUUID()}`;
+  const channelMessage = (id: string, text: string, at: string) =>
+    f.message(text, f.actor, {
+      id,
+      timestamp: at,
+      conversation: { id: `19:channel;messageid=${root}`, conversationType: "channel" },
+      channelData: { tenant: { id: f.tenant }, channel: { id: "19:channel" } },
+    });
+  const rows = () =>
+    shared.admin`select message_id,thread_id,text,mentioned from teams_bot_context_messages where workspace_id=${f.i.workspace_id} order by occurred_at`;
+  await f.handle(
+    channelMessage(
+      root,
+      "The migration window is Tuesday 14:00",
+      new Date(Date.now() - 120_000).toISOString(),
+    ),
+  );
+  await f.handle(
+    channelMessage("reply-1", "Ravi owns it", new Date(Date.now() - 60_000).toISOString()),
+  );
+  expect(await rows()).toEqual([
+    {
+      message_id: root,
+      thread_id: root,
+      text: "The migration window is Tuesday 14:00",
+      mentioned: false,
+    },
+    { message_id: "reply-1", thread_id: root, text: "Ravi owns it", mentioned: false },
+  ]);
+  expect(f.outcomes.filter((x) => x === "context_recorded")).toHaveLength(2);
+  // Without a mention nothing is queued and nothing is sent.
+  expect(
+    await shared.admin`select 1 from teams_bot_inbox where workspace_id=${f.i.workspace_id}`,
+  ).toHaveLength(0);
+  expect(f.calls).toHaveLength(0);
+
+  const revision = (type: "messageUpdate" | "messageDelete", eventType: string, text?: string) => ({
+    type,
+    id: "reply-1",
+    channelId: "msteams",
+    recipient: { id: f.botId },
+    conversation: { id: `19:channel;messageid=${root}`, conversationType: "channel" },
+    channelData: { tenant: { id: f.tenant }, channel: { id: "19:channel" }, eventType },
+    ...(text === undefined ? {} : { text }),
+  });
+  await f.handle(revision("messageUpdate", "editMessage", "Priya owns it"));
+  expect((await rows()).map((x) => x.text)).toEqual([
+    "The migration window is Tuesday 14:00",
+    "Priya owns it",
+  ]);
+  await f.handle(revision("messageDelete", "softDeleteMessage"));
+  expect((await rows()).map((x) => x.message_id)).toEqual([root]);
+  expect(f.outcomes.filter((x) => x === "context_revised")).toHaveLength(2);
+  expect(f.calls).toHaveLength(0);
+});
+
 test("installing the bot for yourself sends one welcome; unlinked people get a button that asks for a link", async () => {
   const f = await fixture();
   const install = (from: string, overrides: Record<string, unknown> = {}) => ({
