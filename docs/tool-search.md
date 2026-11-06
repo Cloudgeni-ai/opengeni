@@ -36,7 +36,7 @@ call. This page describes what a search does and how a deployment configures it.
    points to them, or when they are judged very likely (above 0.75). Other
    candidates judged asked for only fill the result up to `limit`, and another tool
    for a request that already has its best only when it is very likely (above
-   0.8), since it is most often an alternative. If nothing loads, the most likely
+   0.95), since it is most often an alternative. If nothing loads, the most likely
    candidate loads anyway. A request left without a tool lists its three best
    candidates by name; otherwise, when the choice was not clear, up to five next
    candidates are listed.

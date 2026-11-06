@@ -106,7 +106,7 @@ describe("per-request selection", () => {
       judged("invoices_list_unpaid", [0.9, 0.01]),
       judged("create_draft", [0.01, 0.85]),
     ];
-    // create_draft is request 2's best; send_message (0.75) is not above 0.8.
+    // create_draft is request 2's best; send_message (0.75) is not above 0.95.
     expect(selectFromJudgments(judgments).load).toEqual(["invoices_list_unpaid", "create_draft"]);
   });
   test("a prerequisite loads only when a loaded tool's description names it", () => {

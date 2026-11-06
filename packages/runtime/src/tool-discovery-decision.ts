@@ -109,7 +109,7 @@ export const TOOL_SELECTION_POLICY = {
    * has its best loads only above this, since it is most often an
    * alternative to that best.
    */
-  sameRequestAbove: 0.8,
+  sameRequestAbove: 0.95,
   alternativesPerRequest: 3,
   maxAlternatives: 5,
 } as const;
