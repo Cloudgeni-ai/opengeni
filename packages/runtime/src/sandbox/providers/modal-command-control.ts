@@ -55,8 +55,13 @@ const READ_SETTLEMENT_ALLOWANCE_MS = 5_000;
  */
 export const MODAL_EXITED_TAIL_READ_MS = 4_000;
 /** Exited commands whose tail read ended without EOF, most often because a
- * background child still holds the pipe. Later reads skip the tail wait. */
+ * background child still holds the pipe. Later reads skip the tail wait until
+ * this retry interval passes, so a router that is only slow still gets another
+ * full tail read while an open pipe costs the wait at most once per interval. */
+export const MODAL_OPEN_TAIL_RETRY_MS = 15_000;
 const OPEN_TAIL_MEMORY = 256;
+/** A degraded router is reported at most this often per control. */
+const SLOW_TAIL_REPORT_INTERVAL_MS = 60_000;
 type RawStreamPage = { bytes: Buffer; eof: boolean };
 type ControlObservation = { command: ModalRouterProviderCommand; output: string };
 type SupervisionControlResult = {
@@ -143,7 +148,9 @@ export class ModalCommandControl {
    * Start. A failed Start retires the entry so the next one re-resolves. */
   private readonly taskIds = new Map<string, Promise<string>>();
   private readonly controlHelpers = new Map<string, ControlHelper>();
-  private readonly openTails = new Set<string>();
+  /** Exited command key to the time its tail may be read again. */
+  private readonly openTails = new Map<string, number>();
+  private slowTailReportedAt = -Infinity;
   private readonly client: ReturnType<typeof commandControlPlane>;
   private closed = false;
 
@@ -986,7 +993,7 @@ export class ModalCommandControl {
    * stays open (a background child holding the pipe) keeps what was read and
    * leaves the exit for a later page, and only caller cancellation
    * propagates. A tail that stayed open is remembered so later reads of that
-   * command do not wait for it again. */
+   * command skip the wait until MODAL_OPEN_TAIL_RETRY_MS passes. */
   private async readExitedTail(
     router: ModalCommandRouterWire,
     command: ModalRouterProviderCommand,
@@ -995,7 +1002,12 @@ export class ModalCommandControl {
     deadline: number,
   ): Promise<{ stdout: RawStreamPage; stderr: RawStreamPage }> {
     const key = `${command.taskId}:${command.execId}`;
-    if (this.openTails.has(key)) return streams;
+    const retryAt = this.openTails.get(key);
+    if (retryAt !== undefined) {
+      if (performance.now() < retryAt) return streams;
+      this.openTails.delete(key);
+    }
+    const started = performance.now();
     const until = deadline + MODAL_EXITED_TAIL_READ_MS;
     const drain = async (stream: "stdout" | "stderr"): Promise<RawStreamPage> => {
       const page = streams[stream];
@@ -1032,13 +1044,32 @@ export class ModalCommandControl {
       return { bytes: Buffer.concat(chunks, length), eof };
     };
     const [stdout, stderr] = await Promise.all([drain("stdout"), drain("stderr")]);
+    const settled = stdout.eof && stderr.eof;
     // A full page is ordinary progress through a long tail, not an open pipe.
     if (
       [stdout, stderr].some((page) => !page.eof && page.bytes.length < MODAL_ROUTER_READ_PAGE_BYTES)
     ) {
       if (this.openTails.size >= OPEN_TAIL_MEMORY)
-        this.openTails.delete(this.openTails.values().next().value!);
-      this.openTails.add(key);
+        this.openTails.delete(this.openTails.keys().next().value!);
+      this.openTails.set(key, performance.now() + MODAL_OPEN_TAIL_RETRY_MS);
+    }
+    // The router answering slower than the caller's read window is what made
+    // exited commands look running. Keep that visible in operator logs.
+    const now = performance.now();
+    if (now - this.slowTailReportedAt >= SLOW_TAIL_REPORT_INTERVAL_MS) {
+      this.slowTailReportedAt = now;
+      try {
+        console.warn(
+          "Modal command router delivered an exited command's output after its read window",
+          {
+            sandboxId: command.sandboxId,
+            tailReadMs: Math.round(now - started),
+            outputSettled: settled,
+          },
+        );
+      } catch {
+        // Diagnostics never change the read result.
+      }
     }
     return { stdout, stderr };
   }

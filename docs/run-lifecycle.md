@@ -3900,8 +3900,11 @@ shared by several sessions. Once the exit poll reports an exit, a read keeps
 reading the remaining output for up to four seconds past its slice, within one
 page, so the command returns at its exit with its output instead of reporting
 "running" until the reaper's slower reads settle it. A command whose pipe stays
-open after exit (a background child still writing to it) pays this wait once;
-later reads of it return at their slice.
+open after exit (a background child still writing to it) pays this wait at
+most once every 15 seconds; reads in between return at their slice. When a
+read needs this tail, the worker logs a warning (at most once a minute per
+sandbox session) with how long the tail took, so a slow router shows up in
+operator logs instead of only as slow commands.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 

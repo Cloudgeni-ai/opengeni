@@ -128,7 +128,7 @@ test("an exited tail larger than one page is cut at the page cap and continued",
   }
 }, 15_000);
 
-test("an exited command whose pipe stays open costs the tail wait once, not every read", async () => {
+test("an exited command whose pipe stays open costs the tail wait once per retry interval", async () => {
   const { router } = slowEofRouter(0, { neverEof: true });
   const value = control(router);
   try {
@@ -140,6 +140,13 @@ test("an exited command whose pipe stays open costs the tail wait once, not ever
     const second = await value.read(command, 100);
     expect(second.exitCode).toBeNull();
     expect(performance.now() - started).toBeLessThan(1_000);
+    // After the retry interval the tail gets another full read, so a router
+    // that was only slow is not left on the short window for good.
+    const tails = (value as unknown as { openTails: Map<string, number> }).openTails;
+    for (const key of tails.keys()) tails.set(key, performance.now() - 1);
+    started = performance.now();
+    await value.read(command, 100);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(MODAL_EXITED_TAIL_READ_MS - 50);
   } finally {
     await value.close();
   }
@@ -169,29 +176,36 @@ function boxSession(router: ModalCommandRouterWire, sandboxId: string) {
   return { session, control: value };
 }
 
-test("after resume and a shared-box child attach, a fast command returns at exit with its receipt", async () => {
-  // The router now answers slower than the turn's short read slice, as it can
-  // once a resumed box is shared by a parent and a child session.
-  const { router } = slowEofRouter(400);
-  const parent = boxSession(router, "sandbox-shared");
-  const child = boxSession(router, "sandbox-shared");
-  try {
-    for (const [handle, { session }] of [
-      [11, parent],
-      [12, child],
-      [13, parent],
-    ] as const) {
-      const started = performance.now();
-      const result = await withProviderCommandHandle(handle, () =>
-        session.execCommand!({ cmd: "find . -maxdepth 1", yieldTimeMs: 250 }),
-      );
-      expect(result).toContain("Provider output receipt:");
-      expect(result).toContain("Process exited with code 0");
-      expect(result).toContain("done");
-      expect(performance.now() - started).toBeLessThan(2_000);
+// Each read opens fresh router streams and polls the exit directly; no
+// per-command watcher is armed at start, so a resumed control or a second
+// session on the same box has nothing to re-establish. With a prompt router,
+// resume plus attach alone keeps the fast path. With a router slower than the
+// turn's slice, the exit is still returned at once.
+for (const [latency, label] of [
+  [0, "a prompt router"],
+  [400, "a router slower than the read slice"],
+] as const)
+  test(`after resume and a shared-box child attach with ${label}, a fast command returns at exit with its receipt`, async () => {
+    const { router } = slowEofRouter(latency);
+    const parent = boxSession(router, "sandbox-shared");
+    const child = boxSession(router, "sandbox-shared");
+    try {
+      for (const [handle, { session }] of [
+        [11, parent],
+        [12, child],
+        [13, parent],
+      ] as const) {
+        const started = performance.now();
+        const result = await withProviderCommandHandle(handle, () =>
+          session.execCommand!({ cmd: "find . -maxdepth 1", yieldTimeMs: 250 }),
+        );
+        expect(result).toContain("Provider output receipt:");
+        expect(result).toContain("Process exited with code 0");
+        expect(result).toContain("done");
+        expect(performance.now() - started).toBeLessThan(2_000);
+      }
+    } finally {
+      await parent.control.close();
+      await child.control.close();
     }
-  } finally {
-    await parent.control.close();
-    await child.control.close();
-  }
-});
+  });
