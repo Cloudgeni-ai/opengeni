@@ -13,24 +13,20 @@ const refreshFailed = {
 };
 
 describe("event source sign-in failures", () => {
-  test("a refresh that failed while the connection stays active is an outage, not a reconnect", async () => {
-    const failure = await connectionCredentialFailure(refreshFailed, reconnect, async () => true);
+  test("a refresh the sign-in service did not answer is an outage, not a reconnect", () => {
+    const failure = connectionCredentialFailure(refreshFailed, reconnect, true);
     expect(failure).not.toBeInstanceOf(McpEventSourceUnavailableError);
   });
 
-  test("a refresh the provider rejected asks the person to reconnect", async () => {
-    const failure = await connectionCredentialFailure(refreshFailed, reconnect, async () => false);
+  test("a rejected or impossible refresh asks the person to reconnect", () => {
+    const failure = connectionCredentialFailure(refreshFailed, reconnect, false);
     expect(failure).toBeInstanceOf(McpEventSourceUnavailableError);
     expect((failure as McpEventSourceUnavailableError).reason.code).toBe("reconnect");
   });
 
-  test("a missing or revoked connection, or an unreadable status, asks to reconnect", async () => {
-    for (const [result, active] of [
-      [{ ...refreshFailed, reason: "missing_connection" as const }, async () => true],
-      [{ ...refreshFailed, reason: "expired" as const }, async () => true],
-      [refreshFailed, async () => Promise.reject(new Error("db down"))],
-    ] as const) {
-      const failure = await connectionCredentialFailure(result, reconnect, active);
+  test("a missing or expired connection asks to reconnect", () => {
+    for (const reason of ["missing_connection", "expired"] as const) {
+      const failure = connectionCredentialFailure({ ...refreshFailed, reason }, reconnect, true);
       expect(failure).toBeInstanceOf(McpEventSourceUnavailableError);
     }
   });
