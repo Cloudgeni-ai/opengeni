@@ -1064,18 +1064,18 @@ const defaultBuildVerifiedRigProviderImageDependencies: BuildVerifiedRigProvider
 
 export async function buildVerifiedRigProviderImage(
   input: {
-  settings: ControlActivityServices["settings"];
-  db: Database;
-  observability: ControlActivityServices["observability"];
-  accountId: string;
-  workspaceId: string;
-  existingVersionId?: string;
-  definition: RigProviderImageDefinition;
-  target: { kind: "change" | "version"; id: string };
-  established: EstablishedSandboxSession;
-  ownership: RigVerificationSandboxRunContext["ownership"];
-  lifecycle: RigVerificationActivityLifecycle;
-  signal: AbortSignal;
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    existingVersionId?: string;
+    definition: RigProviderImageDefinition;
+    target: { kind: "change" | "version"; id: string };
+    established: EstablishedSandboxSession;
+    ownership: RigVerificationSandboxRunContext["ownership"];
+    lifecycle: RigVerificationActivityLifecycle;
+    signal: AbortSignal;
   },
   dependencies: BuildVerifiedRigProviderImageDependencies = defaultBuildVerifiedRigProviderImageDependencies,
 ): Promise<RigProviderImage> {

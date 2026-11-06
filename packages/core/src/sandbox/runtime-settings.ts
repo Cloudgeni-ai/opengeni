@@ -236,8 +236,10 @@ export function resolveRigProviderImageSelection(
     // (see requestStaleRigProviderImageRefresh), except a failed build of
     // this exact content, which waits for the content to change.
     const rebuild = computeRebuildReason(version, image, expectedContentHash, nowMs);
-    if (rebuild === "missing") return { settings, reason: "missing", contentHash: null, imageId: null };
-    if (rebuild) return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
+    if (rebuild === "missing")
+      return { settings, reason: "missing", contentHash: null, imageId: null };
+    if (rebuild)
+      return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
   }
   if (!image) return { settings, reason: "missing", contentHash: null, imageId: null };
   if (image.status !== "ready" || !image.imageId) {
@@ -312,7 +314,10 @@ function computeRebuildReason(
   if (image.contentHash !== expectedContentHash) return "content_mismatch";
   if (image.status === "building") {
     const startedAtMs = Date.parse(image.startedAt);
-    if (!Number.isFinite(startedAtMs) || nowMs - startedAtMs >= RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS)
+    if (
+      !Number.isFinite(startedAtMs) ||
+      nowMs - startedAtMs >= RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS
+    )
       return "build_abandoned";
   }
   return null;

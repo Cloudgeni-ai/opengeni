@@ -587,7 +587,12 @@ describe("compute environment templates", () => {
         now,
       );
     for (const status of ["failed", "building"] as const) {
-      const other = select({ ...earlier, status, imageId: null, startedAt: new Date(now).toISOString() });
+      const other = select({
+        ...earlier,
+        status,
+        imageId: null,
+        startedAt: new Date(now).toISOString(),
+      });
       expect(other.reason).toBe("content_mismatch");
       expect(other.contentHash).toBe(current.contentHash);
     }
@@ -612,7 +617,7 @@ describe("compute environment templates", () => {
     expect(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toBe(RIG_VERIFICATION_OWNER_TTL_MS);
   });
 
-  test("Modal keeps its selection: no record is missing and other failed content is not ready", () => {
+  test("Modal selection is unchanged: a version with no record is missing", () => {
     const settings = platformSettings();
     expect(resolveRigProviderImageSelection(settings, version(), "modal", null).reason).toBe(
       "missing",
@@ -776,7 +781,10 @@ describe("compute environment templates", () => {
   test("a verification that fails before any build records a failed build of this content", async () => {
     const settings = computeSettings();
     const definition = version();
-    const replaced = { ...readyTemplate(computeSettings({ deploymentRevision: "release-0" }), definition), imageId: "tpl-old" };
+    const replaced = {
+      ...readyTemplate(computeSettings({ deploymentRevision: "release-0" }), definition),
+      imageId: "tpl-old",
+    };
     const finalized: RigProviderImage[] = [];
     const deleted: string[] = [];
     const recorded = await recordComputeEnvironmentVerificationFailure(
