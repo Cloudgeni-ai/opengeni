@@ -2420,6 +2420,7 @@ export const FORCE_RLS_TABLES = [
   "teams_bot_outbox",
   "teams_bot_proofs",
   "teams_bot_routes",
+  "teams_bot_welcomes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -2780,6 +2781,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_outbox",
   "teams_bot_proofs",
   "teams_bot_routes",
+  // 1290_teams_bot_welcomes: install welcomes claimed once across replicas.
+  "teams_bot_welcomes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",

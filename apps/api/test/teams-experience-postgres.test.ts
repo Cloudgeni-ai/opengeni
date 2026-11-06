@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { App } from "@microsoft/teams.apps";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -32,7 +33,11 @@ afterAll(async () => {
 
 const serviceUrl = "https://smba.trafficmanager.net/emea/";
 
-async function fixture() {
+/**
+ * `cardsWithoutId` makes the fake Teams answer a message that carries a card
+ * as Teams can: accepted, with an empty body and no message id.
+ */
+async function fixture(options: { cardsWithoutId?: boolean } = {}) {
   const subject = `user:teams:${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "teams-test",
@@ -87,18 +92,27 @@ async function fixture() {
     },
   } as unknown as ApiRouteDeps;
   const calls: Array<{ conversationId: string; activity: Record<string, unknown> }> = [];
-  const app = {
-    api: {
-      fromServiceUrl: () => ({
-        conversations: {
-          createActivity: async (conversationId: string, activity: Record<string, unknown>) => {
-            calls.push({ conversationId, activity });
-            return { id: `activity-${calls.length}` };
+  /** Sends that fail before reaching Teams, next first. */
+  const failures: Error[] = [];
+  /** A separate Teams client, as each API replica has its own. */
+  const teamsApp = () =>
+    ({
+      api: {
+        fromServiceUrl: () => ({
+          conversations: {
+            createActivity: async (conversationId: string, activity: Record<string, unknown>) => {
+              const failure = failures.shift();
+              if (failure) throw failure;
+              calls.push({ conversationId, activity });
+              return options.cardsWithoutId && activity.attachments
+                ? ""
+                : { id: `activity-${calls.length}` };
+            },
           },
-        },
-      }),
-    },
-  } as unknown as App;
+        }),
+      },
+    }) as unknown as App;
+  const app = teamsApp();
   const botId = `28:${clientId}`;
   const message = (text: string, from = actor, overrides: Record<string, unknown> = {}) => ({
     type: "message",
@@ -114,7 +128,33 @@ async function fixture() {
     ...overrides,
   });
   const handle = (body: unknown) => handleTeamsActivity(deps, app, body);
-  return { i, tenant, actor, subject, deps, app, calls, botId, message, handle, outcomes };
+  /**
+   * Another API replica on the same database: its own process state (route
+   * dependencies, reply budgets) and its own Teams client.
+   */
+  const replica = (settings: Partial<ApiRouteDeps["settings"]> = {}) => {
+    const other = {
+      ...deps,
+      settings: { ...deps.settings, ...settings },
+    } as ApiRouteDeps;
+    const otherApp = teamsApp();
+    return (body: unknown) => handleTeamsActivity(other, otherApp, body);
+  };
+  return {
+    i,
+    tenant,
+    actor,
+    subject,
+    deps,
+    app,
+    calls,
+    failures,
+    botId,
+    message,
+    handle,
+    replica,
+    outcomes,
+  };
 }
 
 function cardActions(activity: Record<string, unknown>): unknown[] {
@@ -263,6 +303,136 @@ test("in an organization that hasn't connected Opengeni, installs and messages g
     "connect_link_sent",
     "onboarding_reply_limited",
     "help_sent",
+  ]);
+});
+
+/** A personal install of the fixture's bot, as Teams delivers it. */
+function personalInstall(
+  f: Awaited<ReturnType<typeof fixture>>,
+  from: string,
+  tenant: string = f.tenant,
+) {
+  return {
+    type: "conversationUpdate",
+    id: `f:${crypto.randomUUID()}`,
+    channelId: "msteams",
+    serviceUrl,
+    from: { id: `29:${from}`, aadObjectId: from },
+    recipient: { id: f.botId },
+    conversation: { id: `a:${from}`, conversationType: "personal", tenantId: tenant },
+    channelData: { tenant: { id: tenant } },
+    membersAdded: [{ id: f.botId }],
+  };
+}
+
+test("an install Teams redelivers to another replica is welcomed once, and a card Teams accepts without an id doesn't fail it", async () => {
+  // Staging, 6 Nov 2026: Teams accepted the welcome card with an empty 202,
+  // the missing id failed the install with a 500, and Teams redelivered it to
+  // another replica, which welcomed the person again.
+  const f = await fixture({ cardsWithoutId: true });
+  const replicaB = f.replica();
+  const replicaC = f.replica();
+
+  // Connected organization, unlinked person: the welcome has a Link account card.
+  const stranger = crypto.randomUUID();
+  const install = personalInstall(f, stranger);
+  expect(await f.handle(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+  expect((cardActions(f.calls[0]!.activity)[0] as { title: string }).title).toBe("Link account");
+  // The same install delivered again, to other replicas, sends nothing more.
+  expect(await replicaB(install)).toEqual({ status: 200 });
+  expect(await replicaC(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+
+  // Linked person: a text-only welcome, also once across replicas.
+  expect(await replicaB(personalInstall(f, f.actor))).toEqual({ status: 200 });
+  expect(await f.handle(personalInstall(f, f.actor))).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(2);
+  expect(cardActions(f.calls[1]!.activity)).toEqual([]);
+
+  // Deliveries that arrive together still welcome once.
+  const concurrent = crypto.randomUUID();
+  const body = personalInstall(f, concurrent);
+  expect(await Promise.all([f.handle(body), replicaB(body), replicaC(body)])).toEqual([
+    { status: 200 },
+    { status: 200 },
+    { status: 200 },
+  ]);
+  expect(f.calls.filter((c) => c.conversationId === `a:${concurrent}`)).toHaveLength(1);
+
+  // An unlinked person's message gets its link card, which also comes back
+  // without an id, and the message doesn't fail.
+  expect(await replicaB(f.message("hello", stranger))).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(4);
+  expect(cardActions(f.calls[3]!.activity)).toHaveLength(1);
+
+  expect(f.outcomes.slice(0, 5)).toEqual([
+    "welcome_sent",
+    "welcome_duplicate",
+    "welcome_duplicate",
+    "welcome_sent",
+    "welcome_duplicate",
+  ]);
+  expect([...f.outcomes.slice(5, 8)].sort()).toEqual([
+    "welcome_duplicate",
+    "welcome_duplicate",
+    "welcome_sent",
+  ]);
+  // Only content-free claims are stored.
+  const claims = await shared.admin<Array<{ scope_hash: string }>>`
+    select scope_hash from teams_bot_welcomes`;
+  expect(claims.length).toBeGreaterThanOrEqual(3);
+  for (const claim of claims) expect(claim.scope_hash).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(claims)).not.toContain(stranger);
+});
+
+test("in an organization that hasn't connected Opengeni, a redelivered install gets one Connect your organization card", async () => {
+  const f = await fixture({ cardsWithoutId: true });
+  const other = crypto.randomUUID();
+  const settings = {
+    teamsBotSelfServeSetupEnabled: true,
+    teamsBotAllowedTenantIds: [f.tenant, other],
+  };
+  // Each replica has its own install-welcome budget, so only the database
+  // claim keeps the card to one.
+  const replicaA = f.replica(settings);
+  const replicaB = f.replica(settings);
+  const person = crypto.randomUUID();
+  const install = personalInstall(f, person, other);
+  expect(await replicaA(install)).toEqual({ status: 200 });
+  expect(await replicaB(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+  expect(f.calls[0]!.activity.text).toContain("Your organization hasn't connected Opengeni yet.");
+  expect(f.outcomes).toEqual(["connect_link_sent", "welcome_duplicate"]);
+});
+
+test("a welcome that fails to send doesn't fail the install, and a later delivery sends it; a reinstall after the window is welcomed again", async () => {
+  const f = await fixture();
+  const replicaB = f.replica();
+  const person = crypto.randomUUID();
+  const install = personalInstall(f, person);
+  f.failures.push(new Error("teams_unreachable"));
+  expect(await f.handle(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(0);
+  // The failed send gave its claim back.
+  expect(await replicaB(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+  expect(await f.handle(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+
+  // Once the claim window has passed, installing again welcomes again.
+  const scope = createHash("sha256").update(`${f.tenant}\na:${person}`).digest("hex");
+  const aged = await shared.admin`
+    update teams_bot_welcomes set claimed_at = now() - interval '11 minutes'
+    where scope_hash = ${scope}`;
+  expect(aged.count).toBe(1);
+  expect(await replicaB(personalInstall(f, person))).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(2);
+  expect(f.outcomes).toEqual([
+    "welcome_failed",
+    "welcome_sent",
+    "welcome_duplicate",
+    "welcome_sent",
   ]);
 });
 

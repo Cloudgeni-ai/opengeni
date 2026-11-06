@@ -396,8 +396,13 @@ conversation, organization connected or not, account linked or not).
   also gets a "Link account" button. The welcome holds no identity proof, since
   proofs expire after ten minutes and a welcome may be read much later: the button
   sends `link` as the person, whose authenticated message gets a fresh link card.
-  A redelivered install within ten minutes isn't welcomed again (per API process),
-  and messages never repeat it. A linked person's first 1:1 chat adds one line
+  Teams can deliver one install several times and to any API replica, so each
+  replica first claims the chat's welcome in `teams_bot_welcomes` (a hash of the
+  tenant and conversation, no content); an install of the same chat within ten
+  minutes isn't welcomed again on any replica, and messages never repeat it. The
+  install activity never fails: a failed send gives the claim back for a later
+  delivery. Teams may accept a message with a card with an empty 202 and no
+  message id; that counts as delivered. A linked person's first 1:1 chat adds one line
   about AI and `help` to the "Started" notice. In an organization that hasn't
   connected Opengeni and has self-serve on, the installer gets the
   "Connect your organization" card instead of this welcome; see

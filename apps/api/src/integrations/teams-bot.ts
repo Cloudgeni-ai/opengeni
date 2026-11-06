@@ -29,6 +29,8 @@ import {
   personalWorkspaceClosedToNewWork,
   resolveNamedManagedPersonalWorkspaceGrant,
   getTeamsInstallation,
+  claimTeamsWelcome,
+  releaseTeamsWelcome,
   invalidateTeamsGroup,
   teamsGroupRouteActive,
   type TeamsGroupAudience,
@@ -119,9 +121,6 @@ const inventoryCursors = new WeakMap<ApiRouteDeps, string>();
 const runtimes = new WeakMap<ApiRouteDeps, Promise<App>>();
 const onboardingBudgetsByDeps = new WeakMap<ApiRouteDeps, TeamsOnboardingBudgets>();
 const typingLoops = new WeakMap<ApiRouteDeps, Map<string, TeamsTypingLoop>>();
-/** Recently welcomed personal chats, so a redelivered install isn't welcomed twice. */
-const welcomed = new WeakMap<ApiRouteDeps, Map<string, number>>();
-const WELCOME_DEDUPE_MS = 10 * 60_000;
 
 function configuredBase(deps: ApiRouteDeps): string {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
@@ -170,13 +169,23 @@ function deliveryConversation(m: TeamsTarget): string {
     ? `${m.conversationId};messageid=${m.threadId}`
     : m.conversationId;
 }
+/**
+ * The id of a message Teams accepted, or null when it accepted it without one.
+ * Teams may answer a send, notably one carrying a card, with an empty 202
+ * ("accepted for processing"): the message is still delivered, so a missing id
+ * is never a failure to retry.
+ */
+function teamsReceipt(response: unknown): string | null {
+  const id = (response as { id?: unknown } | null | undefined)?.id;
+  return typeof id === "string" && id ? id : null;
+}
 /** Text is Teams Markdown. An agent reply carries Teams' AI label and feedback buttons. */
 async function send(
   app: App,
   m: TeamsTarget,
   text: string,
   options: { ai?: boolean } = {},
-): Promise<string> {
+): Promise<string | null> {
   const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
   const response = await client.conversations.createActivity(deliveryConversation(m), {
     type: "message",
@@ -190,8 +199,7 @@ async function send(
         }
       : {}),
   });
-  if (!response.id) throw new Error("teams_delivery_missing_receipt");
-  return response.id;
+  return teamsReceipt(response);
 }
 /** Shows that Opengeni is working on a reply. Teams clears it when the next message arrives. */
 async function sendTyping(app: App, m: TeamsTarget): Promise<void> {
@@ -212,7 +220,7 @@ export async function sendTeamsReply(
   m: TeamsTarget & { personal: boolean },
   reply: TeamsExperienceReply,
   linkUrl?: () => string,
-): Promise<string> {
+): Promise<string | null> {
   const action =
     reply.action?.kind === "link"
       ? m.personal && linkUrl
@@ -247,8 +255,7 @@ export async function sendTeamsReply(
         }
       : {}),
   });
-  if (!response.id) throw new Error("teams_delivery_missing_receipt");
-  return response.id;
+  return teamsReceipt(response);
 }
 const ONBOARDING_TEXT = {
   setup: "Connect Teams to your Opengeni workspace.",
@@ -272,7 +279,7 @@ export async function sendTeamsOnboarding(
   m: Pick<TeamsMessage, "personal" | "serviceUrl" | "conversationId">,
   purpose: "setup" | "link" | "connect",
   url: string,
-): Promise<string> {
+): Promise<string | null> {
   if (!m.personal) throw new Error("teams_onboarding_requires_personal_chat");
   const text = ONBOARDING_TEXT[purpose];
   const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
@@ -298,8 +305,7 @@ export async function sendTeamsOnboarding(
       },
     ],
   });
-  if (!response.id) throw new Error("teams_delivery_missing_receipt");
-  return response.id;
+  return teamsReceipt(response);
 }
 export type TeamsUnconnectedOutcome =
   | "tenant_disabled"
@@ -377,7 +383,7 @@ export async function replyToUnconnectedTeamsTenant(
 export async function confirmTeamsSetup(
   app: App,
   conversation: NonNullable<TeamsLinkProof["conversation"]>,
-): Promise<string> {
+): Promise<string | null> {
   return await send(
     app,
     {
@@ -499,19 +505,38 @@ function experienceState(
  * The welcome for someone who just added the bot for themselves. In an
  * organization that hasn't connected Opengeni, the installer instead gets the
  * way to connect it when they may (see replyToUnconnectedTeamsTenant).
+ *
+ * Teams may deliver one install several times, to any API replica, so the
+ * chat's welcome is claimed in the database first and sent at most once per
+ * claim window. The install activity never fails: a failed send gives the
+ * claim back, so a later delivery or reinstall can try again, and Teams isn't
+ * asked to redeliver an install whose welcome may already have arrived.
  */
 async function welcomeTeamsInstall(
   deps: ApiRouteDeps,
   app: App,
   install: TeamsPersonalInstall,
 ): Promise<string> {
-  let recent = welcomed.get(deps);
-  if (!recent) welcomed.set(deps, (recent = new Map()));
-  const now = Date.now();
-  for (const [key, at] of recent) if (now - at > WELCOME_DEDUPE_MS) recent.delete(key);
-  const key = `${install.tenantId}:${install.conversationId}`;
-  if (recent.has(key)) return "welcome_duplicate";
-  recent.set(key, now);
+  const claim = await claimTeamsWelcome(deps.db, install);
+  if (!claim) return "welcome_duplicate";
+  let outcome: string;
+  try {
+    outcome = await sendTeamsInstallWelcome(deps, app, install);
+  } catch {
+    outcome = "welcome_failed";
+  }
+  // Every outcome that delivered something ends in "_sent".
+  if (!outcome.endsWith("_sent"))
+    await releaseTeamsWelcome(deps.db, claim).catch(() => {
+      // The claim then lapses at the end of its window.
+    });
+  return outcome;
+}
+async function sendTeamsInstallWelcome(
+  deps: ApiRouteDeps,
+  app: App,
+  install: TeamsPersonalInstall,
+): Promise<string> {
   const i = await getTeamsInstallation(deps.db, install.tenantId);
   const active = i?.active ? i : null;
   if (!active && install.actorId) {
@@ -524,7 +549,6 @@ async function welcomeTeamsInstall(
         "install",
       );
     } catch {
-      recent.delete(key);
       return "onboarding_reply_failed";
     }
     if (outcome !== "setup_not_permitted") return outcome;
@@ -532,16 +556,11 @@ async function welcomeTeamsInstall(
   // When Teams doesn't name who added the bot, offer linking; the link
   // command answers from the sender's own authenticated message either way.
   const grant = active && install.actorId ? await actorGrant(deps, active, install.actorId) : null;
-  try {
-    await sendTeamsReply(
-      app,
-      { ...install, threadId: null, personal: true },
-      teamsWelcome(experienceState(true, active, grant)),
-    );
-  } catch (error) {
-    recent.delete(key);
-    throw error;
-  }
+  await sendTeamsReply(
+    app,
+    { ...install, threadId: null, personal: true },
+    teamsWelcome(experienceState(true, active, grant)),
+  );
   return "welcome_sent";
 }
 /**
@@ -1357,7 +1376,7 @@ type TeamsSender = (
   message: Pick<TeamsMessage, "serviceUrl" | "conversationId" | "threadId" | "botId">,
   text: string,
   options?: { ai?: boolean },
-) => Promise<string>;
+) => Promise<string | null>;
 function admissionNotice(
   deps: ApiRouteDeps,
   r: TeamsRoute,
@@ -1661,7 +1680,7 @@ async function drainRoute(
     );
     await settleTeamsOutput(deps.db, i, output.operation_id, {
       state: "delivered",
-      providerMessageId: id,
+      ...(id ? { providerMessageId: id } : {}),
     });
   } catch (error) {
     const response = (error as { response?: { status?: number; headers?: Record<string, string> } })

@@ -44,7 +44,7 @@ function budgetsOf(connect = new TeamsOnboardingLimiter()): TeamsOnboardingBudge
   return { ...createTeamsOnboardingBudgets(), connect };
 }
 
-function transport(receipt: { id?: string } = { id: "sent-1" }) {
+function transport(receipt: unknown = { id: "sent-1" }) {
   const calls: Array<{ serviceUrl: string; conversationId: string; activity: unknown }> = [];
   const app = {
     api: {
@@ -143,8 +143,8 @@ describe("Teams onboarding message delivery", () => {
     expect(calls).toEqual([]);
   });
 
-  test("keeps service-URL validation and requires a provider receipt", async () => {
-    const { app, calls } = transport({});
+  test("keeps service-URL validation", async () => {
+    const { app, calls } = transport();
     await expect(
       sendTeamsOnboarding(
         app,
@@ -154,11 +154,26 @@ describe("Teams onboarding message delivery", () => {
       ),
     ).rejects.toThrow("teams_service_url_rejected");
     expect(calls).toEqual([]);
-    await expect(
-      sendTeamsOnboarding(app, message, "setup", "https://app.example.test/#teams_setup=fixture"),
-    ).rejects.toThrow("teams_delivery_missing_receipt");
-    expect(calls).toHaveLength(1);
   });
+
+  // Teams answers a card it accepted with an empty 202 and no message id
+  // (seen on staging for the install welcome). That card was delivered, so it
+  // must not fail the activity and make Teams redeliver it.
+  test.each([{}, "", undefined])(
+    "a card Teams accepts without a message id (%p) counts as delivered",
+    async (receipt) => {
+      const { app, calls } = transport(receipt);
+      expect(
+        await sendTeamsOnboarding(
+          app,
+          message,
+          "connect",
+          "https://app.example.test/#teams_setup=fixture",
+        ),
+      ).toBeNull();
+      expect(calls).toHaveLength(1);
+    },
+  );
 });
 
 const botClientId = "d3f8842e-a4b7-483d-a9a9-551c547911aa";
