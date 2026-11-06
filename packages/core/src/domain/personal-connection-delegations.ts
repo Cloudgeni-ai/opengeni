@@ -40,6 +40,7 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { personalGitHubRepositoryResources } from "./resources";
+import { connectAutoConnectLoginsForTurn } from "./mcp-auto-connect";
 import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 export { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 import {
@@ -804,8 +805,43 @@ export function withFrozenPersonalConnectionDelegations(input: {
 
 /** Freeze all native account routes without conflating workspace ownership
  * with the exact causal human required for personal connections. */
+/** The longest a turn waits for auto-connect before it starts without it. */
+const AUTO_CONNECT_TURN_BUDGET_MS = 8_000;
+
+async function connectAutoConnectLoginsBeforeTurn(input: {
+  db: Database;
+  settings: Settings;
+  fetchImpl?: typeof fetch | undefined;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  servers: readonly McpServerConfig[];
+}): Promise<void> {
+  const providerDomains = new Set(
+    input.servers
+      .filter((server) => server.connectionRef?.subjectScope === "subject")
+      .map((server) => server.connectionRef!.providerDomain.toLowerCase()),
+  );
+  if (providerDomains.size === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    connectAutoConnectLoginsForTurn({ ...input, providerDomains }).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, AUTO_CONNECT_TURN_BUDGET_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 export async function freezeConnectionAccounts(
-  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & { accountId: string },
+  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & {
+    accountId: string;
+    /**
+     * A person's own turn: connect them first to the auto-connect connectors
+     * it may use (docs/integrations-design.md, "Auto-connect").
+     */
+    autoConnect?: { settings: Settings; fetchImpl?: typeof fetch | undefined } | undefined;
+  },
 ): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
@@ -863,6 +899,16 @@ export async function freezeConnectionAccounts(
           : { kind: "none" },
       selections: [...(input.authoritySelections ?? [])],
     };
+    if (input.autoConnect && input.source.kind === "subject" && servers.length > 0)
+      await connectAutoConnectLoginsBeforeTurn({
+        db: input.db,
+        settings: input.autoConnect.settings,
+        fetchImpl: input.autoConnect.fetchImpl,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+        servers,
+      });
     mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
       accountId: input.accountId,
       workspaceId: input.workspaceId,

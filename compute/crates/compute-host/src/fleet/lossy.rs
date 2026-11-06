@@ -1,13 +1,17 @@
-//! The guard's log, which it writes to without waiting.
+//! The guard's and the agent's log, which they write to without waiting.
 //!
-//! The guard's standard error goes to the journal, and a write to it waits
-//! while the journal is slow to take it, as on a host short of memory,
-//! where the journal waits on the same busy disk as everything else. A
-//! guard waiting there for longer than the watchdog's timeout resets the
-//! machine. So the guard hands each line to a thread of its own, which
-//! writes it; when that thread falls behind by [`ROOM`] lines, the lines
-//! after those are dropped, as are lines the log refuses, and the thread
-//! says how many once it has caught up, as soon as the log takes that.
+//! Their standard error goes to the journal, and a write to it waits while
+//! the journal is slow to take it, as on a host short of memory or whose
+//! disk is saturated, where the journal waits on the same busy disk as
+//! everything else. A guard waiting there for longer than the watchdog's
+//! timeout resets the machine. An agent's threads waiting there run
+//! nothing else meanwhile, its lease's renewals included, so seconds of a
+//! stalled journal became seconds of renewals neither sent nor taken in,
+//! and the guard froze the host's VMs. So each line is handed to a thread
+//! of its own, which writes it; when that thread falls behind by its room
+//! ([`ROOM`] lines for the guard), the lines after those are dropped, as
+//! are lines the log refuses, and the thread says how many once it has
+//! caught up, as soon as the log takes that.
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -48,12 +52,17 @@ impl Lossy {
         Self::with_room(sink, ROOM)
     }
 
-    fn with_room(sink: impl Write + Send + 'static, room: usize) -> io::Result<Self> {
+    /// A log as [`Self::new`] gives, holding up to `room` lines waiting.
+    ///
+    /// # Errors
+    ///
+    /// When the thread cannot be started.
+    pub fn with_room(sink: impl Write + Send + 'static, room: usize) -> io::Result<Self> {
         let (lines, queue) = mpsc::sync_channel(room);
         let counts = Arc::new(Counts::default());
         let writing = Arc::clone(&counts);
         std::thread::Builder::new()
-            .name("guard-log".into())
+            .name("log".into())
             .spawn(move || write_out(&queue, sink, &writing))?;
         Ok(Self { lines, counts })
     }

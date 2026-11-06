@@ -3474,4 +3474,8 @@ against authenticated membership changes. Changes retire the old route rather
 than transferring history. Native admission rechecks all linked members, sender
 permissions and the exact group allowlist; each outbound part revalidates the
 provider roster. Personal routes and private-session authority remain separate.
+Welcome, help and unlink replies are fixed text chosen by installation and link
+state, never agent turns; agent replies carry Teams' AI label and feedback
+buttons, and feedback invokes are recorded as ordinary Opengeni feedback on the
+chat and turn.
 See [Teams release readiness](microsoft-teams-release-readiness.md).

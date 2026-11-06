@@ -317,6 +317,13 @@ const RULES: Rule[] = [
     text: () => "Remove a model id from an organization OpenAI-compatible endpoint.",
   },
   {
+    method: "PUT",
+    pattern:
+      /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/models\/:customModelId\/reasoning$/,
+    text: () =>
+      "Set the reasoning levels a model on an organization OpenAI-compatible endpoint accepts and its default (null: none), or omit `reasoning` to read them again from the endpoint's /models listing.",
+  },
+  {
     method: "GET",
     pattern: /\/codex\/overview$/,
     text: () =>

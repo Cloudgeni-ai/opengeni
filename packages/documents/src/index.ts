@@ -1556,7 +1556,6 @@ export async function addDocumentToBase(
     organizationAuthorityGranted?: boolean | undefined;
     curationStatus?: DocumentCurationStatus | undefined;
     access?: DocumentAccessFilter | undefined;
-    knowledgeSourceIdentity?: string | null | undefined;
   },
 ): Promise<Document> {
   return await withRlsContext(
@@ -1595,10 +1594,6 @@ export async function addDocumentToBase(
         subjectId: fileAuthoritySubjectId,
         fileId: input.fileId,
       });
-      const knowledgeSourceIdentity = cleanString(input.knowledgeSourceIdentity ?? null);
-      if (knowledgeSourceIdentity && knowledgeSourceIdentity.length > 512) {
-        throw new Error("knowledge source document identity exceeds 512 characters");
-      }
       const now = new Date();
       const [existing] = await scopedDb
         .select()
@@ -1606,19 +1601,12 @@ export async function addDocumentToBase(
         .where(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
-            ...(knowledgeSourceIdentity
-              ? [eq(schema.documents.knowledgeSourceIdentity, knowledgeSourceIdentity)]
-              : [
-                  eq(schema.documents.baseId, input.baseId),
-                  eq(schema.documents.fileId, input.fileId),
-                ]),
+            eq(schema.documents.baseId, input.baseId),
+            eq(schema.documents.fileId, input.fileId),
           ),
         )
         .limit(1);
       if (existing) {
-        if (knowledgeSourceIdentity && existing.fileId !== input.fileId) {
-          throw new Error("knowledge source document identity is bound to different content");
-        }
         if (!documentMatchesAccess(existing, input.workspaceId, input.access)) {
           throw new Error(`Document not found: ${existing.id}`);
         }
@@ -1686,7 +1674,6 @@ export async function addDocumentToBase(
             sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
             sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
             sourceVersion: cleanString(input.sourceVersion) ?? null,
-            knowledgeSourceIdentity,
             aclTags: cleanStringArray(input.aclTags),
             authorityKind: authority.kind,
             authorityWorkspaceId: userAuthority ? null : authority.workspaceId,
@@ -1765,9 +1752,7 @@ export async function moveDocumentToBase(
           and(
             eq(schema.documents.workspaceId, row.workspaceId),
             eq(schema.documents.baseId, targetBaseId),
-            ...(row.knowledgeSourceIdentity
-              ? [eq(schema.documents.knowledgeSourceIdentity, row.knowledgeSourceIdentity)]
-              : [eq(schema.documents.fileId, row.fileId)]),
+            eq(schema.documents.fileId, row.fileId),
           ),
         )
         .limit(1);

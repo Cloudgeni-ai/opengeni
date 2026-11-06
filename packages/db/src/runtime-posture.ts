@@ -107,8 +107,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withheld the connected-command re-arm the same way and 1101 granted
- * it. 0988 withholds the queued-turn
- * hold summary; until it is granted, the control worker does not publish it.
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
@@ -120,29 +119,23 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
- * 1218 withholds the organization vault list; until it is granted, the API
- * lists the organization vaults that work in the current workspace and says
- * the list is incomplete.
+ * 1218 withheld the organization vault list and 1224 the organization machine
+ * and rig list; 1272 granted both.
  * 1211 withholds the names-only member list; until it is granted, members
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1224 withholds the organization machine and rig list the same way as the
- * vault list.
  * 1240 withholds the inventory of meeting tracks not yet kept compact; until
  * it is granted, existing meetings keep their audio as it is and only new
  * transcripts keep it compact.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "read_external_identity_v1(uuid, text, text)",
-  "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
-  "list_organization_compute_v1(uuid, uuid, text)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
@@ -581,13 +574,9 @@ const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
 const GOOGLE_DRIVE_AUTHORITY_TABLES = [
   "connections",
   "files",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "knowledge_document_versions",
   "knowledge_providers",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_states",
   "knowledge_sources",
 ] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -896,6 +885,17 @@ export const RETIRING_FEATURE_TABLES = {
     "session_variable_set_attachments",
     "workspace_variable_set_variables",
     "workspace_variable_sets",
+  ],
+  // Migration 1275 removes the retired Knowledge-source sync rows and stops
+  // every SQL routine from reading these tables; a later release drops them.
+  knowledgeSourceSync: [
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_item_outcomes",
+    "knowledge_source_sync_object_observations",
+    "knowledge_source_sync_states",
+    "knowledge_source_sync_wakes",
   ],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
@@ -2161,11 +2161,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
@@ -2619,6 +2624,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",

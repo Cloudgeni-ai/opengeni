@@ -1,9 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -133,10 +129,8 @@ function expected(
 
 describe("queued turns classified by what holds them (migration 0988)", () => {
   test("separates dispatchable prompts from prompts held by session state", async () => {
-    // 0988 withholds the runtime grant for one release; until a later
-    // migration grants it the worker sees no summary rather than an error.
-    expect(await summarizeQueuedTurnsByHold(client.db)).toBeNull();
-    await grantDeferredRuntimeAccess(shared.admin);
+    // 0988 withheld the runtime grant for one release; 1274 grants it, so the
+    // runtime role reads the summary without any test-only grant.
     expect(await counts()).toEqual(expected({}));
 
     // Fresh initial turns are waiting only for dispatch.
@@ -215,7 +209,6 @@ describe("queued turns classified by what holds them (migration 0988)", () => {
   }, 180_000);
 
   test("keeps the canonical override depth rules and finds prompts behind a claimed turn", async () => {
-    await grantDeferredRuntimeAccess(shared.admin);
     const delta = async (before: Record<QueuedTurnHold, number>) => {
       const after = await counts();
       return Object.fromEntries(
@@ -278,7 +271,6 @@ describe("queued turns classified by what holds them (migration 0988)", () => {
     // candidate session, so 500 sessions already took tens of seconds. Clone
     // one idle session with its queued prompt into thousands of sessions, a
     // third of them directly paused, and require the summary to stay fast.
-    await grantDeferredRuntimeAccess(shared.admin);
     const template = await fixture();
     const before = await counts();
     const clones = 3_000;

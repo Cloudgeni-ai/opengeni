@@ -94,20 +94,6 @@ const legacySandboxReaperWorkflowPath = new URL(
   "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
   import.meta.url,
 ).pathname;
-// Recorded with the session workflow immediately before
-// session-capacity-wake-jitter-v1: a capacity wait cut short by a capacity
-// signal, then a waiter whose reset timer fired. Delete it only once that patch
-// is deprecated and no pre-jitter capacity wait can still be replayed.
-const legacySessionCapacityWaitHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
-  import.meta.url,
-).pathname;
-// Recorded from base6609fa6f: an authenticated settled owner still took the
-// unconditional 30-second observer timer before this command patch existed.
-const legacySettledOwnerHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-settled-owner-observation-history.json",
-  import.meta.url,
-).pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -761,28 +747,6 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "replays pre-recovery settled-owner observation without adding a close command",
-    async () => {
-      const history = await Bun.file(legacySettledOwnerHistoryPath).json();
-      expect(patchIds(history)).toContain("session-safe-control-observation-v1");
-      expect(patchIds(history)).not.toContain("session-settled-owner-recovery-v1");
-      expect(
-        history.events.some(
-          (event: any) => event.timerStartedEventAttributes?.startToFireTimeout === "30s",
-        ),
-      ).toBe(true);
-      const workflowId =
-        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
-      await Worker.runReplayHistory(
-        { workflowsPath: workflowDefinitionsPath },
-        history,
-        workflowId,
-      );
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
     "settled-current-owner recovery survives continue-as-new with the original owner run and one same-turn successor",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -965,57 +929,6 @@ describe("Temporal workflow integration", () => {
       }
     },
     quiescenceReceiptTestTimeoutMs,
-  );
-
-  test(
-    "replays a pre-safe-observation peek without adding the new activity input",
-    async () => {
-      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      const workflowId = `wf-${crypto.randomUUID()}`;
-      const calls: unknown[] = [];
-      const worker = await Worker.create({
-        connection: nativeConnection,
-        namespace: "default",
-        taskQueue,
-        workflowsPath: new URL(
-          "../../apps/worker/test/fixtures/legacy-session-observer-workflow.ts",
-          import.meta.url,
-        ).pathname,
-        activities: {
-          peekSessionWork: async (input: unknown) => {
-            calls.push(input);
-            return { kind: "admission-blocked" };
-          },
-        },
-      });
-      const run = worker.run();
-      try {
-        const scope = { ...workflowScope(), sessionId: crypto.randomUUID() };
-        const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
-          taskQueue,
-          workflowId,
-          args: [scope],
-        });
-        await handle.result();
-        expect(calls).toEqual([
-          {
-            workspaceId: scope.workspaceId,
-            sessionId: scope.sessionId,
-            includeAdmissionFence: true,
-          },
-        ]);
-        await Worker.runReplayHistory(
-          { workflowsPath: workflowDefinitionsPath },
-          await handle.fetchHistory(),
-          workflowId,
-        );
-      } finally {
-        worker.shutdown();
-        await run;
-      }
-    },
-    temporalWorkflowTestTimeoutMs,
   );
 
   test(
@@ -3289,36 +3202,6 @@ describe("Temporal workflow integration", () => {
         worker.shutdown();
         await run;
       }
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
-    "replays a pre-jitter capacity wait recorded by the previous worker",
-    async () => {
-      // Forward rolling direction: a patched worker must replay every capacity
-      // wait an older worker recorded (signal-cut timer, then a fired timer)
-      // without adding the jitter timers. The reverse direction is not
-      // supported: an older worker fails a history that carries the marker.
-      const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
-        events: Array<{
-          workflowExecutionStartedEventAttributes?: { workflowId?: string };
-          markerRecordedEventAttributes?: unknown;
-          timerStartedEventAttributes?: unknown;
-          eventType?: string;
-        }>;
-      };
-      const recordedPatches = patchIds(history);
-      expect(recordedPatches).toContain("session-safe-control-observation-v1");
-      expect(recordedPatches).not.toContain("session-capacity-wake-jitter-v1");
-      expect(history.events.filter((event) => event.timerStartedEventAttributes)).toHaveLength(3);
-      const workflowId =
-        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
-      await Worker.runReplayHistory(
-        { workflowsPath: workflowDefinitionsPath },
-        history,
-        workflowId,
-      );
     },
     temporalWorkflowTestTimeoutMs,
   );

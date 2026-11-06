@@ -214,11 +214,14 @@ export function normalizeTeamsMessage(
     routeIdentity: envelope.route.identity,
   };
 }
+
 const PersonalInstall = z.object({
   type: z.literal("conversationUpdate"),
   channelId: z.literal("msteams"),
   serviceUrl: z.string().url(),
-  from: z.object({ id: opaque, aadObjectId: uuid, role: z.string().optional() }),
+  from: z
+    .object({ id: opaque, aadObjectId: uuid.optional(), role: z.string().optional() })
+    .optional(),
   recipient: z.object({ id: opaque }),
   conversation: z.object({
     id: opaque,
@@ -231,21 +234,26 @@ const PersonalInstall = z.object({
     .min(1)
     .max(16),
 });
-export type TeamsPersonalInstall = Pick<
-  TeamsMessage,
-  "tenantId" | "actorId" | "conversationId" | "serviceUrl" | "botId" | "personal"
->;
-/** The bot being added to a person's 1:1 scope. Called only after SDK authentication. */
-export function normalizeTeamsPersonalInstall(raw: unknown): TeamsPersonalInstall | null {
+export type TeamsPersonalInstall = {
+  tenantId: string;
+  /** The person who added the bot, when Teams names a person (never a bot). */
+  actorId: string | null;
+  conversationId: string;
+  serviceUrl: string;
+  botId: string;
+};
+/**
+ * The bot was added to someone's personal scope. Called only by the SDK's
+ * authenticated activity callback; the caller still checks the bot identity.
+ */
+export function teamsPersonalInstall(raw: unknown): TeamsPersonalInstall | null {
   const parsed = PersonalInstall.safeParse(raw);
   if (!parsed.success) return null;
   const a = parsed.data;
   const tenantId = a.channelData.tenant.id.toLowerCase();
   if (
-    a.from.role === "bot" ||
-    a.from.id === a.recipient.id ||
-    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId) ||
-    !a.membersAdded.some((member) => member.id === a.recipient.id)
+    !a.membersAdded.some((member) => member.id === a.recipient.id) ||
+    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
   )
     return null;
   let serviceUrl: string;
@@ -254,13 +262,106 @@ export function normalizeTeamsPersonalInstall(raw: unknown): TeamsPersonalInstal
   } catch {
     return null;
   }
+  const person = a.from && a.from.role !== "bot" && a.from.id !== a.recipient.id ? a.from : null;
+  return {
+    tenantId,
+    actorId: person?.aadObjectId?.toLowerCase() ?? null,
+    conversationId: a.conversation.id,
+    serviceUrl,
+    botId: a.recipient.id,
+  };
+}
+
+const FeedbackInvoke = z.object({
+  type: z.literal("invoke"),
+  name: z.literal("message/submitAction"),
+  id: opaque,
+  channelId: z.literal("msteams"),
+  serviceUrl: z.string().url(),
+  from: z.object({ id: opaque, aadObjectId: uuid, role: z.string().optional() }),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.enum(["personal", "channel", "groupChat"]),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({
+    tenant: z.object({ id: uuid }),
+    channel: z.object({ id: opaque }).optional(),
+  }),
+  replyToId: opaque,
+  value: z.object({
+    actionName: z.literal("feedback"),
+    actionValue: z.object({
+      reaction: z.enum(["like", "dislike"]),
+      feedback: z.string().optional(),
+    }),
+  }),
+});
+export type TeamsFeedback = {
+  tenantId: string;
+  actorId: string;
+  conversationId: string;
+  personal: boolean;
+  groupChat: boolean;
+  /** The Teams channel, for feedback in a channel. */
+  channelId: string | null;
+  /** The bot message the feedback is about. */
+  replyToId: string;
+  eventId: string;
+  sentiment: "positive" | "negative";
+  /** What the person wrote in the feedback form, if anything. */
+  comment: string | null;
+  botId: string;
+};
+/**
+ * A thumbs up or down from Teams' feedback buttons on a bot message. Called
+ * only by the SDK's authenticated activity callback.
+ */
+export function normalizeTeamsFeedback(raw: unknown): TeamsFeedback | null {
+  const parsed = FeedbackInvoke.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (
+    a.from.role === "bot" ||
+    a.from.id === a.recipient.id ||
+    (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
+  )
+    return null;
+  const personal = a.conversation.conversationType === "personal";
+  const groupChat = a.conversation.conversationType === "groupChat";
+  if (!personal && !groupChat && !a.channelData.channel?.id) return null;
+  // Teams sends the form as JSON text: {"feedbackText": "..."}. Long text is
+  // kept, shortened.
+  let comment: string | null = null;
+  const form = a.value.actionValue.feedback;
+  if (form && form.length <= 262_144)
+    try {
+      const value = JSON.parse(form) as { feedbackText?: unknown } | null;
+      if (value && typeof value.feedbackText === "string" && value.feedbackText.trim()) {
+        // At most 4000 UTF-16 code units, the feedback limit, without
+        // splitting a surrogate pair.
+        const text = value.feedbackText.trim();
+        let end = Math.min(text.length, 4000);
+        if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end -= 1;
+        comment = text.slice(0, end);
+      }
+    } catch {
+      comment = null;
+    }
   return {
     tenantId,
     actorId: a.from.aadObjectId.toLowerCase(),
     conversationId: a.conversation.id,
-    serviceUrl,
+    personal,
+    groupChat,
+    channelId: personal || groupChat ? null : a.channelData.channel!.id,
+    replyToId: a.replyToId,
+    eventId: a.id,
+    sentiment: a.value.actionValue.reaction === "like" ? "positive" : "negative",
+    comment,
     botId: a.recipient.id,
-    personal: true,
   };
 }
 const Proof = z

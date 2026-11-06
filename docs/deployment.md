@@ -675,6 +675,15 @@ Ingress there. An edge outside this chart must route the same paths to the API.
 If they reach the web application instead, discovery returns HTML and MCP
 clients cannot sign in.
 
+Auto-connect (Enterprise-Managed Authorization) needs nothing more in either
+direction. Claude and identity providers redeem ID-JAGs at the same
+`/oauth/token`, and the routes answer only while the switch is on with a
+public base URL. Opengeni's own per-organization issuer, for auto-connect
+organization connectors, is served under `/v1` and signs with a key encrypted
+by the same stable `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` that protects other
+connection material. Keep the public base URL stable: it is part of each organization's issuer URL that
+outside apps trust. Migrations `1263`, `1264` and `1265` are rolling.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention
@@ -3319,6 +3328,19 @@ The runtime secret must provide values such as:
   paid plan of at least $20/month and are for app-origin work, never customer
   API-origin work. Existing internal legacy billing terms are unchanged. See
   [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
+- `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED` (default `false`): a
+  deployment-wide operator opt-in that lets API-origin work (organization
+  access keys, embedded products) use the organization's own connected
+  subscriptions. Off, API selections of a subscription fail with `403`
+  `subscription_api_unavailable` and API model lists and defaults skip them.
+  On, every path that refuses API use of a subscription (agent, goal,
+  scheduled, stateless, transcription, realtime voice, titles, model lists and
+  defaults) treats API work like app work; paid-plan requirements still apply
+  where credit billing is active. Set it on both API and worker processes. It
+  is meant for a self-hosted operator who owns the subscriptions it connects;
+  the operator is responsible for its provider's terms. Hosted multi-tenant
+  deployments should leave it off. See
+  [billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
   OpenAI hosted image generation cost credit. Billed provider search replaces
@@ -3791,13 +3813,40 @@ plane it already trusts instead of depending on public DNS. Beta is independent
 and unavailable unless `OPENGENI_AGENT_BETA_VERSION` points at an existing signed
 immutable release.
 
-Live machines follow their channel's promoted build automatically. A machine
-running an older build is asked to update from its next heartbeat; the agent
-applies the update only at an idle point, so accepted work is never interrupted.
-An older agent that postpones because it is busy is asked again every 10
-minutes, an unanswered request is re-sent under the same operation after 10
-minutes, and other retryable failures are retried hourly. A non-retryable
-failure waits for a newer promotion or an explicit "Update now". Automatic
+Live machines follow their channel's promoted build automatically. An update,
+automatic or "Update now", targets only a release whose signed manifest exists
+on the release archive: the API checks `manifest.json` on
+`OPENGENI_AGENT_RELEASES_BASE_URL` first (HEAD, or a one-byte GET when the host
+refuses HEAD). A pinned version is used as set. Unpinned, the source tree's
+agent version is raised when an agent change lands, before its release workflow
+publishes it, so until it is published updates target the newest published
+patch release below it (looking back at most 16 versions; a new minor or major
+version has none to fall back to). When the archive cannot be reached, no
+update is requested until it can, and the API logs a warning at most every 15
+minutes. `/agent/latest/<asset>`, `/agent/stable/manifest.json` and the
+Machines page name the same published release. A machine running an older
+build is asked to update from its next heartbeat; the agent applies the update
+only at an idle point, so accepted work is never interrupted. An older agent
+that postpones because it is busy is asked again every 10 minutes, and an
+unanswered request is re-sent under the same operation after 10 minutes. Other
+retryable failures, such as a failed download, back off: 10 minutes after the
+first, doubling after each further failure for the same release, up to 6
+hours. A non-retryable failure waits for a newer promotion or an explicit
+"Update now".
+
+An agent older than 0.1.58 closes its managed browsers when it updates. The
+automatic updater waits for a moment when none of those browsers belongs to a
+session with a turn underway or waiting for input within its turn (open but
+idle browsers do not hold it, and they close). Once browsers in use have held
+the update for a day, they get a closing time 30 minutes later: every browser
+observation an agent gets from that machine until then says when its browser
+will close, and the update is requested at that time. A busy agent that
+refuses it is asked again under the same announcement for 30 minutes. If the
+update has not happened by then (the agent stayed busy, or the machine was
+away), the announcement ends and the wait starts over, so agents are not told
+of a closing that does not come. A non-retryable failure or a success ends the
+wait. Only browsers opened in the machine's own workspace are counted and told.
+Newer agents keep their browsers across an update. Automatic
 updates only move machines forward: rolling the channel back to an older build
 leaves newer machines alone until someone requests the older build per machine.
 Macs that must first bootstrap through the whole-app installer are never updated
@@ -4189,7 +4238,7 @@ Minimum production dashboards should cover:
   - `opengeni_agent_tool_calls_total{family,outcome}` and `opengeni_agent_tool_call_duration_seconds{family}` count every completed model-dispatched tool call by closed family (`shell`, `browser`, `computer`, `human_handoff`, `integration`, `custom_mcp`, ...) and structural outcome (`ok`, `error`, `rejected`, `cancelled`).
   - `opengeni_machine_connect_total{outcome,reason}` (NATS auth-callout decisions), `opengeni_machine_enrollment_total{flow,outcome}` (device/token/renew decisions that are not HTTP errors), and `opengeni_attached_browser_unavailable_total{reason}`.
   - Alerts: `OpenGeniApiRouteRejectionsAbnormal`, `OpenGeniApiMissingPermissionSpike`, `OpenGeniHandoffAttachRefused`, `OpenGeniHandoffsExpiringUnanswered`, `OpenGeniInteractionOperationFailureRatio`, `OpenGeniConnectFailureRatio`, `OpenGeniIntegrationOAuthCallbackFailures`, `OpenGeniAgentToolErrorRatio`, `OpenGeniMachineConnectRejected`, `OpenGeniAttachedBrowserUnavailable` (see `docs/launch-monitoring.md`).
-- Queue, admission, and billing: `opengeni_turns_queued` (every durable queued prompt), `opengeni_turns_queued_by_hold{hold}` and `opengeni_turns_queued_oldest_age_seconds{hold}` (that total split into `ready`, `behind_active_turn`, `paused`, `failed`, `requires_action`, `waiting_capacity` and `cancelled`; only `ready` waits for dispatch; published once the runtime grant deferred by 0988 lands), `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
+- Queue, admission, and billing: `opengeni_turns_queued` (every durable queued prompt), `opengeni_turns_queued_by_hold{hold}` and `opengeni_turns_queued_oldest_age_seconds{hold}` (that total split into `ready`, `behind_active_turn`, `paused`, `failed`, `requires_action`, `waiting_capacity` and `cancelled`; only `ready` waits for dispatch, before or after its turn reaches the turn queue), `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
 - Model usage and money (turn worker, process-local counters: aggregate with `sum` and use `increase()`/`rate()`): `opengeni_model_responses_total{provider,model,priced}` counts authoritative model responses that reported usage (`priced="false"` when no provider cost estimate exists); `opengeni_model_tokens_total{provider,model,type}` counts their tokens, where `type` is `input` (every prompt token, including cached and cache-write tokens), `cached_input` and `cache_write` (subsets of `input`), `output`, or `reasoning` (a subset of `output`), so the cache hit rate is `cached_input / input`; `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` is the estimated upstream provider cost in USD micros at the provider rate of the configured model pricing (`OPENGENI_MODEL_PRICING_JSON`, keyed by catalog product id) or the AI Gateway's reported cost (`pricing_source="gateway_reported"`), where `payer="external"` marks a customer-paid subscription or key whose cost Opengeni does not pay; `opengeni_model_web_search_requests_total{provider,model,payer}` counts provider-run web searches the provider reports billing with a response (Claude's server-side search; each search is billed per request by the provider, separately from tokens); and `opengeni_model_credits_charged_micros_total{provider,model,funding}` is the credit actually debited for model usage, split by `funding="promotional"` (scoped promotional grants: the verified-signup trial and scoped coupon offers) and `funding="general"` (general credit: purchased credit plus any unscoped grant; the ledger does not track which dollar of the general pool was purchased). Usage and cost are recorded behind the same durable usage-event fence as the Insights model-call fact, so a duplicate or late response is not counted; charged credits are recorded once when the debit ledger row is inserted. `model` is the deployment catalog product id, `custom` for a workspace gateway or customer-key model and for any id the deployment catalog does not list, and `other` after 64 distinct values in one process; account, workspace, user and session ids are never labels. Sandbox, voice, web-search and knowledge debits are not split by funding here; `opengeni_credit_micros_total{kind="usage"}` remains the worker's total of model and sandbox debits. Paid credit purchases (Stripe checkout top-ups, API) are `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` (credits added) and `opengeni_credit_purchase_paid_usd_micros_total{mode}` (USD paid after discounts), with `mode` `live` or `test`; each is counted once by the request that inserted the ledger row. A fully discounted coupon checkout is a grant (`grant_class="coupon"`), not a purchase.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.

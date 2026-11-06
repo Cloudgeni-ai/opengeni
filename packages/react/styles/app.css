@@ -233,7 +233,7 @@
    utilities must beat these element-level defaults. */
 @layer base {
   ::selection {
-    background: color-mix(in oklch, var(--color-brand) 45%, transparent);
+    background: var(--og-color-text-selection);
     color: var(--color-fg);
   }
 

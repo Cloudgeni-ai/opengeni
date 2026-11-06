@@ -46,6 +46,7 @@ import {
 
 import { loadWorkspaceCodexCatalogReadiness } from "./codex-model-availability";
 import {
+  connectedSubscriptionsRefusedForOrigin,
   ownModelFunding,
   ownSubscriptionPlanAllows,
   ownSubscriptionPlanRequired,
@@ -343,7 +344,9 @@ async function withoutUnusableOwnSubscriptions(
 ): Promise<readonly WorkspaceModelSelection[]> {
   const isOwnSubscription = (selection: WorkspaceModelSelection) =>
     ownModelFunding(selection.model) === "subscription";
-  if (chargeBillingOrigin(input.billingOrigin) === "api") {
+  if (
+    connectedSubscriptionsRefusedForOrigin(input.settings, chargeBillingOrigin(input.billingOrigin))
+  ) {
     return input.selections.filter((selection) => !isOwnSubscription(selection));
   }
   if (

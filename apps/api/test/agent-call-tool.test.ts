@@ -170,6 +170,26 @@ async function setup(options: { phoneRules?: ("call" | "failed")[]; ringSeconds?
 }
 
 describe("call_user", () => {
+  test("its description states outcomes and leaves calling again to judgment", () => {
+    let description = "";
+    registerAgentCallTools({
+      server: {
+        registerTool: (_name: string, config: { description: string }) => {
+          description = config.description;
+        },
+      } as never,
+      deps: {} as never,
+      grant: {} as never,
+      sessionId: crypto.randomUUID(),
+      authorize: async () => undefined,
+      attempt: () => ({ callerTurnId: "", callerExecutionGeneration: 0, callerAttemptId: "" }),
+      json: () => ({ content: [] }),
+    });
+    expect(description).toContain("A missed call leaves them a missed-call notice");
+    expect(description).toContain("weigh how urgent it is and whether they asked you to call");
+    expect(description).not.toMatch(/never call again|don't call again/i);
+  });
+
   test("rings nothing when the person allowed no calls, and says to notify instead", async () => {
     if (!shared) return;
     const { callUser, eventTypes } = await setup({ phoneRules: ["failed"] });
@@ -210,11 +230,15 @@ describe("call_user", () => {
       outcome: "declined",
       calleeSubjectId: subjectId,
     });
-    expect(await pending).toMatchObject({ outcome: "declined" });
-    expect(await callUser({ reason: "Need a yes on the refund" })).toMatchObject({
+    const declined = await pending;
+    expect(declined).toMatchObject({ outcome: "declined" });
+    expect(declined.message).not.toMatch(/don't call|never call/i);
+    const refused = await callUser({ reason: "Need a yes on the refund" });
+    expect(refused).toMatchObject({
       placed: false,
       refusal: "declined_recently",
     });
+    expect(refused.message).not.toMatch(/don't call|never call/i);
   });
 
   test("a call nobody answers is missed and leaves a missed-call notice", async () => {
@@ -222,6 +246,9 @@ describe("call_user", () => {
     const { callUser, eventTypes } = await setup({ phoneRules: ["call"], ringSeconds: 1 });
     const result = await callUser({ reason: "Production is down" });
     expect(result).toMatchObject({ placed: true, outcome: "missed" });
+    expect(result.message).toBe(
+      "They didn't answer. They have a missed-call notice with your reason.",
+    );
     expect(await eventTypes()).toEqual([
       "session.agentCall.ringing",
       "session.agentCall.settled",

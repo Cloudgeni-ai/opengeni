@@ -571,10 +571,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const body = await c.req.json().catch(() => ({}));
     const { triggerId } = parseRequestBody(TriggerScheduledTaskRequest, body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
-    const agentRunUsageIdempotencyKey =
-      task.action.kind === "agent_turn"
-        ? manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken)
-        : `knowledge-source-sync:manual:${workspaceId}:${task.id}:${triggerToken}`;
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+      workspaceId,
+      task.id,
+      triggerToken,
+    );
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
     await triggerScheduledTaskForGrant(db, grant, workflowClient, {
       task,

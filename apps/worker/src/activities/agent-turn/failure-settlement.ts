@@ -21,6 +21,7 @@ import {
   isSubscriptionCoreCodexSourceDisconnected,
   SubscriptionCoreCodexLeaseLostError,
   readSessionTurnToolProgressRecoveryState,
+  isSessionCompactionRequested,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -92,6 +93,9 @@ import {
   agentRunRecoveryFailurePayload,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
+  compactionFailureTurnEventPayload,
+  compactionFailureReason,
+  compactionFailureReasonFromError,
 } from "./errors";
 import { selectRejectedProviderArtifactHistoryIds } from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
@@ -1658,6 +1662,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   } else {
     await historySink.reconcileConversationTruth();
   }
+  if (attempt.triggerType === "session.context.compaction.requested") {
+    return await settleFailedCompactionCheckpoint(deps, error, failure.code, notStartedToolCallIds);
+  }
   if (
     !(await eventing.settle!({
       events: [
@@ -1687,6 +1694,73 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.turnId,
   );
   return claimedResult({ status: "failed" });
+}
+
+/**
+ * A compaction checkpoint (the idle one after a person's turn, or `/compact`)
+ * is maintenance: when it fails for any reason, the chat itself is still fine.
+ * Settle it as a failed compaction, exactly as a failed summary is: the
+ * session returns to idle instead of failed, and a still-pending request is
+ * consumed with its `skipped` landmark so it is not claimed again. The
+ * person's next turn compacts at its usual threshold.
+ */
+async function settleFailedCompactionCheckpoint(
+  deps: TurnFailureDeps,
+  error: unknown,
+  failureCode: string | undefined,
+  notStartedToolCallIds: readonly string[],
+): Promise<RunAgentTurnResult> {
+  const { input, db, control, eventing, claimedResult, observability } = deps;
+  // The turn records a short reason; the classification goes to telemetry.
+  // Error class names only: never the message, which may hold content.
+  const diagnostic = safeErrorDiagnostic(error);
+  // Many error subclasses keep the inherited name "Error"; their class name
+  // says more.
+  const errorName =
+    error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error;
+  observability.warn("Compaction checkpoint failed", {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    failureCode: failureCode ?? "unknown",
+    errorName,
+    ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
+  });
+  // A provider, quota or summary failure keeps its own reason. Anything else
+  // happened before or around the summary, so say the checkpoint could not run
+  // and name the error class rather than a bare "unexpected Error".
+  const unclassifiedReason = compactionFailureReason(
+    `unexpected ${error instanceof Error && error.name ? error.name : "unknown error"}`,
+  );
+  const payload =
+    compactionFailureReasonFromError(error) === unclassifiedReason
+      ? compactionFailureTurnEventPayload(error, {
+          error: compactionFailureReason(`the checkpoint could not run (${errorName})`),
+        })
+      : compactionFailureTurnEventPayload(error);
+  // Consuming needs the request to still be pending (settlement is stale
+  // otherwise); a checkpoint that already started has consumed it. A failed
+  // read throws into the post-claim database recovery like any settlement
+  // error: settling idle with the request pending would claim it again.
+  const requestPending = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+  if (
+    !(await eventing.settle!({
+      events: [
+        { type: "turn.failed", payload },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      ...(requestPending ? { consumeRequestedCompactionFailure: true } : {}),
+      ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
+    }))
+  ) {
+    return claimedResult({ status: "cancelled" });
+  }
+  control.turnMetricOutcome = "failed";
+  control.activityStatus = "idle";
+  return claimedResult({ status: "idle" });
 }
 
 /** An error of the given class, directly or anywhere in the cause chain. */

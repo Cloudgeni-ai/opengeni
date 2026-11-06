@@ -314,15 +314,6 @@ const manager = {
   canTargetSessions: true,
 };
 
-function sync(id: string, status: ScheduledTask["status"], control: Record<string, unknown>) {
-  return {
-    ...schedule(id, `Sync ${id}`, status),
-    action: { kind: "knowledge_source_sync" },
-    agentConfig: { prompt: "", resources: [], metadata: {}, knowledgeSource: { id } },
-    metadata: { knowledgeSourceSync: control },
-  } as unknown as ScheduledTask;
-}
-
 test("the switch shows only where it pauses a schedule the viewer can change", () => {
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), manager)).toBe(true);
   expect(canSwitchSchedule(schedule("a", "Mine", "paused"), manager)).toBe(true);
@@ -333,24 +324,9 @@ test("the switch shows only where it pauses a schedule the viewer can change", (
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), { ...manager, canManage: false })).toBe(
     false,
   );
-  // Integration Knowledge sync is retired: no saved sync can be switched on.
-  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: true }), manager)).toBe(false);
-  expect(canSwitchSchedule(sync("s", "active", { sourceEnabled: false }), manager)).toBe(false);
-  expect(canSwitchSchedule(sync("s", "active", { connectionPaused: true }), manager)).toBe(false);
-  // A provider-specific retired sync.
-  const retired = {
-    ...sync("r", "active", {}),
-    agentConfig: {
-      prompt: "",
-      resources: [],
-      metadata: {},
-      knowledgeSource: { connection: { providerDomain: "api.atlassian.com" } },
-    },
-  } as unknown as ScheduledTask;
-  expect(canSwitchSchedule(retired, manager)).toBe(false);
 });
 
-test("switched rows drop Pause from their menu; retired syncs offer only Delete", async () => {
+test("switched rows drop Pause from their menu", async () => {
   async function menuFor(task: ScheduledTask, pauseItem: boolean) {
     document.body.replaceChildren();
     const container = document.createElement("div");
@@ -390,8 +366,6 @@ test("switched rows drop Pause from their menu; retired syncs offer only Delete"
     "Duplicate",
     "Delete",
   ]);
-  const retired = sync("s", "active", { sourceEnabled: true });
-  expect(await menuFor(retired, !canSwitchSchedule(retired, manager))).toEqual(["Delete"]);
 });
 
 test("a list of others' schedules shows no switches", async () => {

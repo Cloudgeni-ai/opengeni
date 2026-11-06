@@ -95,15 +95,17 @@ async function fixture() {
     payload: { text: "Please investigate the project" },
   };
   const messages: string[] = [];
-  const send = async (_m: unknown, text: string) => {
+  const deliveries: Array<{ text: string; ai: boolean }> = [];
+  const send = async (_m: unknown, text: string, options?: { ai?: boolean }) => {
     messages.push(text);
+    deliveries.push({ text, ai: options?.ai === true });
     return `sent-${messages.length}`;
   };
   const tick = async (sender = send) => {
     await shared.admin`update teams_bot_routes set lease_until=null where route_id=${routeId}`;
     await drainTeamsBotOnce(deps, sender);
   };
-  return { i, actor, subject, deps, input, messages, tick, grant, access, personal };
+  return { i, actor, subject, deps, input, messages, deliveries, tick, grant, access, personal };
 }
 
 test("a linked person's 1:1 chat lands in their own Personal workspace; channels and Personal-off stay in the installation's", async () => {
@@ -127,7 +129,7 @@ test("a linked person's 1:1 chat lands in their own Personal workspace; channels
   expect(session!.visibility).toBe("user_private");
   expect(session!.owner_subject_id).toBe(f.subject);
   expect(f.messages).toEqual([
-    `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}`,
+    `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`,
   ]);
   const [shared0] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;

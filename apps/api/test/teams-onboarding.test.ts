@@ -18,7 +18,7 @@ import {
 import {
   mintTeamsProof,
   normalizeTeamsMessage,
-  normalizeTeamsPersonalInstall,
+  teamsPersonalInstall,
   verifyTeamsProof,
 } from "../src/integrations/teams-protocol";
 
@@ -330,7 +330,7 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(calls).toEqual([]);
   });
 
-  test("a tenant that isn't admitted gets a bounded plain notice and no setup link", async () => {
+  test("a tenant that isn't admitted gets a bounded notice and no setup link", async () => {
     const { app, calls } = transport();
     const deps = onboardingDeps({
       teamsBotSelfServeSetupEnabled: true,
@@ -352,7 +352,7 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(calls[0]!.activity).toEqual({
       type: "message",
       text: TEAMS_TENANT_UNAVAILABLE_TEXT,
-      textFormat: "plain",
+      textFormat: "markdown",
     });
   });
 
@@ -384,7 +384,7 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       {
         serviceUrl: message.serviceUrl,
         conversationId: "a:personal",
-        activity: { type: "message", text: TEAMS_SETUP_CONFIRMED_TEXT, textFormat: "plain" },
+        activity: { type: "message", text: TEAMS_SETUP_CONFIRMED_TEXT, textFormat: "markdown" },
       },
     ]);
     await expect(
@@ -418,14 +418,22 @@ describe("Teams personal install events", () => {
   };
 
   test("recognizes the bot being added to a person's 1:1 scope", () => {
-    expect(normalizeTeamsPersonalInstall(install)).toEqual({
+    expect(teamsPersonalInstall(install)).toEqual({
       tenantId,
       actorId,
       conversationId: "a:personal",
       serviceUrl: "https://smba.trafficmanager.net/emea/",
       botId: "28:bot",
-      personal: true,
     });
+  });
+
+  test("names no installer when the sender is a bot, the bot itself or has no Microsoft identity", () => {
+    for (const from of [
+      { id: "28:bot", aadObjectId: actorId },
+      { id: "28:other-bot", aadObjectId: actorId, role: "bot" },
+      { id: "29:human" },
+    ])
+      expect(teamsPersonalInstall({ ...install, from })?.actorId).toBeNull();
   });
 
   test("ignores other members, group scopes, tenant mismatches and untrusted service URLs", () => {
@@ -437,11 +445,9 @@ describe("Teams personal install events", () => {
         conversation: { ...install.conversation, tenantId: "20000000-0000-4000-8000-000000000002" },
       },
       { ...install, serviceUrl: "https://untrusted.example.test/" },
-      { ...install, from: { id: "28:bot", aadObjectId: actorId } },
       { ...install, type: "message" },
-      { ...install, from: { id: "29:human" } },
     ])
-      expect(normalizeTeamsPersonalInstall(value)).toBeNull();
+      expect(teamsPersonalInstall(value)).toBeNull();
   });
 });
 

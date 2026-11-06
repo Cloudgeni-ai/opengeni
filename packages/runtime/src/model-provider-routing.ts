@@ -1,4 +1,8 @@
-import { isDirectModelId } from "@opengeni/contracts";
+import {
+  isDirectModelId,
+  REASONING_EFFORT_LEVELS,
+  type ReasoningEffort,
+} from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
   builtinModelResidency,
@@ -72,7 +76,69 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
-function chatRequest(request: ModelRequest, modelId: string): ModelRequest {
+/**
+ * The reasoning levels a model on a workspace's or organization's own
+ * OpenAI-compatible endpoint declares. Its requests carry only one of them,
+ * and no reasoning at all when it declares none: such an endpoint may refuse
+ * a parameter its model does not take.
+ */
+export type DeclaredModelReasoning = {
+  runnable: boolean;
+  efforts: readonly ReasoningEffort[];
+  defaultEffort: ReasoningEffort | null;
+};
+
+const EFFORT_RANK = new Map<string, number>(
+  REASONING_EFFORT_LEVELS.map((level, index) => [level, index]),
+);
+
+/** The declared level to send for a requested one: itself, the nearest below, or the default. */
+export function declaredReasoningEffort(
+  declared: DeclaredModelReasoning,
+  requested: ReasoningEffort,
+): ReasoningEffort | null {
+  if (!declared.runnable || declared.efforts.length === 0) return null;
+  if (declared.efforts.includes(requested)) return requested;
+  const ceiling = EFFORT_RANK.get(requested) ?? -1;
+  const below = declared.efforts.filter((effort) => (EFFORT_RANK.get(effort) ?? 0) <= ceiling);
+  return (
+    below.at(-1) ??
+    (declared.defaultEffort && declared.efforts.includes(declared.defaultEffort)
+      ? declared.defaultEffort
+      : declared.efforts[0]!)
+  );
+}
+
+/** Keep a request's reasoning to what the model declares (see {@link DeclaredModelReasoning}). */
+export function withDeclaredReasoning(
+  request: ModelRequest,
+  declared: DeclaredModelReasoning | undefined,
+): ModelRequest {
+  const reasoning = request.modelSettings?.reasoning;
+  if (!declared || !reasoning) return request;
+  const requested = reasoning.effort;
+  const effort =
+    typeof requested === "string" && EFFORT_RANK.has(requested)
+      ? declaredReasoningEffort(declared, requested as ReasoningEffort)
+      : null;
+  if (effort === null) {
+    const { reasoning: _reasoning, ...modelSettings } = request.modelSettings;
+    return { ...request, modelSettings };
+  }
+  return effort === requested
+    ? request
+    : {
+        ...request,
+        modelSettings: { ...request.modelSettings, reasoning: { ...reasoning, effort } },
+      };
+}
+
+function chatRequest(
+  request: ModelRequest,
+  modelId: string,
+  declaredReasoning?: DeclaredModelReasoning,
+): ModelRequest {
+  request = withDeclaredReasoning(request, declaredReasoning);
   const input =
     typeof request.input === "string"
       ? request.input
@@ -139,14 +205,22 @@ function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<stri
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   private readonly modelId: string;
+  private readonly declaredReasoning: DeclaredModelReasoning | undefined;
 
-  constructor(...args: ConstructorParameters<typeof OpenAIChatCompletionsModel>) {
-    super(...args);
-    this.modelId = args[1];
+  constructor(
+    client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
+    model: ConstructorParameters<typeof OpenAIChatCompletionsModel>[1],
+    declaredReasoning?: DeclaredModelReasoning,
+  ) {
+    super(client, model);
+    this.modelId = model;
+    this.declaredReasoning = declaredReasoning;
   }
 
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(chatRequest(request, this.modelId));
+    const response = await super.getResponse(
+      chatRequest(request, this.modelId, this.declaredReasoning),
+    );
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -172,7 +246,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
     let inputTokensDetails: Record<string, unknown> | undefined;
-    for await (const event of super.getStreamedResponse(chatRequest(request, this.modelId))) {
+    for await (const event of super.getStreamedResponse(
+      chatRequest(request, this.modelId, this.declaredReasoning),
+    )) {
       if (event.type === "model") {
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
         // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
@@ -232,6 +308,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     client: OpenAI,
     model: string,
     protected readonly provider: ResolvedModelProvider,
+    private readonly declaredReasoning?: DeclaredModelReasoning,
   ) {
     super(client, model);
   }
@@ -361,6 +438,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
+      request = withDeclaredReasoning(request, this.declaredReasoning);
       const input =
         typeof request.input === "string"
           ? request.input
@@ -391,6 +469,7 @@ export function buildModelInstance(
   client: OpenAI,
   modelId: string,
   residency: InferenceResidencyRequirement | null = null,
+  declaredReasoning?: DeclaredModelReasoning,
 ): Model {
   if (provider.api === "anthropic-messages")
     return new AnthropicMessagesModel(
@@ -399,8 +478,19 @@ export function buildModelInstance(
       instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
     );
   return provider.api === "chat"
-    ? new OpenGeniChatCompletionsModel(client, modelId)
-    : new OpenGeniResponsesModel(client, modelId, provider);
+    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning)
+    : new OpenGeniResponsesModel(client, modelId, provider, declaredReasoning);
+}
+
+/** A workspace's or organization's own OpenAI-compatible endpoint sends only the reasoning its model declares. */
+function declaredReasoningFor(
+  provider: ResolvedModelProvider,
+  configured: ConfiguredModel,
+): DeclaredModelReasoning | undefined {
+  return provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization"
+    ? configured.capabilities.reasoning
+    : undefined;
 }
 
 /**
@@ -442,6 +532,7 @@ export function resolveTurnModel(
       client,
       resolved.model.upstreamModelId,
       inferenceResidencyRequirement(settings),
+      declaredReasoningFor(resolved.provider, resolved.model),
     ),
     configured: resolved.model,
   };

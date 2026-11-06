@@ -201,7 +201,7 @@ const EXPECTED_CAPS = [
     2,
     "run",
   ],
-  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 9, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 13, "run"],
   ["ci.yml", "browserd-real-e2e", "Run headed browserd streaming and interaction suite", 5, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
@@ -224,7 +224,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
   "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
-  "ci.yml:browserd-real-e2e": { stepCaps: 33, needed: 34, jobCap: 36 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 37, needed: 38, jobCap: 40 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
 } as const;
 
