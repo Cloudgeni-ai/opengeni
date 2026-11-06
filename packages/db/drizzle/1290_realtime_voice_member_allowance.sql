@@ -15,7 +15,7 @@
 -- Free-form debit metadata is still never trusted.
 --
 -- Rolling: both receipt constraints are replaced NOT VALID to admit the new
--- kind; 1291 validates them. Every existing row satisfies the new
+-- kind; 1292 validates them. Every existing row satisfies the new
 -- definitions. The previous release writes the same events and debits, which
 -- these triggers now count; it never reads receipts.
 SET LOCAL lock_timeout = '5s';
