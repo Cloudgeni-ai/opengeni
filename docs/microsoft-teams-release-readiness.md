@@ -310,10 +310,16 @@ Store submission gate: don't submit until every listed command and prompt
 starter gets a reply with a way forward in every tenant and account state.
 With self-serve setup on (`OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED`), a
 person in an admitted work or school tenant that isn't connected gets the
-Connect your organization card when installing the app and for any 1:1
-message, and a 1:1 message from a tenant that isn't admitted gets the
-not-available notice. Today these cases still get no reply or no way forward:
+Connect your organization card when installing the app and for 1:1 messages
+other than `help` and `unlink`, and a 1:1 message from a tenant that isn't
+admitted gets the not-available notice. Today these cases still get no reply or
+no way forward:
 
+- In a tenant that isn't connected, `help` and `unlink` reply without a way
+  forward: help says the organization must connect Opengeni but carries no
+  Connect your organization card, and unlink says the account isn't linked.
+- The not-available notice tells the admin to contact the Opengeni team but
+  gives no contact route.
 - With self-serve setup off, a tenant that isn't admitted gets no reply at all,
   and an admitted tenant that isn't connected answers only `help` and `unlink`:
   `link` and prompt starters from anyone other than a setup administrator get

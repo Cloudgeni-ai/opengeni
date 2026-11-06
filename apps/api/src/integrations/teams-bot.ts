@@ -581,7 +581,8 @@ async function answerTeamsCommand(
           m.personal,
           active,
           grant,
-          teamsSharedConversationsEnabled(deps, m.tenantId),
+          // Shared conversations only answer once the organization is connected.
+          Boolean(active) && teamsSharedConversationsEnabled(deps, m.tenantId),
         ),
       ),
       active ? () => proofLink(deps, m, active) : undefined,
