@@ -29,7 +29,7 @@ import { requireUsableSessionAvatar } from "../routes/session-avatar";
  */
 
 export const SESSION_PROFILE_TOOL_GUIDANCE =
-  'When a person or an agent chose the name, keep it unless the person asks for a new one. All fields are optional. description and avatar are shown to people, not to you; set them when the person asks or setup instructions say so. description: one line ("" clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue} or {kind:"letters",letters,hue} (one or two characters) with hue 0-359, or {kind:"image",artifactId}. An image shows at about 16 pixels: one bold symbol on a solid colour, no text or fine detail.';
+  'When a person or an agent chose the name, keep it unless the person asks for a new one. description and avatar are shown to people, not to you; set them when the person asks or setup instructions say so. description: one line ("" clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue}, {kind:"letters",letters,hue} (one or two letters or digits) or {kind:"image",artifactId}. An image shows at about 16 pixels: one bold symbol on a solid colour, no text or fine detail.';
 
 export const AvatarInput = z4
   .object({
