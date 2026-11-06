@@ -14,8 +14,9 @@ never reveal credentials, never personal accounts).
 refuses an Only me image with that instruction), what the schema says
 (optional fields, the hue range) and most art direction; `set_session_title`'s
 description changes for every session that has it. `bot_template_save` drops
-the field list and keeps a one-sentence per-person setup rule. Other sessions
-without Slack agents are unchanged.
+the field list and keeps a one-sentence per-person setup rule. Sessions without
+Slack agents change only in the `set_session_title`, other-chat title and
+`bot_template_save` descriptions.
 
 Three pieces of text now follow state the session actually has. Compositions
 with the state keep their bytes (`modular-parity-lock.test.ts`; its
