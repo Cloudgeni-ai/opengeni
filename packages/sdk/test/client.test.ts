@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import sdkPackage from "../package.json";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
@@ -53,6 +54,22 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+test("HTTP and SSE requests identify the installed SDK without enabling strict contract mode", async () => {
+  const { fetch, requests } = recordingFetch(() => jsonResponse({ id: WORKSPACE_ID }));
+  const client = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "fixture",
+    fetch,
+  });
+  await client.getWorkspace(WORKSPACE_ID);
+  const stream = await client.openEventStream(WORKSPACE_ID, SESSION_ID);
+  await stream.cancel();
+  expect(requests).toHaveLength(2);
+  expect(
+    requests.every((request) => request.headers["x-opengeni-sdk-version"] === sdkPackage.version),
+  ).toBe(true);
+});
 
 function makeClient(
   responder: (request: RecordedRequest) => Response,

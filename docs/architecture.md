@@ -1158,9 +1158,14 @@ readers. A major release or deprecation period never permits a break; an
 incompatible design ships as a new version beside the old one, with
 version-specific adapters over shared application logic. `bun run
 check:public-api` and the major-changeset guard enforce it in CI.
+The [published SDK integration lane](api-compatibility-testing.md) runs current
+source and pinned npm builds against the current API and worker. The static
+guard also prevents silently removing tested versions from this bounded matrix;
+the matrix is not a limit on the compatibility promise.
 
 Official builds expose `serverVersion` in health and client config; nothing
-negotiates at runtime.
+negotiates at runtime. `x-opengeni-sdk-version` is optional, content-free
+request/trace metadata, never an admission gate or metric label.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
 ([details](product-integration.md#api-contract-revision)).
