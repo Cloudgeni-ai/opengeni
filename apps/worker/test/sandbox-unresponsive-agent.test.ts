@@ -58,6 +58,30 @@ describe("a compute box whose agent stopped answering a command", () => {
     expect(events).toEqual([]);
   });
 
+  test("is not restarted while its host is busy handing it off, and nothing is recorded", async () => {
+    const { machine, recovery, events, restarts } = turn();
+    const busy = { ...recovery, hostBusy: async () => true };
+    expect(await recoverUnresponsiveComputeAgent(machine, busy)).toBe("host_busy");
+    expect(restarts()).toBe(0);
+    expect(events).toEqual([]);
+    // Once the host is done, a box still silent is restarted as before.
+    const done = { ...recovery, hostBusy: async () => false };
+    expect(await recoverUnresponsiveComputeAgent(machine, done)).toBe("restarted");
+    expect(restarts()).toBe(1);
+  });
+
+  test("a host whose business cannot be read is taken as not busy", async () => {
+    const { machine, recovery, restarts } = turn();
+    const unreadable = {
+      ...recovery,
+      hostBusy: async (): Promise<boolean> => {
+        throw new Error("database unavailable");
+      },
+    };
+    expect(await recoverUnresponsiveComputeAgent(machine, unreadable)).toBe("restarted");
+    expect(restarts()).toBe(1);
+  });
+
   test("a failed restart is recorded and reported", async () => {
     const { machine, recovery, events } = turn({ restartFails: true });
     expect(await recoverUnresponsiveComputeAgent(machine, recovery)).toBe("restart_failed");

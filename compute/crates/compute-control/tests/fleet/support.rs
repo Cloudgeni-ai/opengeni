@@ -1072,6 +1072,7 @@ pub fn op_name(request: &Request) -> &'static str {
         Request::Adopt { .. } => "adopt",
         Request::Sleep { .. } => "sleep",
         Request::Capture { .. } => "capture",
+        Request::Restart { .. } => "restart",
         _ => "other",
     }
 }
@@ -1393,6 +1394,12 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             Reply::Done
         }
         Request::Capture { id, key, .. } if holds(id) => capture(inner, *id, key).await,
+        // Its VM ends unsaved and its memory image goes.
+        Request::Restart { id } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Done
+        }
+        Request::Restart { .. } => error(ErrorCode::NotFound, "no such sandbox"),
         Request::Status => status(inner),
         // The first ask starts the build; later ones find it stored.
         Request::Prepare { image } => {

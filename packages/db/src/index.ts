@@ -47396,6 +47396,7 @@ type LeaseRow = {
   rotation_reason: "provider_deadline" | "operator" | "teardown_claim" | null;
   group_end_requested_at?: Date | string | null;
   compute_asleep_since?: Date | string | null;
+  compute_handing_off_since?: Date | string | null;
   current_checkpoint_artifact_id: string | null;
   previous_checkpoint_artifact_id: string | null;
   shared_preparation_lease_epoch: number | string | null;
@@ -47458,6 +47459,10 @@ export interface LeaseSnapshot {
    * generation admissions) that no capture taken with none attached has
    * covered yet. Null when every such write is in the archive. */
   untrackedWriterSince: Date | null;
+  /** Compute only: since when the current sandbox's host has said it is
+   * handing it off, during which it may refuse wakes for a short while. Null
+   * while it says nothing of the kind. */
+  computeHandingOffSince?: Date | null;
   /** Consecutive settled drain snapshot failures of THIS lease epoch since
    * its last published save (zero after a new box or a save). Drives the
    * drain retry backoff and its alerts. */
@@ -48222,6 +48227,9 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
         : row.untracked_writer_since instanceof Date
           ? row.untracked_writer_since
           : new Date(row.untracked_writer_since),
+    computeHandingOffSince: row.compute_handing_off_since
+      ? new Date(row.compute_handing_off_since)
+      : null,
     archiveCapture:
       row.archive_capture_id === null ||
       row.archive_capture_operation_id === null ||
@@ -52523,7 +52531,7 @@ export async function failSandboxRematerialization(
             resume_state = ${resumeStateJson}::jsonb,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -53423,7 +53431,7 @@ export async function recordWarmingSandboxCreated(
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
             provider_deadline_at = ${providerDeadlineAt?.toISOString() ?? null}::timestamptz,
-            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null,
             rotation_reason = null,
             expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
             updated_at        = now()
@@ -55554,7 +55562,7 @@ export async function markWarmLeaseInstanceLost(
             resume_backend_id = coalesce(resume_backend_id, backend),
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -56095,7 +56103,7 @@ export async function failWarmingToCold(
             resume_backend_id = case when ${hasRecovery} then coalesce(resume_backend_id, backend) else null end,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -57245,7 +57253,7 @@ export async function reapStaleLeaseHolders(
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, rotation_reason = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null, rotation_reason = null,
             archive_capture_id = null, archive_capture_operation_id = null,
             archive_capture_provider_request_id = null,
             archive_capture_provider_replay_safe = false,
@@ -59424,7 +59432,7 @@ export async function confirmDrainCold(
           resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
           provider_created_at = null,
           provider_deadline_at = null,
-          rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
+          rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, compute_handing_off_since = null,
           rotation_reason = null,
           archive_capture_id = null,
           archive_capture_operation_id = null,
@@ -69709,6 +69717,23 @@ export async function renewSandboxAgentLink(
   });
 }
 
+/** How long after its host reported a hand-off of a compute sandbox it may
+ * still be refusing wakes. A host refuses them for at most two minutes of a
+ * hand-off; a wake later than that cancels the hand-off and the sandbox runs
+ * again. The extra minute covers clocks and a report still in flight. */
+export const COMPUTE_HAND_OFF_UNWAKEABLE_MS = 3 * 60_000;
+
+/** Whether the host of a compute lease's sandbox reported handing it off
+ * recently enough that it may be refusing wakes: commands cannot start for
+ * now, and its agent not answering is no failure of the agent. */
+export function computeHostHandingOff(
+  lease: Pick<LeaseSnapshot, "backend" | "computeHandingOffSince"> | null,
+  nowMs = Date.now(),
+): boolean {
+  const since = lease?.backend === "compute" ? lease.computeHandingOffSince : null;
+  return Boolean(since && nowMs - since.getTime() < COMPUTE_HAND_OFF_UNWAKEABLE_MS);
+}
+
 /**
  * RECORD that a compute sandbox went to sleep or woke, as its host reports it
  * through the agent gateway. Warm time accrues only while the sandbox is awake:
@@ -69719,11 +69744,13 @@ export async function renewSandboxAgentLink(
  * epoch and connection instance and a live claim lease, so a report delayed
  * past a newer epoch's open, or one sent after a revocation, is refused
  * (`accepted: false`). Only the lease whose current box is this sandbox
- * changes; anything else is a no-op.
+ * changes; anything else is a no-op. `handingOff` stamps or clears
+ * `compute_handing_off_since`: its host is handing it off and may refuse
+ * wakes for a short while, which is not its agent failing.
  */
 export async function recordComputeSandboxPower(
   db: Database,
-  input: SandboxAgentLinkInput & { sandboxId: string; asleep: boolean },
+  input: SandboxAgentLinkInput & { sandboxId: string; asleep: boolean; handingOff?: boolean },
 ): Promise<{ accepted: boolean; changed: boolean }> {
   assertSandboxAgentLinkInput(input);
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
@@ -69759,16 +69786,26 @@ export async function recordComputeSandboxPower(
       `);
       const row = rows[0];
       if (!row) return { accepted: true, changed: false };
+      const handingOff = input.handingOff === true;
+      const handOffChanged = handingOff !== Boolean(row.compute_handing_off_since);
+      if (handOffChanged) {
+        await tx.execute(sql`
+          update sandbox_leases set
+            compute_handing_off_since = ${handingOff ? sql`clock_timestamp()` : sql`null`},
+            updated_at = now()
+          where id = ${row.id}
+        `);
+      }
       const asleepSince = row.compute_asleep_since ? new Date(row.compute_asleep_since) : null;
       if (input.asleep) {
-        if (asleepSince) return { accepted: true, changed: false };
+        if (asleepSince) return { accepted: true, changed: handOffChanged };
         await tx.execute(sql`
           update sandbox_leases set compute_asleep_since = clock_timestamp(), updated_at = now()
           where id = ${row.id}
         `);
         return { accepted: true, changed: true };
       }
-      if (!asleepSince) return { accepted: true, changed: false };
+      if (!asleepSince) return { accepted: true, changed: handOffChanged };
       // The cursor accrual starts from: the last tick, else the warm instant.
       const recovery = row.resume_state?.opengeniRecovery as
         | { restore?: { completedAt?: unknown } }

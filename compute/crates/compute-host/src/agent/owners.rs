@@ -8,12 +8,16 @@
 //! it in the task that acts on the request, so no adopt, drop or new owner
 //! can come between the check and the act.
 //!
-//! A hand-off keeps nothing on disk until its last step: while it runs the
-//! sandbox takes no wake, and once its latest state is archived and its VM
-//! gone, one record write begins a removal that keeps the store's copy,
-//! which a restarted agent finishes. An agent that restarts before that
-//! write has handed nothing off: the sandbox is still this host's, wakes
-//! as before, and the service, which has had no answer, asks again.
+//! A hand-off keeps nothing on disk until its last step: for a while (see
+//! [`HostConfig::hand_off_unwakeable`]) the sandbox takes no wake, and
+//! once its latest state is archived and its VM gone, one record write
+//! begins a removal that keeps the store's copy, which a restarted agent
+//! finishes. An agent that restarts before that write has handed nothing
+//! off: the sandbox is still this host's, wakes as before, and the
+//! service, which has had no answer, asks again. A wake that comes later
+//! than that while, as on a slow store, its copy is still on its way,
+//! cancels the hand-off the same way: the sandbox stays here and runs
+//! again from its local copy, its newest.
 //!
 //! An adopt after the last owner was lost takes up the store's copy from
 //! its files alone: it deletes the copy's memory image as it claims it, so
@@ -24,11 +28,13 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use compute_core::{Durability, Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::layout::{Images, Paths, sync_parent};
 use crate::observe::{Alarm, Observer, alarm_event};
@@ -36,6 +42,8 @@ use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, MadeAt, Owned, OwnerEpoch, Stamp, Store};
 
+#[cfg(doc)]
+use super::HostConfig;
 use super::disk::{AfterReading, Room, unwanted};
 use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply};
@@ -57,7 +65,37 @@ pub(super) struct Then {
 }
 
 /// Hand-offs under way, with who waits for each.
-pub(super) type HandOffs = HashMap<SandboxId, Vec<Reply<()>>>;
+pub(super) type HandOffs = HashMap<SandboxId, HandOff>;
+
+/// One hand-off under way: since when, and who waits for it.
+#[derive(Debug, Default)]
+pub(super) struct HandOff {
+    /// When it began; `None` only for one taken out of the map empty.
+    since: Option<Instant>,
+    waiters: Vec<Reply<()>>,
+}
+
+impl HandOff {
+    fn new(reply: Reply<()>) -> Self {
+        Self {
+            since: Some(Instant::now()),
+            waiters: vec![reply],
+        }
+    }
+
+    fn push(&mut self, reply: Reply<()>) {
+        self.waiters.push(reply);
+    }
+}
+
+impl IntoIterator for HandOff {
+    type Item = Reply<()>;
+    type IntoIter = std::vec::IntoIter<Reply<()>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.waiters.into_iter()
+    }
+}
 
 /// Adopts waiting for an earlier ownership's copy to go.
 pub(super) type Adopts = HashMap<SandboxId, Then>;
@@ -70,6 +108,7 @@ impl Command {
             | Self::Remove { id, .. }
             | Self::Touch { id, .. }
             | Self::Sleep { id, .. }
+            | Self::Restart { id, .. }
             | Self::Capture { id, .. }
             | Self::Hold { id, .. }
             | Self::Unhold { id, .. }
@@ -93,6 +132,7 @@ impl Command {
             Self::Create { reply, .. }
             | Self::Remove { reply, .. }
             | Self::Sleep { reply, .. }
+            | Self::Restart { reply, .. }
             | Self::Unhold { reply, .. }
             | Self::Check { reply, .. }
             | Self::Adopt { reply, .. }
@@ -601,6 +641,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             waiting.push(reply);
             return;
         }
+        // A restart under way ends its programs where it is; it is handed
+        // off once that is done.
+        if self.restarting.contains_key(&id.0) {
+            let _ = reply.send(Err(HostError::Busy(id)));
+            return;
+        }
         let Some(view) = self.core.sandbox(id.0) else {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
@@ -636,17 +682,43 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             self.input(Input::LetGo { sandbox: id.0 });
         }
-        self.handing_off.insert(id.0, vec![reply]);
+        self.handing_off.insert(id.0, HandOff::new(reply));
+        self.tell_link(id);
         self.continue_hand_off(id);
     }
 
-    /// Refuses to wake sandbox `id` while it is being handed off.
+    /// Refuses sandbox `id` while it is being handed off, as a capture is.
     pub(super) fn not_handing_off(&self, id: Id) -> Result<(), HostError> {
         if self.handing_off.contains_key(&id.0) {
             Err(HostError::HandingOff(id))
         } else {
             Ok(())
         }
+    }
+
+    /// Lets a wake of sandbox `id` through a hand-off under way: refused
+    /// while the hand-off is younger than
+    /// [`HostConfig::hand_off_unwakeable`], and later cancelling it, as an
+    /// agent restart before its last step does. Its waiters hear why; the
+    /// wake that follows cancels any archive under way, and the sandbox
+    /// runs again here from its local copy.
+    pub(super) fn wake_past_hand_off(&mut self, id: Id) -> Result<(), HostError> {
+        let Some(hand_off) = self.handing_off.get(&id.0) else {
+            return Ok(());
+        };
+        let ran = hand_off
+            .since
+            .map_or(Duration::ZERO, |since| since.elapsed());
+        if ran < self.hand_off_unwakeable {
+            return Err(HostError::HandingOff(id));
+        }
+        tracing::warn!(
+            %id,
+            ran_s = ran.as_secs(),
+            "a wake cancels a hand-off that is still storing the sandbox's copy"
+        );
+        self.fail_hand_off(id, &HostError::HandOffCancelled(id));
+        Ok(())
     }
 
     /// Moves a hand-off of sandbox `id` on once its latest state is in the
@@ -685,9 +757,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Ends any hand-off of sandbox `id` with `error`, as when it broke.
     pub(super) fn fail_hand_off(&mut self, id: Id, error: &HostError) {
-        for waiter in self.handing_off.remove(&id.0).unwrap_or_default() {
+        let Some(hand_off) = self.handing_off.remove(&id.0) else {
+            return;
+        };
+        for waiter in hand_off {
             let _ = waiter.send(Err(error.clone()));
         }
+        self.tell_link(id);
     }
 
     /// Drops this host's copy of sandbox `id`, keeping the store's, then

@@ -37,6 +37,7 @@ old one; old records stay as history.
 | 29 | [A sweep lists each period once](0029-a-sweep-lists-each-period-once.md) | Accepted |
 | 30 | [Disk relief counts as room](0030-disk-relief-for-admission.md) | Accepted |
 | 31 | [An archive stores its chunks in packs](0031-an-archive-stores-its-chunks-in-packs.md) | Accepted |
+| 32 | [A restart stays where it is, and a hand-off yields to a wake](0032-a-restart-stays-where-it-is-and-a-hand-off-yields-to-a-wake.md) | Accepted |
 
 ## Format
 

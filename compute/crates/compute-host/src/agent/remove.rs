@@ -29,6 +29,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         for waiter in slot.waiters.drain(..) {
             let _ = waiter.reply.send(Err(HostError::Removed(id)));
         }
+        for waiter in self.restarting.remove(&id.0).unwrap_or_default() {
+            let _ = waiter.send(Err(HostError::Removed(id)));
+        }
         let live = slot.vm.take();
         if let Some(live) = &live {
             live.stopping.store(true, Ordering::Release);
