@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,12 +10,27 @@ import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { assertRuntimeDatabasePosture, RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
+import {
+  assertRuntimeDatabasePosture,
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+  RETIRING_FEATURE_TABLES,
+} from "../src/runtime-posture";
 
 const migration = "1273_drop_retired_automation_and_pr_review.sql";
 const sourceDirectory = join(import.meta.dir, "../drizzle");
 const retired = [...RETIRING_FEATURE_TABLES.automations, ...RETIRING_FEATURE_TABLES.prReview];
 const options = { rlsStrategy: "force" as const, targetSchema: "public" };
+// The database stops before 1273, so tables later migrations add are absent
+// from it by design. Compare the posture around the refused migration rather
+// than against the current contract, which grows with every later table.
+async function postureViolations(): Promise<string[]> {
+  return evaluateRuntimeDatabasePosture(
+    await inspectRuntimeDatabasePosture(client!.db, options),
+    options,
+  );
+}
+let predecessorViolations: string[] = [];
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let owner: postgres.Sql | null = null;
@@ -51,6 +66,7 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
+  predecessorViolations = await postureViolations();
 }, 600_000);
 
 afterAll(async () => {
@@ -80,7 +96,7 @@ async function assertNotApplied() {
   const [receipt] = await owned!.admin<{ present: boolean }[]>`
     select exists(select 1 from schema_migrations where name = ${migration}) as present`;
   expect(receipt?.present).toBe(false);
-  await assertRuntimeDatabasePosture(client!.db, options);
+  expect(await postureViolations()).toEqual(predecessorViolations);
 }
 
 describe.skipIf(!realDatabase)("retired automation and PR-review contraction", () => {
@@ -89,6 +105,27 @@ describe.skipIf(!realDatabase)("retired automation and PR-review contraction", (
       select rolsuper as superuser, rolbypassrls as bypass
       from pg_roles where rolname = current_user`;
     expect(role).toEqual({ superuser: false, bypass: false });
+    // The predecessor's only gaps are tables that migrations after 1273 create.
+    const later = (await readdir(sourceDirectory)).filter(
+      (name) => name.endsWith(".sql") && name > migration,
+    );
+    const laterSql = (
+      await Promise.all(later.map((name) => readFile(join(sourceDirectory, name), "utf8")))
+    ).join("\n");
+    for (const violation of predecessorViolations) {
+      const missing = /^(?:runtime privilege|protected) tables are missing: (.+)$/.exec(violation);
+      expect({ violation, missingTables: missing !== null }).toEqual({
+        violation,
+        missingTables: true,
+      });
+      for (const table of missing![1]!.split(", ")) {
+        const created = new RegExp(`create table (?:if not exists )?(?:public\\.)?${table}\\b`, "i");
+        expect({ table, createdLater: created.test(laterSql) }).toEqual({
+          table,
+          createdLater: true,
+        });
+      }
+    }
     await assertNotApplied();
   }, 180_000);
 
