@@ -1579,15 +1579,14 @@ function deferredReader(
   session: SandboxSessionLike,
   reservedNames: string[] = [],
 ): FunctionTool<unknown> {
-  const tool = workspaceSkills(
-    [{ path: ".agents/skills", source: "agents" }],
-    reservedNames,
-    [],
-    { deferred: true },
-  )
+  const tool = workspaceSkills([{ path: ".agents/skills", source: "agents" }], reservedNames, [], {
+    deferred: true,
+  })
     .bind(session)
     .tools()
-    .find((candidate) => candidate.type === "function" && candidate.name === "repository_skill_read");
+    .find(
+      (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+    );
   if (tool?.type !== "function") throw new Error("missing reader");
   return tool as FunctionTool<unknown>;
 }

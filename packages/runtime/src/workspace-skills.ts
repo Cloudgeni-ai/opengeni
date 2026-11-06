@@ -569,7 +569,9 @@ function repositorySkillMissMessage(discovery: WorkspaceSkillDiscovery, deferred
     ? ` Skipped: ${warnings
         .slice(0, MISS_LISTED_WARNINGS)
         .map((warning) => `${warning.paths.join(", ")} (${warning.reason ?? warning.code})`)
-        .join("; ")}${warnings.length > MISS_LISTED_WARNINGS ? `; and ${warnings.length - MISS_LISTED_WARNINGS} more` : ""}.`
+        .join(
+          "; ",
+        )}${warnings.length > MISS_LISTED_WARNINGS ? `; and ${warnings.length - MISS_LISTED_WARNINGS} more` : ""}.`
     : "";
   if (unavailable)
     return `Repository skills could not be read: the workspace is unreachable. Try again once workspace tools respond.${skipped}`;
