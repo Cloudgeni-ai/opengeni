@@ -85,8 +85,7 @@ function startedAfterFirstModelRequest(
   startedAt: number,
 ): boolean {
   return (
-    observation.firstModelTransportAt !== undefined &&
-    observation.firstModelTransportAt < startedAt
+    observation.firstModelTransportAt !== undefined && observation.firstModelTransportAt < startedAt
   );
 }
 export type ModelTransportDispatchClock = {
