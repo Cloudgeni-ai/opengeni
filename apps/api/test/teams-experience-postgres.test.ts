@@ -20,6 +20,8 @@ import { verifyTeamsProof } from "../src/integrations/teams-protocol";
 import {
   TEAMS_CANNOT_START_TEXT,
   TEAMS_CONNECT_REMINDER_TEXT,
+  TEAMS_SHARED_CANNOT_START_TEXT,
+  TEAMS_UNREADABLE_MESSAGE_TEXT,
   TEAMS_CONVERSATION_OFF_TEXT,
   TEAMS_WORK_ACCOUNT_TEXT,
 } from "../src/integrations/teams-experience";
@@ -356,44 +358,49 @@ test("in an organization that hasn't connected Opengeni, installs and messages g
   await handle(f.message("hello", person, chat));
   expect(f.calls).toHaveLength(2);
   connectAction(1);
-  // A repeat within the card's cooldown gets a short reminder, without a card
-  // or an identity proof; one more within the reminder's cooldown gets nothing.
+  // Repeats within the card's cooldown get a short reminder each, without a
+  // card or an identity proof.
   await handle(f.message("hello again", person, chat));
-  expect(f.calls).toHaveLength(3);
-  expect(f.calls[2]!.activity).toEqual({
-    type: "message",
-    text: TEAMS_CONNECT_REMINDER_TEXT,
-    textFormat: "markdown",
-  });
   await handle(f.message("and again", person, chat));
-  expect(f.calls).toHaveLength(3);
+  expect(f.calls).toHaveLength(4);
+  for (const call of f.calls.slice(2))
+    expect(call.activity).toEqual({
+      type: "message",
+      text: TEAMS_CONNECT_REMINDER_TEXT,
+      textFormat: "markdown",
+    });
   // Help and unlink always answer, with the Connect your organization card.
   await handle(f.message("help", person, chat));
-  expect(f.calls).toHaveLength(4);
-  expect(f.calls[3]!.activity.text).toContain("**Opengeni help**");
-  expect(f.calls[3]!.activity.text).toContain("If that's you, select Connect your organization.");
-  expect(verifyTeamsProof("test", connectAction(3))).toMatchObject({
+  expect(f.calls).toHaveLength(5);
+  expect(f.calls[4]!.activity.text).toContain("**Opengeni help**");
+  expect(f.calls[4]!.activity.text).toContain("If that's you, select Connect your organization.");
+  expect(verifyTeamsProof("test", connectAction(4))).toMatchObject({
     purpose: "setup",
     tenantId: other,
     actorId: person,
     conversation: { id: `a:${person}`, serviceUrl },
   });
   await handle(f.message("unlink", person, chat));
-  expect(f.calls).toHaveLength(5);
-  expect(f.calls[4]!.activity.text).toContain("Your Teams account isn't linked to Opengeni.");
-  connectAction(4);
+  expect(f.calls).toHaveLength(6);
+  expect(f.calls[5]!.activity.text).toContain("Your Teams account isn't linked to Opengeni.");
+  connectAction(5);
   expect(f.outcomes).toEqual([
     "connect_link_sent",
     "connect_link_sent",
     "connect_reminder_sent",
-    "onboarding_reply_limited",
+    "connect_reminder_sent",
     "help_sent",
     "unlink_not_linked",
   ]);
   // The counts are shared through the database: another replica, with its own
-  // process state, doesn't send this person another card.
+  // process state, doesn't send this person another card, only a reminder.
   await f.replica(deps.settings)(f.message("hello from elsewhere", person, chat));
-  expect(f.calls).toHaveLength(5);
+  expect(f.calls).toHaveLength(7);
+  expect(f.calls[6]!.activity).toEqual({
+    type: "message",
+    text: TEAMS_CONNECT_REMINDER_TEXT,
+    textFormat: "markdown",
+  });
   // Only content-free counts are stored.
   const limits = await shared.admin<Array<{ scope_hash: string }>>`
     select scope_hash from teams_bot_onboarding_limits`;
@@ -431,12 +438,25 @@ test("a personal Microsoft account is told a work or school account is needed, o
   ]);
 });
 
-test("a linked person who can't start chats is told why and what to do", async () => {
+test("a linked person who can't start chats is told why and what to do, only in their 1:1 chat", async () => {
   const f = await fixture();
   await shared.admin`update workspace_memberships set permissions = '["workspace:read", "sessions:read"]'::jsonb where workspace_id=${f.i.workspace_id} and subject_id=${f.subject}`;
   await f.handle(f.message("Plan the launch"));
-  expect(f.calls.map((call) => call.activity.text)).toEqual([TEAMS_CANNOT_START_TEXT]);
-  expect(f.outcomes).toEqual(["sessions_create_denied"]);
+  await f.handle(
+    f.message(`<at>Opengeni</at> Plan the launch`, f.actor, {
+      conversation: { id: "19:channel", conversationType: "channel", tenantId: f.tenant },
+      channelData: { tenant: { id: f.tenant }, channel: { id: "19:channel" } },
+      entities: [{ type: "mention", mentioned: { id: f.botId }, text: "<at>Opengeni</at>" }],
+    }),
+  );
+  expect(f.calls.map((call) => call.activity.text)).toEqual([
+    TEAMS_CANNOT_START_TEXT,
+    TEAMS_SHARED_CANNOT_START_TEXT,
+  ]);
+  expect(f.outcomes.filter((outcome) => outcome !== "context_recorded")).toEqual([
+    "sessions_create_denied",
+    "sessions_create_denied",
+  ]);
   const [inbox] =
     await shared.admin`select count(*)::int as n from teams_bot_inbox where workspace_id=${f.i.workspace_id}`;
   expect(inbox!.n).toBe(0);
@@ -1027,4 +1047,44 @@ test("only the owner of a 1:1 chat can rate its replies", async () => {
     "feedback_recorded",
     "feedback_target_missing",
   ]);
+});
+
+test("a 1:1 message with a file or image, or no text, is told to send text", async () => {
+  const f = await fixture();
+  const image = { contentType: "image/png", contentUrl: "https://example.test/a.png" };
+  await f.handle(f.message("Summarize this", f.actor, { attachments: [image] }));
+  await f.handle(f.message(""));
+  // So is someone in an organization that isn't connected.
+  const other = crypto.randomUUID();
+  f.deps.settings.teamsBotAllowedTenantIds = [f.tenant, other];
+  const person = crypto.randomUUID();
+  await f.handle(
+    f.message("", person, {
+      conversation: { id: `a:${person}`, conversationType: "personal", tenantId: other },
+      channelData: { tenant: { id: other } },
+      attachments: [image],
+    }),
+  );
+  // A tenant that isn't admitted gets nothing.
+  const outsider = crypto.randomUUID();
+  await f.handle(
+    f.message("", person, {
+      conversation: { id: `a:${person}`, conversationType: "personal", tenantId: outsider },
+      channelData: { tenant: { id: outsider } },
+    }),
+  );
+  expect(f.calls.map((call) => call.activity)).toEqual([
+    { type: "message", text: TEAMS_UNREADABLE_MESSAGE_TEXT, textFormat: "markdown" },
+    { type: "message", text: TEAMS_UNREADABLE_MESSAGE_TEXT, textFormat: "markdown" },
+    { type: "message", text: TEAMS_UNREADABLE_MESSAGE_TEXT, textFormat: "markdown" },
+  ]);
+  expect(f.outcomes).toEqual([
+    "unreadable_message_notice_sent",
+    "unreadable_message_notice_sent",
+    "unreadable_message_notice_sent",
+    "unreadable_message_ignored",
+  ]);
+  const [inbox] =
+    await shared.admin`select count(*)::int as n from teams_bot_inbox where workspace_id=${f.i.workspace_id}`;
+  expect(inbox!.n).toBe(0);
 });

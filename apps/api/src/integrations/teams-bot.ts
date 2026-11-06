@@ -76,6 +76,7 @@ import {
   teamsThreadlessConversationId,
   normalizeTeamsFeedback,
   teamsPersonalInstall,
+  teamsUnreadablePersonalMessage,
   teamsRouteId,
   mintTeamsProof,
   verifyTeamsProof,
@@ -104,11 +105,13 @@ import {
 } from "./teams-admin-proof";
 import {
   createTeamsOnboardingBudgets,
-  type TeamsOnboardingBudget,
   type TeamsOnboardingBudgets,
+  type TeamsOnboardingReservation,
 } from "./teams-onboarding-limit";
 import {
   TEAMS_CANNOT_START_TEXT,
+  TEAMS_SHARED_CANNOT_START_TEXT,
+  TEAMS_UNREADABLE_MESSAGE_TEXT,
   TEAMS_CONNECT_REMINDER_TEXT,
   TEAMS_CONNECT_TEXT,
   TEAMS_CONVERSATION_OFF_TEXT,
@@ -419,26 +422,25 @@ export async function replyToUnconnectedTeamsTenant(
   const admitted = teamsTenantEnabled(deps.settings, m.tenantId);
   if (!m.personal) {
     if (!admitted) return "tenant_disabled";
-    if (
-      source === "install" ||
-      !deps.settings.teamsBotSelfServeSetupEnabled ||
-      !(await budgets.reminder.tryReserve(m.tenantId, m.actorId))
-    )
-      return "setup_not_permitted";
-    await sendReserved(budgets.reminder, m, () =>
+    const reminder =
+      source === "message" && deps.settings.teamsBotSelfServeSetupEnabled
+        ? await budgets.sharedNotice.reserve(m.tenantId, m.actorId)
+        : null;
+    if (!reminder) return "setup_not_permitted";
+    await sendReserved(reminder, () =>
       send(app, { ...m, threadId: m.threadId ?? null }, TEAMS_SHARED_CONNECT_TEXT),
     );
     return "shared_connect_reminder_sent";
   }
   if (!admitted) {
-    if (
-      source === "install" ||
-      !deps.settings.teamsBotSelfServeSetupEnabled ||
-      !teamsBotConfigured(deps.settings) ||
-      !(await budgets.unavailableNotice.tryReserve(m.tenantId, m.actorId))
-    )
-      return "tenant_disabled";
-    await sendReserved(budgets.unavailableNotice, m, () =>
+    const notice =
+      source === "message" &&
+      deps.settings.teamsBotSelfServeSetupEnabled &&
+      teamsBotConfigured(deps.settings)
+        ? await budgets.unavailableNotice.reserve(m.tenantId, m.actorId)
+        : null;
+    if (!notice) return "tenant_disabled";
+    await sendReserved(notice, () =>
       send(app, { ...m, threadId: null }, teamsTenantUnavailableText(deps.settings)),
     );
     return "tenant_unavailable_notice_sent";
@@ -454,25 +456,24 @@ export async function replyToUnconnectedTeamsTenant(
   const budget = source === "install" ? budgets.installWelcome : budgets.connect;
   if (teamsWorkAccountRequired(deps.settings, m.tenantId)) {
     // Short text either way, so a used-up budget falls back to the reminders'.
-    const granted = (await budget.tryReserve(m.tenantId, m.actorId))
-      ? budget
-      : (await budgets.reminder.tryReserve(m.tenantId, m.actorId))
-        ? budgets.reminder
-        : null;
+    const granted =
+      (await budget.reserve(m.tenantId, m.actorId)) ??
+      (await budgets.reminder.reserve(m.tenantId, m.actorId));
     if (!granted) return "onboarding_reply_limited";
-    await sendReserved(granted, m, () => send(app, personal, TEAMS_WORK_ACCOUNT_TEXT));
+    await sendReserved(granted, () => send(app, personal, TEAMS_WORK_ACCOUNT_TEXT));
     return "work_account_notice_sent";
   }
   if (!teamsSelfServeSetupAvailable(deps.settings, m.tenantId)) return "setup_not_permitted";
-  if (await budget.tryReserve(m.tenantId, m.actorId)) {
-    await sendReserved(budget, m, () =>
+  const card = await budget.reserve(m.tenantId, m.actorId);
+  if (card) {
+    await sendReserved(card, () =>
       sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null)),
     );
     return "connect_link_sent";
   }
-  if (!(await budgets.reminder.tryReserve(m.tenantId, m.actorId)))
-    return "onboarding_reply_limited";
-  await sendReserved(budgets.reminder, m, () =>
+  const reminder = await budgets.reminder.reserve(m.tenantId, m.actorId);
+  if (!reminder) return "onboarding_reply_limited";
+  await sendReserved(reminder, () =>
     send(
       app,
       personal,
@@ -484,19 +485,18 @@ export async function replyToUnconnectedTeamsTenant(
   return "connect_reminder_sent";
 }
 /**
- * Sends a reply reserved from `budget`, giving the reservation back when Teams
- * clearly never received it, so a redelivery can still answer.
+ * Sends a reserved reply, giving the reservation back when Teams clearly
+ * never received it, so a redelivery can still answer.
  */
 async function sendReserved(
-  budget: TeamsOnboardingBudget,
-  m: Pick<TeamsMessage, "tenantId" | "actorId">,
+  reservation: TeamsOnboardingReservation,
   reply: () => Promise<unknown>,
 ): Promise<void> {
   try {
     await reply();
   } catch (error) {
     if (teamsSendFailure(error).refused)
-      await Promise.resolve(budget.release(m.tenantId, m.actorId)).catch(() => {
+      await reservation.release().catch(() => {
         // The reservation then lapses with its window.
       });
     throw error;
@@ -633,7 +633,8 @@ function experienceState(
         : teamsWorkAccountRequired(unconnected.deps.settings, unconnected.tenantId)
           ? ("work_account" as const)
           : undefined;
-  const supportEmail = unconnected?.deps.settings.supportEmail;
+  // Only an organization that isn't connected needs somewhere else to turn.
+  const supportEmail = i?.active ? undefined : unconnected?.deps.settings.supportEmail;
   return {
     personal,
     installation: i?.active ? "active" : "unavailable",
@@ -965,6 +966,27 @@ function teamsConversationAllowed(
         deps.settings.teamsBotAllowedChannelIds.includes(`${c.tenantId}:${c.channelId}`);
 }
 /**
+ * A 1:1 message with a file or image, or no text, is told to send text, in an
+ * admitted tenant and within the short-reply budget. It never fails the
+ * activity.
+ */
+async function replyToUnreadableMessage(
+  deps: ApiRouteDeps,
+  app: App,
+  m: NonNullable<ReturnType<typeof teamsUnreadablePersonalMessage>>,
+  budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
+): Promise<string> {
+  if (!teamsTenantEnabled(deps.settings, m.tenantId)) return "unreadable_message_ignored";
+  try {
+    const reply = await budgets.reminder.reserve(m.tenantId, m.actorId);
+    if (!reply) return "unreadable_message_limited";
+    await sendReserved(reply, () => send(app, m, TEAMS_UNREADABLE_MESSAGE_TEXT));
+    return "unreadable_message_notice_sent";
+  } catch {
+    return "unreadable_message_notice_failed";
+  }
+}
+/**
  * A mention in a group chat or channel that isn't turned on gets a short,
  * bounded reply saying so, instead of silence. It never fails the activity.
  */
@@ -975,8 +997,9 @@ async function replyToDisabledConversation(
   budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
 ): Promise<string> {
   try {
-    if (!(await budgets.reminder.tryReserve(m.tenantId, m.actorId))) return "channel_disabled";
-    await sendReserved(budgets.reminder, m, () => send(app, m, TEAMS_CONVERSATION_OFF_TEXT));
+    const reply = await budgets.sharedNotice.reserve(m.tenantId, m.actorId);
+    if (!reply) return "channel_disabled";
+    await sendReserved(reply, () => send(app, m, TEAMS_CONVERSATION_OFF_TEXT));
     return "channel_disabled_notice_sent";
   } catch {
     return "channel_disabled_notice_failed";
@@ -1058,7 +1081,12 @@ export async function handleTeamsActivity(
     if (recorded && diagnostic.reason === "missing_mention") continue;
     deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
   }
-  if (!m) return { status: 200 };
+  if (!m) {
+    const unreadable = teamsUnreadablePersonalMessage(body);
+    if (unreadable && unreadable.botId.toLowerCase() === botId)
+      observed(await replyToUnreadableMessage(deps, app, unreadable));
+    return { status: 200 };
+  }
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
     return { status: 200 };
@@ -1106,8 +1134,13 @@ export async function handleTeamsActivity(
     return { status: 200 };
   }
   if (!hasPermission(grant.permissions, "sessions:create")) {
-    await send(app, m, TEAMS_CANNOT_START_TEXT);
-    observed("sessions_create_denied");
+    // One person's access is explained only to them.
+    try {
+      await send(app, m, m.personal ? TEAMS_CANNOT_START_TEXT : TEAMS_SHARED_CANNOT_START_TEXT);
+      observed("sessions_create_denied");
+    } catch {
+      observed("sessions_create_denied_reply_failed");
+    }
     return { status: 200 };
   }
   let audience: TeamsGroupAudience | undefined;

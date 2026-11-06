@@ -216,6 +216,47 @@ export function normalizeTeamsMessage(
 }
 
 /**
+ * The sender and chat of a 1:1 message the bot can't read, because it carries
+ * a file or image, or has no text, so it can be told what to send instead.
+ * Null for anything else, including every message `normalizeTeamsMessage`
+ * accepts. Like it, call it only with an authenticated activity.
+ */
+export function teamsUnreadablePersonalMessage(raw: unknown): {
+  tenantId: string;
+  actorId: string;
+  conversationId: string;
+  serviceUrl: string;
+  botId: string;
+  personal: true;
+  threadId: null;
+} | null {
+  const parsed = Activity.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  if (a.from.role === "bot" || a.from.id === a.recipient.id) return null;
+  if (a.conversation.conversationType !== "personal") return null;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId) return null;
+  const files = a.attachments?.some((value) => !InlineTextRepresentation.safeParse(value).success);
+  if (!files && a.text.trim()) return null;
+  let serviceUrl: string;
+  try {
+    serviceUrl = teamsServiceUrl(a.serviceUrl);
+  } catch {
+    return null;
+  }
+  return {
+    tenantId,
+    actorId: a.from.aadObjectId.toLowerCase(),
+    conversationId: a.conversation.id,
+    serviceUrl,
+    botId: a.recipient.id,
+    personal: true,
+    threadId: null,
+  };
+}
+
+/**
  * The root post of the channel thread an activity belongs to. Teams names it
  * in the conversation id (`19:…@thread.tacv2;messageid=<root>`) for the root
  * post and every reply, while `replyToId` can be missing on a reply. So the

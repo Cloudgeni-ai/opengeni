@@ -236,12 +236,19 @@ replica, in separate budgets so one kind can't use up another:
 - Welcomes when someone installs the app: one per person and 25 per tenant per
   day, 500 per hour overall. A tenant that pre-installs the app for everyone
   gets only a few cards.
-- Short text reminders, once a person's or tenant's cards are used up: one per
-  person per minute, 30 per person and 1,000 per tenant per day, 5,000 per hour
+- Short 1:1 text replies, once a person's or tenant's cards are used up: no
+  cooldown, 30 per person and 1,000 per tenant per day, 5,000 per hour
   overall. They carry no card or identity proof and point to `help`, which
   always answers with the Connect your organization card. The work or school
   account notice for personal Microsoft accounts uses the card budget, then
-  this one.
+  this one, and so does the reply to a 1:1 message with only a file, an image
+  or no text.
+- Short text replies in group chats and channels (connect first, or this
+  conversation isn't turned on): one per person per minute, 10 per person and
+  200 per tenant per day, 2,000 per hour overall, because everyone there sees
+  them.
+- `help` and `unlink` are never limited: they are what every limited reply
+  points to, and they start no agent work.
 - With self-serve on, people in a tenant that isn't admitted get a short
   not-available notice when they message the bot: one per person and 20 per
   tenant per day, 200 per hour overall, never for installs. With it off, such
@@ -250,7 +257,9 @@ replica, in separate budgets so one kind can't use up another:
 The counts are kept in the database (`teams_bot_onboarding_limits`, migration
 `1296_teams_bot_onboarding_limits.sql`): content-free rows keyed by a hash of
 the budget and the person, tenant or deployment, using the database clock, and
-removed two days after their window. A replica that can't reach the database
+removed once both the window's start and the last reply are two days old. A
+refused reply writes nothing, and a window starts with its first reply. A
+replica that can't reach the database
 counts in its own memory until it can, so replies stay bounded and still go
 out. A reply Teams clearly never received (refused, throttled or unreachable)
 doesn't count. An install's welcome is also claimed once in the database (see
@@ -369,14 +378,18 @@ and the personal-only package. In it:
   account and to sign in to Teams with one.
 - A linked person whose workspace access doesn't allow starting chats is told
   so and asked to get access from an admin of the connected workspace.
+- A 1:1 message with only a file or an image, or no text, is told that
+  Opengeni reads text messages only and to send the request as text.
 - Onboarding replies are limited per person, per tenant and across the
   deployment, counted in the database (`teams_bot_onboarding_limits`) so every
   API replica shares them; a replica that can't reach the database counts in
   its own memory instead. Connect cards: one per person per 10 minutes, 6 a
   day, 200 per tenant a day, 2,000 an hour overall. Install cards: 1 per person
-  a day, 25 per tenant a day, 500 an hour. Reminders: one per person a minute,
-  30 a day, 1,000 per tenant a day, 5,000 an hour. A person who exceeds both
-  their card and reminder budgets gets no reply until the next window.
+  a day, 25 per tenant a day, 500 an hour. Reminders: no cooldown, 30 per
+  person a day, 1,000 per tenant a day, 5,000 an hour. Only a person who
+  exceeds both their card and reminder budgets in a day (over 36 messages) gets
+  no reply until the next window, and even then `help` and `unlink` still
+  answer with the card.
 
 Outside the Store configuration, these cases still have gaps:
 
@@ -392,7 +405,7 @@ Outside the Store configuration, these cases still have gaps:
   group chat or channel that isn't on the allowlist gets "Opengeni isn't turned
   on in this conversation", and with self-serve setup on, a mention in a tenant
   that isn't connected gets a reminder to message the bot directly. Both come
-  from the reminder budget.
+  from the shared-conversation budget, at most one per person a minute.
 
 The output directory must not exist. The generator writes `manifest.json`,
 `color.png` (192 × 192), and `outline.png` (32 × 32, white on transparent),

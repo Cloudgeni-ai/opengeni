@@ -394,6 +394,7 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       installWelcome: new TeamsOnboardingLimiter(limits),
       unavailableNotice: new TeamsOnboardingLimiter({ ...limits, overallHourlyMax: 1 }),
       reminder: noReminders(),
+      sharedNotice: noReminders(),
     };
     const people = ["1", "2", "3"].map((n) => ({
       ...message,
@@ -427,7 +428,7 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
     expect(await replyToUnconnectedTeamsTenant(deps, app, shared(true), "message", budgets)).toBe(
       "shared_connect_reminder_sent",
     );
-    // The reminder has a cooldown per person.
+    // Everyone in the conversation sees them, so each person gets at most one a minute.
     expect(await replyToUnconnectedTeamsTenant(deps, app, shared(false), "message", budgets)).toBe(
       "setup_not_permitted",
     );
@@ -602,11 +603,13 @@ describe("Teams onboarding limiter", () => {
       },
       (error) => errors.push(error),
     );
-    expect(await budget.tryReserve("T", "A")).toBe(true);
-    expect(await budget.tryReserve("T", "A")).toBe(false);
-    await budget.release("T", "A");
-    expect(await budget.tryReserve("T", "A")).toBe(true);
-    expect(errors).toHaveLength(4);
+    const first = await budget.reserve("T", "A");
+    expect(first).not.toBeNull();
+    expect(await budget.reserve("T", "A")).toBeNull();
+    // Given back to memory, where it was counted.
+    await first!.release();
+    expect(await budget.reserve("T", "A")).not.toBeNull();
+    expect(errors).toHaveLength(3);
   });
 
   test("cooldown, daily caps and the process cap", () => {

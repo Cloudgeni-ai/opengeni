@@ -28,7 +28,10 @@ export type TeamsExperienceState = {
    * when the person uses a personal Microsoft account, which can't.
    */
   setup?: "connect" | "work_account";
-  /** The operator's support address, when there is no other way forward. */
+  /**
+   * The operator's support address, for an organization that isn't connected
+   * when there is no other way forward.
+   */
   supportEmail?: string;
 };
 
@@ -85,6 +88,12 @@ export const TEAMS_CONVERSATION_OFF_TEXT =
 /** For a linked person whose account can't start chats in the connected workspace. */
 export const TEAMS_CANNOT_START_TEXT =
   "Your Opengeni account can't start chats in the workspace your organization connected to Microsoft Teams. Ask an admin of that workspace to give you access to start chats, then message me again.";
+/** The same, in a group chat or channel, without naming one person's access there. */
+export const TEAMS_SHARED_CANNOT_START_TEXT =
+  "I can't start a task for you here. Send me a direct message to see why.";
+/** For a 1:1 message with a file or image, or with no text. */
+export const TEAMS_UNREADABLE_MESSAGE_TEXT =
+  "I can only read text messages. Files and images sent in Teams aren't supported yet, so send your request as text.";
 
 type NextStep = { text: string; action?: TeamsExperienceReply["action"] };
 

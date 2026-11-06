@@ -3,6 +3,7 @@ import {
   releaseTeamsOnboardingReply,
   reserveTeamsOnboardingReply,
   type Database,
+  type TeamsOnboardingGrant,
   type TeamsOnboardingWindow,
 } from "@opengeni/db";
 
@@ -53,15 +54,29 @@ export const TEAMS_UNAVAILABLE_NOTICE_LIMITS: TeamsOnboardingLimits = {
   maxTrackedKeys: 20_000,
 };
 /**
- * Short text reminders with no card, sent instead of silence once a person's
- * or tenant's cards are used up. They point to help, which always answers
- * with the way forward, so they are cheap and can be more generous.
+ * Short text replies with no card: reminders sent instead of silence once a
+ * person's or tenant's cards are used up (they point to help, which always
+ * answers with the way forward), and notices such as "files aren't supported
+ * yet". They are cheap, so they have no cooldown and larger caps.
  */
 export const TEAMS_ONBOARDING_REMINDER_LIMITS: TeamsOnboardingLimits = {
-  actorCooldownMs: 60_000,
+  actorCooldownMs: 0,
   actorDailyMax: 30,
   tenantDailyMax: 1_000,
   overallHourlyMax: 5_000,
+  maxTrackedKeys: 20_000,
+};
+
+/**
+ * Short text replies in group chats and channels (connect your organization
+ * first, or this conversation isn't turned on). Everyone there sees them, so
+ * each person gets at most one a minute.
+ */
+export const TEAMS_SHARED_NOTICE_LIMITS: TeamsOnboardingLimits = {
+  actorCooldownMs: 60_000,
+  actorDailyMax: 10,
+  tenantDailyMax: 200,
+  overallHourlyMax: 2_000,
   maxTrackedKeys: 20_000,
 };
 
@@ -71,11 +86,12 @@ const HOUR_MS = 60 * 60_000;
 type Window = { start: number; count: number; last: number };
 
 /** One kind of onboarding reply's budget. */
+/** A reserved reply, which can be given back if Teams clearly never received it. */
+export type TeamsOnboardingReservation = { release(): Promise<void> };
+/** One kind of onboarding reply's budget. */
 export interface TeamsOnboardingBudget {
   /** Reserves one reply when every limit allows it; otherwise reserves nothing. */
-  tryReserve(tenantId: string, actorId: string): boolean | Promise<boolean>;
-  /** Gives back a reservation whose reply Teams clearly never received. */
-  release(tenantId: string, actorId: string): void | Promise<void>;
+  reserve(tenantId: string, actorId: string): Promise<TeamsOnboardingReservation | null>;
 }
 
 /** Counts one process's replies in memory. */
@@ -85,6 +101,11 @@ export class TeamsOnboardingLimiter implements TeamsOnboardingBudget {
   private process: Window = { start: 0, count: 0, last: 0 };
 
   constructor(private readonly limits: TeamsOnboardingLimits = DEFAULT_TEAMS_ONBOARDING_LIMITS) {}
+
+  async reserve(tenantId: string, actorId: string): Promise<TeamsOnboardingReservation | null> {
+    if (!this.tryReserve(tenantId, actorId)) return null;
+    return { release: async () => this.release(tenantId, actorId) };
+  }
 
   /** Reserves one reply when every limit allows it; otherwise reserves nothing. */
   tryReserve(tenantId: string, actorId: string, now = Date.now()): boolean {
@@ -164,30 +185,30 @@ export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
     this.fallback = new TeamsOnboardingLimiter(limits);
   }
 
-  async tryReserve(tenantId: string, actorId: string): Promise<boolean> {
-    const windows = this.windows(tenantId, actorId);
-    let reserved: boolean;
-    try {
-      reserved = await reserveTeamsOnboardingReply(this.db, windows);
-    } catch (error) {
-      this.onError(error);
-      return this.fallback.tryReserve(tenantId, actorId);
-    }
-    if (reserved)
-      void pruneTeamsOnboardingLimits(this.db).catch(() => {
-        // Pruning is housekeeping; the next reply tries again.
-      });
-    return reserved;
-  }
-
-  async release(tenantId: string, actorId: string): Promise<void> {
+  async reserve(tenantId: string, actorId: string): Promise<TeamsOnboardingReservation | null> {
     const [actor, ...rest] = this.windows(tenantId, actorId);
+    let grant: TeamsOnboardingGrant | null;
     try {
-      await releaseTeamsOnboardingReply(this.db, actor!, rest);
+      grant = await reserveTeamsOnboardingReply(this.db, [actor!, ...rest]);
     } catch (error) {
       this.onError(error);
-      this.fallback.release(tenantId, actorId);
+      // Given back to the store that counted it.
+      return await this.fallback.reserve(tenantId, actorId);
     }
+    if (!grant) return null;
+    void pruneTeamsOnboardingLimits(this.db).catch(() => {
+      // Pruning is housekeeping; the next reply tries again.
+    });
+    return {
+      release: async () => {
+        try {
+          await releaseTeamsOnboardingReply(this.db, grant, actor!, rest);
+        } catch (error) {
+          // The reservation then lapses with its window.
+          this.onError(error);
+        }
+      },
+    };
   }
 
   /** The person's window first, then the tenant's and the deployment's. */
@@ -218,14 +239,17 @@ export type TeamsOnboardingBudgets = {
   installWelcome: TeamsOnboardingBudget;
   /** Not-available notices; never sent for installs. */
   unavailableNotice: TeamsOnboardingBudget;
-  /** Short reminders once a person's or tenant's cards are used up. */
+  /** Short 1:1 text replies: reminders once cards are used up, and notices. */
   reminder: TeamsOnboardingBudget;
+  /** Short text replies in group chats and channels. */
+  sharedNotice: TeamsOnboardingBudget;
 };
 const BUDGET_LIMITS = {
   connect: DEFAULT_TEAMS_ONBOARDING_LIMITS,
   installWelcome: TEAMS_INSTALL_WELCOME_LIMITS,
   unavailableNotice: TEAMS_UNAVAILABLE_NOTICE_LIMITS,
   reminder: TEAMS_ONBOARDING_REMINDER_LIMITS,
+  sharedNotice: TEAMS_SHARED_NOTICE_LIMITS,
 } as const satisfies Record<keyof TeamsOnboardingBudgets, TeamsOnboardingLimits>;
 /**
  * The budgets, counted in `db` across replicas, or in this process's memory
@@ -244,5 +268,6 @@ export function createTeamsOnboardingBudgets(
     installWelcome: budget("installWelcome"),
     unavailableNotice: budget("unavailableNotice"),
     reminder: budget("reminder"),
+    sharedNotice: budget("sharedNotice"),
   };
 }

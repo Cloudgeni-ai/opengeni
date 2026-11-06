@@ -17,7 +17,12 @@ import {
   TEAMS_WORK_ACCOUNT_TEXT,
   type TeamsExperienceState,
 } from "../src/integrations/teams-experience";
-import { normalizeTeamsFeedback, teamsPersonalInstall } from "../src/integrations/teams-protocol";
+import {
+  normalizeTeamsFeedback,
+  normalizeTeamsMessage,
+  teamsPersonalInstall,
+  teamsUnreadablePersonalMessage,
+} from "../src/integrations/teams-protocol";
 import {
   keepTeamsTyping,
   sendTeamsReply,
@@ -176,6 +181,60 @@ describe("Teams notices", () => {
       ],
     });
     expect(JSON.stringify(card.body)).not.toContain("https:");
+  });
+});
+
+describe("Teams messages the bot can't read", () => {
+  const base = {
+    type: "message",
+    id: "message-1",
+    timestamp: "2026-11-06T10:00:00Z",
+    channelId: "msteams",
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    from: { id: "29:human", aadObjectId: actorId },
+    recipient: { id: "28:bot" },
+    conversation: { id: "a:personal", conversationType: "personal", tenantId },
+    channelData: { tenant: { id: tenantId } },
+    text: "Summarize this",
+  };
+  const image = { contentType: "image/png", contentUrl: "https://example.test/a.png" };
+  test("a 1:1 message with a file or image, or no text, names its sender and chat", () => {
+    for (const body of [
+      { ...base, attachments: [image] },
+      { ...base, text: "  " },
+    ])
+      expect(teamsUnreadablePersonalMessage(body)).toEqual({
+        tenantId,
+        actorId,
+        conversationId: "a:personal",
+        serviceUrl: "https://smba.trafficmanager.net/emea/",
+        botId: "28:bot",
+        personal: true,
+        threadId: null,
+      });
+  });
+  test("readable messages, shared conversations, bots and untrusted service URLs are not", () => {
+    expect(normalizeTeamsMessage(base)).not.toBeNull();
+    for (const body of [
+      base,
+      {
+        ...base,
+        attachments: [{ contentType: "text/html", content: "<p>Summarize this</p>" }],
+      },
+      {
+        ...base,
+        attachments: [image],
+        conversation: { id: "19:group", conversationType: "groupChat", tenantId },
+      },
+      { ...base, attachments: [image], from: { ...base.from, role: "bot" } },
+      { ...base, attachments: [image], serviceUrl: "https://untrusted.example.test/" },
+      {
+        ...base,
+        attachments: [image],
+        conversation: { ...base.conversation, tenantId: "20000000-0000-4000-8000-000000000002" },
+      },
+    ])
+      expect(teamsUnreadablePersonalMessage(body)).toBeNull();
   });
 });
 
