@@ -26,7 +26,7 @@ import { requireUsableSessionAvatar } from "../routes/session-avatar";
  */
 
 export const SESSION_PROFILE_TOOL_GUIDANCE =
-  'When a person or a bot template chose the name, keep it unless the person asks for a new one. All fields are optional. description and avatar are shown to people, not to you; set them when the person asks or setup instructions say so. description: one line ("" clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue} or {kind:"letters",letters,hue} (one or two characters) with hue 0-359, or {kind:"image",artifactId}. An image shows at about 16 pixels: one bold symbol on a solid colour, no text or fine detail.';
+  'When a person or a bot template chose the name, keep it unless the person asks for a new one. description and avatar are shown to people, not to you; set them when the person asks or setup instructions say so. description: one line ("" clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue} or {kind:"letters",letters,hue} (one or two letters or digits) or {kind:"image",artifactId}. An image shows at about 16 pixels: one bold symbol on a solid colour, no text or fine detail.';
 
 export const AvatarInput = z4
   .object({
@@ -133,7 +133,7 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Save a bot template people can start new bots from, when the person asks to make a template of you or this chat. Its setup instructions become the first message of every chat started from it: write them to the new agent from what this chat established (its job, the Skills, plugins, connections and machines it needs, the schedules and event triggers to create, its standing rules and preferences), without one-off tasks, history, personal details or secrets. Show the person your draft first unless they asked you to save it directly. The template is shared like this chat. avatar takes the same shapes as in set_session_title.",
+        "Save a bot template people can start new bots from, when the person asks to make a template of you or this chat. Its setup instructions become the first message of every chat started from it: write them to the new agent from what this chat established (its job, the Skills, plugins, connections and machines it needs, the schedules and event triggers to create, its standing rules and preferences), without one-off tasks, history, personal details or secrets. If setup varies by person, tell the new agent to ask; otherwise name exactly what to set up. Show the person your draft first unless they asked you to save it directly. The template is shared like this chat. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(BOT_TEMPLATE_NAME_MAX_LENGTH),
         description: z4.string().max(SESSION_DESCRIPTION_MAX_LENGTH).optional(),

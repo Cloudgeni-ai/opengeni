@@ -451,6 +451,7 @@ import {
 } from "../integrations/slack-interactions";
 import {
   proposeSlackAgentFromChat,
+  CARD_INSTRUCTIONS_MAX_CHARS,
   SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
 } from "../integrations/slack-agent-proposals";
 import {
@@ -3012,7 +3013,7 @@ function registerSlackBotTools(
       inputSchema: {
         name: z4.string().min(1).max(80),
         description: z4.string().min(1).max(200),
-        instructions: z4.string().max(8000).optional(),
+        instructions: z4.string().max(CARD_INSTRUCTIONS_MAX_CHARS).optional(),
         workspace: z4.string().min(1).max(200).optional(),
         avatar: AvatarInput.unwrap().unwrap(),
       },
