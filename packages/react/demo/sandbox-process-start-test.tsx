@@ -23,6 +23,9 @@ const englishText = createOpenGeniText();
  * `?machine=modal`: a Modal box whose /bin/sh was removed. It is replaced
  * with a fresh box restored from the saved /workspace (`restarting`), or its
  * files could not be saved yet and the turn stops (`stopped`).
+ * `?call=waiting|started` (Modal): the model's command when the replacement
+ * began. A command still waiting for the box settles as not started; one that
+ * had reached the box keeps its unknown outcome.
  */
 
 const params = new URLSearchParams(window.location.search);
@@ -30,6 +33,7 @@ const theme = params.get("theme") === "light" ? "light" : "dark";
 const stopped = params.get("state") === "stopped";
 const desktop = params.get("desktop") === "macos";
 const modal = params.get("machine") === "modal";
+const call = params.get("call");
 document.documentElement.dataset.ogTheme = theme;
 document.documentElement.classList.toggle("dark", theme === "dark");
 if (desktop) document.documentElement.dataset.desktop = "macos";
@@ -113,6 +117,68 @@ if (stopped && !modal) {
 const MODAL_AGENT_TEXT =
   "Modal could not start the sandbox shell: failed to load /bin/sh: no such file or directory";
 const MODAL_GROUP = "group-demo";
+const CALL = "call-tests";
+
+const withCall = call === "waiting" || call === "started";
+
+// Built in place so sequences follow the timeline: the model's command, then
+// the restart, then the settlement's exact `agent.toolCall.output`.
+const callCreated = (): SessionEvent[] =>
+  withCall
+    ? [
+        event(
+          "agent.toolCall.created",
+          { id: CALL, name: "exec_command", arguments: { cmd: "bun test" } },
+          1.1,
+        ),
+      ]
+    : [];
+const callSettled = (): SessionEvent[] =>
+  withCall
+    ? [
+        event(
+          "agent.toolCall.output",
+          call === "waiting"
+            ? {
+                id: CALL,
+                output: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.",
+                    },
+                  ],
+                },
+                recovery: {
+                  interrupted: true,
+                  outcome: "not_started",
+                  reason: "sandbox_lifecycle_transition",
+                  unsupportedCallShape: false,
+                },
+              }
+            : {
+                id: CALL,
+                output: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "Tool execution was interrupted by sandbox_lifecycle_transition; its side-effect outcome is unknown.",
+                    },
+                  ],
+                },
+                recovery: {
+                  interrupted: true,
+                  outcome: "unknown",
+                  reason: "sandbox_lifecycle_transition",
+                  unsupportedCallShape: false,
+                },
+              },
+          1.4,
+        ),
+      ]
+    : [];
 
 const modalEvents: SessionEvent[] = [
   event(
@@ -124,6 +190,7 @@ const modalEvents: SessionEvent[] = [
     null,
   ),
   event("turn.started", {}, 1),
+  ...callCreated(),
   event(
     "sandbox.operation.started",
     {
@@ -134,6 +201,7 @@ const modalEvents: SessionEvent[] = [
     },
     1.3,
   ),
+  ...callSettled(),
   // Not completed: the drain replaces the box, and the row settles with the turn.
   event(
     "turn.recovery.requested",
