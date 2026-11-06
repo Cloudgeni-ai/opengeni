@@ -33,6 +33,7 @@ import {
   type ResolvedAgentConfig,
   type AgentMediaAttachment,
   metadataWithTurnExecutionPolicyV1,
+  SESSION_UNATTENDED_METADATA_KEY,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import { sessionEffectiveToolProjectionInput } from "@opengeni/core";
@@ -135,6 +136,14 @@ type FixtureOptions = {
   bundledSkillIds?: BundledSkillId[] | "omit";
   /** Rendered workspace governance for this turn. */
   workspaceGovernance?: string;
+  /** The session started unattended (frozen in its metadata) and still is. */
+  unattended?: boolean;
+  /** Above zero: a child session, which a parent agent can answer. */
+  nestedAgentDepth?: number;
+  /** The deployment Files server's allow-list (default: only the fixture tool). */
+  filesAllowedTools?: string[];
+  /** Observes what the worker hands the spill port for an oversized result. */
+  onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -181,7 +190,12 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       id,
       url: mcp.url,
       cacheToolsList: false,
-      allowedTools: id === "opengeni" ? [...FIRST_PARTY_MCP_TOOL_NAMES] : ["search_documents"],
+      allowedTools:
+        id === "opengeni"
+          ? [...FIRST_PARTY_MCP_TOOL_NAMES]
+          : id === "files" && options.filesAllowedTools
+            ? options.filesAllowedTools
+            : ["search_documents"],
     })),
   });
   const settings =
@@ -347,7 +361,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
           )
         : options.credentialRestrictionSource === "spoof"
           ? { credentialRestriction: "developer_setup" }
-          : {},
+          : options.unattended
+            ? { [SESSION_UNATTENDED_METADATA_KEY]: true }
+            : {},
+    ...(options.unattended ? { unattended: true } : {}),
     ...(Object.hasOwn(options, "agent") ? { agent: options.agent } : {}),
     instructions: null,
     resources: [],
@@ -368,7 +385,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     model: options.modelId ?? "scripted-model",
     sandboxBackend: "none",
     mcpServers: [{ id: "customer-product" }],
-    nestedAgentDepth: 0,
+    nestedAgentDepth: options.nestedAgentDepth ?? 0,
     effectiveMaxNestedAgentDepth: 3,
   } as BuildTurnAgentDeps["session"];
   const turn = {
@@ -447,6 +464,16 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       objectStorage: null,
       observability: createObservability(settings, { component: "worker" }),
       media: {} as BuildTurnAgentDeps["media"],
+      ...(options.onSpill
+        ? {
+            toolResultSpill: {
+              spill: async (spillInput) => {
+                options.onSpill!(spillInput);
+                return { content: [{ type: "text", text: "spilled" }] };
+              },
+            } as PrepareTurnToolRuntimeDeps["toolResultSpill"],
+          }
+        : {}),
       turn,
       session,
       fileAuthoritySubjectId: null,
@@ -1642,13 +1669,14 @@ test("a configured retained router survives deployment search disabled", async (
  * a person. Everything in its first request except the product's own tools is
  * a fixed per-call cost.
  */
-async function embeddingFixedPrefix(human = false) {
+async function embeddingFixedPrefix(human = false, extra: FixtureOptions = {}) {
   const captured = await captureWorkerRequest({
     agent: agentConfig("none"),
     builtins: false,
     eagerProduct: true,
     hasSkills: false,
     humanRecipient: human,
+    ...extra,
   });
   const productTool = prefixedMcpToolName("customer-product", "search_documents");
   const system = captured.request.systemInstructions ?? "";
@@ -1697,6 +1725,126 @@ describe("embedding profile fixed prefix", () => {
     const prefix = await embeddingFixedPrefix();
     expect({ sections: prefix.sections, tools: prefix.tools }).toEqual(INVENTORY);
   });
+
+  // A backend that no person answers creates the session with
+  // `unattended: true`: it pays for no question tool and is told so instead.
+  test("an unattended session has no question tool and stays within its budget", async () => {
+    const prefix = await embeddingFixedPrefix(false, { unattended: true });
+    const toolBytes = Object.values(prefix.tools).reduce((sum, size) => sum + size, 0);
+    expect(prefix.developer).toEqual([]);
+    expect(Object.keys(prefix.tools)).toEqual([]);
+    expect(prefix.system).toContain(runtimeExports.UNATTENDED_SESSION_GUIDANCE);
+    expect(prefix.system).not.toContain("request_human_input");
+    expect(Buffer.byteLength(prefix.system) + toolBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(prefix.sections["# Unattended session"]).toBe(559);
+  });
+});
+
+// request_human_input is sent only where someone can answer it: a person in
+// an interactive chat or an API-started one (the API can answer), and the
+// parent agent of a child session. A session created unattended, one whose
+// `humanInput` capability is off, and a workspace that turned questions off
+// get none (the workspace switch is applied with the governance read, see
+// runtime.test.ts).
+describe("request_human_input follows who can answer", () => {
+  const hasQuestionTool = async (options: FixtureOptions) => {
+    const captured = await captureWorkerRequest(options);
+    const tool = captured.request.tools.find(
+      (candidate) => toolName(candidate) === "request_human_input",
+    );
+    return { captured, tool: tool as { description?: string } | undefined };
+  };
+  const embedding: FixtureOptions = {
+    agent: agentConfig("none"),
+    builtins: false,
+    eagerProduct: true,
+    hasSkills: false,
+  };
+
+  const kept: Array<[string, FixtureOptions]> = [
+    ["embedding profile, a person started the turn", { ...embedding, humanRecipient: true }],
+    ["embedding profile, the API started the turn", { ...embedding, humanRecipient: false }],
+    ["all", { agent: agentConfig("all") }],
+    ["legacy", { agent: null }],
+  ];
+  test.each(kept)("%s keeps it", async (_label, options) => {
+    const { tool } = await hasQuestionTool(options);
+    expect(tool).toBeDefined();
+    expect(tool!.description).not.toContain("parent agent");
+  });
+
+  const children: Array<[string, FixtureOptions]> = [
+    ["embedding profile", { ...embedding, nestedAgentDepth: 1 }],
+    ["all", { agent: agentConfig("all"), nestedAgentDepth: 2 }],
+  ];
+  test.each(children)(
+    "a child session (%s) keeps it, with the parent-agent guidance",
+    async (_label, options) => {
+      const { tool } = await hasQuestionTool(options);
+      expect(tool!.description).toContain("message your parent agent instead");
+    },
+  );
+
+  const leftOut: Array<[string, FixtureOptions]> = [
+    ["embedding profile, unattended", { ...embedding, unattended: true }],
+    ["all, unattended", { agent: agentConfig("all"), unattended: true }],
+    ["legacy, unattended", { agent: null, unattended: true }],
+    [
+      "embedding profile, humanInput off",
+      { ...embedding, agent: agentConfig("none", "humanInput", false) },
+    ],
+    ["all, humanInput off", { agent: agentConfig("all", "humanInput", false) }],
+  ];
+  test.each(leftOut)("%s leaves it out", async (_label, options) => {
+    const { captured, tool } = await hasQuestionTool(options);
+    expect(tool).toBeUndefined();
+    expect(captured.request.systemInstructions ?? "").not.toContain("request_human_input");
+  });
+});
+
+// A result too large to show names only the readers the session has.
+describe("oversized tool results", () => {
+  const readersFor = async (options: FixtureOptions) => {
+    const seen: unknown[] = [];
+    const captured = await captureWorkerRequest({
+      ...options,
+      onSpill: (input) => seen.push(input.readers),
+    });
+    await captured.preparation.spillOversizedModelToolResult!({
+      operationId: "66666666-6666-4666-8666-666666666666",
+      result: { content: [{ type: "text", text: "x" }] },
+      serializedBytes: 1,
+    });
+    return seen;
+  };
+
+  test("the embedding profile has no shell and no download tool", async () => {
+    expect(
+      await readersFor({
+        agent: agentConfig("none"),
+        builtins: false,
+        eagerProduct: true,
+        hasSkills: false,
+      }),
+    ).toEqual([{ shell: false, fileDownload: false }]);
+  });
+
+  test("attached compute brings the shell", async () => {
+    expect(await readersFor({ agent: agentConfig("none"), machineAttached: true })).toEqual([
+      { shell: true, fileDownload: false },
+    ]);
+  });
+
+  test("full capabilities with compute bring the shell and the download tool", async () => {
+    const filesAllowedTools = ["search_documents", "files_get_download_url"];
+    expect(
+      await readersFor({ agent: agentConfig("all"), machineAttached: true, filesAllowedTools }),
+    ).toEqual([{ shell: true, fileDownload: true }]);
+    // The same session under capabilities "none" has no Files server selected.
+    expect(
+      await readersFor({ agent: agentConfig("none"), machineAttached: true, filesAllowedTools }),
+    ).toEqual([{ shell: true, fileDownload: false }]);
+  });
 });
 
 const INVENTORY = {
@@ -1716,7 +1864,7 @@ const INVENTORY = {
     "## New messages while you work": 805,
     "## Compaction": 698,
   },
-  tools: { request_human_input: 2562 },
+  tools: { request_human_input: 2048 },
 };
 
 // Every tool the prompt names must be one the model can reach in that request:
@@ -1757,6 +1905,17 @@ describe("the prompt names only attached tools", () => {
         eagerProduct: true,
         hasSkills: false,
         humanRecipient: false,
+      },
+    ],
+    [
+      "embedding profile, unattended",
+      {
+        agent: agentConfig("none"),
+        builtins: false,
+        eagerProduct: true,
+        hasSkills: false,
+        humanRecipient: false,
+        unattended: true,
       },
     ],
     ["all", { agent: agentConfig("all") }],

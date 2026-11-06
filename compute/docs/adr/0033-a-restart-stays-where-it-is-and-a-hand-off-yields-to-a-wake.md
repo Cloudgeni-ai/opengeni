@@ -1,4 +1,4 @@
-# 32. A restart stays where it is, and a hand-off yields to a wake
+# 33. A restart stays where it is, and a hand-off yields to a wake
 
 Status: Accepted, 2026-11-06. Amends
 [18](0018-the-control-service-leases-and-fences.md) (how the service

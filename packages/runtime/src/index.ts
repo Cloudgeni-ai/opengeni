@@ -356,6 +356,7 @@ export {
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type ProjectModelToolResult,
+  type SpilledToolResultReaders,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -2412,8 +2413,9 @@ export type BuildAgentOptions = {
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
   /**
-   * Whether this session has a parent agent (frozen at create). `false` leaves
-   * the parent-agent guidance out of `request_human_input`; omitted keeps it.
+   * Whether this session has a parent agent (frozen at create). `true` adds the
+   * parent-agent guidance to `request_human_input`, `false` leaves it out, and
+   * omitted keeps it conditioned on being a sub-session.
    */
   subSession?: boolean;
   /**
@@ -2922,11 +2924,15 @@ type HumanInputWireSchemaNode = {
 let fullHumanInputWireParameters: unknown;
 
 /**
- * The model-facing schema of a reduced `request_human_input`: the full
- * contract exactly as the Agents SDK converts it, with only the disabled
- * fields removed. Converting a reduced zod schema directly would take the
- * SDK's other converter, which adds length keywords and can make the reduced
- * schema larger than the full one. The reduced zod schema still parses calls.
+ * The model-facing schema of `request_human_input`: the full contract exactly
+ * as the Agents SDK converts it, with only fields removed. Always removed are
+ * the `$schema` marker and `allowOther`, which the model never needs: new
+ * choice requests always offer Other (`serializeHumanInputRequests`), a Skill
+ * review always drops it, and a text question that sets it is rejected. The disabled
+ * features are removed too. Converting a reduced zod schema directly would
+ * take the SDK's other converter, which adds length keywords and can make the
+ * reduced schema larger than the full one. Calls are still parsed by the zod
+ * schema, so an omitted `allowOther` takes its contract default.
  */
 function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
   fullHumanInputWireParameters ??= agentTool({
@@ -2935,14 +2941,17 @@ function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown
     parameters: RequestHumanInputToolInput,
     execute: () => "",
   }).parameters;
-  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode;
-  if (features.secrets && features.skillReview) return schema;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode & {
+    $schema?: unknown;
+  };
+  delete schema.$schema;
   const question = schema.properties?.questions?.items;
   if (!question?.properties) throw new Error("request_human_input schema has no question object");
   const drop = (field: string) => {
     delete question.properties![field];
     if (question.required) question.required = question.required.filter((name) => name !== field);
   };
+  drop("allowOther");
   if (!features.secrets) {
     drop("secret");
     const kind = question.properties.kind;
@@ -2956,7 +2965,6 @@ function withHumanInputWireParameters<T extends { parameters: unknown }>(
   features: HumanInputQuestionFeatures,
   built: T,
 ): T {
-  if (features.secrets && features.skillReview) return built;
   return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
 }
 
@@ -3342,13 +3350,21 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.";
+  "Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.";
 
-/** Rendered only for a session with a parent agent (nested depth above zero). */
+/**
+ * Rendered for a session with a parent agent (nested depth above zero). When
+ * the caller does not say whether there is a parent, the same text is
+ * conditioned on being a sub-session instead.
+ */
 const HUMAN_INPUT_PARENT_DESCRIPTION =
-  "In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+  "Your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
 
-/** Appended to the tool result when the person chose "Let the agent decide". */
+/**
+ * Appended to the tool result when the person chose "Let the agent decide".
+ * It is the only place the model learns what to do then, so the tool
+ * description does not repeat it.
+ */
 export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
   "The person let you decide. Make your own best choice for every question, continue, and say in one short sentence what you chose.";
 
@@ -3695,7 +3711,10 @@ export function buildOpenGeniAgent(
           // against the full contract below.
           description: [
             HUMAN_INPUT_TOOL_DESCRIPTION,
-            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            options.subSession === true
+              ? HUMAN_INPUT_PARENT_DESCRIPTION
+              : options.subSession === undefined &&
+                `In a sub-session, y${HUMAN_INPUT_PARENT_DESCRIPTION.slice(1)}`,
             toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
           ]
             .filter((part): part is string => typeof part === "string")

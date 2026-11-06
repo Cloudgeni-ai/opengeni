@@ -285,7 +285,7 @@ own URL, allowing 60 seconds of clock skew.
 | `sub` | `s`, `sid`, `subject`, `queue`? | Subscribe; `sid` is the host's, stable for the session. |
 | `unsub` | `s`, `sid` | Unsubscribe. |
 | `pub` | `s`, `subject`, `reply`?, `headers`? | Publish the payload. `headers` is a list of `[name, value]`. |
-| `state` | `s`, `state`, `busy`? | `awake` (its VM runs) or `asleep` (any sleep level). Sent when it changes, once per change however many levels a sleep passes through, and again when a session opens. For showing the sandbox's state and counting its awake time; it decides nothing about delivery. `busy` is `handing_off` while its host hands it off, which may refuse wakes for up to two minutes (ADR 32), and is omitted otherwise; a frame is sent when it changes too. A gateway reads a `busy` it does not know as none. |
+| `state` | `s`, `state`, `busy`? | `awake` (its VM runs) or `asleep` (any sleep level). Sent when it changes, once per change however many levels a sleep passes through, and again when a session opens. For showing the sandbox's state and counting its awake time; it decides nothing about delivery. `busy` is `handing_off` while its host hands it off, which may refuse wakes for up to two minutes (ADR 33), and is omitted otherwise; a frame is sent when it changes too. A gateway reads a `busy` it does not know as none. |
 | `close` | `s` | End the session: the sandbox left this host or its agent process changed. |
 
 ### Frames, gateway to host

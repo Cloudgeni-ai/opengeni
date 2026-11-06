@@ -199,7 +199,7 @@ skips sandbox enrollments, and machine routes list machines only.
   instance. A restart the server asks for because the agent stopped
   answering is the same: the host ends the VM where it is, forgets any saved
   memory image and boots it fresh on its disk, with no archive first (ADR
-  32). While a host hands a sandbox off it tells the gateway so over the
+  33). While a host hands a sandbox off it tells the gateway so over the
   agent link (`busy: "handing_off"`); the server then reports the host as
   busy instead of restarting the agent, and a wake that comes after the
   hand-off has stored for two minutes cancels it, so the sandbox runs on from
@@ -217,8 +217,11 @@ skips sandbox enrollments, and machine routes list machines only.
   the sandbox and the deletion waits for that. A terminal exec whose own
   deadline passes meanwhile gives that same unknown outcome: it reports exit
   124 only when its deadline provably ended the command.
-- **Host loss**: compute never brings an agent back rewound. After a host
-  loss the sandbox boots fresh on another host from its newest stored copy's
+- **Host loss**: compute never brings an agent back rewound. A host that
+  stops answering keeps its sandboxes: their wakes fail as unavailable,
+  saying they wait for the host, until it comes back with them or is
+  declared gone. After a host is declared gone the sandbox boots fresh on
+  another host from its newest stored copy's
   files (programs end; the guest flushes its disk before each capture, so the
   files are as the guest last wrote them before that copy), and its agent is a
   new process on a new connection instance, exactly as after a VM crash (see

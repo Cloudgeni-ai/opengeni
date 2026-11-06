@@ -1,5 +1,48 @@
 # Modular prompt changelog
 
+`request_human_input` says the same in fewer words, for every session. The
+system prompt is unchanged. In the embedding profile the tool falls from 588
+to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
+(legacy, top-level) from 1,179 to 1,070.
+
+- Description: the purpose sentence is shorter; "Supports free text,
+  single-select, multi-select, multiple questions, explicit skip policy, and
+  an optional expiry." is cut because the schema states each of these
+  (`kind`, `questions`, `allowSkip`, `expiresInSeconds`); the recommended,
+  preview, confirm and Other rules keep their meaning in fewer words; the
+  "Let the agent decide" sentence is cut because the tool result carries
+  `HUMAN_INPUT_AGENT_DECIDES_NOTE` exactly when it applies.
+- Parent-agent sentences (child sessions): "In a sub-session," is cut when
+  the caller says the session has a parent (`subSession: true`, which the
+  worker always sets from the frozen nested depth). A direct runtime caller
+  that leaves `subSession` out keeps the conditioned wording.
+- The secret sentences are unchanged.
+- Schema: `allowOther` is no longer sent (new choice questions are always
+  normalized to offer Other, and a text question that set it was rejected),
+  nor the `$schema` marker. The zod contract that validates calls is unchanged.
+- A session that started unattended still gets no tool and no question clause
+  (unchanged); the docs now point backends nobody answers at `unattended: true`.
+
+```text
+- Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.
++ Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.
+- In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
++ Your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
+```
+
+A tool result too large to show names only the tools the session has. The
+spilled-result notice names `files__files_get_download_url` and the shell only
+when the turn has compute and the Files server's download tool. Without both
+(and no placed copy), it says the result was saved, which reader is missing,
+and to call the tool again with narrower arguments if it can. Sessions with
+both readers get the same text as before.
+
+```text
++ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no download tool)
++ … but this session has no shell to read it with. …   (download tool, no shell)
+- If the file is not there, call files__files_get_download_url with fileId <fileId> and download it with the shell.   (placed copy, no download tool)
+```
+
 The search rule no longer assumes `rg` exists. Many user, task and Connected
 Machine images ship without ripgrep, and "`rg` … first" made the agent spend
 its first search on `rg: not found`. Nothing in a turn's prompt inputs says

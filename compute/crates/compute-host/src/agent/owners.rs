@@ -792,6 +792,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// Removes `record`'s sandbox as a ruling to drop it says, keeping this
+    /// host's copy aside if `aside`; `done` is answered once it is gone.
+    /// Returns whether there was anything here to remove.
+    fn drop_ruled(&mut self, record: &Record, aside: bool, frozen: bool, done: Reply<()>) -> bool {
+        let id = record.id;
+        if let Some(removers) = self.destroying.get_mut(&id.0) {
+            // A removal already under way goes on as it began.
+            removers.push(done);
+        } else if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.removers.push(done);
+            slot.set_aside |= aside;
+            self.drop_copy(id, None);
+        } else if frozen {
+            self.hand_away_frozen(record, vec![done], aside);
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// A removal of sandbox `id` ended: an adopt that waited for it goes
     /// on, or fails with it.
     pub(super) fn dropped(&mut self, id: Id, result: &Result<(), HostError>) {
@@ -884,15 +904,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     );
                     self.take_owner(id, Change::new().owner(owner).link(link), done);
                 }
-                Verdict::Drop => {
-                    if let Some(removers) = self.destroying.get_mut(&id.0) {
-                        removers.push(done);
-                    } else if let Some(slot) = self.slots.get_mut(&id.0) {
-                        slot.removers.push(done);
-                        self.drop_copy(id, None);
-                    } else if frozen {
-                        self.hand_away_frozen(&record, vec![done]);
-                    } else {
+                verdict @ (Verdict::Drop | Verdict::SetAside) => {
+                    let aside = verdict == Verdict::SetAside;
+                    if !self.drop_ruled(&record, aside, frozen, done) {
                         continue;
                     }
                 }
@@ -909,7 +923,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     if frozen {
                         // The adopt goes on once its VM is gone.
                         self.then_adopt.insert(id.0, then);
-                        self.hand_away_frozen(&record, Vec::new());
+                        self.hand_away_frozen(&record, Vec::new(), false);
                     } else {
                         self.drop_copy(id, Some(then));
                     }

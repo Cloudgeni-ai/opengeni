@@ -573,9 +573,19 @@ to hosts that offer them; other pools' teams reach none.
   run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
   the service fences it (on GCP it resets the
   instance, or finds it stopped or gone, or restarted since: see below),
-  then clears its sandboxes'
-  owner with a raised epoch, and each wakes on another host from its
-  latest archived copy on its next request. It boots from that copy's
+  then gives up on it. Its sandboxes stay its own and wait for it
+  (ADR 32): their wakes fail with `unavailable`, saying the host stopped
+  answering, and `GET /v1/sandboxes/<id>` shows `waiting_for`. A host that
+  comes back keeps all of them, newer writes and all. Only once the host
+  is declared gone (its group found its instance deleted, or an operator
+  calls `POST /v1/hosts/<name>/gone`, which answers each sandbox that goes
+  on and when its stored copy was saved) are their owners cleared with a
+  raised epoch, and each wakes on another host from its
+  latest archived copy on its next request. Declare a host gone only once
+  its disks are known lost, or when getting the sandboxes back now matters
+  more than what they wrote since their copies. Each such sandbox then shows
+  `restored`, with a plain `notice` saying what point in time it went back
+  to; its wake's answer carries the same. It boots from that copy's
   files: its programs end and start afresh, and what it wrote since the
   copy is lost, which is why sandboxes archive soon after they go idle
   and are checkpointed while they run. Its memory is not brought back
@@ -583,7 +593,13 @@ to hosts that offer them; other pools' teams reach none.
   drain or move hands the latest state off, memory and all. The adopting
   host raises the `programs_lost` alarm for each sandbox whose memory it
   set aside, as a host does for a VM that died. Nothing has to be done by
-  hand, except replacing the machine where no group does it.
+  hand, except declaring a host gone that will not come back, and
+  replacing the machine where no group does it. A host declared gone
+  that comes back after all sets aside each copy it would otherwise
+  drop: the directory moves, whole, to `vm/aside/<id>-e<epoch>-<ms>`
+  under its state root, and the host logs an error naming it. Copy out
+  what is needed (its disk image holds the files), then delete it;
+  nothing deletes it otherwise.
   A GCP host whose machine restarted (its watchdog reset it, or it
   crashed) is given up on as soon as its lease lapses, with no second
   reset and no wait: its agent writes the machine's boot to the
