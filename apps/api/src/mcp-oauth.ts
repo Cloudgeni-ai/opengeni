@@ -49,6 +49,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
@@ -104,6 +105,13 @@ const AUTO_CONNECT_HELPERS: McpAutoConnectHelpers = {
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
+  // Enforced on the streamed body, so a chunked request without a
+  // Content-Length is refused at the limit rather than buffered and parsed.
+  const protocolBodyLimit = bodyLimit({
+    maxSize: MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES,
+    onError: (c) =>
+      c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
+  });
   // First: the organization issuer's RFC 8414 metadata sits under the
   // authorization server metadata wildcard below.
   registerMcpAutoConnectRoutes(app, deps, AUTO_CONNECT_HELPERS);
@@ -154,7 +162,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.post("/oauth/register", async (c) => {
+  app.post("/oauth/register", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const parsed = McpOAuthClientRegistrationRequest.safeParse(
       await c.req.json().catch(() => null),
@@ -307,7 +315,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.post("/oauth/authorize", async (c) => {
+  app.post("/oauth/authorize", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const requestToken = form.get("request") ?? "";
@@ -507,7 +515,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
-  app.post("/oauth/token", async (c) => {
+  app.post("/oauth/token", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const grantType = form.get("grant_type");
@@ -633,6 +641,28 @@ export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||
     pathname === "/oauth/token"
+  );
+}
+
+/**
+ * Largest body accepted by the anonymous OAuth protocol posts (client
+ * registration, the consent form, and the token endpoint). Their requests are
+ * small forms or JSON documents, far below this.
+ */
+export const MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * The OAuth protocol posts. The app-wide request-body limit skips them because
+ * each route enforces {@link MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES} on the
+ * streamed body; the generic ceiling would otherwise buffer a body of many
+ * megabytes on an anonymous route before the route could refuse it.
+ */
+export function isMcpOAuthProtocolPostRequest(method: string, pathname: string): boolean {
+  return (
+    method === "POST" &&
+    (pathname === "/oauth/register" ||
+      pathname === "/oauth/authorize" ||
+      pathname === "/oauth/token")
   );
 }
 

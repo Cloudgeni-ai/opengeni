@@ -291,6 +291,7 @@ import {
 import { createWorkspaceToolGatewayCatalogAttestations } from "./workspace-tool-gateway-attestations";
 import { recordWorkspaceToolGatewayPreparation } from "./workspace-tool-gateway-observability";
 import {
+  isMcpOAuthProtocolPostRequest,
   isMcpOAuthResourcePath,
   mcpOAuthAuthenticateHeader,
   mcpOAuthBearerToken,
@@ -998,11 +999,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web beacons and Site Data uploads enforce their own limits
-    // on the streamed body; the generic ceiling would buffer far more first.
+    // The anonymous web beacons, the OAuth protocol posts, and Site Data
+    // uploads enforce their own limits on the streamed body; the generic
+    // ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
       isAnalyticsConsentReportRequest(c.req.method, pathname) ||
+      isMcpOAuthProtocolPostRequest(c.req.method, pathname) ||
       isSessionHistoryImportRequest(c.req.method, pathname) ||
       isSiteDataFileUploadRequest(c.req.method, pathname)
     ) {
