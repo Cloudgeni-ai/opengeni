@@ -42,6 +42,7 @@ import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
   type MintedRunGitCredentials,
+  type MintedSandboxCodemodeToken,
   type SandboxCodemodeAuthority,
 } from "../environment";
 import { rigProviderImageSourceImage } from "@opengeni/core";
@@ -183,7 +184,7 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
   throwIfWorkerShuttingDown: () => void;
@@ -1308,7 +1309,7 @@ export async function bindLazySandboxProvisioner(
             );
             await attachCodemodeTokenRenewal(
               provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
+              lazyCodemodeToken,
               provisioned,
             );
             await attachGitCredentialRenewal(
