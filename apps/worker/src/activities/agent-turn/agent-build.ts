@@ -196,6 +196,8 @@ export type BuildTurnAgentDeps = {
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
+  /** The repository skill index would prepare the workspace before the model. */
+  deferRepositorySkillIndex: boolean;
   postToolPreparationStartedAt: number;
   codexContext: CodexRequestContext | null;
 };
@@ -927,6 +929,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        ...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
         // W1: `{{secret:…}}` references resolve at the exec boundary, and the
         // session's credential profile adds its variables to every command
         // through the same resolver.

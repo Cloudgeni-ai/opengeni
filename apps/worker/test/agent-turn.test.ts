@@ -132,6 +132,7 @@ import {
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldEstablishSandboxForTurn,
   shouldPrefetchManagedSandbox,
+  shouldDeferRepositorySkillIndex,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
   compactionFailureTurnEventPayload,
@@ -3631,6 +3632,43 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldPrefetchManagedSandbox({ ...recovering, establishPolicy: "eager" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...recovering, groupBoxBackend: "selfhosted" })).toBe(
       false,
+    );
+  });
+
+  test("the repository skill index never prepares a lazily provisioned box before the model", async () => {
+    const base = {
+      lazyEnabled: true,
+      machinePrimary: false,
+      groupBoxBackend: "compute" as const,
+      hasRepositoryResources: true,
+    };
+    expect(shouldDeferRepositorySkillIndex(base)).toBe(true);
+    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "modal" })).toBe(true);
+    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "docker" })).toBe(true);
+    // Without lazy provisioning the box is ready first; a Connected Machine is already there.
+    expect(shouldDeferRepositorySkillIndex({ ...base, lazyEnabled: false })).toBe(false);
+    expect(shouldDeferRepositorySkillIndex({ ...base, machinePrimary: true })).toBe(false);
+    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
+    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "none" })).toBe(false);
+    expect(shouldDeferRepositorySkillIndex({ ...base, hasRepositoryResources: false })).toBe(false);
+
+    // The turn hands the decision to the agent it builds.
+    const runSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const buildSource = await Bun.file(
+      new URL("../src/activities/agent-turn/agent-build.ts", import.meta.url),
+    ).text();
+    const buildCallAt = runSource.indexOf("await buildTurnAgent({");
+    const decisionAt = runSource.indexOf(
+      "deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({",
+      buildCallAt,
+    );
+    expect(buildCallAt).toBeGreaterThan(-1);
+    expect(decisionAt).toBeGreaterThan(buildCallAt);
+    expect(runSource.indexOf("});", buildCallAt)).toBeGreaterThan(decisionAt);
+    expect(buildSource).toContain(
+      "...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),",
     );
   });
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { FunctionTool } from "@openai/agents";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
 
 import {
@@ -217,6 +218,178 @@ describe("workspace repository skills", () => {
     expect(entries[0]?.description).toBe("Maintain Opengeni source code.");
   });
 
+  test("a deferred index never touches the workspace before the model runs", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
+    });
+    let operations = 0;
+    const listDir = session.listDir!;
+    const readFile = session.readFile!;
+    session.listDir = async (args) => {
+      operations++;
+      return listDir(args);
+    };
+    session.readFile = async (args) => {
+      operations++;
+      return readFile(args);
+    };
+    const capability = workspaceSkills(
+      [
+        { path: ".agents/skills", source: "workspace .agents/skills" },
+        { path: "repos/app/.claude/skills", source: "repos/app/.claude/skills" },
+      ],
+      [],
+      [],
+      { deferred: true },
+    ).bind(session);
+
+    const instructions = await capability.instructions();
+    expect(operations).toBe(0);
+    expect(instructions).toContain("## Repository skills");
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
+    expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
+    // No skill is listed, and the notice says how to name one: repository:
+    // and the SKILL.md path from the workspace root, shown with a real folder.
+    expect(instructions).not.toContain("repository:.agents/skills/opengeni");
+    expect(instructions).toContain("(paths from the workspace root)");
+    expect(instructions).toContain("such as repository:.agents/skills/<folder>/SKILL.md");
+
+    // The reader still discovers live when a tool asks for an exact skill, and
+    // its description names skills the way the notice does, not by an index.
+    const tool = capability
+      .tools()
+      .find(
+        (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+      );
+    if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain(
+      "repository: followed by its SKILL.md path from the workspace root",
+    );
+    expect(tool.description).not.toContain("Repository skills index");
+    // A wrong name is told the identifiers that exist.
+    const miss = (await tool.invoke(
+      undefined!,
+      JSON.stringify({ skill: "repository:.agents/skills/opengeni" }),
+    )) as string;
+    // There is no index on these turns, so the miss does not point at one.
+    expect(miss).toContain("No repository skill has this identifier.");
+    expect(miss).not.toContain("index");
+    expect(miss).toContain("repository:.agents/skills/opengeni/SKILL.md");
+    const result = JSON.parse(
+      (await tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" }),
+      )) as string,
+    );
+    expect(result.files[0].content).toContain("# Guidance");
+    expect(operations).toBeGreaterThan(0);
+  });
+
+  test("a deferred reader discovers again after a failed first attempt", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let failures = 1;
+    session.listDir = async (args) => {
+      if (failures-- > 0) throw new Error("transient provision failure");
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    // The reader is often the first workspace operation; its failure surfaces
+    // on that call and does not stick for the rest of the run.
+    expect(String(await reader.invoke(undefined!, id))).toContain("transient provision failure");
+    const result = JSON.parse((await reader.invoke(undefined!, id)) as string);
+    expect(result.files[0].content).toContain("# Guidance");
+  });
+
+  test("a deferred reader says the workspace is unreachable, then reads once it answers", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let failures = 1;
+    session.listDir = async (args) => {
+      if (failures-- > 0) throw agentErrorToControlError(offlineAgentError(undefined, true));
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    const miss = String(await reader.invoke(undefined!, id));
+    expect(miss).toContain("the workspace is unreachable");
+    expect(miss).not.toContain("No repository skills were found");
+    const result = JSON.parse((await reader.invoke(undefined!, id)) as string);
+    expect(result.files[0].content).toContain("# Guidance");
+  });
+
+  test("concurrent deferred reads share one discovery, and both retry after it fails", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let discoveries = 0;
+    let failing = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    session.listDir = async (args) => {
+      if (args.path === ".agents/skills") discoveries++;
+      if (failing) {
+        await gate;
+        throw new Error("transient provision failure");
+      }
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    const pending = [reader.invoke(undefined!, id), reader.invoke(undefined!, id)];
+    // Both reads are waiting on the same discovery before it fails.
+    await Bun.sleep(10);
+    release();
+    for (const output of await Promise.all(pending))
+      expect(String(output)).toContain("transient provision failure");
+    expect(discoveries).toBe(1);
+    failing = false;
+    const results = await Promise.all([
+      reader.invoke(undefined!, id),
+      reader.invoke(undefined!, id),
+    ]);
+    for (const output of results)
+      expect(JSON.parse(output as string).files[0].content).toContain("# Guidance");
+    expect(discoveries).toBe(2);
+  });
+
+  test("a deferred miss names skipped skill folders and why", async () => {
+    const session = fakeSession({
+      ".agents/skills/release/SKILL.md":
+        "---\nname: release\ndescription: Repository release instructions.\n---\n",
+    });
+    const reader = deferredReader(session, ["release"]);
+    const miss = String(
+      await reader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/release/SKILL.md" }),
+      ),
+    );
+    expect(miss).toContain("No repository skills were found.");
+    expect(miss).toContain("Skipped: .agents/skills/release");
+  });
+
+  test("agent capabilities keep a deferred repository index through SDK clone and bind", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    session.listDir = async () => {
+      throw new Error("the workspace must not be prepared before the model runs");
+    };
+    const capabilities = buildAgentCapabilities(testSettings(), [], {
+      ...repositoryWorkspaceSkillPathsOption([
+        { kind: "repository", uri: "https://github.com/example/app", ref: "main" },
+      ]),
+      deferRepositorySkillIndex: true,
+      structuredToolTransport: false,
+    });
+    const capability = capabilities.find((entry) => entry.type === "workspace-skills")!;
+    const instructions = await capability
+      .clone()
+      .bind(session)
+      .instructions(new Manifest({ root: "/workspace" }));
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
+  });
+
   test("advertised repository skills have an explicit live reader", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
@@ -234,6 +407,9 @@ describe("workspace repository skills", () => {
       );
     expect(tool).toBeDefined();
     if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain(
+      "Use the exact repository: identifier from the Repository skills index.",
+    );
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
@@ -714,7 +890,10 @@ description: Prepare a safe release.
           undefined!,
           JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
         ),
-      ).toContain("Repository Skill is not in this index");
+      ).toContain(
+        // This run keeps its index, so the text does not invite a retry.
+        "the workspace was unreachable when this run started. Once workspace tools respond, read the skill's SKILL.md with file tools.",
+      );
       expect(calls).toBe(2);
     });
   }
@@ -1430,6 +1609,23 @@ function sessionActivation(
     artifact,
     reason: "attached to session",
   };
+}
+
+/** The repository_skill_read tool of a deferred index bound to `session`. */
+function deferredReader(
+  session: SandboxSessionLike,
+  reservedNames: string[] = [],
+): FunctionTool<unknown> {
+  const tool = workspaceSkills([{ path: ".agents/skills", source: "agents" }], reservedNames, [], {
+    deferred: true,
+  })
+    .bind(session)
+    .tools()
+    .find(
+      (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+    );
+  if (tool?.type !== "function") throw new Error("missing reader");
+  return tool as FunctionTool<unknown>;
 }
 
 function fakeSession(files: Record<string, string>): SandboxSessionLike {

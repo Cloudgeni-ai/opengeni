@@ -2775,6 +2775,14 @@ export type BuildAgentOptions = {
    */
   turnCancellationSignal?: AbortSignal;
   /**
+   * Leave repository skills unindexed and tell the model where to look
+   * instead. Set for sessions whose workspace is provisioned lazily, where
+   * indexing would be the operation that prepares it (box, environment setup,
+   * clone) before the first model request; that preparation then starts when
+   * a tool first uses it.
+   */
+  deferRepositorySkillIndex?: boolean;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -4011,6 +4019,7 @@ export function buildOpenGeniAgent(
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
+      ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -5523,6 +5532,7 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+    deferRepositorySkillIndex?: boolean;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5619,6 +5629,7 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
+        options.deferRepositorySkillIndex ? { deferred: true } : {},
       ),
     );
   }
