@@ -550,6 +550,15 @@ export function managedChromeArguments(input: {
   sandboxUnavailable?: boolean;
   smallSharedMemory?: boolean;
 }): string[] {
+  // Chromium honors only the last --blink-settings switch, so an additional
+  // one is folded after the desktop pointer and overrides it key by key.
+  const blinkSettings = input.windowed ? [] : [HEADLESS_DESKTOP_POINTER_SETTINGS];
+  const additional = (input.additional ?? []).filter((argument) => {
+    // An invalid one stays for browserLaunchArguments to refuse.
+    if (!argument.startsWith("--blink-settings=") || /[\r\n\0]/u.test(argument)) return true;
+    blinkSettings.push(argument.slice("--blink-settings=".length));
+    return false;
+  });
   return [
     "--remote-debugging-port=0",
     `--user-data-dir=${resolve(input.profileDirectory)}`,
@@ -571,7 +580,8 @@ export function managedChromeArguments(input: {
     // Headless Chrome elsewhere keeps WebGL through SwiftShader, as on Linux.
     ...(!input.windowed && input.platform !== "linux" ? ["--enable-unsafe-swiftshader"] : []),
     ...(input.proxyServer ? [`--proxy-server=${input.proxyServer}`] : []),
-    ...browserLaunchArguments(input.platform, input.additional),
+    ...browserLaunchArguments(input.platform, additional),
+    ...(blinkSettings.length > 0 ? [`--blink-settings=${blinkSettings.join(",")}`] : []),
     // Chrome's sandbox cannot start as root or inside most containers.
     ...(input.sandboxUnavailable ? ["--no-sandbox"] : []),
     ...(input.smallSharedMemory ? ["--disable-dev-shm-usage"] : []),
@@ -977,6 +987,15 @@ async function chromeStderrDrainWrapper(
     throw error;
   }
 }
+
+/** The pointer a headless or offscreen Chrome presents to pages: a desktop
+ * mouse (primary and available hover "hover", pointer "fine"). Headless
+ * Chrome sees no input device, so pages would otherwise match
+ * (hover: none) and (pointer: none) and never apply hover styles, unlike
+ * every desktop Chrome. Values are Blink's HoverType and PointerType bits.
+ * Mobile viewport emulation still turns these into a touch screen. */
+const HEADLESS_DESKTOP_POINTER_SETTINGS =
+  "primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4";
 
 /** Arguments that make an offscreen (new headless) real Chrome on macOS
  * present like the person's ordinary windowed Chrome. Headless Chrome names
