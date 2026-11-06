@@ -685,7 +685,7 @@ export function AutoConnectSetupPage({
 
   return (
     <FlushFormPage
-      backLabel="Connected agents"
+      backLabel="Connected apps"
       onClose={onClose}
       title="Set up auto-connect"
       description={`People in ${organizationName} are connected the first time their agent uses Opengeni, with no sign-in.`}
@@ -906,7 +906,7 @@ export function TrustedIssuerPage({
   onSaved: (next: McpTrustedIssuer) => void;
   onRemoved: (id: string) => void;
 }) {
-  const back = { label: "Connected agents", onClick: onClose };
+  const back = { label: "Connected apps", onClick: onClose };
   if (!issuer)
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -1044,7 +1044,7 @@ function LoadedTrustedIssuerPage({
 
   return (
     <DetailPage
-      back={{ label: "Connected agents", onClick: onClose }}
+      back={{ label: "Connected apps", onClick: onClose }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader

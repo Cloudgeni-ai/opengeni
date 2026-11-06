@@ -153,7 +153,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     if (refused || listFailed)
       return (
         <DetailPage
-          back={{ label: "Connected agents", onClick: () => onNavigate({}) }}
+          back={{ label: "Connected apps", onClick: () => onNavigate({}) }}
           className={FLUSH_DETAIL_PAGE_CLASS}
         >
           {refused ? (
