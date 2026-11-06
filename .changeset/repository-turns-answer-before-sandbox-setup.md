@@ -10,6 +10,6 @@ Indexing the repository's skills used to be the first workspace operation. On a 
 - **Deferred index:** these sessions now leave the repository skills index out of the instructions. Instead, they tell the model which skill folders to check and how to name a skill for `repository_skill_read`.
 - **Workspace preparation:** the workspace is still prepared when a sandbox tool first uses it, exactly as before, and the box create still starts early.
 - **Stable instructions:** the choice holds for the whole session, so the instructions stay the same from turn to turn. Sessions on Connected Machines, or with lazy provisioning off, keep the live index.
-- **Better errors:** a `repository_skill_read` call with an unknown identifier now lists the identifiers that exist.
+- **Better errors:** a `repository_skill_read` call with an unknown identifier now lists the identifiers that exist, names skipped skill folders and why, or says the folders could not be read. A failed discovery is retried on the next call instead of being remembered for the rest of the run.
 - **Accurate startup metrics:** repository skill discovery that starts after the first model request is no longer counted as model-preparation startup.
 - **API:** `buildAgent` accepts `deferRepositorySkillIndex`, and `workspaceSkills` accepts `{ deferred: true }`. A deferred index never touches the sandbox session.
