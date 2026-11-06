@@ -30,6 +30,7 @@ import {
   CompatibleModelApi,
   CompatibleModelBaseUrl,
   CompatibleModelName,
+  DirectModelName,
   CompatibleModelReasoning,
 } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
@@ -3960,6 +3961,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
        * its `/openai/v1` URL). Arbitrary proxy endpoints are refused.
        */
       endpoint: AzureOpenAIEndpoint.optional(),
+      /**
+       * OpenAI and Azure OpenAI only: models (Azure deployment names) to offer
+       * with the connection. Each is checked with a short request using this
+       * key (or sign-in) before anything is saved, then saved with the
+       * connection in one step. Models it already offers are kept as they are.
+       */
+      models: z.array(DirectModelName).min(1).max(16).optional(),
       claudeIdentity: z
         .object({
           accountUuid: primitives.uuid,

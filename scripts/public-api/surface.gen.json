@@ -32584,6 +32584,8 @@
         "$.claudeIdentity.deviceId": "string!",
         "$.endpoint": "string?",
         "$.expectedVersion": "integer?",
+        "$.models": "array?",
+        "$.models[]": "string",
         "$.operationId": "string!"
       }
     },
