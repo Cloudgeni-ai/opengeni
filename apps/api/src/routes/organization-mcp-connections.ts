@@ -63,6 +63,12 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent can change what it can do.",
       });
     }
+    if (connection.autoConnect) {
+      throw new HTTPException(409, {
+        message:
+          "This agent connected automatically. An admin changes what it can do in Auto-connect.",
+      });
+    }
     const parsed = parseRequestBody(
       UpdateOrganizationMcpConnectionRequest,
       await c.req.json().catch(() => null),
@@ -194,6 +200,12 @@ async function projectConnections(deps: ApiRouteDeps, connections: OrganizationM
         name: profile?.name?.trim() || profile?.email || "Someone",
       },
       policy: connection.organizationAccess,
+      autoConnect: connection.autoConnect
+        ? {
+            trustedIssuerId: connection.autoConnect.trustedIssuerId,
+            issuerName: connection.autoConnect.issuerName ?? "Trusted issuer",
+          }
+        : null,
       createdAt: connection.connectedAt.toISOString(),
       lastUsedAt: connection.lastUsedAt?.toISOString() ?? null,
       expiresAt: connection.expiresAt.toISOString(),

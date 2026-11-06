@@ -274,8 +274,7 @@ admins only). For each it says where it works (a machine or sandbox environment
 always works in the workspace it came from) and where it opens: in this
 workspace when it works here, else in the first workspace by name that it
 works in and the viewer can open, else nowhere. A caller those lists refuse
-(anyone but an organization owner or admin, or an agent acting as itself), or
-a server that has not granted a list yet (`complete: false`), gets the
+(anyone but an organization owner or admin, or an agent acting as itself) gets the
 organization ones that work in the current workspace, and the page says so.
 The Skills row counts the organization's Skills and says how many don't work
 here (the Skills list already holds those for the people who manage them).

@@ -300,7 +300,7 @@ its own connection.
 
 It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
 `credentialRole: "direct_openai_compatible"` and
-`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label?, reasoning? }`.
 `providerDomain` must be the base URL's host. Over the API:
 
 ```json
@@ -339,10 +339,32 @@ Model IDs are `workspace-compatible-<connection id>/<version>/<model>`. The key
 is sent only to that base URL and only for that workspace's turns. Usage is
 billed by the provider and uses no Opengeni credits. The route gets the
 conservative text, function-calling and SSE capabilities every compatible API
-shares; no hosted tools, reasoning controls or images are assumed, the model
+shares; no hosted tools or images are assumed, the model
 SDK does not retry a failed request on its own, and no price is inferred from
 the model ID. Its residency is recorded as unknown, so deployments that
 require EU-only inference refuse these routes.
+
+##### Reasoning levels
+
+A compatible model offers reasoning only at the levels it declares:
+`reasoning: { efforts, defaultEffort }`, where `efforts` is a non-empty subset
+of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max` (stored lowest
+first) and contains `defaultEffort`. When a connection doesn't set it, the
+setup check reads it from the endpoint's own listing: `GET {baseUrl}/models/{model}`,
+then the `GET {baseUrl}/models` entry with that `id`, taking
+`supported_reasoning_efforts` (or `reasoning_efforts`) and the default from
+`default_reasoning_effort` (or `reasoning_effort`); levels with no Opengeni
+name are skipped. Reading is best effort: an endpoint that lists none, or
+can't be read, gets no reasoning levels.
+
+With levels, the model picker offers exactly those, starting at the default,
+and each request sends the chosen level as `reasoning_effort` (Chat
+Completions) or `reasoning.effort` (Responses). A level the model doesn't
+declare is sent as the nearest declared level below it (or the default).
+Without levels, no reasoning parameter is sent at all. Reasoning text the
+endpoint returns (`reasoning_content` or `reasoning`) and cached input tokens
+(`usage.prompt_tokens_details.cached_tokens`) are read back like on every Chat
+Completions route.
 
 #### Organization OpenAI and Azure OpenAI
 
@@ -442,12 +464,18 @@ POST   /v1/organizations/:id/model-providers/openai_compatible/endpoints
 PUT    …/endpoints/:connectionId/key
 DELETE …/endpoints/:connectionId
 POST   …/endpoints/:connectionId/models
+PUT    …/endpoints/:connectionId/models/:customModelId/reasoning
 DELETE …/endpoints/:connectionId/models/:customModelId
 ```
 
 Connecting takes the same fields as a workspace endpoint above (HTTPS base URL,
-key, first model ID, API format, optional name); more models can be added
-later. Every key and model is checked with the same short setup request before
+key, first model ID, API format, optional name, optional `reasoning`); more
+models can be added later, each with optional `reasoning`. Every model's
+[reasoning levels](#reasoning-levels) are read from the endpoint when not given
+(`null` saves none). `PUT …/reasoning` with `{ expectedVersion, reasoning }`
+changes them, and without `reasoning` reads them again from the endpoint (422
+when it lists none); the endpoint's page offers both under each model's
+**Reasoning levels** button. Every key and model is checked with the same short setup request before
 it is saved, and that request and every model request are DNS-pinned to public
 addresses without redirects, exactly as for workspace endpoints. The key is
 stored encrypted and never returned. Products are

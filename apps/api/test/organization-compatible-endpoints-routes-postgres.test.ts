@@ -38,6 +38,9 @@ let app: Hono | null = null;
 /** Test requests the API sent to endpoints: URL and bearer key. */
 const checks: { url: string; authorization: string | null; model: string }[] = [];
 let endpointAnswers = 200;
+/** What each endpoint's GET /models routes list, by URL; anything else is 404. */
+const listings = new Map<string, unknown>();
+const listingReads: string[] = [];
 
 const signedIn = new Map<string, { authSessionId: string; userId: string; email: string }>();
 
@@ -62,6 +65,13 @@ function fullApp(): Hono {
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({}) as never,
     directModelFetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") {
+        listingReads.push(String(input));
+        const listing = listings.get(String(input));
+        return listing === undefined
+          ? new Response("not found", { status: 404 })
+          : Response.json(listing);
+      }
       const headers = new Headers(init?.headers);
       const body = JSON.parse(String(init?.body)) as { model: string };
       checks.push({
@@ -328,5 +338,100 @@ describe.skipIf(!realDb)("organization OpenAI-compatible endpoint routes", () =>
     expect((after.json.endpoints as { id: string }[]).map((endpoint) => endpoint.id)).toEqual([
       kept!.id,
     ]);
+  });
+
+  test("reasoning levels are read from the endpoint's /models, or set by an administrator", async () => {
+    const base = "https://reasoning.example.com/v1";
+    listings.clear();
+    listingReads.length = 0;
+    listings.set(`${base}/models/acme/thinker`, {
+      id: "acme/thinker",
+      supported_reasoning_efforts: ["none", "low", "high", "max", "ultra"],
+      reasoning_effort: "high",
+    });
+    const created = await call(owner, "POST", endpointsPath(owner.accountId), {
+      operationId: crypto.randomUUID(),
+      baseUrl: base,
+      apiKey: "sk-reasoning",
+      model: "acme/thinker",
+    });
+    expect(created.status).toBe(201);
+    const endpointPath = `${endpointsPath(owner.accountId)}/${created.json.id}`;
+    const [thinker] = created.json.models as Record<string, any>[];
+    expect(thinker!.reasoning).toEqual({
+      efforts: ["none", "low", "high", "max"],
+      defaultEffort: "high",
+    });
+    expect(listingReads).toEqual([`${base}/models/acme/thinker`]);
+
+    // A model the endpoint lists nothing for has none; given levels are saved as they are.
+    const plain = await call(owner, "POST", `${endpointPath}/models`, {
+      operationId: crypto.randomUUID(),
+      upstreamModelId: "acme/plain",
+    });
+    expect(plain.status).toBe(201);
+    expect(plain.json.reasoning).toBeNull();
+    const chosen = await call(owner, "POST", `${endpointPath}/models`, {
+      operationId: crypto.randomUUID(),
+      upstreamModelId: "acme/chosen",
+      reasoning: { efforts: ["high", "low"], defaultEffort: "low" },
+    });
+    expect(chosen.json.reasoning).toEqual({ efforts: ["low", "high"], defaultEffort: "low" });
+
+    const reasoningPath = (id: string) => `${endpointPath}/models/${id}/reasoning`;
+    const set = await call(owner, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: plain.json.version,
+      reasoning: { efforts: ["medium"], defaultEffort: "medium" },
+    });
+    expect(set.status).toBe(200);
+    expect(set.json).toMatchObject({
+      version: plain.json.version + 1,
+      reasoning: { efforts: ["medium"], defaultEffort: "medium" },
+    });
+    // Without levels, it reads them again; 422 when the endpoint still lists none.
+    const nothing = await call(owner, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: set.json.version,
+    });
+    expect(nothing.status).toBe(422);
+    listings.set(`${base}/models`, {
+      data: [{ id: "acme/plain", reasoning_efforts: ["low", "high"] }],
+    });
+    const detected = await call(owner, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: set.json.version,
+    });
+    expect(detected.status).toBe(200);
+    expect(detected.json.reasoning).toEqual({ efforts: ["low", "high"], defaultEffort: "high" });
+    const stale = await call(owner, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: set.json.version,
+      reasoning: null,
+    });
+    expect(stale.status).toBe(409);
+    const invalid = await call(owner, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: detected.json.version,
+      reasoning: { efforts: ["low"], defaultEffort: "max" },
+    });
+    expect(invalid.status).toBe(422);
+    const memberSet = await call(member, "PUT", reasoningPath(plain.json.id), {
+      expectedVersion: detected.json.version,
+      reasoning: null,
+    });
+    expect(memberSet.status).toBe(403);
+
+    const listed = await call(owner, "GET", endpointsPath(owner.accountId));
+    const endpoint = (listed.json.endpoints as Record<string, any>[]).find(
+      (candidate) => candidate.id === created.json.id,
+    )!;
+    expect(
+      Object.fromEntries(
+        (endpoint.models as Record<string, any>[]).map((model) => [
+          model.upstreamModelId,
+          model.reasoning?.efforts ?? null,
+        ]),
+      ),
+    ).toEqual({
+      "acme/thinker": ["none", "low", "high", "max"],
+      "acme/plain": ["low", "high"],
+      "acme/chosen": ["low", "high"],
+    });
   });
 });

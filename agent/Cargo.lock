@@ -2047,6 +2047,7 @@ name = "opengeni-agent-linux-ffi"
 version = "0.1.155"
 dependencies = [
  "libc",
+ "signal-hook-registry",
  "tokio",
 ]
 

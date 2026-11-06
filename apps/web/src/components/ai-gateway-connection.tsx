@@ -468,6 +468,10 @@ export interface ProviderConnectionView {
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
   removeCustomModel(model: CustomModelLike): Promise<boolean>;
+  /** A second line under a custom model's readiness, such as its reasoning levels. */
+  customModelDetail?: ((model: CustomModelLike) => ReactNode) | undefined;
+  /** A control before a custom model's Remove button, such as editing its reasoning levels. */
+  customModelAction?: ((model: CustomModelLike) => ReactNode) | undefined;
 }
 
 export function useProviderConnection(
@@ -1330,34 +1334,46 @@ export function ProviderCustomModels({
                       (isClaude ? claudeModelLabel(model.upstreamModelId) : model.upstreamModelId)}
                   </span>
                 }
-                description={readiness}
+                description={
+                  state.customModelDetail ? (
+                    <>
+                      <span className="block">{readiness}</span>
+                      <span className="block">{state.customModelDetail(model)}</span>
+                    </>
+                  ) : (
+                    readiness
+                  )
+                }
                 control={
                   state.canManageCustomModels ? (
-                    <Button
-                      ref={(node) => {
-                        if (node) state.removeButtonRefs.current.set(model.id, node);
-                        else state.removeButtonRefs.current.delete(model.id);
-                      }}
-                      type="button"
-                      size="icon-sm"
-                      variant="ghost"
-                      className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-danger pointer-coarse:size-11"
-                      disabled={state.removingModelId !== null}
-                      aria-label={`Remove ${model.upstreamModelId}`}
-                      onClick={() => {
-                        state.removeFocusTargetRef.current =
-                          state.removeButtonRefs.current.get(model.id) ??
-                          state.modelInputRef.current;
-                        state.restoreRemovalFocusRef.current = true;
-                        state.setModelPendingRemoval(model);
-                      }}
-                    >
-                      {state.removingModelId === model.id ? (
-                        <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
-                      ) : (
-                        <MinusCircleIcon aria-hidden="true" />
-                      )}
-                    </Button>
+                    <span className="flex items-center gap-1">
+                      {state.customModelAction?.(model)}
+                      <Button
+                        ref={(node) => {
+                          if (node) state.removeButtonRefs.current.set(model.id, node);
+                          else state.removeButtonRefs.current.delete(model.id);
+                        }}
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-danger pointer-coarse:size-11"
+                        disabled={state.removingModelId !== null}
+                        aria-label={`Remove ${model.upstreamModelId}`}
+                        onClick={() => {
+                          state.removeFocusTargetRef.current =
+                            state.removeButtonRefs.current.get(model.id) ??
+                            state.modelInputRef.current;
+                          state.restoreRemovalFocusRef.current = true;
+                          state.setModelPendingRemoval(model);
+                        }}
+                      >
+                        {state.removingModelId === model.id ? (
+                          <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
+                        ) : (
+                          <MinusCircleIcon aria-hidden="true" />
+                        )}
+                      </Button>
+                    </span>
                   ) : null
                 }
               />

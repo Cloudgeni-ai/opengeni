@@ -1556,30 +1556,30 @@ describe("child lifecycle notices", () => {
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
   });
 
-  test("subscription capacity waits enqueue child_waiting_capacity", async () => {
+  test("a long subscription capacity wait tells the parent at once, with its reset time", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const codexChild = await startSession(grant, { parent, message: "codex work" });
+    const resetsAt = new Date(Date.now() + 4 * 24 * 60 * 60_000);
     const codex = await armSubscriptionCoreCapacityWait(client.db, "codex", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: codexChild.session.id,
       turnId: codexChild.turn.id,
       attemptId: codexChild.attemptId,
-      waitReason: "capacity",
-      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetsAt,
       failurePayload: { error: "all connected Codex subscriptions are unavailable" },
     });
     if (codex.action !== "waiting") throw new Error(`codex wait not armed: ${codex.action}`);
-    expect(
-      await outbox(
-        grant,
-        childWaitingCapacityDedupeKey({
-          childSessionId: codexChild.session.id,
-          waiterId: codex.waiter.waiterId,
-        }),
-      ),
-    ).toMatchObject({
+    const codexNotice = await outbox(
+      grant,
+      childWaitingCapacityDedupeKey({
+        childSessionId: codexChild.session.id,
+        waiterId: codex.waiter.waiterId,
+      }),
+    );
+    expect(codexNotice).toMatchObject({
       kind: "child_waiting_capacity",
       classification: "info",
       targetSessionId: parent.session.id,
@@ -1589,8 +1589,19 @@ describe("child lifecycle notices", () => {
         childTurnId: codexChild.turn.id,
         provider: "codex",
         nextCheckAt: codex.waiter.nextCheckAt.toISOString(),
+        resetsAt: resetsAt.toISOString(),
       },
     });
+    expect(codexNotice!.summary).toContain(
+      `until about ${resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+    );
+    expect(codexNotice!.summary).toContain("session_set_model");
+    // A worker's wait does not also notify the person: the parent handles it.
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId, codexChild.session.id)).some(
+        (event) => event.type === "session.notification.posted",
+      ),
+    ).toBe(false);
 
     const claudeChild = await startSession(grant, { parent, message: "claude work" });
     const claude = await armSubscriptionCoreCapacityWait(client.db, "claude", {
@@ -1615,6 +1626,38 @@ describe("child lifecycle notices", () => {
     ).toMatchObject({
       kind: "child_waiting_capacity",
       payload: { provider: "claude", childTurnId: claudeChild.turn.id },
+    });
+
+    // A wait that ends within minutes resumes by itself and stays quiet.
+    const shortChild = await startSession(grant, { parent, message: "short wait" });
+    const short = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: shortChild.session.id,
+      turnId: shortChild.turn.id,
+      attemptId: shortChild.attemptId,
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      failurePayload: { error: "all connected Codex subscriptions are unavailable" },
+    });
+    if (short.action !== "waiting") throw new Error(`short wait not armed: ${short.action}`);
+    expect(
+      await outbox(
+        grant,
+        childWaitingCapacityDedupeKey({
+          childSessionId: shortChild.session.id,
+          waiterId: short.waiter.waiterId,
+        }),
+      ),
+    ).toBeNull();
+
+    // Immediate: it wakes the orchestrating parent instead of riding its next claim.
+    await settleIdle(grant, parent);
+    const delivered = await deliver(codexNotice!);
+    if (delivered.reason !== "added") throw new Error("capacity notice not added");
+    expect(delivered.workflowWakeRevision).not.toBeNull();
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
     });
   });
 

@@ -1,4 +1,5 @@
 export * from "./constants";
+export * from "./client-version";
 export * from "./errors";
 export * from "./bounded-operation";
 export * from "./oauth";

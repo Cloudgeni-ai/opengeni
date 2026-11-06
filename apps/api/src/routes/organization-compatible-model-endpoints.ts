@@ -3,13 +3,16 @@ import {
   CreateOrganizationCompatibleEndpointRequest,
   DeleteOrganizationProviderCustomModelRequest,
   OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointModel,
   OrganizationCompatibleEndpointsResponse,
-  OrganizationProviderCustomModel,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   RevokeOrganizationModelProviderConnectionRequest,
+  SetOrganizationCompatibleEndpointModelReasoningRequest,
   type CompatibleModelApi,
+  type CompatibleModelReasoning,
 } from "@opengeni/contracts";
 import {
+  discoverCompatibleModelReasoning,
   requireEnvironmentEncryption,
   verifyDirectModelAccess,
   type ApiRouteDeps,
@@ -27,6 +30,7 @@ import {
   replaceOrganizationCompatibleEndpointKey,
   retireOrganizationCompatibleEndpointModel,
   revokeOrganizationCompatibleEndpoint,
+  setOrganizationCompatibleEndpointModelReasoning,
   type OrganizationCompatibleEndpoint as StoredEndpoint,
   type OrganizationCompatibleEndpointModel as StoredModel,
 } from "@opengeni/db";
@@ -45,7 +49,8 @@ import { parseRequestBody } from "../http/request-body";
 // organization can connect several: each is addressed by its connection id.
 // Every model and key is checked with a short request to the endpoint before
 // it is saved; that request, like every later model call, is DNS-pinned to
-// public addresses and refuses redirects.
+// public addresses and refuses redirects. A model's reasoning levels are read
+// from the endpoint's model listing unless the administrator sets them.
 
 const BASE = "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints";
 
@@ -60,10 +65,11 @@ async function jsonBody<T>(c: Context, schema: z.ZodType<T>, message: string): P
 }
 
 function modelJson(model: StoredModel) {
-  return OrganizationProviderCustomModel.parse({
+  return OrganizationCompatibleEndpointModel.parse({
     id: model.id,
     upstreamModelId: model.upstreamModelId,
     label: model.label,
+    reasoning: model.reasoning,
     version: model.version,
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
@@ -98,7 +104,16 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
   app: Hono,
   deps: ApiRouteDeps,
 ): void {
-  /** Send one short test request to the endpoint, DNS-pinned like every call to it. */
+  /** DNS-pinned like every call to the endpoint, refusing redirects. */
+  const endpointFetch =
+    deps.directModelFetch ??
+    (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+      pinnedFetch(input as string | URL | Request, init, deps.settings, {
+        label: "Model endpoint",
+        requireHttpsOutsideLocalTest: true,
+      })) as typeof fetch);
+
+  /** Send one short test request to the endpoint. */
   async function verify(
     endpoint: { baseUrl: string; api: CompatibleModelApi },
     model: string,
@@ -107,12 +122,22 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
     await verifyDirectModelAccess(
       { provider: "openai_compatible", baseUrl: endpoint.baseUrl, api: endpoint.api, model },
       apiKey,
-      deps.directModelFetch ??
-        (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
-          pinnedFetch(input as string | URL | Request, init, deps.settings, {
-            label: "Model endpoint",
-            requireHttpsOutsideLocalTest: true,
-          })) as typeof fetch),
+      endpointFetch,
+    );
+  }
+
+  /** The levels the administrator gave (null for none), or else those the endpoint lists. */
+  async function reasoningFor(
+    requested: CompatibleModelReasoning | null | undefined,
+    endpoint: { baseUrl: string },
+    model: string,
+    apiKey: string,
+  ): Promise<CompatibleModelReasoning | null> {
+    if (requested !== undefined) return requested;
+    return await discoverCompatibleModelReasoning(
+      { baseUrl: endpoint.baseUrl, model },
+      apiKey,
+      endpointFetch,
     );
   }
 
@@ -156,6 +181,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
     );
     const key = requireEnvironmentEncryption(deps.settings);
     await verify(payload, payload.model, payload.apiKey);
+    const reasoning = await reasoningFor(payload.reasoning, payload, payload.model, payload.apiKey);
     try {
       const { endpoint, model } = await createOrganizationCompatibleEndpoint(deps.db, {
         ...actor,
@@ -165,6 +191,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         api: payload.api,
         label: payload.label ?? null,
         upstreamModelId: payload.model,
+        reasoning,
         operationId: payload.operationId,
       });
       return c.json(endpointJson(endpoint, [model]), 201);
@@ -238,16 +265,61 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
     );
     const { endpoint, apiKey } = await activeEndpoint(actor, connectionId);
     await verify(endpoint, payload.upstreamModelId, apiKey);
+    const reasoning = await reasoningFor(
+      payload.reasoning,
+      endpoint,
+      payload.upstreamModelId,
+      apiKey,
+    );
     try {
       const model = await createOrganizationCompatibleEndpointModel(deps.db, {
         ...actor,
         connectionId,
         upstreamModelId: payload.upstreamModelId,
+        reasoning,
         operationId: payload.operationId,
       });
       return c.json(modelJson(model), 201);
     } catch (error) {
       conflict(error, "This endpoint has the most models it can have.");
+    }
+  });
+
+  // Set a model's reasoning levels, or read them again from the endpoint.
+  app.put(`${BASE}/:connectionId/models/:customModelId/reasoning`, async (c) => {
+    const actor = await administrator(c, true);
+    const connectionId = uuidParam(c, "connectionId", "Endpoint not found");
+    const customModelId = uuidParam(c, "customModelId", "Model not found");
+    const payload = await jsonBody(
+      c,
+      SetOrganizationCompatibleEndpointModelReasoningRequest,
+      "Choose the reasoning levels this model accepts and its default",
+    );
+    let reasoning = payload.reasoning;
+    if (reasoning === undefined) {
+      const { endpoint, apiKey } = await activeEndpoint(actor, connectionId);
+      const model = (
+        await listOrganizationCompatibleEndpointModels(deps.db, { ...actor, connectionId })
+      ).find((candidate) => candidate.id === customModelId);
+      if (!model) throw new HTTPException(404, { message: "Model not found" });
+      reasoning = await reasoningFor(undefined, endpoint, model.upstreamModelId, apiKey);
+      if (!reasoning)
+        throw new HTTPException(422, {
+          message:
+            "Your endpoint doesn’t list reasoning levels for this model. Choose them yourself.",
+        });
+    }
+    try {
+      const model = await setOrganizationCompatibleEndpointModelReasoning(deps.db, {
+        ...actor,
+        connectionId,
+        customModelId,
+        expectedVersion: payload.expectedVersion,
+        reasoning,
+      });
+      return c.json(modelJson(model));
+    } catch (error) {
+      conflict(error, "This endpoint can’t take another change right now.");
     }
   });
 

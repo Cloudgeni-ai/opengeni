@@ -5458,7 +5458,11 @@ describe("connections routes", () => {
       client_name: "Opengeni",
       redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
       token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"],
+      grant_types: [
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      ],
       response_types: ["code"],
     });
   });

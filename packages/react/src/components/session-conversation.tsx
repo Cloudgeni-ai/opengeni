@@ -216,12 +216,13 @@ export type SessionConversationProps = ClientOverride &
     /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
     modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
     /**
-     * Show how the agent works behind the scenes above the composer: the goal
-     * pill, and the agents and commands segments a host passes in
-     * `chromeProps`. Defaults to true. Set `false` for end users to whom a
-     * paused goal, a count of helper agents or a running command means
-     * nothing; queued messages, approvals and the agent's questions still
-     * show.
+     * Show how the agent works behind the scenes: above the composer, the
+     * goal pill and the agents and commands segments a host passes in
+     * `chromeProps`; on each turn row, the live step and step facets.
+     * Defaults to true. Set `false` for end users to whom a paused goal, a
+     * count of helper agents, a running command or a tool step means
+     * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+     * Queued messages, approvals and the agent's questions still show.
      */
     agentSignals?: boolean | undefined;
     /** Localized actions for already-sent user-message disclosure. */
@@ -719,6 +720,7 @@ function ConversationView({
               events={feed.events}
               items={conversation.timeline}
               turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+              agentSignals={agentSignals}
               renderAuthNeeded={(item) =>
                 timelineProps?.renderAuthNeeded?.(item) ??
                 (item.capability?.id === "api:connected-machine" && computerConnection ? (

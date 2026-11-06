@@ -1,4 +1,5 @@
 import { createAzureLiveTransportStarter } from "./azure-live-transport";
+import { defaultRealtimeRemoteAudio } from "./codex-realtime";
 /**
  * Public, provider-neutral realtime browser SDK.
  *
@@ -88,7 +89,7 @@ export function createSessionRealtimeController(
     ...(transport === "azure-live"
       ? {
           startTransport: createAzureLiveTransportStarter({
-            remoteAudio: options.remoteAudio,
+            remoteAudio: options.remoteAudio ?? defaultRealtimeRemoteAudio(),
             createPeerConnection: options.createPeerConnection,
           }),
         }

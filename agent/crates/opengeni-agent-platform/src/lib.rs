@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+pub mod command_activity;
 mod continuous_clock;
 mod desktop;
 mod error;
@@ -44,6 +45,8 @@ mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+#[cfg(target_os = "linux")]
+pub mod signal_sender;
 #[cfg(unix)]
 mod system_shell;
 pub mod transactional_write;
