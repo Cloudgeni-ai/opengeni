@@ -502,6 +502,25 @@ describe("Teams onboarding limiter", () => {
     expect(fresh.tryReserve("T3", "A", 60 * 60_000)).toBe(true);
   });
 
+  test("a released reservation can be used again at once", () => {
+    const limiter = new TeamsOnboardingLimiter({
+      actorCooldownMs: 10_000,
+      actorDailyMax: 1,
+      tenantDailyMax: 1,
+      processHourlyMax: 1,
+      maxTrackedKeys: 100,
+    });
+    expect(limiter.tryReserve("T", "A", 0)).toBe(true);
+    expect(limiter.tryReserve("T", "A", 1)).toBe(false);
+    limiter.release("T", "A", 2);
+    expect(limiter.tryReserve("t", "a", 3)).toBe(true);
+    expect(limiter.tryReserve("T", "A", 4)).toBe(false);
+    // Releasing what was never reserved changes nothing.
+    limiter.release("T", "B", 5);
+    limiter.release("T", "B", 5);
+    expect(limiter.tryReserve("T", "B", 6)).toBe(false);
+  });
+
   test("tracked keys stay bounded", () => {
     const limiter = new TeamsOnboardingLimiter({
       actorCooldownMs: 1_000,

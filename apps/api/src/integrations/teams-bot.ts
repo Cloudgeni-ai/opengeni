@@ -94,6 +94,7 @@ import {
 } from "./teams-admin-proof";
 import {
   createTeamsOnboardingBudgets,
+  type TeamsOnboardingLimiter,
   type TeamsOnboardingBudgets,
 } from "./teams-onboarding-limit";
 import {
@@ -363,7 +364,9 @@ export async function replyToUnconnectedTeamsTenant(
       !budgets.unavailableNotice.tryReserve(m.tenantId, m.actorId)
     )
       return "tenant_disabled";
-    await send(app, { ...m, threadId: null }, TEAMS_TENANT_UNAVAILABLE_TEXT);
+    await sendReserved(budgets.unavailableNotice, m, () =>
+      send(app, { ...m, threadId: null }, TEAMS_TENANT_UNAVAILABLE_TEXT),
+    );
     return "tenant_unavailable_notice_sent";
   }
   if (
@@ -376,8 +379,26 @@ export async function replyToUnconnectedTeamsTenant(
   if (!teamsSelfServeSetupAvailable(deps.settings, m.tenantId)) return "setup_not_permitted";
   const budget = source === "install" ? budgets.installWelcome : budgets.connect;
   if (!budget.tryReserve(m.tenantId, m.actorId)) return "onboarding_reply_limited";
-  await sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null));
+  await sendReserved(budget, m, () =>
+    sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null)),
+  );
   return "connect_link_sent";
+}
+/**
+ * Sends a reply reserved from `budget`, giving the reservation back when Teams
+ * clearly never received it, so a redelivery can still answer.
+ */
+async function sendReserved(
+  budget: TeamsOnboardingLimiter,
+  m: Pick<TeamsMessage, "tenantId" | "actorId">,
+  reply: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await reply();
+  } catch (error) {
+    if (teamsSendFailure(error).refused) budget.release(m.tenantId, m.actorId);
+    throw error;
+  }
 }
 
 /** Tells the installer's 1:1 chat that setup finished. */
@@ -531,10 +552,13 @@ async function welcomeTeamsInstall(
     const failure = attempt.sending ? teamsSendFailure(error) : { refused: true, retry: true };
     const outcome = attempt.connected ? "welcome_failed" : "onboarding_reply_failed";
     if (!failure.refused) return { outcome, status: 200 };
-    await releaseTeamsWelcome(deps.db, claim).catch(() => {
-      // The claim then lapses at the end of its window.
-    });
-    return { outcome, status: failure.retry ? 503 : 200 };
+    // A redelivery can only send once the claim is back; otherwise the claim
+    // lapses at the end of its window.
+    const released = await releaseTeamsWelcome(deps.db, claim).then(
+      () => true,
+      () => false,
+    );
+    return { outcome, status: failure.retry && released ? 503 : 200 };
   }
   if (result.delivered)
     await pruneTeamsWelcomes(deps.db).catch(() => {

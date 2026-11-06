@@ -211,7 +211,9 @@ separate budgets so one kind can't use up another:
   messages are ignored as before.
 
 The counters are in memory, so the limits apply per replica and reset on
-restart.
+restart. A reply Teams clearly never received (refused, throttled or
+unreachable) doesn't count. Across replicas, an install's welcome is claimed
+once in the database (see [In-Teams experience](#in-teams-experience)).
 
 ### Entra app configuration
 
@@ -400,7 +402,8 @@ conversation, organization connected or not, account linked or not).
   replica first claims the chat's welcome in `teams_bot_welcomes` (a hash of the
   tenant and conversation, no content); an install of the same chat within ten
   minutes isn't welcomed again on any replica, and messages never repeat it.
-  Claims are removed a day later. The install never fails once a welcome may
+  Claims older than a day are removed as later welcomes are sent. The install
+  never fails once a welcome may
   have arrived. When Teams clearly refused the send, the claim is given back,
   and a throttled or unreachable send answers 503 so that Teams redelivers.
   When the send may have arrived (a timeout, a Teams 5xx), or the replica
