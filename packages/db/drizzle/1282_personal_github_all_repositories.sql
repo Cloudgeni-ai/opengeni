@@ -5,7 +5,7 @@
 --    null (only the selected repositories, as before) or the access every
 --    repository the person can reach on GitHub gets ('read' or 'write').
 --    The selected rows stay while it is on, so turning it off restores them.
---    The check is added NOT VALID; 1282 validates it.
+--    The check is added NOT VALID; 1283 validates it.
 --    all_repositories_generation is the selection generation at which the
 --    mode last changed: work accepted under the mode before then (it was
 --    turned off, or its access changed) stays stopped when it is turned on
