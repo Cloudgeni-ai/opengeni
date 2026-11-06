@@ -381,7 +381,7 @@ describe("app actions for a person in an embedded chat", () => {
 
     // Organization-wide actions and other workspaces are refused in one step,
     // before anything runs, naming the one workspace they can use and no page.
-    const reach = `Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace (workspaceId ${workspaceId}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`;
+    const reach = `Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace (workspaceId ${workspaceId}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`;
     for (const outside of [
       { id: "listOrganizationAdministrationMembers", pathParameters: { organizationId } },
       { id: "listWorkspaces", pathParameters: {} },
@@ -432,7 +432,7 @@ describe("app actions for a person in an embedded chat", () => {
       body: { name: "Renamed" },
     });
     expect(textOf(change)).toBe(
-      "Nothing was run: this person uses Opengeni through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.",
+      "Nothing was run: this person uses this chat through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.",
     );
 
     // A person signed in to Opengeni itself is offered everything, as before.

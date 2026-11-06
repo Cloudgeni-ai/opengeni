@@ -12268,11 +12268,13 @@ const LOCAL_SANDBOX_API_ROUTES: readonly RegExp[] = [
   /^\/v1\/workspaces\/[^/]+\/mcp(?:\/|$)/u,
   // The personal GitHub HTTPS smart-Git broker.
   /^\/v1\/git\/personal\/[A-Za-z0-9_-]{43}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/u,
+  // The personal GitHub gateway `gh` uses as the person.
+  /^\/v1\/github\/personal\/gateway\/(?:api|uploads|git)(?:\/|$)/u,
 ];
 
 /**
  * Local development only: whether a normalized API path is one a sandbox calls
- * (Codemode, first-party MCP, and the personal Git broker). The Linux Docker
+ * (Codemode, first-party MCP, the personal Git broker and GitHub gateway). The Linux Docker
  * sandbox route relays only these, and the local API serves only these on the
  * addresses that only sandboxes use (see `apps/api/src/http/local-browser-boundary.ts`).
  */

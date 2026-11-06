@@ -1929,6 +1929,15 @@ because a recipient is a workspace administrator. See
 [credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
 API/SDK and the transaction-compatible top-up enqueue seam.
 
+Opt-in automatic credit top-ups use the API's
+`apps/api/src/billing-auto-top-up-maintenance.ts` keyset discovery loop and the
+tagged billing webhook handlers. Both construct the same durable payment service
+with `packages/db/src/billing-auto-top-up-notifications.ts` as the shared outbox
+adapter. Fresh-charge activation is independent of recovery: reserved payments
+and undelivered terminal notifications continue reconciling while the feature is
+off. See [automatic credit top-ups](automatic-credit-top-ups.md) for consent,
+canonical PaymentIntent recovery, tax-inclusive caps and the invoice boundary.
+
 Connected subscriptions serve app-origin work on qualifying paid plans, with
 no usage fee. API-origin work refuses them at admission and before model calls;
 omitted API models skip subscription defaults. Origin is inherited by children,
@@ -2432,6 +2441,16 @@ Apps. Independent write/review/merge policies use DB rows and accepted snapshots
 Canonical: `packages/core/src/domain/github-action-policies.ts`,
 `apps/api/src/routes/github.ts`, and
 `apps/web/src/components/capabilities/use-github-integration.tsx`.
+
+Repositories mounted as the person (Your GitHub) reach GitHub through the API:
+Git through the personal smart-HTTP broker, and `gh` in managed sandboxes
+through the personal GitHub gateway, which adds the person's token per request
+and maps each REST or GraphQL request (and each push that deletes or rewrites a
+ref) to the same `github_personal` action policy, recording asks in
+`connector_action_requests`. Canonical: `apps/api/src/routes/personal-github-git-broker.ts`,
+`apps/api/src/routes/personal-github-gateway.ts`,
+`apps/api/src/integrations/github-gateway-requests.ts`, and the `gh` wrapper in
+`packages/runtime/src/index.ts`; see [`personal-github.md`](personal-github.md).
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),

@@ -3,14 +3,58 @@
 The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
 chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
 keeps its meaning: precedence over the default behavior, no extra authority,
-and a later developer message may replace it. Nothing binds a chat to an agent
-yet, so no live prompt changes. The developer-message texts and their legacy
-parse forms are unchanged.
+and a later developer message may replace it. Plain chats are unchanged; a
+chat bound to an agent gets the new bytes from its next turn. The
+developer-message texts and their legacy parse forms are unchanged.
 
 ```text
 - The agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.
 + These take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.
 ```
+
+In a managed sandbox, `gh` on repositories mounted as the person now acts as
+the person through the Opengeni GitHub gateway, so the repositories module
+stops telling the agent to avoid it there. Sessions without a repository
+mounted as the person keep their prompt bytes. Outside a managed sandbox
+(Connected Machines) the old sentence stays, because `gh` there is not routed
+through the gateway. The provider-CLI sentence no longer carves out personal
+repositories. `github_connect_link`'s description says the same.
+
+```text
+- On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.
++ On repositories mounted as the person, git and gh (including gh api) act as the person, as on their own computer; the github_personal__* tools act as them too.   (managed sandbox)
+- Provider CLIs such as gh, glab, and az may be pre-authenticated … for repositories that are not mounted as the person; try them there before asking for credentials.
++ Provider CLIs such as gh, glab, and az may be pre-authenticated …; try them before asking for credentials.
+```
+
+A `gh` request that waits for the person's approval fails with a message that
+says so, tells the agent to end its turn, and to run the same command again
+after approval; the approval card is the normal one, and the continuation note
+after the decision says which requests were approved or declined.
+
+The contract no longer names the product. A host names its platform through its
+own identity or instructions; the default identity still introduces the agent
+as an Opengeni workspace agent. Three clauses change wording only; their
+meaning is the same. The "GitHub identity" and "Secrets" sentence lists below
+are updated to the new sentences; before and after:
+
+```text
+- Opengeni's own tools that store or send text (messages to other sessions, …) keep the reference as text, …
++ Built-in workspace tools that store or send text (messages to other sessions, …) keep the reference as text, …
+- `repos/…`: as the Opengeni app. Work appears as the Opengeni bot.   (personal GitHub mounted)
++ `repos/…`: as the workspace's GitHub app. Work appears as its bot.
+- On Opengeni app repositories, use the github_app__* tools.
++ On GitHub app repositories, use the github_app__* tools.
+- … and 'install the GitHub app' means the Opengeni app.
++ … and 'install the GitHub app' means the workspace's GitHub app.
+```
+
+Tool texts the agent reads (the `privacy_facts` result, `wait_for_input`,
+`goal_complete`, the GitHub, secret-profile, Slack-suggestion and Connected
+Machine descriptions, and several tool results) say "this deployment", "the
+runtime" or the passive voice instead of the product name. The Connected Machine
+descriptions name the deployment's configured browser extension
+(`OPENGENI_BROWSER_EXTENSION_NAME`).
 
 Each waiting rule is stated once. How a wait behaves is the `wait_for_input`
 description's job: when not to call it, `reply`, the deadline, the minimum, and
@@ -460,7 +504,7 @@ that mount only Opengeni app repositories render byte-for-byte as before. The
 (see docs/github-app.md).
 
 ```diff
-+ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the workspace's GitHub app.
 ```
 
 Automatic chat titles are written in the language the person writes in, and
@@ -1161,7 +1205,7 @@ so "never request credentials in chat" comes with the supported alternative.
 ```diff
 + Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
 + A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls.
-+ Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
++ Built-in workspace tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
 + In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.

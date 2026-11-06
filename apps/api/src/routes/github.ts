@@ -103,6 +103,7 @@ import {
 } from "../integrations/github-app-connect";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
@@ -810,6 +811,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "GitHub installation authorization was already used",
       });
     }
+    // The owner's proof read GitHub's list before the bind; catch up on any
+    // change GitHub made since.
+    void requestGitHubInstallationRepositorySync(deps, installationId);
     deleteCookie(c, githubStateCookie, { path: "/v1" });
     return c.html(
       githubSetupSuccessHtml(

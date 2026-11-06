@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 
 import { CreateSlackAgentRequest, slackAgentNameKey, type AccessGrant } from "@opengeni/contracts";
 import {
+  AgentLimitError,
   availableSlackBotConnectionMetadata,
   getSlackAgent,
   getWorkspace,
@@ -72,7 +73,8 @@ export type CreateSlackAgentOutcome =
   | { kind: "workspace_not_found" }
   | { kind: "personal_workspace" }
   | { kind: "slack_bot_unavailable" }
-  | { kind: "name_taken" };
+  | { kind: "name_taken" }
+  | { kind: "limit_reached" };
 
 /**
  * Create an agent that works in `grant.workspaceId`.
@@ -89,6 +91,8 @@ export async function createSlackAgent(
     grant: AccessGrant;
     request: z.output<typeof CreateSlackAgentRequest>;
     agentId?: string;
+    /** `slack` for the card a chat posted in Slack, `app` for the API. */
+    origin: "slack" | "app";
     /** The Knowledge context the Memory collection is saved under. */
     memoryContext: () => Promise<KnowledgeContext>;
   },
@@ -127,7 +131,12 @@ export async function createSlackAgent(
       avatar: request.avatar,
       instructions: request.instructions,
       createdBySubjectId: grant.subjectId,
+      origin: input.origin,
+    }).catch((error: unknown) => {
+      if (error instanceof AgentLimitError) return "limit_reached" as const;
+      throw error;
     });
+    if (inserted === "limit_reached") return { kind: "limit_reached" };
     if (inserted === "name_taken") {
       // A second, concurrent create of the same agent id (two clicks on one
       // card) collides on the id, not the name: that agent is this one.

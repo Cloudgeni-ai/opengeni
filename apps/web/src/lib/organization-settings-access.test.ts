@@ -44,6 +44,35 @@ function visible(
 }
 
 describe("organization settings access", () => {
+  test("only a signed-in human owner can authorize recurring credit charges", () => {
+    const access = (
+      role: "owner" | "admin" | "member",
+      subjectId = "user:alex",
+      authMode = "managedSession",
+      accountId = "acme",
+      permissions = ["billing:manage"],
+    ) =>
+      organizationSettingsAccess({
+        accessContext: { ...context(role, permissions), subjectId },
+        clientConfig: { ...managed, auth: { mode: authMode } } as never,
+        accountId,
+      });
+    expect(access("owner").canManageAutomaticTopUp).toBe(true);
+    expect(access("admin").canManageAutomaticTopUp).toBe(false);
+    expect(access("member").canManageAutomaticTopUp).toBe(false);
+    expect(access("owner", "api_key:k1").canManageAutomaticTopUp).toBe(false);
+    expect(access("owner", "service:worker").canManageAutomaticTopUp).toBe(false);
+    expect(access("owner", "user:alex", "deploymentKey").canManageAutomaticTopUp).toBe(false);
+    expect(access("owner", "user:alex", "none").canManageAutomaticTopUp).toBe(false);
+    expect(
+      access("owner", "user:alex", "managedSession", "different-org").canManageAutomaticTopUp,
+    ).toBe(false);
+    expect(
+      access("owner", "user:alex", "managedSession", "acme", ["billing:read"])
+        .canManageAutomaticTopUp,
+    ).toBe(false);
+  });
+
   test("owners see every page", () => {
     expect(
       visible("owner", [

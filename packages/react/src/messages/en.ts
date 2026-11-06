@@ -4815,6 +4815,9 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.connectsYourOwnAccountOnly":
     "Connects your own account. Only work you start can use it.",
   "sessionMcpCapabilityCard.continueToName": "Continue to {name}",
+  "sessionMcpCapabilityCard.reconnectName": "Reconnect {name}",
+  "sessionMcpCapabilityCard.reconnectsTheSameAccount":
+    "Signs in again to the same account. Its settings stay as they were.",
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",

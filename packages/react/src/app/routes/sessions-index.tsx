@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { REPOSITORY_OPEN_REFRESH_COOLDOWN_MS } from "../lib/github-access-return";
 import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
@@ -2610,6 +2611,9 @@ function SessionModelControl({
   );
 }
 
+/** When the new-chat repository menu last re-read each workspace's repositories. */
+const repositoryMenuOpenReads = new Map<string, number>();
+
 function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
@@ -2650,6 +2654,19 @@ function workspaceRepositoryPickerProps(
         context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true }),
         context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true }),
       ]);
+    },
+    // Opening the menu re-reads the workspace's App repositories, which the
+    // server keeps in line with GitHub (a repository just added there shows up).
+    onOpenRefresh: async () => {
+      if (context.repoBusy || context.githubStatus?.status !== "bound") return;
+      const now = Date.now();
+      if (
+        now - (repositoryMenuOpenReads.get(workspaceId) ?? 0) <
+        REPOSITORY_OPEN_REFRESH_COOLDOWN_MS
+      )
+        return;
+      repositoryMenuOpenReads.set(workspaceId, now);
+      await context.refreshGitHub(workspaceId);
     },
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
     onTogglePersonalGitHubRepo: (repository) =>

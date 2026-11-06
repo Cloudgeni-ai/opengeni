@@ -1,33 +1,44 @@
 import {
+  AGENTS_PER_WORKSPACE_MAX,
   SessionAvatar,
+  slackAgentNameKey,
+  slackAgentNameProblem,
+  slackAgentNameProblemText,
   type BotTemplateVisibility,
   type ParsedCreateBotTemplateRequest,
   type ParsedUpdateBotTemplateRequest,
   type WorkspaceBotTemplate,
 } from "@opengeni/contracts";
 import {
-  BotTemplateLimitError,
-  createBotTemplate,
-  deleteBotTemplate,
-  getBotTemplate,
-  listBotTemplates,
-  updateBotTemplate,
-  type BotTemplateRecord,
+  AgentLimitError,
+  AgentPrivateOwnerError,
+  createAgent,
+  deleteAgent,
+  getAgent,
+  getWorkspace,
+  listAgents,
+  listAgentSlackInstalls,
+  updateAgent,
+  type AgentRecord,
   type Database,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { agentEditableBy, agentViewerCanMakePrivate, agentVisibleTo } from "./agents";
 import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
 
 /**
- * Bot templates saved in a workspace. A shared one is for everyone in the
- * workspace to start bots from; whoever saved it, an admin, or a
- * workspace-level caller may change or delete it. An Only me one exists only
- * for whoever saved it, like an Only me chat: nobody else reads, finds or
- * changes it. The server stores templates and never starts a chat from one:
- * the client opens a new chat with the template's setup instructions as its
- * first message and gives it the template's name, description and avatar.
+ * Bot templates: the compatibility view of agents (docs/agents.md) for the
+ * `/bot-templates` endpoints and the `bot_template_save` tool. Every agent the
+ * reader can use is a template; its setup instructions are the agent's First
+ * message. Saving one makes an agent with that First message and no
+ * Instructions, and keeps a legacy `bot_templates` row for older releases.
+ *
+ * Who may change one follows the agents rule: whoever made it, an admin, or a
+ * workspace-level caller. An Only me one exists only for its owner. The server
+ * never starts a chat from one: the client opens a new chat with the setup
+ * instructions as its first message.
  */
 
 /**
@@ -49,67 +60,47 @@ export async function botTemplateViewerForGrant(
   };
 }
 
-/**
- * A workspace template is shared work, like a shared Skill or Site: everyone
- * who may start chats can change or delete it. An Only me template stays with
- * whoever saved it.
- */
+/** A template's access for the viewer: `manage` when they may change it. */
 export function botTemplateAccess(
   viewer: BotTemplateViewer,
-  template: Pick<BotTemplateRecord, "createdBySubjectId" | "visibility">,
+  agent: Pick<AgentRecord, "createdBySubjectId" | "ownerSubjectId" | "visibility">,
 ): "manage" | "use" {
-  if (viewer.admin || viewer.subjectId === null) return "manage";
-  if (template.visibility === "workspace" && viewer.contributor) return "manage";
-  return viewer.contributor &&
-    template.createdBySubjectId !== null &&
-    template.createdBySubjectId === viewer.subjectId
-    ? "manage"
-    : "use";
+  return agentEditableBy(viewer, agent) ? "manage" : "use";
 }
 
-/**
- * Whether the viewer may make the template Only me. It then stays with
- * whoever saved it, so only they or an admin may take a shared one away from
- * everyone; a template a service saved has nobody to keep it.
- */
+/** Whether the viewer may make the template Only me. */
 export function botTemplateViewerCanMakePrivate(
   viewer: BotTemplateViewer,
-  template: Pick<BotTemplateRecord, "createdBySubjectId" | "visibility">,
+  agent: Pick<AgentRecord, "createdBySubjectId" | "ownerSubjectId" | "visibility">,
 ): boolean {
-  if (template.createdBySubjectId === null) return false;
-  if (botTemplateAccess(viewer, template) !== "manage") return false;
-  return (
-    template.visibility === "private" ||
-    viewer.admin ||
-    viewer.subjectId === template.createdBySubjectId
-  );
+  return agentViewerCanMakePrivate(viewer, agent);
 }
 
-function forViewer(viewer: BotTemplateViewer, template: BotTemplateRecord): WorkspaceBotTemplate {
-  const avatar = SessionAvatar.safeParse(template.avatar);
+function forViewer(viewer: BotTemplateViewer, agent: AgentRecord): WorkspaceBotTemplate {
+  const avatar = SessionAvatar.safeParse(agent.avatar);
   return {
-    id: template.id,
-    workspaceId: template.workspaceId,
-    name: template.name,
-    description: template.description,
+    id: agent.id,
+    workspaceId: agent.workspaceId,
+    name: agent.name,
+    description: agent.description,
     avatar: avatar.success ? avatar.data : null,
-    setupInstructions: template.setupInstructions,
-    visibility: template.visibility,
-    sourceSessionId: template.sourceSessionId,
-    createdBySubjectId: template.createdBySubjectId,
-    viewerAccess: botTemplateAccess(viewer, template),
-    viewerCanMakePrivate: botTemplateViewerCanMakePrivate(viewer, template),
-    createdAt: template.createdAt.toISOString(),
-    updatedAt: template.updatedAt.toISOString(),
+    setupInstructions: agent.content?.firstMessage ?? "",
+    visibility: agent.visibility,
+    sourceSessionId: agent.sourceSessionId,
+    // An Only me template belongs to whoever saved it.
+    createdBySubjectId:
+      agent.visibility === "private" ? agent.ownerSubjectId : agent.createdBySubjectId,
+    viewerAccess: botTemplateAccess(viewer, agent),
+    viewerCanMakePrivate: botTemplateViewerCanMakePrivate(viewer, agent),
+    createdAt: agent.createdAt.toISOString(),
+    updatedAt: agent.updatedAt.toISOString(),
   };
 }
 
-/** Whether the viewer may see the template at all. */
-function visibleTo(viewer: BotTemplateViewer, template: BotTemplateRecord): boolean {
-  return (
-    template.visibility === "workspace" ||
-    (viewer.subjectId !== null && template.createdBySubjectId === viewer.subjectId)
-  );
+async function homeOf(db: Database, workspaceId: string) {
+  const workspace = await getWorkspace(db, workspaceId);
+  if (!workspace) throw new HTTPException(404, { message: "bot template not found" });
+  return { accountId: workspace.accountId, workspaceId };
 }
 
 async function requireTemplate(
@@ -117,12 +108,13 @@ async function requireTemplate(
   workspaceId: string,
   templateId: string,
   viewer: BotTemplateViewer,
-): Promise<BotTemplateRecord> {
-  const template = await getBotTemplate(db, workspaceId, templateId);
-  if (!template || !visibleTo(viewer, template)) {
+): Promise<{ home: { accountId: string; workspaceId: string }; agent: AgentRecord }> {
+  const home = await homeOf(db, workspaceId);
+  const agent = await getAgent(db, home, templateId);
+  if (!agent || !agentVisibleTo(viewer, agent)) {
     throw new HTTPException(404, { message: "bot template not found" });
   }
-  return template;
+  return { home, agent };
 }
 
 function requireOwnerForPrivate(
@@ -137,10 +129,10 @@ function requireOwnerForPrivate(
   }
 }
 
-function requireManage(viewer: BotTemplateViewer, template: BotTemplateRecord): void {
-  if (botTemplateAccess(viewer, template) !== "manage") {
+function requireManage(viewer: BotTemplateViewer, agent: AgentRecord): void {
+  if (botTemplateAccess(viewer, agent) !== "manage") {
     throw new HTTPException(403, {
-      message: "Only people who can start chats in this workspace can change its bot templates",
+      message: "Only whoever made this agent, or a workspace admin, can change it.",
     });
   }
 }
@@ -150,9 +142,13 @@ export async function listBotTemplatesForViewer(
   workspaceId: string,
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate[]> {
-  return (await listBotTemplates(db, workspaceId, viewer.subjectId)).map((template) =>
-    forViewer(viewer, template),
-  );
+  const home = await homeOf(db, workspaceId);
+  // The old gallery opens a template as composer text, in a chat not bound to
+  // the agent, so it lists only agents with a First message (or made as
+  // templates); the others' Instructions would silently not apply.
+  return (await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true }))
+    .filter((agent) => agent.origin === "bot_template" || Boolean(agent.content?.firstMessage))
+    .map((agent) => forViewer(viewer, agent));
 }
 
 export async function getBotTemplateForViewer(
@@ -161,7 +157,7 @@ export async function getBotTemplateForViewer(
   templateId: string,
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate> {
-  return forViewer(viewer, await requireTemplate(db, workspaceId, templateId, viewer));
+  return forViewer(viewer, (await requireTemplate(db, workspaceId, templateId, viewer)).agent);
 }
 
 export async function createBotTemplateForViewer(input: {
@@ -170,25 +166,38 @@ export async function createBotTemplateForViewer(input: {
   workspaceId: string;
   viewer: BotTemplateViewer;
   request: ParsedCreateBotTemplateRequest;
+  /** Standing Instructions, for `bot_template_save`; the endpoint has none. */
+  instructions?: string;
 }): Promise<WorkspaceBotTemplate> {
   const { db, request, viewer, workspaceId } = input;
   requireOwnerForPrivate(viewer, request.visibility);
   try {
-    const created = await createBotTemplate(db, {
-      accountId: input.accountId,
-      workspaceId,
-      name: request.name,
-      description: request.description,
-      avatar: request.avatar,
-      setupInstructions: request.setupInstructions,
-      visibility: request.visibility,
-      sourceSessionId: request.sourceSessionId,
-      createdBySubjectId: viewer.subjectId,
-    });
-    return forViewer(viewer, created);
+    const { agent } = await createAgent(
+      db,
+      { accountId: input.accountId, workspaceId },
+      {
+        visibility: request.visibility,
+        ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+        name: request.name,
+        description: request.description,
+        avatar: request.avatar,
+        instructions: input.instructions ?? "",
+        firstMessage: request.setupInstructions,
+        memoryEnabled: false,
+        origin: "bot_template",
+        sourceSessionId: request.sourceSessionId,
+        createdBySubjectId: viewer.subjectId,
+        legacyBotTemplate: true,
+        maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
+      },
+    );
+    return forViewer(viewer, agent);
   } catch (error) {
-    if (error instanceof BotTemplateLimitError) {
+    if (error instanceof AgentLimitError) {
       throw new HTTPException(409, { message: error.message });
+    }
+    if (error instanceof AgentPrivateOwnerError) {
+      throw new HTTPException(422, { message: error.message });
     }
     throw error;
   }
@@ -202,32 +211,77 @@ export async function updateBotTemplateForViewer(input: {
   request: ParsedUpdateBotTemplateRequest;
 }): Promise<WorkspaceBotTemplate> {
   const { db, request, viewer, workspaceId } = input;
-  const template = await requireTemplate(db, workspaceId, input.templateId, viewer);
-  requireManage(viewer, template);
-  // Making a template Only me keeps it with whoever saved it, not the caller.
-  if (request.visibility === "private" && template.createdBySubjectId === null) {
-    throw new HTTPException(422, {
+  const { home, agent } = await requireTemplate(db, workspaceId, input.templateId, viewer);
+  requireManage(viewer, agent);
+  const makesPrivate = request.visibility === "private" && agent.visibility !== "private";
+  if (makesPrivate && !botTemplateViewerCanMakePrivate(viewer, agent)) {
+    throw new HTTPException(agent.createdBySubjectId === null ? 422 : 403, {
       message:
-        "This template was saved for the workspace, not by a person, so it can't become Only me.",
+        agent.createdBySubjectId === null
+          ? "This template was saved for the workspace, not by a person, so it can't become Only me."
+          : "Only whoever saved this bot template, or a workspace admin, can make it Only me.",
     });
   }
-  // ...so only they (or an admin) can take a shared template away from everyone.
-  if (request.visibility === "private" && !botTemplateViewerCanMakePrivate(viewer, template)) {
-    throw new HTTPException(403, {
-      message: "Only whoever saved this bot template, or a workspace admin, can make it Only me.",
+  const changesVisibility =
+    request.visibility !== undefined && request.visibility !== agent.visibility;
+  const renamesSlackHandle =
+    request.name !== undefined && slackAgentNameKey(request.name) !== slackAgentNameKey(agent.name);
+  if (makesPrivate || renamesSlackHandle) {
+    const inSlack = (await listAgentSlackInstalls(db, home, [agent.id])).length > 0;
+    if (inSlack && makesPrivate) {
+      throw new HTTPException(409, {
+        message: "This agent is available in Slack, so it stays shared with the workspace.",
+      });
+    }
+    const problem =
+      inSlack && request.name !== undefined ? slackAgentNameProblem(request.name) : null;
+    if (problem && request.name !== undefined) {
+      throw new HTTPException(422, { message: slackAgentNameProblemText(request.name, problem) });
+    }
+  }
+  if (changesVisibility && agent.memoryEnabled) {
+    throw new HTTPException(409, {
+      message: "This agent remembers across chats. Turn Memory off to change who can use it.",
     });
   }
-  const updated = await updateBotTemplate(db, {
-    workspaceId,
-    templateId: template.id,
-    name: request.name,
-    description: request.description,
-    avatar: request.avatar,
-    setupInstructions: request.setupInstructions,
-    visibility: request.visibility,
+  const outcome = await updateAgent(db, home, {
+    agentId: agent.id,
+    expectedVersion: null,
+    actorSubjectId: viewer.subjectId,
+    patch: {
+      ...(request.name !== undefined ? { name: request.name } : {}),
+      ...(request.description !== undefined ? { description: request.description } : {}),
+      ...(request.avatar !== undefined ? { avatar: request.avatar } : {}),
+      ...(request.setupInstructions !== undefined
+        ? { firstMessage: request.setupInstructions }
+        : {}),
+      ...(changesVisibility && request.visibility !== undefined
+        ? {
+            visibility: request.visibility,
+            ownerSubjectId: request.visibility === "private" ? agent.createdBySubjectId : null,
+          }
+        : {}),
+    },
+  }).catch((error: unknown) => {
+    if (error instanceof AgentPrivateOwnerError) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
   });
-  if (!updated) throw new HTTPException(404, { message: "bot template not found" });
-  return forViewer(viewer, updated);
+  if (outcome.kind === "slack_name_taken") {
+    throw new HTTPException(409, {
+      message: "Another agent in Slack already has this name.",
+    });
+  }
+  if (outcome.kind === "requires_workspace_visibility") {
+    throw new HTTPException(409, {
+      message: "This agent is available in Slack, so it stays shared with the workspace.",
+    });
+  }
+  if (outcome.kind !== "updated") {
+    throw new HTTPException(404, { message: "bot template not found" });
+  }
+  return forViewer(viewer, outcome.agent);
 }
 
 export async function deleteBotTemplateForViewer(input: {
@@ -236,14 +290,14 @@ export async function deleteBotTemplateForViewer(input: {
   templateId: string;
   viewer: BotTemplateViewer;
 }): Promise<void> {
-  const template = await requireTemplate(
+  const { home, agent } = await requireTemplate(
     input.db,
     input.workspaceId,
     input.templateId,
     input.viewer,
   );
-  requireManage(input.viewer, template);
-  if (!(await deleteBotTemplate(input.db, input.workspaceId, template.id))) {
+  requireManage(input.viewer, agent);
+  if (!(await deleteAgent(input.db, home, agent.id))) {
     throw new HTTPException(404, { message: "bot template not found" });
   }
 }
