@@ -6588,6 +6588,24 @@ export function browserScreenshotError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // The controller's own reasons a tab produced no capture (Chrome has not
+  // drawn it yet, or a tab behind another one never drew) are fixed texts with
+  // no page or host detail, and say what to do instead, so they are published.
+  if (
+    error instanceof BrowserControlRequestError &&
+    error.error.code === "timeout" &&
+    (error.error.message.startsWith("browser screenshot timed out: Chrome ") ||
+      error.error.message.startsWith("browser screenshot stalled: Chrome "))
+  ) {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message: error.error.message,
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
     const failure = new ApiHttpError(504, {
       code: "upstream_unavailable",

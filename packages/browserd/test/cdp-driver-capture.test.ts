@@ -641,8 +641,10 @@ test("a live view whose first frame keeps failing for another reason is refused"
   }
 });
 
-test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
-  // The wait for the frame comes out of the screenshot's own 3 s, not on top.
+test("a screenshot of attached Chrome queued behind a frame still gives up at its deadline", async () => {
+  // The wait for the frame comes out of the screenshot's own deadline, not on
+  // top. The tab is not reported as behind another one, so that is the whole
+  // capture deadline.
   const fixture = await captureFixture(undefined, "chrome");
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
   try {
@@ -661,15 +663,17 @@ test("a screenshot of attached Chrome queued behind a frame still gives up at th
     fixture.replyToStalled();
     const error = await shot;
     const elapsed = Date.now() - started;
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("browser screenshot stalled");
-    expect(elapsed).toBeGreaterThanOrEqual(2_900);
-    expect(elapsed).toBeLessThan(4_200);
+    expect(error).toMatchObject({
+      code: "timeout",
+      message: "browser screenshot timed out during Page.captureScreenshot",
+    });
+    expect(elapsed).toBeGreaterThanOrEqual(9_900);
+    expect(elapsed).toBeLessThan(11_000);
   } finally {
     await frames?.close();
     await fixture.driver.close();
   }
-}, 15_000);
+}, 20_000);
 
 test("a viewport change or reset the page did not take is an unknown outcome, never a success", async () => {
   const fixture = await captureFixture();
@@ -1070,7 +1074,7 @@ test("a tab that never draws fails as a plain timeout and leaves the queue usabl
       code: "timeout",
       retryable: true,
       message:
-        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe",
+        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe.",
     });
     expect((error as Error).cause).toBeInstanceOf(CdpProtocolError);
     jest.useRealTimers();
@@ -1122,7 +1126,7 @@ test("a tab that never lays out fails as a plain timeout and leaves the queue us
       code: "timeout",
       retryable: true,
       message:
-        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe",
+        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe.",
     });
     jest.useRealTimers();
     fixture.reportUnlaidLayouts(0);
