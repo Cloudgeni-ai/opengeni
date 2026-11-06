@@ -217,7 +217,9 @@ endpoint remains `410 Gone`; it is not an alternate binding path.
 Repository visibility is not the credential decision; the workspace allowlist
 is. Every repository in a bound installation's allowlist receives a short-lived
 installation token scoped to exactly that repository, whether the repository is
-public or private, so the sandbox can push and use `gh` against it. A
+public or private, so the sandbox can push and use `gh` against it (`gh` on
+repositories mounted as the person goes through the
+[personal GitHub gateway](personal-github.md#gh-in-managed-sandboxes) instead). A
 repository that is not in any of the workspace's allowlists (for example a
 public upstream project) is cloned anonymously and is read-only: no token is
 minted for it.
