@@ -210,11 +210,16 @@ A workspace links one Teams account per Opengeni account, and links survive a
 disconnect. When the installer's Opengeni account is already linked to a
 different Teams account in the chosen workspace, setup refuses with
 `opengeni_account_linked` and changes nothing (the setup link stays usable).
-The setup page then offers **Unlink and connect**: it removes only the signed-in
-person's own link, as **Unlink account** does, and starts setup again with a
-new Microsoft sign-in. When the installer's Teams account is linked to another
-Opengeni account (`teams_account_linked`), they sign in to Opengeni with that
-account instead.
+The setup page then offers **Unlink and connect**: it starts setup again with a
+new Microsoft sign-in and `replaceOwnLink: true`. The API removes only the
+signed-in person's own link in that workspace, as **Unlink account** does, and
+only after the administrator sign-in and every binding check pass and that link
+is what refused the install, so a refused or abandoned attempt keeps the link.
+When the installer's Teams account is linked to another Opengeni account
+(`teams_account_linked`), nothing is removed and they sign in to Opengeni with
+that account instead. A refused account link from the plugins page
+(`link_opengeni_account_linked`) tells the person to unlink in the Teams
+integration and get a new link.
 
 Replies to tenants that have not connected are bounded on each API replica, in
 separate budgets so one kind can't use up another:

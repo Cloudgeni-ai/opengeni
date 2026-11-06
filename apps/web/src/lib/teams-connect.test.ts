@@ -94,6 +94,25 @@ describe("Teams self-serve Microsoft sign-in return", () => {
     expect(readPendingTeamsSetup(storage, 2_000)).toBeNull();
   });
 
+  test("keeps the choice to replace the person's own link through the sign-in", () => {
+    const storage = memoryStorage();
+    savePendingTeamsSetup(
+      { setupToken: "signed-proof", workspaceId: "ws", replaceOwnLink: true },
+      storage,
+      1_000,
+    );
+    expect(readPendingTeamsSetup(storage, 2_000)).toEqual({
+      setupToken: "signed-proof",
+      workspaceId: "ws",
+      replaceOwnLink: true,
+    });
+    storage.setItem(
+      "opengeni.teams-setup",
+      JSON.stringify({ setupToken: "p", workspaceId: "ws", replaceOwnLink: "yes", savedAt: 1_000 }),
+    );
+    expect(readPendingTeamsSetup(storage, 2_000)).toEqual({ setupToken: "p", workspaceId: "ws" });
+  });
+
   test("reads exactly one code and state, or Microsoft's error", () => {
     expect(teamsMicrosoftReturn("?code=c&state=s&session_state=x")).toEqual({
       kind: "signed_in",

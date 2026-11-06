@@ -38252,6 +38252,7 @@
     "@opengeni/sdk/teams": {
       "teamsApi": "value",
       "TeamsBotStatus": "type",
+      "TeamsInstallOptions": "type",
       "TeamsMicrosoftSignInResult": "type",
       "TeamsMicrosoftSignInStart": "type"
     },

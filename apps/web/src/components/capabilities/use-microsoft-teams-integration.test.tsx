@@ -279,20 +279,15 @@ test("setup shows the API's own refusal, not generic permission or conflict text
   window.history.replaceState(null, "", "/teams/connect");
 });
 
-test("an account already linked to another Teams account can unlink it and connect", async () => {
+test("an account already linked to another Teams account can replace that link and connect", async () => {
   window.history.replaceState(null, "", "/teams/connect#teams_setup=setup-proof");
   const linked =
     "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.";
   const requests: any[][] = [];
-  let unlinked = false;
   prepare(async (...args) => {
     requests.push(args.slice(0, 3));
     if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl: null };
-    if (args[0] === "DELETE") {
-      unlinked = true;
-      return { ok: true };
-    }
-    if (!unlinked) throw setupRefusal(409, "opengeni_account_linked", linked);
+    if (!args[2]?.replaceOwnLink) throw setupRefusal(409, "opengeni_account_linked", linked);
     return {};
   });
   const view = await render(<TeamsConnectRoute />);
@@ -305,18 +300,77 @@ test("an account already linked to another Teams account can unlink it and conne
     expect(button.textContent).toContain("Unlink and connect");
     expect(requests).toHaveLength(2);
     await submit(view);
+    // The server removes the person's own link only once setup is verified;
+    // the page never unlinks on its own.
     expect(requests.slice(2)).toEqual([
-      ["DELETE", `/v1/workspaces/${ws}/integrations/teams/link`],
       [
         "POST",
         `/v1/workspaces/${ws}/integrations/teams/bot/microsoft-sign-in`,
         { setupToken: "setup-proof" },
       ],
-      ["PUT", `/v1/workspaces/${ws}/integrations/teams/bot`, { setupToken: "setup-proof" }],
+      [
+        "PUT",
+        `/v1/workspaces/${ws}/integrations/teams/bot`,
+        { setupToken: "setup-proof", replaceOwnLink: true },
+      ],
     ]);
     expect(view.container.textContent).toContain("Teams is connected");
   } finally {
     await view.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
+  }
+});
+
+test("after Microsoft sign-in, replacing an existing link signs in again and asks the server to replace it", async () => {
+  const linked =
+    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.";
+  const authorizationUrl = "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?x=2";
+  const requests: any[][] = [];
+  prepare(async (...args) => {
+    requests.push(args.slice(0, 3));
+    if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl };
+    if (!args[2]?.replaceOwnLink) throw setupRefusal(409, "opengeni_account_linked", linked);
+    return {};
+  });
+  const assigned: string[] = [];
+  const assign = window.location.assign;
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => assigned.push(url),
+  });
+  savePendingTeamsSetup({ setupToken: "setup-proof", workspaceId: ws });
+  window.history.replaceState(null, "", "/teams/connect?code=microsoft-code&state=signed-state");
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toBe(linked);
+    expect(view.container.querySelector('button[type="submit"]')?.textContent).toContain(
+      "Unlink and connect",
+    );
+    await submit(view);
+    expect(requests.map((request) => request[0])).toEqual(["PUT", "POST"]);
+    expect(assigned).toEqual([authorizationUrl]);
+  } finally {
+    await view.cleanup();
+    Object.defineProperty(window.location, "assign", { configurable: true, value: assign });
+  }
+  // Back from Microsoft: the pending setup carries the person's choice.
+  window.history.replaceState(null, "", "/teams/connect?code=second-code&state=second-state");
+  const returned = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests.at(-1)).toEqual([
+      "PUT",
+      `/v1/workspaces/${ws}/integrations/teams/bot`,
+      {
+        setupToken: "setup-proof",
+        microsoft: { code: "second-code", state: "second-state" },
+        replaceOwnLink: true,
+      },
+    ]);
+    expect(returned.container.textContent).toContain("Teams is connected");
+  } finally {
+    await returned.cleanup();
     window.history.replaceState(null, "", "/teams/connect");
   }
 });
@@ -368,9 +422,9 @@ test("bot link requires confirmation and default-off unconfigured bot stays hidd
 test("a refused account link says which account is already linked and what to do", async () => {
   window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
   const linked =
-    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.";
+    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it in the Teams integration, then message Opengeni in Teams to get a new link.";
   prepare(async (...args) => {
-    if (args[0] === "POST") throw setupRefusal(409, "opengeni_account_linked", linked);
+    if (args[0] === "POST") throw setupRefusal(409, "link_opengeni_account_linked", linked);
     return {
       enabled: true,
       configured: true,

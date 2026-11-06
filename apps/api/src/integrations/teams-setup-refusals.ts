@@ -1,3 +1,4 @@
+import { nestedErrorRecords, nestedPostgresSqlState } from "@opengeni/db";
 import { ApiHttpError } from "../http/api-error";
 
 /**
@@ -89,10 +90,14 @@ const REFUSALS = {
     409,
     "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
   ],
+  link_opengeni_account_linked: [
+    409,
+    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it in the Teams integration, then message Opengeni in Teams to get a new link.",
+  ],
   link_used: [409, "This link was already used. Message Opengeni in Teams to get a new link."],
   link_changed: [
     409,
-    "Teams was reconnected while you were linking. Message Opengeni in Teams to get a new link.",
+    "The Teams connection for this workspace changed while you were linking. Message Opengeni in Teams to get a new link.",
   ],
 } as const satisfies Record<string, readonly [400 | 403 | 409 | 422, string]>;
 
@@ -126,16 +131,14 @@ export function teamsConnectionRefused(reason: TeamsConnectionRefusal): ApiHttpE
 export function teamsLinkConflict(
   error: unknown,
 ): "proof_used" | "opengeni_account_linked" | "teams_account_linked" | "other" | null {
-  const cause = error as {
-    code?: unknown;
-    constraint_name?: unknown;
-    cause?: { code?: unknown; constraint_name?: unknown } | null;
-    message?: unknown;
-  } | null;
-  if (cause?.message === "teams_identity_already_linked") return "teams_account_linked";
-  const sqlState = cause?.code ?? cause?.cause?.code;
-  if (sqlState !== "23505") return null;
-  const constraint = cause?.constraint_name ?? cause?.cause?.constraint_name;
+  if ((error as { message?: unknown } | null)?.message === "teams_identity_already_linked")
+    return "teams_account_linked";
+  if (nestedPostgresSqlState(error) !== "23505") return null;
+  let constraint: unknown;
+  for (const record of nestedErrorRecords(error)) {
+    constraint = record.constraint_name;
+    if (typeof constraint === "string") break;
+  }
   if (constraint === "teams_bot_proofs_pkey") return "proof_used";
   if (constraint === "teams_bot_links_workspace_id_subject_id_key")
     return "opengeni_account_linked";

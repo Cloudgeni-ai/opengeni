@@ -45,7 +45,7 @@ const MICROSOFT_RETURN_PARAMS = [
   "error_uri",
 ];
 
-export type TeamsPendingSetup = { setupToken: string; workspaceId: string };
+export type TeamsPendingSetup = { setupToken: string; workspaceId: string; replaceOwnLink?: true };
 export type TeamsMicrosoftReturn =
   | { kind: "signed_in"; code: string; state: string }
   | { kind: "failed"; error: string; description: string };
@@ -88,7 +88,11 @@ export function readPendingTeamsSetup(
       value.savedAt > now
     )
       return null;
-    return { setupToken: value.setupToken, workspaceId: value.workspaceId };
+    return {
+      setupToken: value.setupToken,
+      workspaceId: value.workspaceId,
+      ...(value.replaceOwnLink === true ? { replaceOwnLink: true as const } : {}),
+    };
   } catch {
     return null;
   }

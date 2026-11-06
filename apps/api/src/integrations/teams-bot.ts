@@ -1055,9 +1055,15 @@ export async function completeTeamsSetup(
   input: {
     setupToken: string;
     microsoft?: { code: string; state: string } | undefined;
+    /**
+     * The installer's Opengeni account may be linked to another Teams account
+     * in this workspace: remove only that link, after the administrator and
+     * the binding are verified, so a refused setup changes nothing.
+     */
+    replaceOwnLink?: boolean | undefined;
   },
 ) {
-  const { setupToken, microsoft } = input;
+  const { setupToken, microsoft, replaceOwnLink } = input;
   const p = setupProof(deps, setupToken);
   const approved = operatorApprovedInstaller(deps, p);
   let admin: TeamsAdminIdentity | null = null;
@@ -1104,8 +1110,8 @@ export async function completeTeamsSetup(
           },
         }
       : null;
-  try {
-    await installTeamsBot(deps.db, {
+  const install = () =>
+    installTeamsBot(deps.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       tenantId: p.tenantId,
@@ -1115,6 +1121,21 @@ export async function completeTeamsSetup(
       requireInactive: !approved,
       replaceInactive,
     });
+  try {
+    try {
+      await install();
+    } catch (error) {
+      if (
+        !replaceOwnLink ||
+        !existingWorkspace ||
+        teamsLinkConflict(error) !== "opengeni_account_linked"
+      )
+        throw error;
+      // The conflicting link is the caller's own in this workspace's
+      // installation, which is this tenant's. Nothing else is removed.
+      await removeTeamsLink(deps.db, existingWorkspace, grant.subjectId);
+      await install();
+    }
   } catch (error) {
     const cause = error as {
       constraint_name?: string;
@@ -1156,6 +1177,49 @@ export async function completeTeamsSetup(
       .catch(() => deps.observability?.info("Teams setup confirmation not delivered", {}));
   }
   return await status(deps, grant.workspaceId, grant.subjectId);
+}
+/**
+ * Links the signed-in person to the Teams account a link proof names, in the
+ * workspace's current installation. One Teams account per Opengeni account in
+ * a workspace and one Opengeni account per Teams account: a conflict says
+ * which side is already linked, never to whom.
+ */
+export async function linkTeamsAccount(deps: ApiRouteDeps, grant: AccessGrant, token: string) {
+  const p = proof(deps, token);
+  const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
+  if (
+    p.purpose !== "link" ||
+    p.workspaceId !== grant.workspaceId ||
+    !i?.active ||
+    i.tenant_id !== p.tenantId ||
+    i.generation !== p.generation ||
+    !teamsTenantEnabled(deps.settings, p.tenantId)
+  )
+    throw new HTTPException(403, {
+      message: "This Teams link does not match the current workspace installation.",
+    });
+  try {
+    await linkTeamsActor(deps.db, i, {
+      actorId: p.actorId,
+      subjectId: grant.subjectId,
+      nonce: p.nonce,
+    });
+  } catch (error) {
+    const conflict =
+      (error as { message?: unknown } | null)?.message === "teams_installation_changed"
+        ? "other"
+        : teamsLinkConflict(error);
+    if (!conflict) throw error;
+    throw teamsConnectionRefused(
+      conflict === "proof_used"
+        ? "link_used"
+        : conflict === "other"
+          ? "link_changed"
+          : conflict === "opengeni_account_linked"
+            ? "link_opengeni_account_linked"
+            : conflict,
+    );
+  }
 }
 export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(ENDPOINT, bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
@@ -1220,6 +1284,7 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
             .object({ code: z.string().min(1).max(4096), state: z.string().min(1).max(4096) })
             .strict()
             .optional(),
+          replaceOwnLink: z.boolean().optional(),
         })
         .strict(),
     );
@@ -1240,35 +1305,7 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
     if (grant.subjectId !== human.subjectId) throw new HTTPException(403);
     const { token } = await parseRequestJson(c, z.object({ token: z.string().max(4096) }).strict());
-    const p = proof(deps, token);
-    const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
-    if (
-      p.purpose !== "link" ||
-      p.workspaceId !== grant.workspaceId ||
-      !i?.active ||
-      i.tenant_id !== p.tenantId ||
-      i.generation !== p.generation ||
-      !teamsTenantEnabled(deps.settings, p.tenantId)
-    )
-      throw new HTTPException(403, {
-        message: "This Teams link does not match the current workspace installation.",
-      });
-    try {
-      await linkTeamsActor(deps.db, i, {
-        actorId: p.actorId,
-        subjectId: grant.subjectId,
-        nonce: p.nonce,
-      });
-    } catch (error) {
-      const conflict =
-        (error as { message?: unknown } | null)?.message === "teams_installation_changed"
-          ? "other"
-          : teamsLinkConflict(error);
-      if (!conflict) throw error;
-      throw teamsConnectionRefused(
-        conflict === "proof_used" ? "link_used" : conflict === "other" ? "link_changed" : conflict,
-      );
-    }
+    await linkTeamsAccount(deps, grant, token);
     return c.json({ ok: true });
   });
   app.delete(`${ROOT}/link`, async (c) => {

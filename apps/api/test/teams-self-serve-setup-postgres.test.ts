@@ -16,7 +16,11 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { completeTeamsSetup, startTeamsSetupSignIn } from "../src/integrations/teams-bot";
+import {
+  completeTeamsSetup,
+  linkTeamsAccount,
+  startTeamsSetupSignIn,
+} from "../src/integrations/teams-bot";
 import { mintTeamsProof } from "../src/integrations/teams-protocol";
 import { TEAMS_ADMIN_ROLE_IDS } from "../src/integrations/teams-admin-proof";
 import { ApiHttpError } from "../src/http/api-error";
@@ -606,7 +610,7 @@ describe("Teams self-serve setup", () => {
     expect(provider.tokenRequests).toHaveLength(0);
   }, 60_000);
 
-  test("an installer whose Opengeni account is linked to another Teams account is told so and can unlink it", async () => {
+  test("an installer whose Opengeni account is linked to another Teams account is told so and can replace it", async () => {
     const provider = microsoft();
     const d = deps(provider);
     const admin = await person();
@@ -646,16 +650,41 @@ describe("Teams self-serve setup", () => {
     expect(await getTeamsActor(client.db, left, firstActor)).toBe(admin.subject);
     expect(await getTeamsActor(client.db, left, otherAdmin)).toBeNull();
 
-    // The way forward: the person unlinks their own account, then connects again.
-    await removeTeamsLink(client.db, left, admin.subject);
+    // Asking to replace the link changes nothing until the administrator is proven.
+    expect(
+      await refusal(
+        completeTeamsSetup(d, admin.grant, {
+          setupToken,
+          replaceOwnLink: true,
+          microsoft: await adminSignIn(provider, d, admin, setupToken, {
+            oid: otherAdmin,
+            wids: [],
+          }),
+        }),
+      ),
+    ).toMatchObject({ status: 403, reason: "not_tenant_admin" });
+    expect(await getTeamsActor(client.db, left, firstActor)).toBe(admin.subject);
+
+    // The way forward: connect again, replacing the person's own link.
     const status = await completeTeamsSetup(d, admin.grant, {
       setupToken,
+      replaceOwnLink: true,
       microsoft: await signIn(),
     });
     expect(status).toMatchObject({ installation: { tenantId, active: true }, linked: true });
     const current = (await getTeamsInstallation(client.db, tenantId))!;
     expect(await getTeamsActor(client.db, current, otherAdmin)).toBe(admin.subject);
     expect(await getTeamsActor(client.db, current, firstActor)).toBeNull();
+    // The setup link is now used up.
+    expect(
+      await refusal(
+        completeTeamsSetup(d, admin.grant, {
+          setupToken,
+          replaceOwnLink: true,
+          microsoft: await signIn(),
+        }),
+      ),
+    ).toMatchObject({ status: 409 });
   }, 60_000);
 
   test("an installer whose Teams account is linked to another Opengeni account is told so", async () => {
@@ -687,21 +716,25 @@ describe("Teams self-serve setup", () => {
     await removeTeamsLink(client.db, installed, owner.subject);
     const left = (await getTeamsInstallation(client.db, tenantId))!;
     const setupToken = setupProof(tenantId, colleagueActor);
-    const refused = await refusal(
-      completeTeamsSetup(d, owner.grant, {
-        setupToken,
-        microsoft: await adminSignIn(provider, d, owner, setupToken, {
-          oid: colleagueActor,
-          wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+    // Replacing one's own link never removes another person's.
+    for (const replaceOwnLink of [false, true]) {
+      const refused = await refusal(
+        completeTeamsSetup(d, owner.grant, {
+          setupToken,
+          replaceOwnLink,
+          microsoft: await adminSignIn(provider, d, owner, setupToken, {
+            oid: colleagueActor,
+            wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+          }),
         }),
-      }),
-    );
-    expect(refused).toEqual({
-      status: 409,
-      reason: "teams_account_linked",
-      message:
-        "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
-    });
+      );
+      expect(refused).toEqual({
+        status: 409,
+        reason: "teams_account_linked",
+        message:
+          "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
+      });
+    }
     expect(await getTeamsInstallation(client.db, tenantId)).toEqual(left);
     expect(await getTeamsActor(client.db, left, colleagueActor)).toBe(colleague);
   }, 60_000);
@@ -756,5 +789,67 @@ describe("Teams self-serve setup", () => {
         nonce,
       }),
     ).toBe("proof_used");
+  }, 60_000);
+
+  test("linking an account says which rule refused it, never to whom", async () => {
+    const d = deps(microsoft());
+    const owner = await person();
+    const tenantId = crypto.randomUUID();
+    const ownerActor = crypto.randomUUID();
+    const installation = await installTeamsBot(client.db, {
+      accountId: owner.grant.accountId,
+      workspaceId: owner.grant.workspaceId,
+      tenantId,
+      actorId: ownerActor,
+      subjectId: owner.subject,
+      nonce: crypto.randomUUID(),
+    });
+    const linkProof = (actorId: string) =>
+      mintTeamsProof(STATE_SECRET, {
+        purpose: "link",
+        tenantId,
+        actorId,
+        workspaceId: owner.grant.workspaceId,
+        generation: installation.generation,
+      });
+    const as = (subjectId: string) => ({ ...owner.grant, subjectId });
+
+    expect(await refusal(linkTeamsAccount(d, owner.grant, linkProof(crypto.randomUUID())))).toEqual(
+      {
+        status: 409,
+        reason: "link_opengeni_account_linked",
+        message:
+          "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it in the Teams integration, then message Opengeni in Teams to get a new link.",
+      },
+    );
+    const colleague = `user:teams-setup:${crypto.randomUUID()}`;
+    expect(await refusal(linkTeamsAccount(d, as(colleague), linkProof(ownerActor)))).toEqual({
+      status: 409,
+      reason: "teams_account_linked",
+      message:
+        "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
+    });
+    const colleagueProof = linkProof(crypto.randomUUID());
+    await linkTeamsAccount(d, as(colleague), colleagueProof);
+    expect(
+      await refusal(
+        linkTeamsAccount(d, as(`user:teams-setup:${crypto.randomUUID()}`), colleagueProof),
+      ),
+    ).toEqual({
+      status: 409,
+      reason: "link_used",
+      message: "This link was already used. Message Opengeni in Teams to get a new link.",
+    });
+    // A link for an installation that is no longer current is refused before any write.
+    await disconnectTeamsBot(client.db, installation);
+    expect(
+      await refusal(
+        linkTeamsAccount(
+          d,
+          as(`user:teams-setup:${crypto.randomUUID()}`),
+          linkProof(crypto.randomUUID()),
+        ),
+      ),
+    ).toMatchObject({ status: 403 });
   }, 60_000);
 });

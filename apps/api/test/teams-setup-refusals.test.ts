@@ -30,6 +30,7 @@ const reasons: TeamsConnectionRefusal[] = [
   "setup_link_used",
   "opengeni_account_linked",
   "teams_account_linked",
+  "link_opengeni_account_linked",
   "link_used",
   "link_changed",
 ];
@@ -73,6 +74,13 @@ describe("Teams setup refusals", () => {
         cause: unique("teams_bot_links_workspace_id_subject_id_key"),
       }),
     ).toBe("opengeni_account_linked");
+    // A wrapper with its own non-SQL code still exposes the driver error.
+    expect(
+      teamsLinkConflict({
+        code: "ERR_WRAPPED",
+        cause: { message: "Failed query", cause: unique("teams_bot_proofs_pkey") },
+      }),
+    ).toBe("proof_used");
     expect(teamsLinkConflict(new Error("teams_identity_already_linked"))).toBe(
       "teams_account_linked",
     );

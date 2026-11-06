@@ -63,7 +63,7 @@ export function TeamsConnectRoute() {
         : null,
   );
   // The workspace where the signed-in account is linked to another Teams
-  // account; connecting there again unlinks it first.
+  // account; connecting there again replaces that link once setup succeeds.
   const [unlinkIn, setUnlinkIn] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [finishing, setFinishing] = useState(
@@ -79,9 +79,13 @@ export function TeamsConnectRoute() {
     const signedIn = arrival.microsoft.kind === "signed_in" ? arrival.microsoft : null;
     if (!signedIn || !arrival.pending || finished.current) return;
     finished.current = true;
-    const { setupToken, workspaceId: chosen } = arrival.pending;
+    const { setupToken, workspaceId: chosen, replaceOwnLink } = arrival.pending;
     void teamsApi(client, chosen)
-      .installBot(setupToken, { code: signedIn.code, state: signedIn.state })
+      .installBot(
+        setupToken,
+        { code: signedIn.code, state: signedIn.state },
+        { replaceOwnLink: Boolean(replaceOwnLink) },
+      )
       .then(() => {
         clearTeamsFragment("teams_setup");
         setToken(null);
@@ -178,24 +182,24 @@ export function TeamsConnectRoute() {
             return false;
           }
           setError(null);
-          let unlink = unlinkIn === workspaceId;
+          const replaceOwnLink = unlinkIn === workspaceId;
           try {
             const api = teamsApi(client, workspaceId);
-            // Removes only the signed-in person's own link in this workspace.
-            if (unlink) await api.unlinkAccount();
-            unlink = false;
-            setUnlinkIn(null);
             const { authorizationUrl } = await api.startMicrosoftSignIn(token).catch((caught) => {
               // An API without self-serve setup keeps the operator-approved flow.
               if (teamsRouteMissing(caught)) return { authorizationUrl: null };
               throw caught;
             });
             if (authorizationUrl) {
-              savePendingTeamsSetup({ setupToken: token, workspaceId });
+              savePendingTeamsSetup({
+                setupToken: token,
+                workspaceId,
+                ...(replaceOwnLink ? { replaceOwnLink: true as const } : {}),
+              });
               window.location.assign(authorizationUrl);
               return false;
             }
-            await api.installBot(token);
+            await api.installBot(token, undefined, { replaceOwnLink });
             clearTeamsFragment("teams_setup");
             setConnected(true);
           } catch (caught) {
@@ -205,8 +209,7 @@ export function TeamsConnectRoute() {
                 "This setup link may have expired. Request a new link in Teams.",
               ),
             );
-            // A failed unlink can be tried again.
-            setUnlinkIn(unlink || teamsOwnAccountLinkedElsewhere(caught) ? workspaceId : null);
+            setUnlinkIn(teamsOwnAccountLinkedElsewhere(caught) ? workspaceId : null);
           }
           return false;
         }}
