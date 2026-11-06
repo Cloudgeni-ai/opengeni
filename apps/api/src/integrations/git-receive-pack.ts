@@ -123,8 +123,6 @@ export function receivePackRejection(
   return Buffer.concat(parts);
 }
 
-export type PackCommit = { oid: string; parents: string[] };
-
 /**
  * Commit objects in a pack and their parents. Deltified commits are
  * resolved when their base is in the pack; a commit whose base is not (a

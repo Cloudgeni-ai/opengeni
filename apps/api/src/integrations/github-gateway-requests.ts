@@ -671,7 +671,8 @@ function resolveValue(value: GraphqlValue, variables: Record<string, unknown>): 
  * to their repositories before the mutation runs.
  */
 function collectNodeIds(value: unknown, into: Set<string>, depth = 0): void {
-  if (depth > GRAPHQL_MAX_DEPTH || into.size >= GRAPHQL_NODE_IDS_MAX) return;
+  // One past the limit, so a request with too many IDs is seen as such.
+  if (depth > GRAPHQL_MAX_DEPTH || into.size > GRAPHQL_NODE_IDS_MAX) return;
   if (typeof value === "string") {
     if (looksLikeGitHubNodeId(value)) into.add(value);
     return;
