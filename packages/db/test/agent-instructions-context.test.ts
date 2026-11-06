@@ -20,7 +20,7 @@ import {
   applyContextCompaction,
   isSessionEventPersistenceError,
 } from "../src/index";
-import { rawRows, withRlsContext, withSessionRlsActorContext } from "../src/database";
+import { rawRows, withSessionRlsActorContext } from "../src/database";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -80,6 +80,25 @@ async function fixture(options: { agent?: string; onlyMe?: boolean } = {}) {
     await shared.admin`
       update sessions set agent_id = ${agentId}, agent_prompt_revision = 1
       where id = ${session.id}`;
+    // An Only me agent serves only its owner's Only me chats.
+    // (Set directly: the tenancy transition itself is not under test here.)
+    if (options.onlyMe) {
+      const personal = crypto.randomUUID();
+      await shared.admin`insert into workspaces (id, account_id, name)
+        values (${personal}, ${accountId}, 'Personal')`;
+      await shared.admin`insert into organization_memberships
+          (account_id, subject_id, role, status, personal_workspace_id)
+        values (${accountId}, ${subjectId}, 'member', 'active', ${personal})
+        on conflict do nothing`;
+      await shared.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          update sessions set visibility = 'user_private', owner_subject_id = ${subjectId},
+            owner_organization_membership_id = (select id from organization_memberships
+              where account_id = ${accountId} and subject_id = ${subjectId})
+          where id = ${session.id}`;
+      });
+    }
   }
   /** A new agent revision, as an edit in the app writes it. */
   async function edit(instructions: string, firstMessage = "") {
@@ -300,47 +319,51 @@ test("a deleted agent leaves a plain chat and withdraws only an earlier edit ite
   ]);
 }, 180_000);
 
-test("an Only me agent keeps its layer in turns that act for nobody or for another person", async () => {
+test("an Only me agent serves its owner's Only me chat; shared later, it is a plain chat", async () => {
   const f = await fixture({ agent: "Be brief.", onlyMe: true });
   await f.edit("Be thorough.");
   const actor = (initiatingHumanSubjectId: string | null) => ({
     subjectId: "service:agent-turn",
     initiatingHumanSubjectId,
   });
-  const visibleAgents = () =>
-    withRlsContext(
-      client.db,
-      { accountId: f.scope.accountId, workspaceId: f.scope.workspaceId },
-      async (db) =>
-        (
-          await rawRows<{ count: number }>(
-            db,
-            sql`select count(*)::int as count from agents where id = ${f.agentId}::uuid`,
-          )
-        )[0]!.count,
-    );
   const thorough = agentInstructionsContextText({
     kind: "revision",
     revision: 2,
     instructions: "Be thorough.",
   });
-  for (const human of [null, `someone-else-${crypto.randomUUID()}`, f.subjectId]) {
+  const owned = await f.claim();
+  await withSessionRlsActorContext(actor(f.subjectId), async () => {
+    expect(await f.readPrompt(owned)).toEqual({
+      agentId: f.agentId,
+      revision: 1,
+      instructions: "Be brief.",
+    });
+    expect(await f.deliver(owned)).toBe(thorough);
+  });
+  await f.settle(owned);
+  // Shared after it started (set directly; the transition is not under test).
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set visibility = 'workspace_shared', owner_subject_id = null,
+        owner_organization_membership_id = null
+      where id = ${f.scope.sessionId}`;
+  });
+  const deleted = agentInstructionsContextText({ kind: "deleted" });
+  for (const human of [null, `someone-else-${crypto.randomUUID()}`]) {
     const turn = await f.claim();
     await withSessionRlsActorContext(actor(human), async () => {
-      // The turn's own RLS view hides the agent from anyone but its owner...
-      if (human !== f.subjectId) expect(await visibleAgents()).toBe(0);
-      // ...but the chat's binding is what authorizes its layer.
+      // The private Instructions never reach a shared chat.
       expect(await f.readPrompt(turn)).toEqual({
         agentId: f.agentId,
         revision: 1,
-        instructions: "Be brief.",
+        instructions: null,
       });
-      expect(await f.deliver(turn)).toBe(thorough);
+      expect(await f.deliver(turn)).toBe(deleted);
     });
     await f.settle(turn);
   }
-  // One edit item, never a spurious deletion.
-  expect(await f.delivered()).toEqual([parseAgentInstructionsContextText(thorough)]);
+  // The earlier edit item is withdrawn once.
+  expect((await f.delivered()).map((context) => context?.kind)).toEqual(["revision", "deleted"]);
 }, 180_000);
 
 test("every attempt of a turn builds the prompt its first attempt recorded", async () => {

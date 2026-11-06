@@ -349,13 +349,16 @@ describe("Slack agents administration", () => {
     expect(created.status).toBe(201);
     const { agent } = (await created.json()) as { agent: { id: string; version: number } };
     // An agent named before the stricter rules: its name is stored as is.
+    // (An older release's write: the legacy sync carries it into the agent.)
     await shared!
       .admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+    const [older] = await shared!.admin<{ version: number }[]>`
+      select version from agents where id = ${agent.id}`;
     const unchanged = await app().request(`${base}/${agent.id}`, {
       method: "PATCH",
       headers: admin,
       body: JSON.stringify({
-        expectedVersion: agent.version,
+        expectedVersion: older!.version,
         name: "Test",
         description: "Runs our test suite.",
       }),

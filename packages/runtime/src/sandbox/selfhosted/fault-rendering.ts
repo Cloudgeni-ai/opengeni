@@ -446,8 +446,8 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
     case "restarted":
       return {
         headline:
-          "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
-        happened: `the workspace machine did not answer for ${waited}, so Opengeni restarted it`,
+          "this chat's workspace machine stopped responding and didn't come back. It was restarted; re-run the command.",
+        happened: `the workspace machine did not answer for ${waited}, so it was restarted`,
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept; programs that were running stopped with the restart. ${command}${
           error.neverSent ? "" : " If it had started, the restart stopped it."
@@ -459,8 +459,8 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
     case "restarting":
       return {
         headline:
-          "this chat's workspace machine stopped responding and didn't come back. Opengeni asked for a restart; re-run the command in a moment.",
-        happened: `the workspace machine did not answer for ${waited}, so Opengeni asked for a restart, which had not finished yet`,
+          "this chat's workspace machine stopped responding and didn't come back. A restart was requested; re-run the command in a moment.",
+        happened: `the workspace machine did not answer for ${waited}, so a restart was requested, which had not finished yet`,
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept; programs that were running stop with the restart. ${command}${
           error.neverSent ? "" : " If it had started, the restart stops it."
@@ -473,11 +473,11 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
       return {
         headline:
           "this chat's workspace machine stopped responding for a while, and is answering again",
-        happened: `the workspace machine did not answer for ${waited}, then answered again, so Opengeni did not restart it`,
+        happened: `the workspace machine did not answer for ${waited}, then answered again, so it was not restarted`,
         layer: "the workspace machine itself — not your command",
         preserved: error.neverSent
           ? `files are kept. ${command}`
-          : `files are kept. ${command} If it started, it may still be running, or Opengeni may be stopping it.`,
+          : `files are kept. ${command} If it started, it may still be running, or it may be being stopped.`,
         tryNext: error.neverSent
           ? "re-run the command."
           : "check whether the command already took effect, then re-run it if needed.",
@@ -486,7 +486,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
       return {
         headline:
           "this chat's workspace machine stopped responding, and it was already restarted once this turn",
-        happened: `the workspace machine did not answer for ${waited}; Opengeni restarts it at most once per turn, and a restart was already made or begun this turn, so it was not restarted again`,
+        happened: `the workspace machine did not answer for ${waited}; it is restarted at most once per turn, and a restart was already made or begun this turn, so it was not restarted again`,
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
@@ -494,9 +494,8 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
       };
     case "restart_unavailable":
       return {
-        headline:
-          "this chat's workspace machine stopped responding, and Opengeni could not restart it",
-        happened: `the workspace machine did not answer for ${waited}; Opengeni could not arrange a restart, so none was made`,
+        headline: "this chat's workspace machine stopped responding, and it could not be restarted",
+        happened: `the workspace machine did not answer for ${waited}; no restart could be arranged, so none was made`,
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
@@ -505,7 +504,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
     case "restart_failed":
       return {
         headline: "this chat's workspace machine stopped responding, and restarting it failed",
-        happened: `the workspace machine did not answer for ${waited}; Opengeni tried to restart it, but the restart did not go through`,
+        happened: `the workspace machine did not answer for ${waited}; a restart was tried, but it did not go through`,
         layer: "the workspace machine itself — not your command",
         preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
@@ -515,7 +514,7 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
       return {
         headline:
           "this chat's workspace machine is being moved or saved by its host and can't run commands until that finishes",
-        happened: `the workspace machine did not answer for ${waited} because its host is busy moving or saving it, which takes at most a couple of minutes before it can run again; it is not broken, so Opengeni did not restart it`,
+        happened: `the workspace machine did not answer for ${waited} because its host is busy moving or saving it, which takes at most a couple of minutes before it can run again; it is not broken, so it was not restarted`,
         layer: "the workspace machine's host — not your command",
         preserved: `files on the workspace machine are kept. ${command}`,
         tryNext:
