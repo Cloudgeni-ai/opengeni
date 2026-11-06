@@ -480,7 +480,10 @@ async function requireSelectedPersonalGitHubRepository(
   },
   expected: ExpectedPersonalGitHubRepositoryAuthority | null,
   getSelectionState: PersonalGitHubRepositoryBranchServices["getSelectionState"],
-  services: Pick<PersonalGitHubRepositoryBranchServices, "providerJson"> = personalGitHubRepositoryBranchServices,
+  services: Pick<
+    PersonalGitHubRepositoryBranchServices,
+    "providerJson"
+  > = personalGitHubRepositoryBranchServices,
 ): Promise<{
   connectionAuthorityGeneration: number;
   selectionGeneration: number;

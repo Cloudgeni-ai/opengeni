@@ -575,10 +575,7 @@ function personalGitHubFullNameFromUri(uri: string): string {
   return new URL(uri).pathname.split("/").filter(Boolean).join("/");
 }
 
-function usablePersonalGitHubConnection(
-  candidate: ConnectionMetadata,
-  subjectId: string,
-): boolean {
+function usablePersonalGitHubConnection(candidate: ConnectionMetadata, subjectId: string): boolean {
   return (
     candidate.subjectId === subjectId &&
     candidate.status === "active" &&
@@ -1330,15 +1327,15 @@ export async function freezePersonalConnectionDelegations(input: {
   const personalGitHub = !mayUsePersonalGitHub
     ? null
     : await personalGitHubDelegationFromVisibleConnections({
-    db: input.db,
-    accountId: input.source.accountId,
-    subjectId: ownerSubjectId,
-    connections: visibleConnections,
-    resources: input.resources ?? [],
-    ...(personalGitHubAuthoritySelection
-      ? { authoritySelection: personalGitHubAuthoritySelection }
-      : {}),
-  });
+        db: input.db,
+        accountId: input.source.accountId,
+        subjectId: ownerSubjectId,
+        connections: visibleConnections,
+        resources: input.resources ?? [],
+        ...(personalGitHubAuthoritySelection
+          ? { authoritySelection: personalGitHubAuthoritySelection }
+          : {}),
+      });
   if (!includeFirstPartyConnections) {
     return [...mcp, ...(personalGitHub ? [personalGitHub] : [])];
   }

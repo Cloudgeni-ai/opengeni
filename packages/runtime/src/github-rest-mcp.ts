@@ -451,15 +451,31 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
   async listTools(): Promise<GitHubTool[]> {
     return GITHUB_REST_MCP_TOOLS.filter(
       (entry) => this.options.account || !ACCOUNT_TOOLS.has(entry.name),
-    ).map((entry) =>
-      entry.name === "repositories_list" && this.options.resolveRepository
-        ? {
-            ...entry,
-            description:
-              "List the GitHub repositories attached to this task. Any other repository the connected person can access also works by owner/name; find them with owner_repositories_list.",
-          }
-        : { ...entry },
-    );
+    ).map((entry) => {
+      if (!this.options.resolveRepository) return { ...entry };
+      if (entry.name === "repositories_list") {
+        return {
+          ...entry,
+          description:
+            "List the GitHub repositories attached to this task. Every other repository the connected person can access works too, by owner/name; find them with owner_repositories_list.",
+        };
+      }
+      const schema = entry.inputSchema as { properties?: Record<string, unknown> };
+      if (!schema.properties?.repository) return { ...entry };
+      return {
+        ...entry,
+        inputSchema: {
+          ...entry.inputSchema,
+          properties: {
+            ...schema.properties,
+            repository: stringProperty(
+              "Exact owner/name of any repository the person can access.",
+              256,
+            ),
+          },
+        },
+      } as GitHubTool;
+    });
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
@@ -868,7 +884,11 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     const event = optionalString(args.event, "event", 64);
     const status = optionalString(args.status, "status", 64);
     let headSha = optionalSha(args.headSha, "headSha");
-    const pullNumber = optionalPositiveInteger(args.pullNumber, "pullNumber", Number.MAX_SAFE_INTEGER);
+    const pullNumber = optionalPositiveInteger(
+      args.pullNumber,
+      "pullNumber",
+      Number.MAX_SAFE_INTEGER,
+    );
     if (pullNumber !== undefined) {
       const pull = await this.request(
         "workflow_runs_list",

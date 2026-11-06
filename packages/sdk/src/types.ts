@@ -1252,6 +1252,12 @@ export type PersonalGitHubRepositorySelectionState = {
   credentialBindingId: string;
   providerPrincipalId: string;
   selectionGeneration: number;
+  /**
+   * "All my repositories": every repository the person can access on GitHub,
+   * up to this access. Null (or absent from older servers) means only
+   * `repositories`, which are kept while the mode is on.
+   */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
   repositories: PersonalGitHubSelectedRepository[];
 };
 
@@ -1262,6 +1268,8 @@ export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
 export type ListPersonalGitHubRepositoriesOptions = {
   cursor?: number | undefined;
   limit?: number | undefined;
+  /** Find repositories by `owner/name` across everything the person can access (not paged). */
+  query?: string | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesResponse = {
@@ -1281,6 +1289,8 @@ export type ReplacePersonalGitHubRepositorySelectionsRequest = {
   expectedSelectionGeneration: number;
   idempotencyKey: string;
   repositories: PersonalGitHubRepositorySelectionInput[];
+  /** Turn "All my repositories" on with this access, or off with null. Omitted keeps it. */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type VerifyPersonalGitHubRepositorySelectionsRequest = {

@@ -36,6 +36,7 @@ import {
 } from "@opengeni/contracts";
 import type {
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   UpdateSessionRequest,
 } from "@opengeni/sdk";
@@ -1718,7 +1719,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           cursor = page.nextCursor ?? undefined;
         } while (cursor !== undefined && repositories.length < 1_000);
         if (signal?.aborted || !ownsRefresh()) return;
-        setPersonalGitHubRepositories(repositories);
+        setPersonalGitHubRepositories((current) => {
+          // In All my repositories, repositories found by search past the
+          // listed pages stay available.
+          if (!selection?.allRepositoriesAccess) return repositories;
+          const listed = new Set(repositories.map((repository) => repository.repositoryId));
+          return [
+            ...repositories,
+            ...current.filter((repository) => !listed.has(repository.repositoryId)),
+          ];
+        });
         setPersonalGitHubSelection(selection);
         setPersonalGitHubAuthorityCache((current) =>
           selection &&
@@ -1844,9 +1854,30 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  async function searchPersonalGitHubRepositories(
+    workspaceId: string,
+    query: string,
+  ): Promise<void> {
+    const connection = personalGitHubStatus?.connection;
+    const trimmed = query.trim();
+    if (!connection || connection.status !== "active" || trimmed.length < 2) return;
+    const page = await client.listPersonalGitHubRepositories(workspaceId, connection.id, {
+      query: trimmed,
+      limit: 50,
+    });
+    if (page.repositories.length === 0) return;
+    setPersonalGitHubRepositories((current) => {
+      const known = new Set(current.map((repository) => repository.repositoryId));
+      const added = page.repositories.filter((repository) => !known.has(repository.repositoryId));
+      return added.length > 0 ? [...current, ...added] : current;
+    });
+  }
+
   async function savePersonalGitHubRepositories(
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ): Promise<boolean> {
     const connection = personalGitHubStatus?.connection;
     const selection = personalGitHubSelection;
@@ -1858,6 +1889,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedSelectionGeneration: selection.selectionGeneration,
         idempotencyKey: crypto.randomUUID(),
         repositories,
+        ...(allRepositoriesAccess !== undefined ? { allRepositoriesAccess } : {}),
       });
       await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
@@ -2683,6 +2715,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   );
   const contextDisconnectPersonalGitHub = useLatestCallback(disconnectPersonalGitHub);
   const contextSavePersonalGitHubRepositories = useLatestCallback(savePersonalGitHubRepositories);
+  const contextSearchPersonalGitHubRepositories = useLatestCallback(
+    searchPersonalGitHubRepositories,
+  );
   const contextEnsurePersonalGitHubAuthority = useLatestCallback(ensurePersonalGitHubAuthority);
   const contextTogglePersonalGitHubRepository = useLatestCallback(togglePersonalGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
@@ -2796,6 +2831,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           reconnectPersonalGitHub: contextReconnectPersonalGitHub,
           disconnectPersonalGitHub: contextDisconnectPersonalGitHub,
           savePersonalGitHubRepositories: contextSavePersonalGitHubRepositories,
+          searchPersonalGitHubRepositories: contextSearchPersonalGitHubRepositories,
           ensurePersonalGitHubAuthority: contextEnsurePersonalGitHubAuthority,
           togglePersonalGitHubRepository: contextTogglePersonalGitHubRepository,
           refreshWorkspaceMcpServers,

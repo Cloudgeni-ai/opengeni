@@ -128,6 +128,11 @@ export type RepositoryContextPickerProps = {
   onConnectPersonalGitHub?: (() => void) | undefined;
   onTogglePersonalGitHubRepo?: ((repo: PersonalGitHubRepositoryCatalogItem) => void) | undefined;
   onPersonalGitHubRefChange?: ((repositoryId: string, ref: string) => void) | undefined;
+  /**
+   * Finds more of the person's repositories on GitHub for a search; matches
+   * arrive through `personalGitHubRepositories`.
+   */
+  onSearchPersonalGitHubRepositories?: ((query: string) => Promise<void>) | undefined;
   groups: RepositoryGroup[];
   selectedRepoIds: Set<number>;
   selectedRepoRefs: Record<number, string>;
@@ -245,6 +250,31 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
       active = false;
     };
   }, []);
+  const [personalSearching, setPersonalSearching] = useState(false);
+  const searchPersonal = useRef(props.onSearchPersonalGitHubRepositories);
+  searchPersonal.current = props.onSearchPersonalGitHubRepositories;
+  const personalSearchActive =
+    props.personalGitHubStatus?.enabled === true &&
+    props.personalGitHubStatus.connection?.status === "active" &&
+    Boolean(props.onSearchPersonalGitHubRepositories);
+  useEffect(() => {
+    const needle = search.trim();
+    if (!personalSearchActive || needle.length < 2) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      setPersonalSearching(true);
+      void searchPersonal
+        .current?.(needle)
+        .catch(() => undefined)
+        .finally(() => {
+          if (active) setPersonalSearching(false);
+        });
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [personalSearchActive, search]);
   const matchesSearch = (name: string) => name.toLowerCase().includes(search.trim().toLowerCase());
   const personalRepositories = (props.personalGitHubRepositories ?? []).filter(
     (repository) => repository.selectedAccess !== null,
@@ -410,7 +440,8 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)]">
         <div className="space-y-1">
-          {props.repositories.length + (props.personalGitHubRepositories?.length ?? 0) > 5 ? (
+          {personalSearchActive ||
+          props.repositories.length + (props.personalGitHubRepositories?.length ?? 0) > 5 ? (
             <Input
               aria-label="Search repositories"
               placeholder="Search repositories…"
@@ -422,7 +453,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {search.trim() &&
           !props.repositories.some((repo) => matchesSearch(repo.fullName)) &&
           !personalRepositories.some((repo) => matchesSearch(repo.fullName)) ? (
-            <p className={MENU_NOTE_CLASS}>No repositories match your search.</p>
+            <p className={MENU_NOTE_CLASS}>
+              {personalSearching ? "Searching GitHub…" : "No repositories match your search."}
+            </p>
           ) : null}
           {rowGroups.length > 0 ? (
             <section>

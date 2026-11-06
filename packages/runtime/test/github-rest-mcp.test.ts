@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  GITHUB_REST_ACCOUNT_TOOL_NAMES,
   GITHUB_REST_MCP_PERSONAL_DESCRIPTOR,
+  GITHUB_REST_READ_TOOL_NAMES,
   GITHUB_REST_TOOL_NAMES,
+  readLogWindow,
   githubRestConnectorActionOutcome,
   GitHubRestMcpServer,
   GitHubRestMutationNotExecutedError,
@@ -24,7 +27,12 @@ describe("GitHubRestMcpServer", () => {
   test("publishes a static reviewed surface with no authority selector", async () => {
     const server = buildServer(async () => response({ id: 42 }));
     const tools = await server.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual([...GITHUB_REST_TOOL_NAMES]);
+    // Account-level reads need account authority; this server has none.
+    expect(tools.map((tool) => tool.name)).toEqual(
+      GITHUB_REST_TOOL_NAMES.filter(
+        (name) => !(GITHUB_REST_ACCOUNT_TOOL_NAMES as readonly string[]).includes(name),
+      ),
+    );
     expect(server.bridge).toEqual(GITHUB_REST_MCP_PERSONAL_DESCRIPTOR);
     for (const tool of tools) {
       const properties = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
@@ -281,3 +289,282 @@ function response(body: unknown, status = 200, headers: Record<string, string> =
     headers: { "content-type": "application/json", ...headers },
   });
 }
+
+const personalAccount = {
+  connectionId: repository.connectionId,
+  resolveAuthority: async () => ({
+    headers: { authorization: "Bearer secret" },
+    connectionId: repository.connectionId,
+    actor: { kind: "personal_oauth" as const, login: "bendik" },
+    authorizeProviderRequest: async () => true,
+  }),
+};
+
+function openServer(
+  fetchImpl: (url: URL | RequestInfo, init?: RequestInit) => Promise<Response>,
+  resolveRepository: (fullName: string) => Promise<GitHubRestRepository | null> = async (
+    fullName,
+  ) =>
+    fullName.toLowerCase() === "acme/widgets"
+      ? {
+          repositoryId: "77",
+          fullName: "acme/widgets",
+          canonicalUrl: "https://github.com/acme/widgets",
+          defaultRef: "trunk",
+          access: "read",
+          authorityKind: "personal_oauth",
+          connectionId: repository.connectionId,
+        }
+      : null,
+) {
+  return new GitHubRestMcpServer({
+    serverId: "github_personal",
+    authorityKind: "personal_oauth",
+    repositories: [],
+    resolveRepository,
+    account: personalAccount,
+    resolveAuthority: personalAccount.resolveAuthority,
+    fetchImpl,
+  });
+}
+
+describe("GitHub read tools", () => {
+  test("the new tools are reads", () => {
+    for (const name of [
+      "workflow_runs_list",
+      "workflow_run_get",
+      "workflow_job_logs_get",
+      "organizations_list",
+      "owner_repositories_list",
+    ]) {
+      expect((GITHUB_REST_READ_TOOL_NAMES as readonly string[]).includes(name)).toBe(true);
+    }
+  });
+
+  test("All my repositories: no attached repositories, any repository by name", async () => {
+    const urls: string[] = [];
+    const server = openServer(async (url) => {
+      urls.push(String(url));
+      return response({ id: 77, full_name: "acme/widgets", default_branch: "trunk" });
+    });
+    const tools = await server.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual([...GITHUB_REST_TOOL_NAMES]);
+    const result = await server.callToolResult("repository_get", { repository: "acme/widgets" });
+    expect(result.isError).toBeUndefined();
+    expect(urls).toEqual(["https://api.github.com/repos/acme/widgets"]);
+    const unknown = await server.callToolResult("repository_get", { repository: "acme/secret" });
+    expect(unknown.isError).toBe(true);
+    // Read access from the resolver blocks writes before any request.
+    const write = await server.callToolResult("issue_create", {
+      repository: "acme/widgets",
+      title: "t",
+    });
+    expect(githubRestConnectorActionOutcome(write)).toBe("not_executed");
+    expect(urls).toHaveLength(1);
+    const listed = await server.callToolResult("repositories_list", {});
+    expect(listed.structuredContent).toEqual({ repositories: [], allRepositories: true });
+  });
+
+  test("lists organizations and an organization's repositories with a name filter", async () => {
+    const urls: string[] = [];
+    const server = openServer(async (url) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.startsWith("https://api.github.com/user/orgs")) {
+        return response([{ id: 1, login: "acme", description: "Acme", node_id: "x" }]);
+      }
+      if (href === "https://api.github.com/users/acme") {
+        return response({ login: "acme", type: "Organization" });
+      }
+      return response({
+        total_count: 1,
+        items: [{ id: 77, full_name: "acme/widgets", private: true, default_branch: "trunk" }],
+      });
+    });
+    const orgs = await server.callToolResult("organizations_list", { limit: 10 });
+    expect(orgs.structuredContent.data.organizations).toEqual([
+      { id: 1, login: "acme", description: "Acme" },
+    ]);
+    const repos = await server.callToolResult("owner_repositories_list", {
+      owner: "acme",
+      filter: "widg",
+    });
+    expect(repos.isError).toBeUndefined();
+    expect(repos.structuredContent.data.repositories[0]).toMatchObject({
+      fullName: "acme/widgets",
+      private: true,
+    });
+    const search = new URL(urls[2]!);
+    expect(search.pathname).toBe("/search/repositories");
+    expect(search.searchParams.get("q")).toBe("widg in:name org:acme");
+  });
+
+  test("lists the person's own repositories, private ones included", async () => {
+    const urls: string[] = [];
+    const server = openServer(async (url) => {
+      urls.push(String(url));
+      return String(url) === "https://api.github.com/users/Bendik"
+        ? response({ login: "bendik", type: "User" })
+        : response([]);
+    });
+    await server.callToolResult("owner_repositories_list", { owner: "Bendik" });
+    expect(new URL(urls[1]!).pathname).toBe("/user/repos");
+    expect(new URL(urls[1]!).searchParams.get("affiliation")).toBe("owner");
+  });
+
+  test("filters workflow runs by pull request head", async () => {
+    const urls: string[] = [];
+    const sha = "a".repeat(40);
+    const server = buildServer(async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/pulls/9")) return response({ head: { sha } });
+      return response({
+        total_count: 1,
+        workflow_runs: [
+          {
+            id: 5,
+            name: "CI",
+            status: "completed",
+            conclusion: "failure",
+            head_sha: sha,
+            pull_requests: [{ number: 9 }],
+          },
+        ],
+      });
+    });
+    const result = await server.callToolResult("workflow_runs_list", {
+      repository: repository.fullName,
+      pullNumber: 9,
+      status: "failure",
+      workflow: "ci.yml",
+    });
+    expect(result.isError).toBeUndefined();
+    const runs = new URL(urls[1]!);
+    expect(runs.pathname).toBe("/repos/Cloudgeni-ai/opengeni/actions/workflows/ci.yml/runs");
+    expect(runs.searchParams.get("head_sha")).toBe(sha);
+    expect(runs.searchParams.get("status")).toBe("failure");
+    expect(result.structuredContent.data.runs[0]).toMatchObject({
+      id: 5,
+      conclusion: "failure",
+      pullRequests: [9],
+    });
+  });
+
+  test("gets a run with its jobs and steps", async () => {
+    const server = buildServer(async (url) =>
+      String(url).includes("/jobs")
+        ? response({
+            total_count: 1,
+            jobs: [
+              {
+                id: 11,
+                name: "test",
+                conclusion: "failure",
+                steps: [{ number: 1, name: "Run tests", conclusion: "failure" }],
+              },
+            ],
+          })
+        : response({ id: 5, name: "CI" }),
+    );
+    const result = await server.callToolResult("workflow_run_get", {
+      repository: repository.fullName,
+      runId: 5,
+    });
+    expect(result.structuredContent.data).toMatchObject({
+      run: { id: 5, name: "CI" },
+      totalJobs: 1,
+      jobs: [{ id: 11, steps: [{ number: 1, name: "Run tests", conclusion: "failure" }] }],
+    });
+  });
+
+  test("reads the end of a job log from the redirect without the GitHub credential", async () => {
+    const seen: Array<{ url: string; authorization: string | null; redirect?: string }> = [];
+    const log = Array.from({ length: 5_000 }, (_, index) => `line ${index}`).join("\n");
+    const server = buildServer(async (url, init) => {
+      seen.push({
+        url: String(url),
+        authorization: new Headers(init?.headers).get("authorization"),
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+      });
+      if (String(url).startsWith("https://api.github.com/")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://results.blob.example/job-11.txt?sig=abc" },
+        });
+      }
+      return new Response(log, { status: 200 });
+    });
+    const result = await server.callToolResult("workflow_job_logs_get", {
+      repository: repository.fullName,
+      jobId: 11,
+      maxBytes: 2_048,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(seen[0]).toEqual({
+      url: "https://api.github.com/repos/Cloudgeni-ai/opengeni/actions/jobs/11/logs",
+      authorization: "Bearer secret",
+      redirect: "manual",
+    });
+    expect(seen[1]?.url).toBe("https://results.blob.example/job-11.txt?sig=abc");
+    expect(seen[1]?.authorization).toBeNull();
+    const data = result.structuredContent.data;
+    expect(data.text.endsWith("line 4999")).toBe(true);
+    expect(data.text.startsWith("line ")).toBe(true);
+    expect(data.totalBytes).toBe(new TextEncoder().encode(log).byteLength);
+    expect(data.endByte).toBe(data.totalBytes);
+    expect(data.nextOffset).toBeNull();
+    expect(JSON.stringify(result)).not.toContain("sig=abc");
+  });
+
+  test("refuses a log location that is not https", async () => {
+    const server = buildServer(
+      async () =>
+        new Response(null, { status: 302, headers: { location: "http://insecure.example/log" } }),
+    );
+    const result = await server.callToolResult("workflow_job_logs_get", {
+      repository: repository.fullName,
+      jobId: 11,
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("readLogWindow", () => {
+  const stream = (text: string, chunk = 7) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        const bytes = new TextEncoder().encode(text);
+        for (let index = 0; index < bytes.length; index += chunk) {
+          controller.enqueue(bytes.subarray(index, index + chunk));
+        }
+        controller.close();
+      },
+    });
+
+  test("pages from an offset", async () => {
+    const text = "abcdefghijklmnopqrstuvwxyz";
+    const first = await readLogWindow(stream(text), { offset: 0, maxBytes: 10 });
+    expect(first).toMatchObject({ text: "abcdefghij", startByte: 0, endByte: 10, nextOffset: 10 });
+    const last = await readLogWindow(stream(text), { offset: 20, maxBytes: 10 });
+    expect(last).toMatchObject({ text: "uvwxyz", startByte: 20, endByte: 26, nextOffset: null });
+    expect(last.totalBytes).toBe(26);
+  });
+
+  test("keeps the tail on whole lines", async () => {
+    const text = "one\ntwo\nthree\nfour\n";
+    const tail = await readLogWindow(stream(text, 3), { maxBytes: 9 });
+    expect(tail.text).toBe("four\n");
+    expect(tail.endByte).toBe(text.length);
+    expect(tail.totalBytes).toBe(text.length);
+  });
+
+  test("stops at the scan limit and says where to continue", async () => {
+    const window = await readLogWindow(stream("x".repeat(100), 10), {
+      maxBytes: 20,
+      scanMaxBytes: 50,
+    });
+    expect(window.totalBytes).toBeNull();
+    expect(window.endByte).toBe(50);
+    expect(window.nextOffset).toBe(50);
+  });
+});

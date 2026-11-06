@@ -337,8 +337,7 @@ async function resolveBrokerAuthority(
   }
   const delegation = exactDelegation(turn.personalConnectionDelegations, claims);
   const repository = exactRouteRepository(secret, claims, delegation, routeId);
-  const allRepositoriesAccess =
-    delegation.personalGitHubRepositorySelection?.allRepositoriesAccess;
+  const allRepositoriesAccess = delegation.personalGitHubRepositorySelection?.allRepositoriesAccess;
   const providerIdentity = await assertCurrentConnectionAndSelection(
     deps,
     claims,
@@ -358,7 +357,12 @@ async function authorizeBrokerProviderRequest(
   // Re-read every mutable connection/repository fence before this physical
   // provider request. A previous request's successful check grants nothing to
   // this one.
-  const currentIdentity = await assertCurrentConnectionAndSelection(deps, claims, repository, allRepositoriesAccess);
+  const currentIdentity = await assertCurrentConnectionAndSelection(
+    deps,
+    claims,
+    repository,
+    allRepositoriesAccess,
+  );
   if (currentIdentity.providerPrincipalId !== authority.providerPrincipalId) {
     throw new Error("personal GitHub provider identity changed");
   }

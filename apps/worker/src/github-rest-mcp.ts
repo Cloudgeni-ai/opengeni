@@ -304,9 +304,7 @@ function personalAllRepositoriesDelegation(
   if (!delegations.some(mayBePersonalGitHubDelegation)) return null;
   try {
     const delegation = exactPersonalDelegation(delegations);
-    return delegation.personalGitHubRepositorySelection?.allRepositoriesAccess
-      ? delegation
-      : null;
+    return delegation.personalGitHubRepositorySelection?.allRepositoriesAccess ? delegation : null;
   } catch {
     return null;
   }
@@ -844,7 +842,9 @@ function personalRepositoryResolver(
 /** Account-level reads (organizations, an owner's repositories) as the person. */
 function personalAccountAuthorityResolver(
   input: PersonalValidationInput & { resolveCredential: ResolveCredential },
-): NonNullable<ConstructorParameters<typeof GitHubRestMcpServer>[0]["account"]>["resolveAuthority"] {
+): NonNullable<
+  ConstructorParameters<typeof GitHubRestMcpServer>[0]["account"]
+>["resolveAuthority"] {
   return async ({ toolName, destinationUrl, forceRefresh }) => {
     const reconnectOr = (error: GitHubRestAuthorityError) =>
       personalReconnectOr(error, () => personalConnectionNeedsReconnect(input));
