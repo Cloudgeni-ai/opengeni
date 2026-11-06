@@ -1196,12 +1196,11 @@ export async function buildVerifiedRigProviderImage(
       finishedAt: new Date().toISOString(),
       error: {
         code: "provider_image_build_unsupported",
-        message:
-          computeWithoutSetup
-            ? "compute builds only Sandbox Environments with a setup script"
-            : backend === "compute"
-              ? "compute builds need a configured compute image and a deployment revision that identifies it"
-              : `sandbox backend ${backend} does not support immutable provider image builds`,
+        message: computeWithoutSetup
+          ? "compute builds only Sandbox Environments with a setup script"
+          : backend === "compute"
+            ? "compute builds need a configured compute image and a deployment revision that identifies it"
+            : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
     });
@@ -1213,14 +1212,12 @@ export async function buildVerifiedRigProviderImage(
     ) {
       // The record no longer names the template it replaced.
       const template = replaced.imageId;
-      await dependencies
-        .deleteComputeTemplate(input.settings, template)
-        .catch((error: unknown) => {
-          input.observability.warn("replaced compute environment template was not deleted", {
-            template,
-            error: errorMessage(error),
-          });
+      await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+        input.observability.warn("replaced compute environment template was not deleted", {
+          template,
+          error: errorMessage(error),
         });
+      });
     }
     return unsupported;
   }
