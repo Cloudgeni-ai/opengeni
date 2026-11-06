@@ -925,7 +925,7 @@ export class DesktopShell {
       if (this.connectingFromLink || this.pending) return;
       const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
       if (account) void this.connectFromLink(account, computerLink);
-      else void this.beginSignIn(computerLink.origin, computerLink);
+      else void this.signInFromLink(computerLink);
       return;
     }
     const link = parseAppLink(raw, {
@@ -962,6 +962,47 @@ export class DesktopShell {
   }
 
   // --- Sign-in ------------------------------------------------------------------------------------
+
+  /**
+   * A link never adds a server by itself: signing in to a server this app has
+   * not used needs the person's approval, naming the server, before the
+   * browser opens.
+   */
+  private async signInFromLink(link: ComputerConnectLink): Promise<void> {
+    if (!this.knowsServer(link.origin)) {
+      this.connectingFromLink = true;
+      try {
+        this.reveal();
+        const server = serverLabel(link.origin);
+        const { response } = await dialog.showMessageBox({
+          type: "warning",
+          title: "Sign in to a new server",
+          message: `Sign in to ${server}?`,
+          detail: `A link asked ${this.config.productName} to sign in to ${server}, a server you haven't used in this app. Continue only if you trust ${server} and opened this link yourself.`,
+          buttons: ["Cancel", "Sign in"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (response !== 1) return;
+      } finally {
+        this.connectingFromLink = false;
+      }
+      if (this.pending) return;
+    }
+    await this.beginSignIn(link.origin, link);
+  }
+
+  /** The app's own servers and the servers of accounts already added here. */
+  private knowsServer(serverInput: string): boolean {
+    const baseUrl = normalizeServerUrl(serverInput);
+    if (!baseUrl) return false;
+    return [
+      this.defaultServerUrl(),
+      this.config.defaultServerUrl,
+      ...this.store.snapshot().accounts.map((account) => account.baseUrl),
+    ].some((server) => normalizeServerUrl(server) === baseUrl);
+  }
 
   private async beginSignIn(
     serverInput: string,
