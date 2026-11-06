@@ -57,6 +57,7 @@ export type { ModelPickerSheetProps } from "./model-picker";
 export type { ComposerCall, SessionComposerProps } from "./composer";
 export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./decisions";
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
+export type { ApprovalReviewLoader } from "./approval-reviews";
 export { Button, IconButton } from "./controls";
 export {
   NativeAuthNeededRow,

@@ -260,6 +260,8 @@ describe("a prestarted setup on a full /workspace", () => {
         cause: { kind: "no_space" },
       }),
       attachGitCredentialRenewal: async () => undefined,
+      prepareCodemodeTokenSeed: async () => undefined,
+      attachCodemodeTokenRenewal: async () => undefined,
     } as unknown as EagerOwnedSandboxSetupDeps;
     const preparedInput = { input: "hello", persistedHistoryCount: 0 };
     await runEagerOwnedSandboxSetup(deps, {

@@ -131,7 +131,11 @@ describe("API component integration", () => {
 
   test("configured browser principals pass the CORS preflight", async () => {
     const app = createApp({
-      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      // Local access mode grants CORS only to this stack's own web origin.
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        webBaseUrl: "http://127.0.0.1:24000",
+      }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),

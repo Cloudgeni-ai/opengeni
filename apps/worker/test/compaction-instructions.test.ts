@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, noneAgentCapabilities } from "@opengeni/contracts";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   UNATTENDED_SESSION_GUIDANCE,
   appendSessionInstructions,
   appendWorkspaceMemory,
@@ -157,5 +158,51 @@ describe("standalone compaction instructions (AC16)", () => {
         ...context,
       }),
     ).not.toContain(UNATTENDED_SESSION_GUIDANCE);
+  });
+
+  test("an agent chat carries its agent instructions exactly as its turns do", () => {
+    const agentInstructions = "Answer as a pirate.";
+    const config = agentConfig();
+    const configured = { agent: config, instructions: "SESSION", resources: [] };
+    const instructions = standaloneCompactionInstructions({
+      settings,
+      session: configured,
+      ...context,
+      agentInstructions,
+    });
+    expect(instructions).toBe(
+      inspectPersistentAgentInstructions(settings, {
+        agentConfig: config,
+        workspaceAgentIdentity: context.workspaceAgentIdentity,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+        agentInstructions,
+        rig: context.rig,
+      }).composed,
+    );
+    expect(instructions).toContain(`${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}`);
+    const legacy = { agent: null, instructions: "SESSION", resources: [] };
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions,
+      }),
+    ).toBe(
+      appendWorkspaceMemory(
+        `${composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig)}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}\n\nSESSION`,
+        "MEMORY",
+      ),
+    );
+    // A deleted agent (no instructions) composes the plain chat's text.
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions: null,
+      }),
+    ).toBe(standaloneCompactionInstructions({ settings, session: legacy, ...context }));
   });
 });

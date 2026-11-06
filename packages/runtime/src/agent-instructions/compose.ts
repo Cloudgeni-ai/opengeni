@@ -76,6 +76,11 @@ export type ComposeModularAgentInstructionsInput = {
   /** Per-attempt runtime directives, each already gated by its caller. */
   codemode?: string | undefined;
   codeSearch?: string | undefined;
+  /**
+   * The instructions of the agent revision this chat is bound to
+   * (`sessions.agent_prompt_revision`). Absent for every other chat.
+   */
+  agentInstructions?: string | undefined;
   gitBindings?: string | undefined;
   /** Rendered Skill index, only when it is not delivered in conversation history. */
   skillCatalog?: string | undefined;
@@ -104,6 +109,22 @@ const VOLATILE_CONTRACT_MODULE_IDS: ReadonlySet<AgentPromptModule["id"]> = new S
  */
 export const SESSION_INSTRUCTIONS_PREAMBLE =
   "# Session instructions\n\nThese instructions were set for this session. Follow them over the default behavior above, such as tone, length, and format.\n\n";
+
+/**
+ * Heads an agent's instructions. The agent's editors wrote them, not the
+ * person in this chat or the platform, so they say plainly that they grant
+ * nothing beyond what the rules above already allow.
+ */
+export const AGENT_INSTRUCTIONS_PREAMBLE =
+  "# Instructions for this agent\n\nThe agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.\n\n";
+
+/** The agent instructions layer text, or undefined when there are none. */
+export function agentInstructionsLayerContent(
+  instructions: string | undefined,
+): string | undefined {
+  const trimmed = instructions?.trim();
+  return trimmed ? `${AGENT_INSTRUCTIONS_PREAMBLE}${trimmed}` : undefined;
+}
 
 /**
  * The operational contract for a session with an agent configuration: base
@@ -145,10 +166,12 @@ export function composeOperationalContract(
 
 /**
  * Layer order: identity → operational contract (base, mechanics, modules) →
- * attempt directives → Skill index → workspace governance → historical memory →
- * session instructions. Everything up to the directives is the stable,
- * cache-friendly prefix; governance and session text follow it, and session
- * instructions come last so they refine everything above.
+ * Codemode and code-search directives → agent instructions → Git bindings →
+ * Skill index → workspace governance → historical memory → session
+ * instructions. Everything up to the agent instructions is the stable,
+ * cache-friendly prefix (shared by every chat of one agent); governance and
+ * session text follow it, and session instructions come last so they refine
+ * everything above.
  */
 export function composeModularAgentInstructions(input: ComposeModularAgentInstructionsInput): {
   layers: ModularInstructionLayer[];
@@ -157,7 +180,8 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
    * Only with `input.stablePrefix`: the leading part of `composed` that holds
    * no workspace-, session- or turn-specific text (identity, the contract's
    * session-independent modules, then the Codemode/code-search directives when
-   * no volatile module sits between). Undefined when it would be empty.
+   * no volatile module sits between, then the agent instructions, which every
+   * chat of that agent shares). Undefined when it would be empty.
    */
   stablePrefix?: string;
 } {
@@ -188,6 +212,11 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
   };
   push("codemode", "Codemode", input.codemode);
   push("code_search", "Code search", input.codeSearch);
+  push(
+    "agent_instructions",
+    "Agent instructions",
+    agentInstructionsLayerContent(input.agentInstructions),
+  );
   push("git_bindings", "Git credential bindings", input.gitBindings);
   push("skill_catalog", "Skills", input.skillCatalog);
   push("workspace_governance", "Workspace governance", input.workspaceGovernance);
@@ -204,9 +233,15 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
   if (contract.stableContent === undefined) return { layers, composed };
   let stablePrefix = `${layers[0]!.content}${MODULAR_LAYER_SEPARATOR}${contract.stableContent}`;
   if (contract.stableContent === contract.content) {
-    // Deployment-level directives whose presence follows the agent configuration.
+    // Deployment-level directives whose presence follows the agent
+    // configuration, then the agent's own instructions.
     for (const layer of layers.slice(2)) {
-      if (layer.id !== "codemode" && layer.id !== "code_search") break;
+      if (
+        layer.id !== "codemode" &&
+        layer.id !== "code_search" &&
+        layer.id !== "agent_instructions"
+      )
+        break;
       stablePrefix += `${layer.joinBefore}${layer.content}`;
     }
   }

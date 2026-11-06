@@ -90,7 +90,7 @@ import {
   settleContextCompactionInterruption,
 } from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
-import { type MintedRunGitCredentials } from "../environment";
+import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
@@ -304,9 +304,11 @@ export type TurnStreamAttemptDeps = {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
+  /** Stops Codemode renewal and returns the bearer a managed setup writes next. */
+  prepareCodemodeTokenSeed: () => Promise<MintedSandboxCodemodeToken | undefined>;
   /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,

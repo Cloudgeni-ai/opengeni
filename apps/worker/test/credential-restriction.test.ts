@@ -104,7 +104,10 @@ describe("trusted worker credential restriction", () => {
         expect(prepared.codemodeAuthority.credentialRestriction).toBe(expected);
         expect(Object.hasOwn(initial, "credentialRestriction")).toBe(source !== "none");
         // Force the production renewal path without waiting for an expiry timer.
-        await prepared.attachCodemodeTokenRenewal(undefined, new Date(0));
+        await prepared.attachCodemodeTokenRenewal(undefined, {
+          token: prepared.sandboxCodemodeToken!,
+          expiresAt: new Date(0),
+        });
         const renewed = await verifyDelegatedAccessToken(
           settings.delegationSecret!,
           prepared.transientCodemodeEnvironment!().OPENGENI_CODEMODE_TOKEN!,

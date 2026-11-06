@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { FileResourceRef } from "@opengeni/contracts";
-import { completeFileUpload, prepareGeneratedWorkspaceFile, type Database } from "@opengeni/db";
+import {
+  completeFileUpload,
+  prepareGeneratedWorkspaceFile,
+  withSessionRlsActorContext,
+  type Database,
+} from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import type { DownloadedSlackReactionImage } from "./integrations/slack-bot";
 
@@ -15,6 +20,13 @@ export type SlackReactionImageImportSource = Readonly<{
   slackTeamId: string;
   slackChannelId: string;
   slackMessageTs: string;
+  /**
+   * The person a private Slack interaction (a bot DM or a private handoff)
+   * belongs to. Its session is fenced to them, so what they attach to it is
+   * their personal file. Null for a workspace-visible interaction. Not part of
+   * the import identity.
+   */
+  privateOwnerSubjectId?: string | null;
 }>;
 
 export type ImportedSlackReactionImage = Readonly<{
@@ -53,9 +65,13 @@ export async function importSlackReactionImage(
   const safeFilename = safeSlackImageFilename(image.filename, image.contentType);
   const objectKey = `workspaces/${source.workspaceId}/files/${fileId}/slack-reactions/${safeFilename}`;
   const filename = safeFilename;
-  const prepared = await (dependencies.prepareFile ?? prepareGeneratedWorkspaceFile)(
-    dependencies.db,
-    {
+  const owner = source.privateOwnerSubjectId ?? null;
+  const inFileScope = <T>(run: () => Promise<T>): Promise<T> =>
+    owner
+      ? withSessionRlsActorContext({ subjectId: owner, privateFileOwnerSubjectId: owner }, run)
+      : run();
+  const prepared = await inFileScope(() =>
+    (dependencies.prepareFile ?? prepareGeneratedWorkspaceFile)(dependencies.db, {
       accountId: source.accountId,
       workspaceId: source.workspaceId,
       fileId,
@@ -68,7 +84,8 @@ export async function importSlackReactionImage(
       bucket: storage.bucket,
       objectKey,
       expiresAt: new Date((dependencies.now?.() ?? new Date()).getTime() + UPLOAD_INTENT_TTL_MS),
-    },
+      ...(owner ? { privateOwnerSubjectId: owner } : {}),
+    }),
   );
 
   let file = prepared.file;
@@ -94,10 +111,12 @@ export async function importSlackReactionImage(
         sha256,
       });
     }
-    file = await (dependencies.completeFile ?? completeFileUpload)(
-      dependencies.db,
-      source.workspaceId,
-      uploadId,
+    file = await inFileScope(() =>
+      (dependencies.completeFile ?? completeFileUpload)(
+        dependencies.db,
+        source.workspaceId,
+        uploadId,
+      ),
     );
   } else {
     await assertVisibleSlackImage(storage, objectKey, image, sha256);

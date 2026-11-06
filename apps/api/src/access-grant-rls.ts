@@ -1,5 +1,6 @@
 import type { AccessGrant, BillingOrigin } from "@opengeni/contracts";
 import {
+  agentPrivateFileOwnerSubjectId,
   billingOriginForGrant,
   fundedBillingOrigin,
   requireLiveAgentAttemptAuthorization,
@@ -9,6 +10,7 @@ import {
 import {
   ambientBillingOrigin,
   freezeAgentLearningPolicy,
+  getSlackPrivateSessionOwnerSubjectId,
   readTurnBillingOrigin,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
@@ -166,7 +168,15 @@ function sameLearningActor(left: AgentLearningActor, right: AgentLearningActor):
   );
 }
 
-type FrozenLearningPolicy = Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+/**
+ * What decides an attempt's personal file owner: its frozen learning policy and
+ * the private Slack interaction, if any, that owns its session's root. Both are
+ * fixed for the attempt's lifetime.
+ */
+type FrozenLearningPolicy = {
+  learning: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+  slackPrivateOwnerSubjectId: string | null;
+};
 
 /**
  * An agent's learning policy is frozen once per accepted turn (a durable
@@ -175,7 +185,8 @@ type FrozenLearningPolicy = Awaited<ReturnType<typeof freezeAgentLearningPolicy>
  * attempts. Re-reading it on every agent request took row locks on the
  * session, turn and attempt for an answer that cannot change, so remember the
  * verified answer per exact attempt. Liveness is still checked on every
- * request; only the immutable policy read is reused.
+ * request; only the immutable policy read (and the session's equally
+ * immutable Slack ownership) is reused.
  */
 const FROZEN_LEARNING_LIMIT = 4_096;
 const FROZEN_LEARNING_TTL_MS = 15 * 60_000;
@@ -245,11 +256,19 @@ export async function withAccessGrantSessionRlsContext<T>(
     throw agentAttemptAuthorityError("malformed");
   }
   const freezeLearning = (actor: AgentLearningActor) =>
-    freezeAgentLearningPolicy(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      actor,
-    });
+    Promise.all([
+      freezeAgentLearningPolicy(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor,
+      }),
+      getSlackPrivateSessionOwnerSubjectId(deps.db, grant.workspaceId, actor.sessionId),
+    ]).then(
+      ([learning, slackPrivateOwnerSubjectId]): FrozenLearningPolicy => ({
+        learning,
+        slackPrivateOwnerSubjectId,
+      }),
+    );
   try {
     // The learning policy is keyed by the exact attempt, which a live actor
     // takes verbatim from the grant's claims. Read it for the claimed attempt
@@ -294,8 +313,10 @@ export async function withAccessGrantSessionRlsContext<T>(
             subjectId: actor.subjectId,
             initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
             agentRootSessionId: actor.callerRootSessionId,
-            privateFileOwnerSubjectId:
-              learning.defaultScope === "personal" ? learning.subjectId : null,
+            privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+              learning.learning,
+              learning.slackPrivateOwnerSubjectId,
+            ),
           },
           fn,
         ),

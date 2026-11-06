@@ -1767,7 +1767,12 @@ visible touch targets when styling actions.
 
 `ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
 load the versioned facts with `client.getToolActionReview`. It shows one selected
-action, counts and bounded fields instead of raw argument JSON. Keep
+action, counts and bounded fields instead of raw argument JSON.
+A host may also return its own `ToolActionReview` (a plain title and consequence
+for a tool whose arguments are only identifiers), or `null` to keep the standard
+card for that approval. The React Native `ApprovalStrip` and
+`NativeSessionScreen` take the same `loadReview`.
+Keep
 `selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
 detail route unmounts the surface, so returning cannot silently select a different
 action. The native `onApprove` / `onReject` identity is unchanged and duplicate
