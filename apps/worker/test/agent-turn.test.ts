@@ -3521,9 +3521,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     // An eagerly established box and a Connected Machine are already there.
     expect(shouldDeferRepositorySkillIndex({ ...base, establishPolicy: "eager" })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, machinePrimary: true })).toBe(false);
-    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "selfhosted" })).toBe(
-      false,
-    );
+    expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, groupBoxBackend: "none" })).toBe(false);
     expect(shouldDeferRepositorySkillIndex({ ...base, hasRepositoryResources: false })).toBe(false);
 
