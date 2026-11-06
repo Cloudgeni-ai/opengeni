@@ -2406,6 +2406,14 @@ export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /**
+   * Called when a tool search's decision model fails or misses its deadline
+   * and the search falls back to keywords: the search result says only that
+   * it fell back.
+   */
+  onToolSelectionError?:
+    | ((failure: import("./tool-discovery-decision").ToolSelectionFailure) => void)
+    | undefined;
+  /**
    * Ranks tools by meaning alongside keywords in tool search; the caller owns
    * its route checks. Absent means keyword ranking alone.
    */
@@ -4256,7 +4264,10 @@ function maybeInstallLazyToolTransport(
       return names;
     },
     options.toolSearchDecisionModel
-      ? createToolSelector(options.toolSearchDecisionModel)
+      ? createToolSelector(
+          options.toolSearchDecisionModel,
+          options.onToolSelectionError ? { onError: options.onToolSelectionError } : {},
+        )
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
@@ -12232,6 +12243,7 @@ export { connectableIntegrationsNamedIn } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
+  ToolSelectionFailure,
   ToolSelector,
   ToolDecisionInput,
   ToolDecisionCandidate,

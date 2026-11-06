@@ -1,13 +1,41 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import type { DecisionUsage } from "@opengeni/decisions";
+import { DecisionError, type DecisionUsage } from "@opengeni/decisions";
 import type { DocumentEmbedder } from "@opengeni/documents";
 import { createToolSelector } from "@opengeni/runtime";
 import {
   configuredToolDecisionModel,
   configuredToolMeaningRanker,
+  toolSelectionFallbackReason,
 } from "../src/activities/agent-turn/tool-discovery";
 import { configuredDecisionModel } from "../src/activities/agent-turn/decision-model";
+
+describe("tool search selection fallback reasons", () => {
+  const failure = (error: unknown, timedOut = false) => ({
+    error,
+    elapsedMs: 8000,
+    timedOut,
+    attempts: 2,
+  });
+
+  test("names the deadline, rate limits, provider errors, failed requests and bad answers", () => {
+    expect(toolSelectionFallbackReason(failure(new Error("aborted"), true))).toBe("deadline");
+    expect(
+      toolSelectionFallbackReason(failure(new DecisionError("slow down", { status: 429 }))),
+    ).toBe("rate_limited");
+    expect(
+      toolSelectionFallbackReason(failure(new DecisionError("bad gateway", { status: 502 }))),
+    ).toBe("provider_error");
+    expect(
+      toolSelectionFallbackReason(
+        failure(new DecisionError("network", { code: "request_failed" })),
+      ),
+    ).toBe("request_failed");
+    expect(toolSelectionFallbackReason(failure(new DecisionError("invalid typed answers")))).toBe(
+      "invalid_answer",
+    );
+  });
+});
 
 describe("tool search meaning ranking", () => {
   const remote = (overrides: Partial<DocumentEmbedder> = {}) => {

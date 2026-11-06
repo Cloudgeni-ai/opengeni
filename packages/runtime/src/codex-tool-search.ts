@@ -10,7 +10,7 @@ import {
 } from "./mcp-network";
 
 const DEFAULT_SEARCH_LIMIT = 8;
-const MAX_SEARCH_LIMIT = 20;
+export const MAX_SEARCH_LIMIT = 20;
 
 const MCP_TOOL_NAME_SEPARATOR = "__";
 const NO_MCP_SERVER_IDS: ReadonlySet<string> = new Set();
