@@ -44,6 +44,7 @@ import {
 } from "../src/integrations/slack-agent-updates";
 
 const DAY = 24 * 60 * 60 * 1_000;
+const HOUR = 60 * 60 * 1_000;
 const DELEGATION_SECRET = "slack-agent-updates-delegation-secret";
 const signingMaterial = ["slack", "updates", crypto.randomUUID()].join("-");
 const encryptionKey = randomBytes(32).toString("base64");
@@ -944,9 +945,12 @@ describe("update messages with PostgreSQL", () => {
     const before = await f.person("before");
     await f.setSwitch(true);
     const newcomer = await f.person("newcomer");
-    // Any time, not only at 10:00: they are in Slack right now. A fixed
-    // afternoon keeps the daily 10:00 update for others out of this count.
-    const now = weekdayAt(15);
+    // Any time, not only at 10:00: they are in Slack right now. An hour or two
+    // from now stays inside the one-day welcome window (the next weekday
+    // afternoon is three days away on a Friday evening), and skipping the
+    // 10:00 hour keeps the daily update for others out of this count.
+    const now = new Date(Date.now() + HOUR);
+    if (now.getUTCHours() === 10) now.setTime(now.getTime() + HOUR);
     expect((await f.sweep(now)).sent).toBe(1);
     expect(f.slack.posts).toHaveLength(1);
     expect(f.slack.posts[0]!.channel).toBe(newcomer.channel);
