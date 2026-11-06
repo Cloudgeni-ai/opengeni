@@ -20,12 +20,12 @@ export function readable(catalog: Catalog, toolName: string) {
 
 function summaryTable(rows: [string, Summary][]) {
   const lines = [
-    "| Strategy | Searches | First pick right | Right tool loaded | Right tool loaded or shown | Wrong tools loaded per search | Tokens to agent, mean / p95 | Latency, mean / p95 / p99 | Cost per search | Fallbacks |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Strategy | Searches | First pick right | Right tool loaded | Right tool loaded or shown | Needs loaded | Needs loaded or shown | Wrong tools loaded per search | Tokens to agent, mean / p95 | Latency, mean / p95 / p99 | Cost per search | Fallbacks |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const [name, s] of rows)
     lines.push(
-      `| ${cell(name)} | ${s.searches}${s.errors ? ` (${s.errors} errors)` : ""} | ${share(s.firstPick, s.scored)} | ${percent(s.loadedRight)} | ${share(s.visible, s.scored)} | ${s.offLabelLoaded.toFixed(2)} | ${Math.round(s.meanAgentTokens)} / ${s.p95AgentTokens} | ${ms(s.meanLatencyMs)} / ${ms(s.p95LatencyMs)} / ${ms(s.p99LatencyMs)} | ${usd(s.meanCostUsd)} | ${s.fallbacks} |`,
+      `| ${cell(name)} | ${s.searches}${s.errors ? ` (${s.errors} errors)` : ""} | ${share(s.firstPick, s.scored)} | ${percent(s.loadedRight)} | ${share(s.visible, s.scored)} | ${percent(s.needsLoaded)} | ${percent(s.needsVisible)} | ${s.offLabelLoaded.toFixed(2)} | ${Math.round(s.meanAgentTokens)} / ${s.p95AgentTokens} | ${ms(s.meanLatencyMs)} / ${ms(s.p95LatencyMs)} / ${ms(s.p99LatencyMs)} | ${usd(s.meanCostUsd)} | ${s.fallbacks} |`,
     );
   return lines.join("\n");
 }
@@ -76,7 +76,7 @@ export function markdownReport(
     summaryTable(byStrategy),
     recallTable(byStrategy),
     "",
-    "What the columns mean: **first pick right**, the first tool the agent receives is an acceptable one; **loaded or shown**, the agent receives or sees by name an acceptable tool, so it needs at most one more call; **wrong tools loaded**, schemas the agent receives that are not acceptable.",
+    "What the columns mean: **first pick right**, the first tool the agent receives is an acceptable one; **loaded or shown**, the agent receives or sees by name an acceptable tool, so it needs at most one more call; **needs loaded**, of everything the searches asked for (each need of a search that asks for several things), the share the search loaded a tool for; **wrong tools loaded**, schemas the agent receives that are not acceptable.",
   ];
   for (const tag of tags) {
     out.push(
@@ -100,7 +100,7 @@ export function markdownReport(
     const misses = records.filter((r) => {
       if (r.strategy !== strategy.name) return false;
       const score = scoreSearch(r);
-      return !score || !score.firstPick;
+      return !score || !score.firstPick || score.needsLoaded < score.needs;
     });
     out.push(
       `### ${strategy.name}: ${misses.length} of ${records.filter((r) => r.strategy === strategy.name).length}`,
@@ -117,7 +117,9 @@ export function markdownReport(
         .join(", ");
       out.push(
         `- **${r.scenario}**: "${clip(r.query, 220)}"`,
-        `  - Acceptable: ${r.acceptable.map((n) => readable(catalog, n)).join(", ")}`,
+        r.needs && r.needs.length > 1
+          ? `  - Needs (${score?.needsLoaded ?? 0} of ${r.needs.length} loaded): ${r.needs.map((need) => need.map((n) => readable(catalog, n)).join(" or ")).join("; ")}`
+          : `  - Acceptable: ${r.acceptable.map((n) => readable(catalog, n)).join(", ")}`,
         r.error
           ? `  - Error: ${clip(r.error, 300)}`
           : `  - Loaded: ${loaded}. Shown: ${shown}.${score?.visible ? " (Right tool visible.)" : " (Right tool not visible.)"}`,

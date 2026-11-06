@@ -1,9 +1,4 @@
-import {
-  calculateModelUsageCostBreakdown,
-  configuredModelPricingSchedules,
-  configuredStaticUsageLimits,
-  type Settings,
-} from "@opengeni/config";
+import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
   SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
@@ -15,12 +10,10 @@ import {
   chargeBillingOrigin,
   checkWorkspaceAllowance,
   getByokFeeSpendableBalance,
-  releaseModelCallCredits,
-  reserveModelCallCredits,
+  getSpendableCreditBalance,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import type { SingleModelCallRequest } from "@opengeni/runtime";
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
@@ -50,104 +43,11 @@ export type ModelCallAdmission =
     };
 
 /**
- * Output tokens a credit-reserving call may produce when its request sets no
- * limit. The catalog records no output maximum per model, so without a limit
- * the call's maximum cost (and its hold) could not be sized; such a call is
- * sent with this limit instead of the provider's own default.
- */
-export const MODEL_CALL_DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
-
-/**
- * Input tokens counted for each image part when sizing a hold, above what
- * providers usually bill for one image.
- */
-const MODEL_CALL_HOLD_IMAGE_INPUT_TOKENS = 8_192;
-/** Role and framing tokens counted for each message when sizing a hold. */
-const MODEL_CALL_HOLD_MESSAGE_INPUT_TOKENS = 16;
-
-/**
- * Whether admission reserves a credit hold for the call: an Opengeni-credit
- * model on a credit-metered deployment whose balance this deployment keeps
- * (a host entitlements port admits on its own terms).
- */
-export function modelCallReservesCredits(
-  services: { settings: Settings; entitlements?: EntitlementsPort | null },
-  chargesOpenGeniCredits: boolean,
-): boolean {
-  return (
-    chargesOpenGeniCredits &&
-    !services.entitlements &&
-    (services.settings.billingMode === "stripe" || services.settings.usageLimitsMode === "managed")
-  );
-}
-
-/** The request with an output limit, so its cost has a maximum. */
-export function withModelCallOutputLimit<T extends Pick<SingleModelCallRequest, "maxOutputTokens">>(
-  request: T,
-): T & { maxOutputTokens: number } {
-  return {
-    ...request,
-    maxOutputTokens: request.maxOutputTokens ?? MODEL_CALL_DEFAULT_MAX_OUTPUT_TOKENS,
-  };
-}
-
-/**
- * The most Opengeni credit one call can be charged: its input counted at one
- * token per UTF-8 byte of text (byte-level tokenizers produce fewer), a fixed
- * allowance per image, and its full output limit, at the model's credit price
- * and at whichever of the uncached-input and cache-write rates is higher.
- * Settlement still charges actual usage.
- */
-export function modelCallMaxCreditCostMicros(
-  settings: Settings,
-  modelId: string,
-  request: Pick<SingleModelCallRequest, "messages" | "outputFormat"> & { maxOutputTokens: number },
-): number {
-  const schedules = configuredModelPricingSchedules(settings);
-  const pricingModel =
-    !schedules[modelId] && modelId.startsWith("codex/") && schedules[modelId.slice("codex/".length)]
-      ? modelId.slice("codex/".length)
-      : modelId;
-  let inputTokens = 0;
-  for (const message of request.messages) {
-    inputTokens += MODEL_CALL_HOLD_MESSAGE_INPUT_TOKENS;
-    if (typeof message.content === "string") {
-      inputTokens += Buffer.byteLength(message.content, "utf8");
-      continue;
-    }
-    for (const part of message.content) {
-      inputTokens +=
-        part.type === "text"
-          ? Buffer.byteLength(part.text, "utf8")
-          : MODEL_CALL_HOLD_IMAGE_INPUT_TOKENS;
-    }
-  }
-  if (request.outputFormat?.type === "json_schema") {
-    inputTokens +=
-      Buffer.byteLength(request.outputFormat.name, "utf8") +
-      Buffer.byteLength(JSON.stringify(request.outputFormat.schema), "utf8");
-  }
-  const outputTokens = request.maxOutputTokens;
-  const uncached = calculateModelUsageCostBreakdown(settings, pricingModel, {
-    inputTokens,
-    outputTokens,
-  }).creditCostMicros;
-  const cacheWrite = calculateModelUsageCostBreakdown(settings, pricingModel, {
-    inputTokens,
-    outputTokens,
-    inputTokensDetails: { cache_write_tokens: inputTokens },
-  }).creditCostMicros;
-  return Math.max(uncached, cacheWrite);
-}
-
-/**
  * Admission for one stateless model call, with the same funding rules as an
- * agent turn between model calls: the workspace allowance must not be
- * exhausted and the static monthly caps apply. An Opengeni-credit model on a
- * credit-metered deployment reserves the call's maximum cost (`creditHold`)
- * against the spendable balance net of other calls still in flight; the
- * caller releases the hold once the call settles or fails, and settlement
- * charges actual usage. A refused admission leaves no hold.
+ * agent turn between model calls: an Opengeni-credit model needs a positive
+ * spendable balance, the workspace allowance must not be exhausted, and the
+ * static monthly caps apply. Admission is a read, never a reservation or an
+ * estimate of the call's cost; settlement charges actual usage afterwards.
  * Externally funded calls (subscriptions, workspace or organization keys)
  * skip the credit gate and the token cap; an own key needs paid credit for
  * its platform fee, and an own subscription needs a paid plan.
@@ -168,18 +68,11 @@ export async function admitModelCall(
     byok?: boolean;
     /** Served by the person's own subscription (needs a paid plan, no fee). */
     ownSubscription?: boolean;
-    /**
-     * Required when the call reserves credits (`modelCallReservesCredits`):
-     * its server-generated request id and maximum priced cost
-     * (`modelCallMaxCreditCostMicros`).
-     */
-    creditHold?: { requestId: string; maxCostMicros: number };
   },
 ): Promise<ModelCallAdmission> {
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
-  let heldRequestId: string | null = null;
   if (
     input.ownSubscription &&
     connectedSubscriptionsRefusedForOrigin(settings, chargeBillingOrigin(input.billingOrigin))
@@ -234,22 +127,16 @@ export async function admitModelCall(
       }
     } else {
       const origin = chargeBillingOrigin(input.billingOrigin);
-      const hold = input.creditHold;
-      if (!hold) throw new Error("A credit-metered model call is admitted only with a credit hold");
-      // At least one micro, so a zero-priced call still needs a positive balance.
-      const amountMicros = Math.max(1, hold.maxCostMicros);
-      const reservation = Number.isSafeInteger(amountMicros)
-        ? await reserveModelCallCredits(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            requestId: hold.requestId,
-            usage: input.model,
-            origin,
-            amountMicros,
-          })
-        : { reserved: false, creditPolicyRevision: undefined };
-      creditPolicyRevision = reservation.creditPolicyRevision;
-      if (!reservation.reserved) {
+      const balance = await getSpendableCreditBalance(
+        db,
+        input.accountId,
+        input.model,
+        undefined,
+        undefined,
+        origin,
+      );
+      creditPolicyRevision = balance.creditPolicyRevision;
+      if (balance.balanceMicros <= 0) {
         return {
           allowed: false,
           denial: "insufficient_credits",
@@ -258,50 +145,8 @@ export async function admitModelCall(
             : { message: "Insufficient workspace credits." }),
         };
       }
-      heldRequestId = hold.requestId;
     }
   }
-  // A later refusal (or failure) gives the hold back: nothing was dispatched.
-  let refusal: ModelCallAdmission | null;
-  try {
-    refusal = await fundingLimitRefusal(services, input);
-  } catch (error) {
-    if (heldRequestId) await releaseHold(db, input, heldRequestId);
-    throw error;
-  }
-  if (refusal) {
-    if (heldRequestId) await releaseHold(db, input, heldRequestId);
-    return refusal;
-  }
-  return { allowed: true, creditPolicyRevision };
-}
-
-async function releaseHold(
-  db: Database,
-  scope: { accountId: string; workspaceId: string },
-  requestId: string,
-): Promise<void> {
-  await releaseModelCallCredits(db, {
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    requestId,
-  }).catch(() => {
-    // An unreleased hold stops counting when it expires.
-  });
-}
-
-/** The allowance and static monthly cap checks that follow the credit gate. */
-async function fundingLimitRefusal(
-  services: { db: Database; settings: Settings },
-  input: {
-    accountId: string;
-    workspaceId: string;
-    chargesOpenGeniCredits: boolean;
-    countsTowardTokenCap: boolean;
-    subjectId: string | null;
-  },
-): Promise<ModelCallAdmission | null> {
-  const { settings, db } = services;
   const refusal = await checkWorkspaceAllowance(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -343,7 +188,7 @@ async function fundingLimitRefusal(
       }
     }
   }
-  return null;
+  return { allowed: true, creditPolicyRevision };
 }
 
 function startOfUtcMonth(): Date {

@@ -10,6 +10,8 @@ It answers four questions for every strategy:
 - **First pick right:** is the first tool the agent receives an acceptable one?
 - **Loaded or shown:** does the agent receive, or see by name, an acceptable tool, so it
   needs at most one more call?
+- **Needs loaded:** when one search asks for several things, what share of them got a
+  tool loaded by that search (and, separately, loaded or shown by name)?
 - **Recall at K:** for ranking stages, is an acceptable tool within the top K candidates?
 - **Cost and delay:** latency (mean, p95, p99) and model cost per search.
 
@@ -49,6 +51,7 @@ Options:
 | `--skip-problems` | Run even when some scenarios reference tools missing from the catalog. |
 | `--with-task` | Give strategies that can use it the user's request as well as the query. |
 | `--selection-policy key=value,…` | Override the runtime's selection policy for this run, for example `candidates=25`. |
+| `--limit N` | Pass `limit: N` to every search, as agents often do (a scenario's own `limit` wins). Default: the tool's default. |
 
 ## Catalog
 
@@ -89,6 +92,15 @@ A JSON array or JSON Lines of:
   model name, `server.tool`, the published name or its underscore form.
 - A task that no tool can do has an empty `acceptable` list and the tag `no-fit`; it is
   right when search loads nothing.
+- `needs` (optional) splits a search that asks for several things into what each need
+  accepts, a list of lists: `[["deviations.create"], ["files.create_upload",
+  "photos.create_upload"]]`. Their tools are acceptable too, and the report's **needs
+  loaded** counts each need as met when the search loaded one of its tools. A search
+  without `needs` is one need.
+- A tool that an acceptable tool's own description names (the tool to call first, or
+  to get an input from) is acceptable as well: loading it is not wrong, though no need
+  requires it.
+- `limit` (optional) is the `limit` the search passes.
 - `tags` give per-slice tables in the report. Useful ones: the query's language
   (`lang:en`, `lang:no`), `multi-need` (one query, several tools), `name-guess` (the agent
   guesses a tool name), `no-fit`, and `split:dev` / `split:holdout`.
@@ -147,6 +159,22 @@ Chat models for the experimental `two-stage`, `whole-catalog` and card writing u
 `TOOL_EVAL_SELECTOR_*`, `TOOL_EVAL_CARDS_*` (`BASE_URL`, `API_KEY`, `MODEL`,
 `USD_PER_MILLION` as `input,cached,output`, optional `AUTH=api-key`). Embeddings use
 `TOOL_EVAL_EMBEDDING_*` with the same fields and optional `DIMENSIONS`.
+
+## Synthetic fixtures
+
+`fixtures/synthetic-catalog.ts` writes two public catalogs: a large one of about 1,350
+tools (one product API with about 1,100 dotted tools plus twelve common integrations)
+and a small one of 50 (mail, calendar and chat). `fixtures/synthetic-scenarios.ts`
+writes their multi-need tasks: each task is searched as packed keywords, as one plain
+clause per need, and as the user's own sentence, and each need also as a search of its
+own. Tasks tagged `split:holdout` were written before any selection change was tuned.
+
+```sh
+bun scripts/tool-discovery-eval/fixtures/synthetic-catalog.ts --out /tmp/tool-fixtures
+bun scripts/tool-discovery-eval/run.ts --catalog /tmp/tool-fixtures/large/catalog.json \
+  --scenarios /tmp/tool-fixtures/large/scenarios.json --out /tmp/tool-results --limit 2 \
+  --strategies runtime-meaning-selector
+```
 
 ## Earlier findings
 

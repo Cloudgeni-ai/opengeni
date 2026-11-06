@@ -49,6 +49,14 @@ export const PersonalGitHubRepositoryAccess = /* @__PURE__ */ defineSchema(() =>
 );
 export type PersonalGitHubRepositoryAccess = z.infer<typeof PersonalGitHubRepositoryAccess>;
 
+/** Whether `granted` access includes `requested` (write includes read). */
+export function personalGitHubAccessCovers(
+  granted: PersonalGitHubRepositoryAccess | null | undefined,
+  requested: PersonalGitHubRepositoryAccess,
+): boolean {
+  return granted === "write" || (granted === "read" && requested === "read");
+}
+
 export const PersonalGitHubRepositoryPermissions = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -68,6 +76,34 @@ export const PersonalGitHubRepositoryVisibility = /* @__PURE__ */ defineSchema((
   z.enum(["public", "private", "internal"]),
 );
 export type PersonalGitHubRepositoryVisibility = z.infer<typeof PersonalGitHubRepositoryVisibility>;
+
+/**
+ * The access "All my repositories" gives one repository: the chosen default,
+ * lowered to what GitHub allows the person there. Null when GitHub allows no
+ * use at all (no read permission, or a disabled repository); an archived
+ * repository stays readable.
+ */
+export function personalGitHubAllRepositoriesEffectiveAccess(
+  allRepositoriesAccess: PersonalGitHubRepositoryAccess,
+  repository: {
+    permissions: PersonalGitHubRepositoryPermissions;
+    archived: boolean;
+    disabled: boolean;
+  },
+): PersonalGitHubRepositoryAccess | null {
+  const permissions = repository.permissions;
+  if (repository.disabled) return null;
+  const canRead =
+    permissions.pull ||
+    permissions.triage ||
+    permissions.push ||
+    permissions.maintain ||
+    permissions.admin;
+  if (!canRead) return null;
+  const canWrite =
+    !repository.archived && (permissions.push || permissions.maintain || permissions.admin);
+  return allRepositoriesAccess === "write" && canWrite ? "write" : "read";
+}
 
 const PersonalGitHubRepositoryFullName = /* @__PURE__ */ defineSchema(() =>
   z
@@ -132,6 +168,14 @@ export const PersonalGitHubRepositorySelectionState = /* @__PURE__ */ defineSche
       credentialBindingId: primitives.uuid,
       providerPrincipalId: PersonalGitHubRepositoryId,
       selectionGeneration: primitives.nonnegativeInteger,
+      /**
+       * "All my repositories": every repository the person can access on
+       * GitHub, up to this access, checked live with GitHub on every use.
+       * Null (or absent from older servers) means only `repositories`.
+       * The per-repository list is kept while this is on, so turning it off
+       * restores the earlier choice.
+       */
+      allRepositoriesAccess: PersonalGitHubRepositoryAccess.nullable().optional(),
       repositories: z
         .array(PersonalGitHubSelectedRepository)
         .max(PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX),
@@ -147,6 +191,12 @@ export const ListPersonalGitHubRepositoriesQuery = /* @__PURE__ */ defineSchema(
     .object({
       cursor: z.coerce.number().int().positive().max(10_000).default(1),
       limit: z.coerce.number().int().min(1).max(PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX).default(50),
+      /**
+       * Find repositories by name across everything the person can access,
+       * not only the listed page. Matches `owner/name` substrings; an exact
+       * `owner/name` is also looked up directly. Results are not paged.
+       */
+      query: z.string().trim().min(1).max(140).optional(),
     })
     .strict(),
 );
@@ -156,7 +206,14 @@ export type ListPersonalGitHubRepositoriesQuery = z.infer<
 
 export const PersonalGitHubRepositoryCatalogItem = /* @__PURE__ */ defineSchema(() =>
   PersonalGitHubRepository.safeExtend({
+    /** The person's saved choice for this repository; null when not chosen. */
     selectedAccess: PersonalGitHubRepositoryAccess.nullable(),
+    /**
+     * The access work gets now: the saved choice, or in All my repositories
+     * that mode's access lowered to GitHub's permission. Null when unusable.
+     * Absent from older servers, where `selectedAccess` is the answer.
+     */
+    effectiveAccess: PersonalGitHubRepositoryAccess.nullable().optional(),
   }).strict(),
 );
 export type PersonalGitHubRepositoryCatalogItem = z.infer<
@@ -200,6 +257,12 @@ export const ReplacePersonalGitHubRepositorySelectionsRequest = /* @__PURE__ */ 
       repositories: z
         .array(PersonalGitHubRepositorySelectionInput)
         .max(PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX),
+      /**
+       * Turn "All my repositories" on with this access, or off with null.
+       * Omitted keeps the current mode. `repositories` is saved either way,
+       * so the per-repository choice returns when the mode is turned off.
+       */
+      allRepositoriesAccess: PersonalGitHubRepositoryAccess.nullable().optional(),
     })
     .strict()
     .superRefine((request, context) => {
@@ -294,6 +357,8 @@ export const PersonalGitHubConnectionStatusResponse = /* @__PURE__ */ defineSche
   z
     .object({
       enabled: primitives.boolean,
+      /** People may choose "All my repositories" on this deployment. */
+      allRepositoriesAvailable: primitives.boolean.optional(),
       connection: ConnectionMetadata.nullable(),
       reviewUrl: z.string().url().nullable(),
     })

@@ -73,4 +73,25 @@ describe("release credential environment boundary", () => {
     }
     expect(workflows.has("migrate-release-secrets.yml")).toBe(false);
   });
+
+  test("jobs holding the agent signing key install only pinned tools, never beside the key", () => {
+    const unpinned = /\b(?:cargo install|pip3? install|python3? -m pip install)\b/;
+    const builds =
+      /\b(?:cargo (?:zig)?build|bun (?:install|build)|install-agent-build-tools\.sh)\b/;
+    let keyed = 0;
+    for (const [file, workflow] of workflows) {
+      for (const [id, job] of Object.entries(workflow.jobs ?? {}) as [string, any][]) {
+        if (!JSON.stringify(job).includes("secrets.OPENGENI_AGENT_MINISIGN_KEY")) continue;
+        for (const step of job.steps ?? []) {
+          const run = String(step.run ?? "");
+          expect(run, `${file}/${id}/${step.name}`).not.toMatch(unpinned);
+          if (!JSON.stringify(step.env ?? {}).includes("secrets.OPENGENI_AGENT_MINISIGN_KEY"))
+            continue;
+          keyed++;
+          expect(run, `${file}/${id}/${step.name}`).not.toMatch(builds);
+        }
+      }
+    }
+    expect(keyed).toBeGreaterThanOrEqual(6);
+  });
 });

@@ -156,6 +156,73 @@ describe("buildGitHubRestMcpForTurn", () => {
     });
   });
 
+  test("All my repositories gives Your GitHub tools to a chat with no attached repository", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const result = await buildGitHubRestMcpForTurn({
+      db: {} as Database,
+      settings: testSettings({ githubRestMcpEnabled: true }),
+      accountId: "00000000-0000-4000-8000-000000000001",
+      workspaceId: "00000000-0000-4000-8000-000000000002",
+      sessionId: "00000000-0000-4000-8000-000000000003",
+      attemptId: "00000000-0000-4000-8000-000000000004",
+      turn: {
+        personalConnectionDelegations: [
+          {
+            serverId: "github:personal",
+            connectionId,
+            originWorkspaceId: "00000000-0000-4000-8000-000000000005",
+            ownerSubjectId: "user-1",
+            providerDomain: "github.com",
+            kind: "oauth2",
+            connectionType: "github_personal",
+            personalGitHubRepositorySelection: {
+              credentialBindingId: "22222222-2222-4222-8222-222222222222",
+              connectionAuthorityGeneration: 2,
+              selectionGeneration: 4,
+              allRepositoriesAccess: "write",
+              repositories: [],
+            },
+          },
+        ],
+      } as unknown as SessionTurn,
+      resources: [],
+      tools: [],
+      resolveCredential: async () => ({
+        status: "auth_needed",
+        reason: "missing_connection",
+        providerDomain: "github.com",
+      }),
+    });
+    expect(result.localMcpServers.map((entry) => entry.id)).toEqual([
+      GITHUB_REST_MCP_PERSONAL_SERVER_ID,
+    ]);
+    const tools = await result.localMcpServers[0]!.server.listTools();
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain("organizations_list");
+    expect(names).toContain("owner_repositories_list");
+    expect(names).toContain("workflow_job_logs_get");
+    // Any repository name binds to the person's connection; the bridge checks it.
+    const runs = result.connectorBindings.find(
+      (binding) =>
+        binding.modelName ===
+        prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "workflow_runs_list"),
+    );
+    expect(runs?.call("read-call", { repository: "acme/anything" })).toMatchObject({
+      connectionId,
+      toolName: "workflow_runs_list",
+    });
+    expect(runs?.call("read-call", { repository: "acme/anything" })).not.toHaveProperty(
+      "approvalMode",
+    );
+    expect(
+      result.connectorBindings.some(
+        (binding) =>
+          binding.modelName ===
+          prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "organizations_list"),
+      ),
+    ).toBe(false);
+  });
+
   // The idle compaction checkpoint of a chat with a personal repository runs
   // without the person's delegation. This threw "Personal GitHub delegation
   // is unavailable" and failed the whole turn.

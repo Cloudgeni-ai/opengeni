@@ -455,6 +455,7 @@ import {
 } from "../integrations/slack-interactions";
 import {
   proposeSlackAgentFromChat,
+  CARD_INSTRUCTIONS_MAX_CHARS,
   SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
 } from "../integrations/slack-agent-proposals";
 import {
@@ -2963,7 +2964,7 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass this Slack request to the agent the person asked for by name; it answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4
@@ -2985,7 +2986,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. A button to ask that agent is added under your answer. Don't mention the suggestion in your answer.",
+        "After answering yourself, name the agent that handles requests like this one; a button to ask it is added under your answer. Don't mention the suggestion.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2999,7 +3000,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
+        "List this Slack agent's other recent chats, newest first. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
@@ -3016,7 +3017,7 @@ function registerSlackBotTools(
       inputSchema: {
         name: z4.string().min(1).max(80),
         description: z4.string().min(1).max(200),
-        instructions: z4.string().max(8000).optional(),
+        instructions: z4.string().max(CARD_INSTRUCTIONS_MAX_CHARS).optional(),
         workspace: z4.string().min(1).max(200).optional(),
         avatar: AvatarInput.unwrap().unwrap(),
       },

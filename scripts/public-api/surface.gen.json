@@ -24838,6 +24838,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allRepositoriesAvailable": "boolean?",
         "$.connection": "ref(ConnectionMetadata)! null",
         "$.enabled": "boolean!",
         "$.reviewUrl": "string! null"
@@ -24883,6 +24884,7 @@
         "$.canonicalUrl": "string!",
         "$.defaultBranch": "string!",
         "$.disabled": "boolean!",
+        "$.effectiveAccess": "ref(GitRepositoryAccess)? null",
         "$.fullName": "string!",
         "$.permissions": "ref(PersonalGitHubRepositoryPermissions)!",
         "$.private": "boolean!",
@@ -24921,6 +24923,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allRepositoriesAccess": "ref(GitRepositoryAccess)? null",
         "$.connectionAuthorityGeneration": "integer!",
         "$.credentialBindingId": "string!",
         "$.providerPrincipalId": "string!",
@@ -26406,6 +26409,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allRepositoriesAccess": "ref(GitRepositoryAccess)? null",
         "$.expectedConnectionAuthorityGeneration": "integer!",
         "$.expectedSelectionGeneration": "integer!",
         "$.idempotencyKey": "string!",

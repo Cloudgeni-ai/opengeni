@@ -10,7 +10,11 @@ import {
   type McpPersonalConnectionDelegation,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  personalGitHubRepositoryAuthority,
+  personalGitHubRepositoryDenialMessage,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import { getSessionGitHubGatewayState } from "@opengeni/db";
 import {
   openPersonalGitHubGitBrokerClaims,
@@ -199,30 +203,6 @@ export function gatewayBearer(authorization: string | null): string | null {
 // Repository allowlist
 // ---------------------------------------------------------------------------
 
-function canRead(permissions: {
-  pull: boolean;
-  triage: boolean;
-  push: boolean;
-  maintain: boolean;
-  admin: boolean;
-}) {
-  return (
-    permissions.pull ||
-    permissions.triage ||
-    permissions.push ||
-    permissions.maintain ||
-    permissions.admin
-  );
-}
-
-function canWrite(permissions: { push: boolean; maintain: boolean; admin: boolean }) {
-  return permissions.push || permissions.maintain || permissions.admin;
-}
-
-function accessCovers(granted: unknown, requested: PersonalGitHubRepositoryAccess): boolean {
-  return granted === "write" || (granted === "read" && requested === "read");
-}
-
 function repositoryLabel(repository: GitHubGatewayRepositoryRef): string {
   return repository.kind === "name"
     ? `${repository.owner}/${repository.name}`
@@ -236,7 +216,7 @@ function repositoryLabel(repository: GitHubGatewayRepositoryRef): string {
  * this chat. GitHub enforces the person's own permission on the request.
  */
 export function gatewayRepositoryDecision(
-  authority: Pick<PersonalGitHubGatewayAuthority, "selection" | "removedRepositories">,
+  authority: Pick<PersonalGitHubGatewayAuthority, "selection" | "metadata" | "removedRepositories">,
   repository: GitHubGatewayRepositoryRef,
   access: PersonalGitHubRepositoryAccess,
 ): { allowed: true } | { allowed: false; message: string } {
@@ -262,28 +242,32 @@ export function gatewayRepositoryDecision(
   if (removed) {
     return { allowed: false, message: `${label} was removed from this chat.` };
   }
-  const allRepositoriesAccess = (authority.selection as { allRepositoriesAccess?: unknown })
-    .allRepositoriesAccess;
-  if (allRepositoriesAccess === "read" || allRepositoriesAccess === "write") {
-    if (accessCovers(allRepositoriesAccess, access)) return { allowed: true };
-    return { allowed: false, message: `${label} may only be read as the person.` };
+  const decision = personalGitHubRepositoryAuthority({
+    current: {
+      ...authority.selection,
+      allRepositoriesAccess: authority.selection.allRepositoriesAccess ?? null,
+    },
+    metadata: authority.metadata,
+    repository:
+      repository.kind === "id"
+        ? { repositoryId: repository.id }
+        : { fullName: `${repository.owner}/${repository.name}` },
+    access,
+  });
+  if (decision.allowed) return { allowed: true };
+  switch (decision.reason) {
+    case "not_selected":
+      return {
+        allowed: false,
+        message: `${label} is not one of the repositories the person allowed under Your GitHub.`,
+      };
+    case "read_denied":
+      return { allowed: false, message: `You cannot read ${label} on GitHub.` };
+    case "write_denied":
+      return { allowed: false, message: `${label} may only be read as the person.` };
+    default:
+      return { allowed: false, message: personalGitHubRepositoryDenialMessage(decision.reason) };
   }
-  if (!selected) {
-    return {
-      allowed: false,
-      message: `${label} is not one of the repositories the person allowed under Your GitHub.`,
-    };
-  }
-  if (selected.disabled || !canRead(selected.permissions)) {
-    return { allowed: false, message: `You cannot read ${label} on GitHub.` };
-  }
-  if (
-    access === "write" &&
-    (selected.selectedAccess !== "write" || selected.archived || !canWrite(selected.permissions))
-  ) {
-    return { allowed: false, message: `${label} may only be read as the person.` };
-  }
-  return { allowed: true };
 }
 
 /**
@@ -319,8 +303,7 @@ async function githubRepositoryName(
   authority: PersonalGitHubGatewayAuthority,
   repositoryId: string,
 ): Promise<string | null> {
-  const all = (authority.selection as { allRepositoriesAccess?: unknown }).allRepositoriesAccess;
-  if (all !== "read" && all !== "write") return null;
+  if (!authority.selection.allRepositoriesAccess) return null;
   const url = new URL(`/repositories/${repositoryId}`, PERSONAL_GITHUB_API_ORIGIN);
   try {
     const authorization = await services.authorizeProviderRequest(
@@ -756,7 +739,10 @@ export async function resolvePersonalGitHubGatewayAuthority(
     identity: { claims, initiator, unattended: session.unattended },
     providerPrincipalId: connection.providerPrincipalId,
     metadata: connection.metadata,
-    selection: connection.selection,
+    // All my repositories applies only while the rollout setting is on.
+    selection: deps.settings.githubPersonalAllRepositoriesEnabled
+      ? connection.selection
+      : { ...connection.selection, allRepositoriesAccess: null },
     removedRepositories: session.removedRepositories,
   };
 }

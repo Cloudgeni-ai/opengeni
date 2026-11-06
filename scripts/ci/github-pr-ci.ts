@@ -15,11 +15,30 @@ type Run = {
   display_title?: string;
 };
 type Job = { status: string; conclusion: string | null; name: string; id?: number };
+type PullIdentity = {
+  head: { ref: string; repo?: { full_name?: string } | null };
+  user?: { login?: string } | null;
+};
+const VERSION_BRANCH = "changeset-release/main";
+/** The bot-authored, same-repository Version PR; only it owns Version dispatch runs. */
+export function isVersionPr(p: PullIdentity, repo: string): boolean {
+  return (
+    p.head.ref === VERSION_BRANCH &&
+    p.head.repo?.full_name === repo &&
+    p.user?.login === "github-actions[bot]"
+  );
+}
+/**
+ * Older PR CI runs of PR `number`. Version PR CI starts by workflow_dispatch on
+ * the Version branch, which carries no PR number, so those runs belong to the
+ * PR only when the caller verified it is the Version PR (`isVersionPr`); a head
+ * branch name alone is chosen by whoever opens the PR, including forks.
+ */
 export function supersededPrRuns(
   runs: Run[],
   number: number,
   head: string,
-  branch: string,
+  versionPr: boolean,
 ): number[] {
   return runs
     .filter(
@@ -31,9 +50,7 @@ export function supersededPrRuns(
         r.status !== "completed" &&
         r.head_sha !== head &&
         ((r.event === "pull_request" && r.pull_requests?.some((p) => p.number === number)) ||
-          (r.event === "workflow_dispatch" &&
-            r.head_branch === branch &&
-            branch === "changeset-release/main")),
+          (versionPr && r.event === "workflow_dispatch" && r.head_branch === VERSION_BRANCH)),
     )
     .map((r) => r.id);
 }
@@ -287,7 +304,7 @@ export async function runPrCiCommand(
       live = await api(`pulls/${p.number}`);
     if (live.head.sha !== p.head.sha) throw Error("Supersession event is stale");
     const runs = await activeRuns("pr-ci.yml", `&branch=${encodeURIComponent(p.head.ref)}`);
-    for (const id of supersededPrRuns(runs, p.number, p.head.sha, p.head.ref)) {
+    for (const id of supersededPrRuns(runs, p.number, p.head.sha, isVersionPr(live, repo))) {
       if ((await api(`pulls/${p.number}`)).head.sha !== p.head.sha)
         throw Error("Head changed before cancellation");
       await api(`actions/runs/${id}/cancel`, "POST");
@@ -326,13 +343,7 @@ export async function runPrCiCommand(
     const number = Number(env.VERSION_PR_NUMBER),
       head = env.VERSION_HEAD_SHA;
     const p = await api(`pulls/${number}`);
-    if (
-      p.state !== "open" ||
-      p.head.sha !== head ||
-      p.head.ref !== "changeset-release/main" ||
-      p.head.repo?.full_name !== repo ||
-      p.user?.login !== "github-actions[bot]"
-    )
+    if (p.state !== "open" || p.head.sha !== head || !isVersionPr(p, repo))
       throw Error("Version identity changed");
     const runs = await activeRuns("pr-ci.yml", `&branch=${encodeURIComponent(p.head.ref)}`);
     const validations = await activeRuns(
@@ -344,7 +355,7 @@ export async function runPrCiCommand(
       "workflow_runs",
     );
     for (const id of [
-      ...supersededPrRuns(runs, number, head!, p.head.ref),
+      ...supersededPrRuns(runs, number, head!, true),
       ...supersededVersionValidationRuns(validations, number, head!),
     ]) {
       if ((await api(`pulls/${number}`)).head.sha !== head)

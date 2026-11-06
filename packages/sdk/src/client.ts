@@ -11143,6 +11143,7 @@ export class OpenGeniClient {
       {
         ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.query ? { query: options.query } : {}),
       },
     );
   }

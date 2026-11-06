@@ -94,17 +94,8 @@ An unavailable subscription returns `503 subscription_unavailable` or
 
 ## Billing
 
-- A credit-billed call on a credit-metered deployment reserves its maximum
-  cost at admission: its input (one token per UTF-8 byte of text, a fixed
-  allowance per image) plus its output limit at the model's credit price. A
-  request without `max_tokens` / `max_completion_tokens` is sent with an
-  output limit of 32,000 tokens, so that maximum exists. The call is admitted
-  only when the spendable balance minus the holds of the account's other
-  calls still in flight covers it, under the account lock settlement uses, and
-  is otherwise refused with `402` before anything reaches the provider. The
-  hold is released when the call settles, fails or is aborted; a hold left by
-  a stopped process stops counting after 30 minutes
-  (`model_call_credit_holds`).
+- Admission only requires a positive credit balance for credit-billed models;
+  it is never sized from `max_tokens`.
 - Actual usage is settled once per call, keyed by a server-generated request
   ID (`model_call:{requestId}`), with the same pricing and attribution as turn
   model usage. Subscription and customer-credential calls cost no Opengeni
@@ -134,5 +125,4 @@ so readers can tell it from the turn's own (`main`) calls.
 | Model resolution, admission, subscriptions, settlement | `apps/api/src/model-calls/service.ts` |
 | Provider-neutral single call | `packages/runtime/src/single-model-call.ts` |
 | Admission and settlement | `packages/core/src/billing/model-call-admission.ts`, `packages/core/src/billing/model-usage-settlement.ts` |
-| Credit holds for calls in flight | `packages/db/src/model-call-credit-holds.ts` |
 | Title route | `apps/worker/src/activities/agent-turn/session-title.ts` |

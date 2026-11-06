@@ -11,27 +11,76 @@ import {
   readChunksInOrder,
   recordingAudioContainer,
   RecordingAudioError,
-  RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS,
   renderRecordingAudioPiece,
   soundBetweenSilences,
+  SPEECH_PCM_FORMAT,
   startsAdtsFrame,
   startsContainer,
 } from "../src/activities/recording-audio";
+import { readPcmWav } from "../src/activities/dictation-pieces";
+import {
+  measureRecordingStage,
+  RecordingUsage,
+  withRecordingUsage,
+} from "../src/activities/recording-usage";
 
 import {
   adtsAac,
   adtsFrames,
+  browserCaptureChunks,
   ffmpegPath,
   gatedOpusWebm,
   gappedOpusWebm,
   hasFfmpeg,
   jumpedOpusWebm,
+  loudnessAt,
   opusWebm,
 } from "./recording-audio-fixtures";
 
 function split(bytes: Uint8Array, parts: number): Uint8Array[] {
   const size = Math.ceil(bytes.length / parts);
   return Array.from({ length: parts }, (_, index) => bytes.slice(index * size, (index + 1) * size));
+}
+
+/** A prepared speech PCM file's samples. */
+function wavSamples(bytes: Uint8Array): Int16Array {
+  const pcm = readPcmWav(bytes);
+  if (!pcm || pcm.sampleRate !== 16_000) throw new Error("not 16 kHz PCM");
+  return new Int16Array(pcm.data.slice().buffer);
+}
+
+/** Prepare one-run chunks as speech PCM, counting what the prepare stage's programs used. */
+async function preparedSpeech(
+  bytes: readonly Uint8Array[],
+  chunks: ReadonlyArray<{ startMilliseconds: number; durationMilliseconds: number }>,
+) {
+  const usage = new RecordingUsage();
+  const prepared = await withRecordingUsage(usage, () =>
+    measureRecordingStage("prepare", () =>
+      prepareRecordingTrackAudio({
+        chunks: chunks.map((chunk, index) => ({
+          ...chunk,
+          chunkNumber: index,
+          objectKey: `k${index}`,
+        })),
+        mimeType: "audio/webm",
+        format: SPEECH_PCM_FORMAT,
+        ffmpegPath,
+        readChunk: async (chunk) => bytes[chunk.chunkNumber]!,
+      }),
+    ),
+  );
+  return { prepared, usage };
+}
+
+/** The prepare stage's usage once every program it started has been counted. */
+async function prepareUsage(usage: RecordingUsage, processes: number) {
+  for (let wait = 0; wait < 100; wait += 1) {
+    const stage = usage.stages().get("prepare");
+    if (stage && stage.processes >= processes) return stage;
+    await Bun.sleep(10);
+  }
+  return usage.stages().get("prepare")!;
 }
 
 describe("recording audio", () => {
@@ -134,6 +183,25 @@ describe("recording audio", () => {
       });
       // Two seconds, a three-second gap of silence, then two more seconds.
       expect(Math.abs(prepared.durationMilliseconds - 7_000)).toBeLessThan(200);
+      const samples = wavSamples(
+        (
+          await prepareRecordingTrackAudio({
+            chunks: parts.map((_, index) => ({
+              chunkNumber: index,
+              startMilliseconds: starts[index]!,
+              durationMilliseconds: 1_000,
+              objectKey: `k${index}`,
+            })),
+            mimeType: "audio/webm",
+            format: SPEECH_PCM_FORMAT,
+            ffmpegPath,
+            readChunk: async (chunk) => parts[chunk.chunkNumber]!,
+          })
+        ).bytes,
+      );
+      expect(loudnessAt(samples, 1)).toBeGreaterThan(0.05);
+      expect(loudnessAt(samples, 3.5)).toBeLessThan(0.001);
+      expect(loudnessAt(samples, 6)).toBeGreaterThan(0.05);
     },
   );
 
@@ -425,61 +493,132 @@ describe("recording audio", () => {
   );
 
   test.skipIf(!hasFfmpeg)(
-    "a hole too long to fill, or audio past its declared length, is refused before decoding",
+    "a browser capture that went quiet for minutes keeps its timing",
     async () => {
-      // A second of audio, a few kilobytes, whose timestamps claim far more:
-      // the timeline filter would hold every second of each hole in memory.
-      const overHole = (RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS + 60_000) / 1_000;
-      const prepare = (
-        bytes: readonly Uint8Array[],
-        chunks: ReadonlyArray<{ startMilliseconds: number; durationMilliseconds: number }>,
-      ) =>
-        prepareRecordingTrackAudio({
-          chunks: chunks.map((chunk, index) => ({
-            ...chunk,
-            chunkNumber: index,
-            objectKey: `k${index}`,
-          })),
-          mimeType: "audio/webm",
-          ffmpegPath,
-          readChunk: async (chunk) => bytes[chunk.chunkNumber]!,
-        });
+      // A track fed by an audio graph that was suspended for 130 s: its
+      // timestamps jump 130 s, and the 2 s of tone after it play at 132 s.
+      const suspended = browserCaptureChunks("suspended");
+      const quiet = await preparedSpeech(
+        suspended.map((chunk) => chunk.bytes),
+        suspended,
+      );
+      expect(Math.abs(quiet.prepared.durationMilliseconds - 134_004)).toBeLessThan(150);
+      const samples = wavSamples(quiet.prepared.bytes);
+      expect(loudnessAt(samples, 1)).toBeGreaterThan(0.05);
+      expect(loudnessAt(samples, 60)).toBeLessThan(0.001);
+      expect(loudnessAt(samples, 131)).toBeLessThan(0.001);
+      expect(loudnessAt(samples, 133)).toBeGreaterThan(0.05);
+      // Paused for 130 s: the recorder leaves the pause out of its timestamps
+      // and its chunks' durations alike, so the track is 4 s long.
+      const paused = browserCaptureChunks("paused");
+      const resumed = await preparedSpeech(
+        paused.map((chunk) => chunk.bytes),
+        paused,
+      );
+      expect(Math.abs(resumed.prepared.durationMilliseconds - 4_002)).toBeLessThan(150);
+    },
+  );
+
+  test.skipIf(!hasFfmpeg)(
+    "a hole of hours inside the declared length is filled in bounded memory",
+    async () => {
+      // A second of audio, a few kilobytes, with a two-hour hole after its
+      // first half, in a track that declared three hours. Filling that hole
+      // in one go held about 1.6 GB per hour of it.
+      const hours = 2;
+      const { prepared, usage } = await preparedSpeech(
+        [jumpedOpusWebm(1, 25, hours * 3_600)],
+        [{ startMilliseconds: 0, durationMilliseconds: 3 * 3_600_000 }],
+      );
+      const holeEnds = hours * 3_600 + 0.5;
+      expect(Math.abs(prepared.durationMilliseconds - (holeEnds + 0.5) * 1_000)).toBeLessThan(150);
+      const samples = wavSamples(prepared.bytes);
+      expect(loudnessAt(samples, 0.25)).toBeGreaterThan(0.05);
+      expect(loudnessAt(samples, 3_600)).toBeLessThan(0.001);
+      expect(loudnessAt(samples, holeEnds - 0.5)).toBeLessThan(0.001);
+      expect(loudnessAt(samples, holeEnds + 0.25)).toBeGreaterThan(0.05);
+      // The timestamp check, the decoder and the encoder.
+      const stage = await prepareUsage(usage, 3);
+      expect(stage.processes).toBe(3);
+      if (process.platform === "linux") {
+        expect(stage.peakMemoryBytes).toBeGreaterThan(0);
+        expect(stage.peakMemoryBytes).toBeLessThan(256 * 1024 * 1024);
+      }
+    },
+    60_000,
+  );
+
+  test.skipIf(!hasFfmpeg)(
+    "a timeline past its declared length is refused before decoding",
+    async () => {
       const refused = async (attempt: Promise<unknown>, message: RegExp) => {
         const error = await attempt.catch((caught: unknown) => caught);
         expect(error).toBeInstanceOf(RecordingAudioError);
         expect((error as RecordingAudioError).code).toBe("invalid_audio");
         expect((error as RecordingAudioError).message).toMatch(message);
       };
-      // A hole between packets, however long the chunks claim to be.
-      const declaredLong = [{ startMilliseconds: 0, durationMilliseconds: 10 * 3_600_000 }];
-      await refused(prepare([jumpedOpusWebm(1, 25, overHole)], declaredLong), /gap/u);
+      const refusedEarly = async (
+        bytes: readonly Uint8Array[],
+        chunks: ReadonlyArray<{ startMilliseconds: number; durationMilliseconds: number }>,
+      ) => {
+        const usage = new RecordingUsage();
+        await refused(
+          withRecordingUsage(usage, () =>
+            measureRecordingStage("prepare", () =>
+              prepareRecordingTrackAudio({
+                chunks: chunks.map((chunk, index) => ({
+                  ...chunk,
+                  chunkNumber: index,
+                  objectKey: `k${index}`,
+                })),
+                mimeType: "audio/webm",
+                ffmpegPath,
+                readChunk: async (chunk) => bytes[chunk.chunkNumber]!,
+              }),
+            ),
+          ),
+          /declared length/u,
+        );
+        // Only timestamp checks ran: nothing was decoded.
+        const stage = await prepareUsage(usage, chunks.length);
+        expect(stage.processes).toBeLessThanOrEqual(chunks.length);
+      };
+      // A hole between packets past what the chunks declared.
+      await refusedEarly(
+        [jumpedOpusWebm(1, 25, 30)],
+        [{ startMilliseconds: 0, durationMilliseconds: 2_000 }],
+      );
       // A first packet stamped long after time zero.
-      await refused(prepare([jumpedOpusWebm(1, 0, overHole)], declaredLong), /gap/u);
-      // A hole short enough to fill, but past what the chunks declared.
-      await refused(
-        prepare(
-          [jumpedOpusWebm(1, 25, 30)],
-          [{ startMilliseconds: 0, durationMilliseconds: 2_000 }],
-        ),
-        /declared length/u,
+      await refusedEarly(
+        [jumpedOpusWebm(1, 0, 3_600)],
+        [{ startMilliseconds: 0, durationMilliseconds: 60_000 }],
+      );
+      // A file brought in without a length may be as long as a recording can
+      // be (ten hours), but no longer.
+      await refusedEarly(
+        [jumpedOpusWebm(1, 25, 11 * 3_600)],
+        [{ startMilliseconds: 0, durationMilliseconds: 0 }],
       );
       // Each run of a track is checked on its own.
-      await refused(
-        prepare(
-          [opusWebm(1), jumpedOpusWebm(1, 25, overHole)],
-          [
-            { startMilliseconds: 0, durationMilliseconds: 1_000 },
-            { startMilliseconds: 5_000, durationMilliseconds: 10 * 3_600_000 },
-          ],
-        ),
-        /gap/u,
+      await refusedEarly(
+        [opusWebm(1), jumpedOpusWebm(1, 25, 3_600)],
+        [
+          { startMilliseconds: 0, durationMilliseconds: 1_000 },
+          { startMilliseconds: 5_000, durationMilliseconds: 60_000 },
+        ],
       );
-      // A hole within the limit, inside the declared length, is still filled.
-      const filled = await prepare(
-        [jumpedOpusWebm(1, 25, 3)],
-        [{ startMilliseconds: 0, durationMilliseconds: 4_000 }],
+    },
+  );
+
+  test.skipIf(!hasFfmpeg)(
+    "a file brought in without a length is prepared at its own length",
+    async () => {
+      // A phone can't read a WebM or Ogg file's length, so it declares none.
+      const { prepared } = await preparedSpeech(
+        [opusWebm(8)],
+        [{ startMilliseconds: 0, durationMilliseconds: 0 }],
       );
-      expect(Math.abs(filled.durationMilliseconds - 4_000)).toBeLessThan(150);
+      expect(Math.abs(prepared.durationMilliseconds - 8_000)).toBeLessThan(150);
     },
   );
 

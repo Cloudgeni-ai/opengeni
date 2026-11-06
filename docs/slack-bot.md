@@ -596,7 +596,7 @@ The buttons carry only the proposal id. A click must match the stored proposal's
 - The agent's id is the proposal's id and the Memory collection is created only when missing, so repeated or concurrent clicks create one agent (a click that loses the race finds that agent and settles the card too). A failure (name taken, app not available in that workspace) returns the proposal to `pending` and tells the clicker privately.
 - On success the card becomes "<Agent> is ready" with "Ask it with @Opengeni <Name>". A cancelled card reads "<Agent> was not created." Settled cards ignore further clicks.
 
-An icon is required, in the session avatar form: `emoji` (with a hue), `icon` (a built-in icon with a hue), `letters`, or `image` (an artifact id). The tool description tells the chat to generate an icon and pass `{ kind: "image", artifactId }` when it has an image-generation tool, and otherwise to ask the person for an emoji. An image icon must be a file in the agent's workspace that everyone there can see, so it works only when that is the chat's own workspace; otherwise the chat is told to use an emoji or built-in icon. Proposals do not expire.
+An icon is required, in the session avatar form: `emoji` (with a hue), `icon` (a built-in icon with a hue), `letters`, or `image` (an artifact id). The tool description tells the chat to generate an icon and pass `{ kind: "image", artifactId }` when it can generate images, and otherwise to ask the person for an emoji. An image icon must be a file in the agent's workspace that everyone there can see, so it works only when that is the chat's own workspace; otherwise the chat is told to use an emoji. Proposals do not expire.
 
 ### Update messages
 
