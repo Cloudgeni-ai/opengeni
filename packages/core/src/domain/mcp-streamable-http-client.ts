@@ -19,6 +19,11 @@ export type McpStreamableHttpConnectInput = {
   fetch?: (url: string | URL, init?: RequestInit) => Promise<Response>;
   /** Client capabilities to advertise, such as protocol extensions. */
   capabilities?: ClientCapabilities;
+  /**
+   * `legacy` goes straight to the 2025-era `initialize` handshake, for a
+   * server already known to be 2025-era, without the `server/discover` probe.
+   */
+  era?: "legacy";
 };
 
 /**
@@ -31,6 +36,13 @@ export type McpStreamableHttpConnectInput = {
 export async function connectMcpStreamableHttpClient(
   input: McpStreamableHttpConnectInput,
 ): Promise<McpStreamableHttpClient> {
+  if (input.era === "legacy") {
+    try {
+      return await connectOnce(input, "legacy");
+    } catch (error) {
+      throw legacyMcpClientError(error);
+    }
+  }
   try {
     return await connectOnce(input, "auto");
   } catch (error) {
@@ -55,6 +67,8 @@ export async function connectMcpStreamableHttpClient(
  */
 export type McpStreamableHttpSession = {
   use<T>(use: (client: McpStreamableHttpClient) => Promise<T>): Promise<T>;
+  /** The protocol era the session speaks now. */
+  era(): "modern" | "legacy" | undefined;
   /**
    * Close the client. `terminate` first ends the server-side session with an
    * HTTP DELETE, as a client that no longer needs a session should.
@@ -88,6 +102,13 @@ export async function openMcpStreamableHttpSession(
         if (!isModernEraResultMismatch(used, error)) throw error;
       }
       return await use(await toLegacy(used));
+    },
+    era() {
+      try {
+        return client.getProtocolEra();
+      } catch {
+        return undefined;
+      }
     },
     async close(options = {}) {
       const closing = client;

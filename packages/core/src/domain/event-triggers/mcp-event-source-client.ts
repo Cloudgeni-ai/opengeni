@@ -310,6 +310,10 @@ export async function withMcpEventSourceClient<T>(
  * next step starts afresh. One unused for {@link KEPT_SESSION_IDLE_MS} is
  * ended. Sessions are per process: after a restart, or on another replica,
  * the first step opens a new one.
+ *
+ * A server found to speak only the 2025-era protocol (it refuses the
+ * `server/discover` probe) is remembered by URL, so its later sessions skip
+ * the probe and start with `initialize`.
  */
 type KeptSession = {
   key: string;
@@ -327,6 +331,9 @@ type KeptSession = {
 
 const KEPT_SESSION_IDLE_MS = 15 * 60_000;
 const keptSessions = new Map<string, Promise<KeptSession>>();
+/** Server URLs whose sessions negotiated the 2025-era protocol. */
+const legacyServerUrls = new Set<string>();
+const MAX_LEGACY_SERVER_URLS = 1_000;
 
 function sessionKey(sourceId: string, resolved: ResolvedServer): string {
   return createHash("sha256")
@@ -384,13 +391,22 @@ function sessionLost(error: unknown): boolean {
 
 function openKeptSession(
   key: string,
+  url: string,
   connectInput: (headers: () => Record<string, string>) => McpStreamableHttpConnectInput,
   headers: Record<string, string>,
 ): Promise<KeptSession> {
   const holder: { kept?: KeptSession } = {};
-  const pending: Promise<KeptSession> = openMcpStreamableHttpSession(
-    connectInput(() => holder.kept?.headers ?? headers),
-  ).then((session) => {
+  const knownLegacy = legacyServerUrls.has(url);
+  const pending: Promise<KeptSession> = openMcpStreamableHttpSession({
+    ...connectInput(() => holder.kept?.headers ?? headers),
+    ...(knownLegacy ? { era: "legacy" as const } : {}),
+  }).then((session) => {
+    if (session.era() === "legacy") {
+      if (legacyServerUrls.size >= MAX_LEGACY_SERVER_URLS) legacyServerUrls.clear();
+      legacyServerUrls.add(url);
+    } else {
+      legacyServerUrls.delete(url);
+    }
     holder.kept = {
       key,
       entry: pending,
@@ -407,6 +423,8 @@ function openKeptSession(
   keptSessions.set(key, pending);
   pending.catch(() => {
     if (keptSessions.get(key) === pending) keptSessions.delete(key);
+    // The server may have moved on: probe it again next time.
+    if (knownLegacy) legacyServerUrls.delete(url);
   });
   return pending;
 }
@@ -425,7 +443,7 @@ async function withKeptSession<T>(
     const existing = keptSessions.get(key);
     let kept: KeptSession | null = null;
     try {
-      kept = await (existing ?? openKeptSession(key, connectInput, headers));
+      kept = await (existing ?? openKeptSession(key, resolved.server.url, connectInput, headers));
       // Ended while this step waited for it (it sat idle too long): take another.
       if (kept.retired) {
         kept = null;

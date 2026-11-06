@@ -2033,8 +2033,8 @@ describe("MCP event sources", () => {
       const polls = 5;
       for (let step = 0; step < polls; step += 1) await pump();
       // Two subscriptions to one server with one sign-in share a session. Its
-      // handshake is the era probe (`server/discover`, which a 2025-era server
-      // refuses), `initialize` and `notifications/initialized`.
+      // handshake is the era probe (`server/discover`, which this 2025-era
+      // server doesn't know), `initialize` and `notifications/initialized`.
       expect(stub.counts()).toEqual({
         "server/discover": 1,
         initialize: 1,
@@ -2046,13 +2046,14 @@ describe("MCP event sources", () => {
 
       // The server forgets the session: a poll on it is refused with 404, and
       // the step starts one new session and polls again on it. Both steps run
-      // at once, so either one or both may meet the old session first.
+      // at once, so either one or both may meet the old session first. The
+      // server is known to be 2025-era by now, so the new session skips the probe.
       stub.expireSessions();
       await pump();
       const rejected = stub.rejectedForExpiredSession;
       expect([1, 2]).toContain(rejected);
       expect(stub.counts()).toEqual({
-        "server/discover": 2,
+        "server/discover": 1,
         initialize: 2,
         "notifications/initialized": 2,
         "events/list": 2,
@@ -2108,6 +2109,14 @@ function startSessionfulMcpEventsStub(options: { nextPollMs: number }) {
         params?: Record<string, any>;
       };
       counts[message.method] = (counts[message.method] ?? 0) + 1;
+      // A 2025-era server: it doesn't know the 2026 era probe.
+      if (message.method === "server/discover") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32_601, message: "Method not found" },
+        });
+      }
       if (message.method === "initialize" && !sessionId) {
         const id = crypto.randomUUID();
         sessions.add(id);
