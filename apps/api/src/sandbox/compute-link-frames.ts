@@ -265,18 +265,23 @@ export function subjectWithin(subject: string, prefix: string): boolean {
   return subject.startsWith(`${prefix}.`) && subject.length > prefix.length + 1;
 }
 
-/** The subjects one sandbox's session may use, as the NATS callout grants a
- * Connected Machine (workspaceAgentPermissions): subscribe within the scope;
- * publish within the scope or `_INBOX.>`. A reply subject must lie within
+/** The subjects one sandbox's session may use: subscribe within the scope;
+ * publish within the scope, or to `_INBOX.>` only as the answer to a request
+ * delivered to this session and not yet answered (`unanswered`), so an agent
+ * can never answer a request it was not sent. A reply subject must lie within
  * the scope, the only place the agent can hear an answer. */
 export function maySubscribe(scope: string, subject: string): boolean {
   return validSubject(subject, true) && subjectWithin(subject, scope);
 }
 
-export function mayPublish(scope: string, subject: string): boolean {
+export function mayPublish(
+  scope: string,
+  subject: string,
+  unanswered: ReadonlySet<string>,
+): boolean {
   return (
     validSubject(subject, false) &&
-    (subjectWithin(subject, scope) || subjectWithin(subject, "_INBOX"))
+    (subjectWithin(subject, scope) || (subjectWithin(subject, "_INBOX") && unanswered.has(subject)))
   );
 }
 
