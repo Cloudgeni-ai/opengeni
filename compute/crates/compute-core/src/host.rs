@@ -13,6 +13,7 @@ use crate::time::At;
 mod admission;
 mod disk;
 pub(crate) mod outgrowth;
+mod restart;
 mod spare;
 mod squeeze;
 mod view;
@@ -425,6 +426,19 @@ pub enum Input {
         /// The least depth to reach.
         level: Level,
     },
+    /// Boot the sandbox afresh from its disk where it is: any step under
+    /// way that would keep or bring back its running programs is
+    /// cancelled, its VM, if it has one, ends without being saved
+    /// ([`Action::EndForRestart`]), and its saved memory image, here and in
+    /// object storage, is forgotten ([`Step::Forget`]) before anything
+    /// wakes it, so its next wake boots from its files. Its files, and the
+    /// copy of them in object storage, stay as they are. A wake asked
+    /// meanwhile waits for that, then boots it. Done once
+    /// [`Host::restarting`] is false. Ignored for a broken sandbox.
+    Restart {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// Time passed. Call at [`Host::next_deadline`].
     Tick,
 }
@@ -574,6 +588,13 @@ pub enum Action {
         sandbox: SandboxId,
         /// Why the host ends it.
         cause: ShrinkCause,
+    },
+    /// End the sandbox's running VM without saving it, for an
+    /// [`Input::Restart`]. Report it with [`Input::Lost`] once it has
+    /// ended. Comes again after each [`Input::Restart`] while it runs.
+    EndForRestart {
+        /// The sandbox.
+        sandbox: SandboxId,
     },
     /// Set the sandbox's running VM's `memory.low` to `low` and its
     /// `memory.high` to `high` (`None` for none). A VM starts, resumes and
@@ -967,6 +988,7 @@ impl Host {
                     self.mark(sandbox);
                 }
             }
+            Input::Restart { sandbox } => self.restart(sandbox),
             Input::Tick => {}
         }
     }
@@ -1089,13 +1111,17 @@ impl Host {
             let (state, lost) = slot.state.without_process();
             slot.state = state;
             slot.renew();
-            if lost {
+            // A restart ends its programs on purpose.
+            if lost && slot.restart.is_none() {
                 out.push(Action::Notify {
                     sandbox,
                     notice: Notice::MemoryLost,
                 });
             }
             out.push(state_notice(sandbox, slot));
+        }
+        if let Some(restart) = &mut slot.restart {
+            restart.ending = false;
         }
         self.mark(sandbox);
     }
@@ -1227,12 +1253,23 @@ impl Host {
                 self.disk_freed = self.disk_freed.add(copy);
             }
         }
+        // A restart whose memory image cannot be forgotten, as while the
+        // store is out of reach, ends: the sandbox wakes from its last
+        // save rather than not at all.
+        if flight.step == Step::Forget
+            && matches!(outcome, Outcome::Failed(_))
+            && slot.state.memory_saved
+        {
+            slot.restart = None;
+        }
         if lost {
             slot.retry = None;
-            out.push(Action::Notify {
-                sandbox: id,
-                notice: Notice::MemoryLost,
-            });
+            if slot.restart.is_none() {
+                out.push(Action::Notify {
+                    sandbox: id,
+                    notice: Notice::MemoryLost,
+                });
+            }
         }
         if slot.floor != Level::Running && slot.state.level >= slot.floor {
             self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
@@ -1344,6 +1381,7 @@ impl Host {
         slot.dirty = false;
         slot.expire_holds(now);
         self.settle_squeeze(id, out);
+        self.settle_restart(id, out);
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
@@ -1374,6 +1412,8 @@ impl Host {
             if let Some(flight) = &mut slot.in_flight
                 && !flight.step.wakes()
                 && flight.step != Step::Checkpoint
+                // A restart forgets its memory image before it wakes.
+                && !(slot.restart.is_some() && flight.step == Step::Forget)
                 && !flight.cancel_sent
             {
                 flight.cancel_sent = true;

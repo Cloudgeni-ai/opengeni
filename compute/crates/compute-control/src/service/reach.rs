@@ -122,7 +122,7 @@ impl<S: Store> Service<S> {
             };
             let epoch = row.ownership.epoch;
             let Some(target) = self.view.target(host) else {
-                "its host is not reachable".clone_into(&mut waited_on);
+                waited_on = self.unreachable(host);
                 tokio::time::sleep(AGAIN_AFTER).await;
                 continue;
             };

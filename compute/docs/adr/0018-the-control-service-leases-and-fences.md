@@ -1,6 +1,8 @@
 # 18. The fleet: one service, leases in Postgres, fences on every write
 
 Status: Accepted, 2026-10-17. Implements [15](0015-placement-and-moves-between-hosts.md).
+Recovery amended by [32](0032-a-lost-hosts-sandboxes-wait-for-it.md): giving
+up on a host keeps its sandboxes its own until it is declared gone.
 
 ## Context
 
@@ -387,7 +389,8 @@ can be built and tested.
   sandbox's pointer under the owner epoch the service names and creates a
   record at Remote from what it names, so the next wake fetches it lazily.
   `hand_off` hands a sleeping sandbox off: the agent marks it draining
-  (from then wakes are refused as busy), archives its latest state, ends
+  (from then wakes are refused as busy, for at most two minutes: a later
+  wake cancels it, ADR 33), archives its latest state, ends
   the VM and confirms it gone, then forgets the sandbox, keeping the
   store's copy, and answers. Only the last step is recorded, so a
   restarted agent finishes a hand-off that reached it; one cut short
@@ -458,8 +461,9 @@ can be built and tested.
   rollout, whose check lets a missing host pass, has such a write refused
   too, and rolling back keeps working: older builds never forget hosts.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
-  and the host must register again), it raises the owner epoch of each of
-  its sandboxes and clears their owner. Each comes back on its next wake,
+  and the host must register again), its sandboxes wait for it (ADR 32).
+  Once it is declared gone, the owner epoch of each of its sandboxes is
+  raised and their owner cleared. Each comes back on its next wake,
   from its latest
   archive, on another host. A sandbox never archived is lost with its
   host; checkpoints, below, keep that window short. A lost host that

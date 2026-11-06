@@ -166,6 +166,7 @@ async fn respond(
             owner_epoch,
             awake,
         } => done(handle.hand_off(id, OwnerEpoch(owner_epoch), awake).await),
+        Request::Restart { id } => done(handle.restart(id).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
             id,
@@ -593,7 +594,10 @@ fn error_reply(error: &HostError) -> Reply {
         code: match error {
             HostError::NotFound(_) | HostError::NoCopy(_) => ErrorCode::NotFound,
             HostError::Exists(_) => ErrorCode::Exists,
-            HostError::Busy(_) | HostError::Awake(_) | HostError::HandingOff(_) => ErrorCode::Busy,
+            HostError::Busy(_)
+            | HostError::Awake(_)
+            | HostError::HandingOff(_)
+            | HostError::HandOffCancelled(_) => ErrorCode::Busy,
             HostError::Broken(_) => ErrorCode::Broken,
             HostError::Blocked { .. } => ErrorCode::Blocked,
             HostError::Removed(_) => ErrorCode::Removed,

@@ -484,6 +484,15 @@ impl View {
             .map(|known| known.target.name.clone())
     }
 
+    /// Whether host `host` is given up on, as the view last heard.
+    #[must_use]
+    pub fn lost(&self, host: HostId) -> bool {
+        self.read()
+            .hosts
+            .get(&host)
+            .is_some_and(|known| known.state == HostState::Lost)
+    }
+
     /// Whether host `host` is draining ahead of its removal.
     #[must_use]
     pub fn draining(&self, host: HostId) -> bool {

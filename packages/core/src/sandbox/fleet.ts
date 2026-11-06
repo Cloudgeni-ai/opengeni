@@ -22,6 +22,7 @@ import {
 } from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
+  computeHostHandingOff,
   getEnrollment,
   getSession,
   getLiveEnrollmentConnection,
@@ -174,6 +175,10 @@ export type FleetSandboxEntry = {
    * be wakeable even while its holderless lease is cold/draining and therefore
    * not an already-live swap target. */
   operationAvailability: FleetOperationAvailability;
+  /** Compute only, and only while it holds: its host is handing it off to
+   * another host, so it cannot start commands for a short while
+   * (`operationAvailability` is then `recovering`). */
+  hostBusy?: "handing_off";
   /** Selfhosted only: whether whole-machine + screen-control consent is acked. */
   consented?: boolean;
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
@@ -461,14 +466,19 @@ export async function listFleet(
     // warm lease, observed provider existence, and verified workspace readiness.
     const groupActive = pointer.activeSandboxId === null;
     const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+    // A warm lease is no proof it can start commands: a host handing it off
+    // refuses to wake it for a while.
+    const groupHandingOff = computeHostHandingOff(groupLease);
     const groupOnline = Boolean(
       groupLease?.liveness === "warm" &&
       groupLease.recovery.provider.status === "exists" &&
-      groupLease.recovery.workspace.status === "ready",
+      groupLease.recovery.workspace.status === "ready" &&
+      !groupHandingOff,
     );
     const groupRecovering = Boolean(
       groupLease &&
-      (groupLease.liveness === "warming" ||
+      (groupHandingOff ||
+        groupLease.liveness === "warming" ||
         groupLease.recovery.restore.status === "pending" ||
         groupLease.recovery.restore.status === "restoring" ||
         groupLease.recovery.restore.status === "verifying"),
@@ -498,6 +508,7 @@ export async function listFleet(
       enrollmentId: null,
       attachable: groupOnline,
       operationAvailability: groupOperationAvailability,
+      ...(groupHandingOff ? { hostBusy: "handing_off" as const } : {}),
       providerStatus: groupLease?.recovery.provider.status ?? "not_created",
       leaseLiveness: groupLease?.liveness ?? null,
       routeStatus: groupActive ? "attached" : "detached",

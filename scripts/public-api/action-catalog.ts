@@ -92,7 +92,7 @@ export function isActionCatalogExempt(path: string): boolean {
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern:
-      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^POST \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot\/microsoft-sign-in$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
     reason:
       "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
   },

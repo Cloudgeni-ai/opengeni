@@ -511,6 +511,16 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
         tryNext:
           "try once more in a moment; if it still does not respond, tell the person, and a new chat gets a fresh workspace machine.",
       };
+    case "host_busy":
+      return {
+        headline:
+          "this chat's workspace machine is being moved or saved by its host and can't run commands until that finishes",
+        happened: `the workspace machine did not answer for ${waited} because its host is busy moving or saving it, which takes at most a couple of minutes before it can run again; it is not broken, so Opengeni did not restart it`,
+        layer: "the workspace machine's host — not your command",
+        preserved: `files on the workspace machine are kept. ${command}`,
+        tryNext:
+          "wait a couple of minutes, then re-run the command; if it changes state, first check whether it already took effect.",
+      };
     default:
       return {
         headline: "this chat's workspace machine stopped responding",

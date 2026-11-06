@@ -671,6 +671,9 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         pointers_in_service: true,
         // And it reads copies whose chunks are in packs (ADR 31).
         reads_packs: true,
+        // And it sets aside a copy the service will not let it keep but
+        // that may be newer than any other.
+        sets_aside: true,
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
         info: Some(renewer.info.clone()),

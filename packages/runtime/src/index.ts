@@ -356,6 +356,7 @@ export {
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type ProjectModelToolResult,
+  type SpilledToolResultReaders,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -2412,8 +2413,9 @@ export type BuildAgentOptions = {
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
   /**
-   * Whether this session has a parent agent (frozen at create). `false` leaves
-   * the parent-agent guidance out of `request_human_input`; omitted keeps it.
+   * Whether this session has a parent agent (frozen at create). `true` adds the
+   * parent-agent guidance to `request_human_input`, `false` leaves it out, and
+   * omitted keeps it conditioned on being a sub-session.
    */
   subSession?: boolean;
   /**
@@ -2922,11 +2924,15 @@ type HumanInputWireSchemaNode = {
 let fullHumanInputWireParameters: unknown;
 
 /**
- * The model-facing schema of a reduced `request_human_input`: the full
- * contract exactly as the Agents SDK converts it, with only the disabled
- * fields removed. Converting a reduced zod schema directly would take the
- * SDK's other converter, which adds length keywords and can make the reduced
- * schema larger than the full one. The reduced zod schema still parses calls.
+ * The model-facing schema of `request_human_input`: the full contract exactly
+ * as the Agents SDK converts it, with only fields removed. Always removed are
+ * the `$schema` marker and `allowOther`, which the model never needs: new
+ * choice requests always offer Other (`serializeHumanInputRequests`), a Skill
+ * review always drops it, and a text question that sets it is rejected. The disabled
+ * features are removed too. Converting a reduced zod schema directly would
+ * take the SDK's other converter, which adds length keywords and can make the
+ * reduced schema larger than the full one. Calls are still parsed by the zod
+ * schema, so an omitted `allowOther` takes its contract default.
  */
 function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
   fullHumanInputWireParameters ??= agentTool({
@@ -2935,14 +2941,17 @@ function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown
     parameters: RequestHumanInputToolInput,
     execute: () => "",
   }).parameters;
-  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode;
-  if (features.secrets && features.skillReview) return schema;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode & {
+    $schema?: unknown;
+  };
+  delete schema.$schema;
   const question = schema.properties?.questions?.items;
   if (!question?.properties) throw new Error("request_human_input schema has no question object");
   const drop = (field: string) => {
     delete question.properties![field];
     if (question.required) question.required = question.required.filter((name) => name !== field);
   };
+  drop("allowOther");
   if (!features.secrets) {
     drop("secret");
     const kind = question.properties.kind;
@@ -2956,7 +2965,6 @@ function withHumanInputWireParameters<T extends { parameters: unknown }>(
   features: HumanInputQuestionFeatures,
   built: T,
 ): T {
-  if (features.secrets && features.skillReview) return built;
   return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
 }
 
@@ -3342,13 +3350,21 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.";
+  "Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.";
 
-/** Rendered only for a session with a parent agent (nested depth above zero). */
+/**
+ * Rendered for a session with a parent agent (nested depth above zero). When
+ * the caller does not say whether there is a parent, the same text is
+ * conditioned on being a sub-session instead.
+ */
 const HUMAN_INPUT_PARENT_DESCRIPTION =
-  "In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+  "Your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
 
-/** Appended to the tool result when the person chose "Let the agent decide". */
+/**
+ * Appended to the tool result when the person chose "Let the agent decide".
+ * It is the only place the model learns what to do then, so the tool
+ * description does not repeat it.
+ */
 export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
   "The person let you decide. Make your own best choice for every question, continue, and say in one short sentence what you chose.";
 
@@ -3695,7 +3711,10 @@ export function buildOpenGeniAgent(
           // against the full contract below.
           description: [
             HUMAN_INPUT_TOOL_DESCRIPTION,
-            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            options.subSession === true
+              ? HUMAN_INPUT_PARENT_DESCRIPTION
+              : options.subSession === undefined &&
+                `In a sub-session, y${HUMAN_INPUT_PARENT_DESCRIPTION.slice(1)}`,
             toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
           ]
             .filter((part): part is string => typeof part === "string")
@@ -5706,6 +5725,13 @@ export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
   /**
+   * Connectors configured for this turn that the caller already left out, by
+   * server id, with the plain reason. Tool discovery reports them beside the
+   * connectors that fail to connect or list here, so a connector dropped
+   * before preparation is never silently missing from search and listing.
+   */
+  preparationUnavailableMcpServers?: ReadonlyMap<string, string>;
+  /**
    * Current-human workspace gateway only: give every connection-backed MCP
    * server (built-in bridges and remote servers) a side-effect-free approval
    * preflight, so an approval-required tool can be confirmed by a person. The
@@ -6201,7 +6227,10 @@ export async function prepareAgentTools(
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
-  const unavailableMcpServers = new Map<string, string>();
+  const unavailableMcpServers = new Map<string, string>(options.preparationUnavailableMcpServers);
+  // Why a connection-backed server's setup was refused a credential, by
+  // server id, so its connect/list failure says why instead of a bare 401.
+  const setupAuthNeededReasons = new Map<string, ToolAuthNeededPayload["reason"]>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
   tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
@@ -6451,6 +6480,7 @@ export async function prepareAgentTools(
                 resolvedMcpConnectionIds,
                 resolvedMcpToolConnectionIds,
                 optional,
+                setupAuthNeededReasons,
               )
             : firstParty
               ? firstPartyAuthFetch(guardedFetch, settings, options)
@@ -6616,6 +6646,7 @@ export async function prepareAgentTools(
     // list, and any server whose list was trimmed to fit this turn.
     if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
+      entry.server.setupAuthNeededReasons = setupAuthNeededReasons;
     }
   }
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
@@ -6663,7 +6694,11 @@ export async function prepareAgentTools(
         failed.releaseAggregateBudget();
         unavailableMcpServers.set(
           failed.registryId,
-          mcpUnavailableReason(connected.errors.get(failed), "connect"),
+          mcpUnavailableReason(
+            connected.errors.get(failed),
+            "connect",
+            setupAuthNeededReasons.get(failed.registryId),
+          ),
         );
       }
       if (
@@ -7793,11 +7828,27 @@ function connectionBrokerFetch(
   resolvedMcpConnectionIds: Map<string, string>,
   resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
+  setupAuthNeededReasons?: Map<string, ToolAuthNeededPayload["reason"]>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
     return baseFetch;
   }
+  const authNeeded = async (
+    request: McpRequestReplayInfo,
+    auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  ): Promise<Response> => {
+    // A setup request (connect or tools/list) has no tool name.
+    if (!request.toolName) setupAuthNeededReasons?.set(config.id, auth.reason);
+    return await authNeededFetchResponse(
+      options,
+      config.id,
+      request,
+      auth,
+      connectionRef,
+      suppressSetupAuthNeeded,
+    );
+  };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
     const destinationUrl = mcpRequestDestinationUrl(input);
@@ -7810,15 +7861,9 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        first,
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, first);
     }
+    if (!request.toolName) setupAuthNeededReasons?.delete(config.id);
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     recordResolvedMcpToolConnectionId(
       resolvedMcpToolConnectionIds,
@@ -7827,14 +7872,7 @@ function connectionBrokerFetch(
       first.connectionId,
     );
     if (!(await authorizeResolvedProviderRequest(first))) {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        providerRequestAuthorizationDenied(connectionRef, first),
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, providerRequestAuthorizationDenied(connectionRef, first));
     }
     if (request.method === "tools/call") {
       assertMcpOperationObservationAuthority({
@@ -7900,27 +7938,16 @@ function connectionBrokerFetch(
           );
           return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          refreshed,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, refreshed);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
         return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       if (!(await authorizeResolvedProviderRequest(refreshed))) {
-        return await authNeededFetchResponse(
-          options,
-          config.id,
+        return await authNeeded(
           request,
           providerRequestAuthorizationDenied(connectionRef, refreshed),
-          connectionRef,
-          suppressSetupAuthNeeded,
         );
       }
       const retry = await baseFetch(
@@ -7931,39 +7958,25 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(
-            options,
-            config.id,
-            request,
-            auth,
-            connectionRef,
-            suppressSetupAuthNeeded,
-          );
+          return await authNeeded(request, auth);
         }
         return retry;
       }
       if (retry.status === 401) {
         await cancelMcpResponseBody(retry);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          {
-            status: "auth_needed",
-            reason: "expired",
-            providerDomain: connectionRef.providerDomain,
-            ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-            connectionId: refreshed.connectionId,
-            ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
-            ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-            ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-            ...(connectionRef.selectedResources
-              ? { selectedResources: connectionRef.selectedResources }
-              : {}),
-          },
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, {
+          status: "auth_needed",
+          reason: "expired",
+          providerDomain: connectionRef.providerDomain,
+          ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
+          connectionId: refreshed.connectionId,
+          ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+          ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+          ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+          ...(connectionRef.selectedResources
+            ? { selectedResources: connectionRef.selectedResources }
+            : {}),
+        });
       }
       return retry;
     }
@@ -7971,14 +7984,7 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          auth,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, auth);
       }
       return response;
     }
@@ -8733,7 +8739,39 @@ function mcpErrorFields(
  * only from the public diagnostic projection: status, error class and code,
  * never provider message text.
  */
-export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"): string {
+/**
+ * Why a connection-backed server's setup got no credential, in plain words with
+ * what the person can do. The connect or list then fails with a bare 401, which
+ * says nothing about the cause.
+ */
+function mcpSetupAuthNeededReason(reason: ToolAuthNeededPayload["reason"]): string {
+  switch (reason) {
+    case "missing_connection":
+      return "no signed-in account is available for it; the person can sign in to it and try again";
+    case "expired":
+    case "refresh_failed":
+      return "its sign-in expired or could not be renewed; the person can sign in to it again";
+    case "insufficient_scope":
+      return "its sign-in lacks a permission these tools need; the person can sign in again and grant it";
+    case "personal_authority_unavailable":
+      return "the person's own sign-in for it is not usable in this workspace for this turn, for example right after their workspace access changed; this can clear within minutes, otherwise they can sign in to it again";
+    case "resource_scope_unavailable":
+      return "its sign-in does not cover the resource these tools need; the person can sign in again and choose it";
+    case "designated_credential_unavailable":
+      return "the account this workspace designated for it cannot be used right now; whoever manages this workspace's connectors can reconnect it";
+    case "unsupported_auth":
+      return "it uses a sign-in method that is not supported; it needs to be connected again";
+  }
+}
+
+export function mcpUnavailableReason(
+  error: unknown,
+  phase: "connect" | "list",
+  /** The credential refusal behind the failure, when its setup had one. */
+  authNeededReason?: ToolAuthNeededPayload["reason"],
+): string {
+  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
+  if (authNeededReason) return `${what}: ${mcpSetupAuthNeededReason(authNeededReason)}.`;
   const fields = mcpErrorFields(
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
@@ -8762,7 +8800,6 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
   ]
     .filter(Boolean)
     .join(", ");
-  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
   const next =
     status === 401 || status === 403
       ? "; its connection may need to be signed in again"
@@ -9862,6 +9899,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Why setup was refused a credential, by server id (see connectionBrokerFetch). */
+  setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
   /** Set by this server's transport when a tools/list response is refused for size. */
   listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
@@ -10350,7 +10389,7 @@ export class PrefixedMcpServer implements MCPServer {
         this.registryId,
         tooLarge
           ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
-          : mcpUnavailableReason(error, "list"),
+          : mcpUnavailableReason(error, "list", this.setupAuthNeededReasons?.get(this.registryId)),
       );
       this.releaseAggregateBudget();
       return [];

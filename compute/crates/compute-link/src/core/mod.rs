@@ -60,8 +60,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use bytes::Bytes;
 use compute_protocol::link::{
-    AgentLink, GatewayFrame, Headers, HostFrame, NO_WAKE_HEADER, Relay, Running, UNANSWERED_HEADER,
-    Unanswered, has_header, may_publish,
+    AgentLink, Busy, GatewayFrame, Headers, HostFrame, NO_WAKE_HEADER, Relay, Running,
+    UNANSWERED_HEADER, Unanswered, has_header, may_publish,
 };
 
 use crate::nats::{ClientOp, ServerOp};
@@ -173,6 +173,10 @@ pub enum Input {
     LinkDown { link: LinkId },
     /// Whether a sandbox runs, for its gateway to show.
     Running { sandbox: String, running: Running },
+    /// What its host is busy with that keeps a sandbox from running for
+    /// now, if anything, for its gateway to tell apart from its agent
+    /// failing.
+    Busy { sandbox: String, busy: Option<Busy> },
     /// Time passed.
     Tick,
 }
@@ -257,6 +261,8 @@ struct Sandbox {
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
+    /// What its host is busy with, as it last said; told with `running`.
+    busy: Option<Busy>,
 }
 
 impl Sandbox {
@@ -507,6 +513,7 @@ impl Core {
             } => self.gateway(now, link, frame, payload),
             Input::LinkDown { link } => self.link_down(now, link),
             Input::Running { sandbox, running } => self.running(now, &sandbox, running),
+            Input::Busy { sandbox, busy } => self.busy(&sandbox, busy),
             Input::Tick => self.tick(now),
         }
     }
@@ -580,6 +587,7 @@ impl Core {
                 untracked: None,
                 quiet: HashMap::new(),
                 running: None,
+                busy: None,
             },
         );
         self.try_open(now, id);
@@ -810,6 +818,7 @@ impl Core {
                 frame: HostFrame::State {
                     s: *s,
                     state: running,
+                    busy: sandbox.busy,
                 },
                 payload: Bytes::new(),
             });
@@ -821,6 +830,25 @@ impl Core {
             self.save(id);
             self.answer_quiet(now, id);
             self.owed(now, id);
+        }
+    }
+
+    /// Takes in what the host is busy with for sandbox `id`, telling its
+    /// open session when that changed and whether it runs is known.
+    fn busy(&mut self, id: &str, busy: Option<Busy>) {
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        if sandbox.busy == busy {
+            return;
+        }
+        sandbox.busy = busy;
+        if let (Session::Open { link, s, .. }, Some(state)) = (&sandbox.session, sandbox.running) {
+            self.effects.push(Effect::Frame {
+                link: *link,
+                frame: HostFrame::State { s: *s, state, busy },
+                payload: Bytes::new(),
+            });
         }
     }
 
