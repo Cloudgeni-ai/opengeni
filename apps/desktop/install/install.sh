@@ -103,6 +103,12 @@ as_root() {
   fi
 }
 
+# Whether the Mac app is running: its own executable, not a helper and not an
+# iOS build of the same name in a simulator (those have no Contents/MacOS).
+mac_app_running() {
+  pgrep -f '/Opengeni\.app/Contents/MacOS/Opengeni( |$)' >/dev/null 2>&1
+}
+
 install_mac() {
   name="Opengeni-$VERSION-mac.zip"
   fetch_verified "$name"
@@ -124,16 +130,17 @@ install_mac() {
   fi
   mkdir -p "$destination"
 
-  # A running copy closes first and reopens below.
-  if pgrep -xq Opengeni; then
+  # A running copy closes first and reopens below. Only the Mac app counts: an
+  # iOS app of the same name in a simulator is not the one being replaced.
+  if mac_app_running; then
     say "Closing Opengeni to update it..."
     osascript -e 'tell application id "ai.opengeni.desktop" to quit' >/dev/null 2>&1 || true
     tries=0
-    while pgrep -xq Opengeni && [ "$tries" -lt 20 ]; do
+    while mac_app_running && [ "$tries" -lt 20 ]; do
       sleep 0.5
       tries=$((tries + 1))
     done
-    if pgrep -xq Opengeni; then fail "Opengeni is still open. Quit it, then run this again."; fi
+    if mac_app_running; then fail "Opengeni is still open. Quit it, then run this again."; fi
   fi
 
   target="$destination/Opengeni.app"

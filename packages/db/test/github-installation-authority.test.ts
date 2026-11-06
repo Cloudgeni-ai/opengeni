@@ -11,6 +11,7 @@ import {
   hasAuditableGitHubInstallationAuthority,
   hasGitHubInstallationOwnerAuthority,
   listGitHubInstallationAccessForWorkspace,
+  listAllowedGitHubRepositoryIdsForWorkspace,
   listGitHubInstallationBindingWorkspaces,
   type Database,
   type DbClient,
@@ -40,6 +41,55 @@ afterAll(async () => {
 }, 180_000);
 
 describe("GitHub installation owner-authority persistence", () => {
+  test("batched decisions preserve exact workspace authority, partial selection and input order", async () => {
+    if (!available) return;
+    const first = await freshWorkspace();
+    const second = await freshWorkspace(first.accountId);
+    await bindAuthorizedGitHubInstallationRepositories(
+      db,
+      authorityInput(first, {
+        installationId: 7099,
+        authorityNonce: crypto.randomUUID(),
+        repositoryIds: [7191, 7192],
+      }),
+    );
+    await bindAuthorizedGitHubInstallationRepositories(
+      db,
+      authorityInput(second, {
+        installationId: 7099,
+        authorityNonce: crypto.randomUUID(),
+        repositoryIds: [7193],
+      }),
+    );
+    expect(
+      await listAllowedGitHubRepositoryIdsForWorkspace(
+        db,
+        first.workspaceId,
+        7099,
+        [7192, 7193, 7191, 7192],
+      ),
+    ).toEqual([7192, 7191]);
+    expect(
+      await listAllowedGitHubRepositoryIdsForWorkspace(
+        db,
+        second.workspaceId,
+        7099,
+        [7192, 7193, 7191],
+      ),
+    ).toEqual([7193]);
+    expect(
+      await listAllowedGitHubRepositoryIdsForWorkspace(db, first.workspaceId, 7098, [7191]),
+    ).toEqual([]);
+    expect(
+      await listAllowedGitHubRepositoryIdsForWorkspace(db, first.workspaceId, 7099, []),
+    ).toEqual([]);
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(db, first.workspaceId, 7099, [7192, 7193]),
+    ).toBe(false);
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(db, first.workspaceId, 7099, [7192, 7192]),
+    ).toBe(true);
+  });
   test("consumes one proof once under concurrency and enforces its exact allowlist", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -230,6 +280,14 @@ describe("GitHub installation owner-authority persistence", () => {
     });
     const [legacy] = await listGitHubInstallationAccessForWorkspace(db, workspace.workspaceId);
     expect(hasAuditableGitHubInstallationAuthority(legacy!)).toBe(false);
+    expect(
+      await listAllowedGitHubRepositoryIdsForWorkspace(
+        db,
+        workspace.workspaceId,
+        installationId,
+        [7601],
+      ),
+    ).toEqual([]);
     expect(
       await areGitHubRepositoriesAllowedForWorkspace(
         db,

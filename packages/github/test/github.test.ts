@@ -1067,7 +1067,9 @@ describe("GitHub App installation repository lookup", () => {
 
 describe("findInaccessibleGitHubAppInstallationRepositories", () => {
   async function withTokenMint(
-    respond: (repositoryIds: number[]) => { status: number; body?: unknown },
+    respond: (
+      repositoryIds: number[],
+    ) => { status: number; body?: unknown } | Promise<{ status: number; body?: unknown }>,
     run: (bodies: number[][]) => Promise<void>,
   ): Promise<void> {
     const originalFetch = globalThis.fetch;
@@ -1084,7 +1086,7 @@ describe("findInaccessibleGitHubAppInstallationRepositories", () => {
       // Only a metadata-read probe token; never contents or write access.
       expect(body.permissions).toEqual({ metadata: "read" });
       bodies.push(body.repository_ids);
-      const { status, body: payload } = respond(body.repository_ids);
+      const { status, body: payload } = await respond(body.repository_ids);
       return new Response(JSON.stringify(payload ?? { message: "refused" }), { status });
     }) as typeof fetch;
     try {
@@ -1094,6 +1096,59 @@ describe("findInaccessibleGitHubAppInstallationRepositories", () => {
     }
   }
   const ok = { status: 201, body: { token: "probe", expires_at: "2099-01-01T00:00:00Z" } };
+
+  test("one inaccessible repository does not eagerly dispatch the entire fallback frontier", async () => {
+    let active = 0,
+      peak = 0;
+    const ids = Array.from({ length: 128 }, (_, index) => index + 1);
+    await withTokenMint(
+      async (selected) => {
+        if (selected.length > 1) return { status: 422 };
+        peak = Math.max(peak, ++active);
+        await Bun.sleep(2);
+        active--;
+        return selected[0] === 2 ? { status: 422 } : ok;
+      },
+      async () => {
+        expect(
+          await findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: ids,
+          }),
+        ).toEqual([2]);
+        expect(active).toBe(0);
+        expect(peak).toBeLessThanOrEqual(8);
+      },
+    );
+  });
+
+  test("cancelling a refused-list fallback stops queued probes and joins admitted requests", async () => {
+    const owner = new AbortController();
+    let started = 0,
+      active = 0;
+    await withTokenMint(
+      async (ids) => {
+        if (ids.length > 1) return { status: 422 };
+        started++;
+        active++;
+        if (started === 8) owner.abort(new Error("turn paused"));
+        await Bun.sleep(2);
+        active--;
+        return ok;
+      },
+      async () => {
+        await expect(
+          findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: Array.from({ length: 128 }, (_, i) => i + 1),
+            signal: owner.signal,
+          }),
+        ).rejects.toThrow("turn paused");
+        expect(started).toBeLessThanOrEqual(8);
+        expect(active).toBe(0);
+      },
+    );
+  });
 
   test("one scoped probe answers when every repository is still reachable", async () => {
     await withTokenMint(
