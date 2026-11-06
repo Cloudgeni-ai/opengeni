@@ -43,13 +43,24 @@ export function billingCreditEmail(input: {
     title + ".",
     `General credits available: ${dollars(input.details.availableBalanceMicros)}.`,
   ];
-  if (input.details.amountMicros !== undefined)
-    lines.push(`Amount: ${dollars(input.details.amountMicros)}.`);
+  if (input.details.amountMicros !== undefined && input.kind !== "cap_reached")
+    lines.push(
+      `${input.kind === "topup_success" ? "Credits added" : input.kind === "topup_failed" ? "Requested credits" : "Amount"}: ${dollars(input.details.amountMicros)}.`,
+    );
   if (input.details.lastHourSpendMicros !== undefined)
     lines.push(`Spent in the last hour: ${dollars(input.details.lastHourSpendMicros)}.`);
-  lines.push(
-    "Model-scoped promotional and Free-plan credits are separate and may still be available for eligible use.",
-  );
+  if (input.kind === "topup_failed")
+    lines.push(
+      "Automatic top-ups are off. Review your card and settings before enabling them again.",
+    );
+  else if (input.kind === "cap_reached")
+    lines.push(
+      "The next automatic top-up would exceed your monthly limit. No payment was started.",
+    );
+  else if (input.kind !== "topup_success")
+    lines.push(
+      "Model-scoped promotional and Free-plan credits are separate and may still be available for eligible use.",
+    );
   return {
     from: input.sender,
     to: input.email,

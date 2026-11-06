@@ -10,6 +10,7 @@ import {
 } from "./bounded-zip";
 import { FileBlob } from "./file-blob";
 import {
+  EXCEL_MAX_ROWS,
   formatCellAddress,
   formatRangeAddress,
   parseRangeAddress,
@@ -1457,6 +1458,8 @@ async function preflightXlsx(
   let xmlElements = 0;
   let xmlTextCharacters = 0;
   let worksheetCells = 0;
+  let worksheetMergeCells = 0;
+  let worksheetValidationAddresses = 0;
   let formulas = 0;
   let formulaBytes = 0;
   let sharedStrings = 0;
@@ -1586,6 +1589,8 @@ async function preflightXlsx(
     xmlElements += counts.elements;
     xmlTextCharacters += counts.textCharacters;
     worksheetCells += counts.worksheetCells;
+    worksheetMergeCells += counts.worksheetMergeCells;
+    worksheetValidationAddresses += counts.worksheetValidationAddresses;
     formulas += counts.formulas;
     formulaBytes += counts.formulaBytes;
     sharedStrings += counts.sharedStrings;
@@ -1637,6 +1642,20 @@ async function preflightXlsx(
     if (worksheetCells > limits.worksheetCells) {
       throw securityError(
         `OOXML package exceeds the ${limits.worksheetCells} worksheet-cell limit`,
+        "limit-exceeded",
+        entry.name,
+      );
+    }
+    if (worksheetMergeCells > limits.worksheetCells) {
+      throw securityError(
+        `OOXML package merged ranges exceed the ${limits.worksheetCells} worksheet-cell limit`,
+        "limit-exceeded",
+        entry.name,
+      );
+    }
+    if (worksheetValidationAddresses > MAX_DATA_VALIDATION_ADDRESSES) {
+      throw securityError(
+        `OOXML package data validations exceed the ${MAX_DATA_VALIDATION_ADDRESSES} covered-address limit`,
         "limit-exceeded",
         entry.name,
       );
@@ -2057,6 +2076,10 @@ type XmlInspection = {
   elements: number;
   textCharacters: number;
   worksheetCells: number;
+  /** Cells covered by merged ranges, which ExcelJS materializes as real cells. */
+  worksheetMergeCells: number;
+  /** Addresses covered by data-validation ranges, which ExcelJS expands into map entries. */
+  worksheetValidationAddresses: number;
   formulas: number;
   formulaBytes: number;
   sharedStrings: number;
@@ -2119,6 +2142,8 @@ function inspectXml(
     elements: 0,
     textCharacters: 0,
     worksheetCells: 0,
+    worksheetMergeCells: 0,
+    worksheetValidationAddresses: 0,
     formulas: 0,
     formulaBytes: 0,
     sharedStrings: 0,
@@ -2281,6 +2306,27 @@ function inspectXml(
         );
       }
     }
+    if (/^xl\/worksheets\/[^/]+\.xml$/i.test(entryName) && tag.prefix === "") {
+      if (localName === "mergeCell") {
+        // ExcelJS creates a real cell for every merged address, so merged areas are charged
+        // against the worksheet-cell budget before the package reaches it.
+        result.worksheetMergeCells = chargeWorksheetRangeArea(
+          attributes.get("ref"),
+          result.worksheetMergeCells,
+          limits.worksheetCellsPerPart,
+          "merged ranges",
+          entryName,
+        );
+      } else if (localName === "dataValidation") {
+        result.worksheetValidationAddresses = chargeWorksheetRangeArea(
+          attributes.get("sqref"),
+          result.worksheetValidationAddresses,
+          MAX_DATA_VALIDATION_ADDRESSES,
+          "data validations",
+          entryName,
+        );
+      }
+    }
     if (/^xl\/sharedStrings\.xml$/i.test(entryName) && localName === "si") {
       result.sharedStrings += 1;
       if (result.sharedStrings > limits.sharedStrings) {
@@ -2414,6 +2460,61 @@ function inspectXml(
   );
   result.opaqueFeatures = [...features].sort();
   return result;
+}
+
+/**
+ * ExcelJS expands every data-validation `sqref` into one map entry per covered address. That
+ * measured at about 140 MB and 0.9 s per full Excel column, far cheaper per address than real
+ * cells, so validations get their own ceiling of four full columns per part and per package
+ * instead of sharing the worksheet-cell budget. One whole-column dropdown still imports.
+ */
+const MAX_DATA_VALIDATION_ADDRESSES = 4 * EXCEL_MAX_ROWS;
+
+/**
+ * Adds the area of a merge `ref` or a space-separated data-validation `sqref` to `charged` and
+ * rejects the part once it covers more than `limit` addresses. Each parsed range covers at most
+ * EXCEL_MAX_ROWS x EXCEL_MAX_COLUMNS (about 1.7e10) cells and the running total is checked after
+ * every range, so the sum stays far below Number.MAX_SAFE_INTEGER. Malformed references are
+ * rejected rather than skipped, because ExcelJS would otherwise interpret them on its own terms.
+ */
+function chargeWorksheetRangeArea(
+  reference: string | undefined,
+  charged: number,
+  limit: number,
+  label: string,
+  entryName: string,
+): number {
+  const ranges = (reference ?? "").split(/[ \t\r\n]+/u).filter((range) => range.length > 0);
+  if (ranges.length === 0) {
+    throw securityError("Worksheet range reference is missing", "invalid-package", entryName);
+  }
+  let total = charged;
+  for (const text of ranges) {
+    let range: RangeAddress;
+    try {
+      range = parseRangeAddress(text);
+    } catch (error) {
+      const failure = securityError(
+        "Worksheet range reference is invalid",
+        "invalid-package",
+        entryName,
+      );
+      Object.defineProperty(failure, "cause", {
+        value: error,
+        enumerable: false,
+      });
+      throw failure;
+    }
+    total += range.rowCount * range.colCount;
+    if (total > limit) {
+      throw securityError(
+        `Worksheet ${label} exceed the ${limit} covered-address limit`,
+        "limit-exceeded",
+        entryName,
+      );
+    }
+  }
+  return total;
 }
 
 function localAttributes(tag: SaxesTagNS, entryName: string): Map<string, string> {

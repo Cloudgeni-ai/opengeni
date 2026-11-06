@@ -1,4 +1,5 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { BillingCreditNotification } from "@opengeni/contracts/billing-credit-notifications";
 import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
 export type {
   SessionUsageLimit,
@@ -7253,6 +7254,8 @@ export type InboxItemServerQuestion = {
 
 export type ListInboxResponse = {
   items: InboxItem[];
+  /** Organization billing notices for the recipient; not workspace inbox items. */
+  billingNotifications?: BillingCreditNotification[];
   /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */
   needsYouCount: number;
   /** Open, unsnoozed, unread items of any kind. */
@@ -7533,10 +7536,20 @@ export type SlackUserLinkAccessRequest = {
   createdAt: string;
   updatedAt: string;
   /**
-   * Set for the person linking when they may link this Slack account as a
-   * member of the organization, without workspace access, once they confirm
-   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
-   * account when Slack says who it is.
+   * The Slack account this request links, shown to the person linking while
+   * it is prepared so they see whose account it is, when Slack says who it is.
+   */
+  slackAccountLabel?: string | null | undefined;
+  /**
+   * Whether the person linking may link this Slack account now by confirming
+   * it (`linkSlackUserAsOrganizationMember` with this request's `version`).
+   * Preparing a request never links it.
+   */
+  canLink?: boolean | undefined;
+  /**
+   * @deprecated Use `canLink` and `slackAccountLabel`. Set when `canLink` is
+   * true because the person is a member of the organization without access
+   * to the workspace.
    */
   organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };

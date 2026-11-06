@@ -264,6 +264,8 @@ import {
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
+import { managedSignUpBrowserMiddleware } from "./auth/managed-sign-up-browser";
+import { startBillingAutoTopUpMaintenance } from "./billing-auto-top-up-maintenance";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -291,6 +293,7 @@ import {
 import { createWorkspaceToolGatewayCatalogAttestations } from "./workspace-tool-gateway-attestations";
 import { recordWorkspaceToolGatewayPreparation } from "./workspace-tool-gateway-observability";
 import {
+  isMcpOAuthProtocolPostRequest,
   isMcpOAuthResourcePath,
   mcpOAuthAuthenticateHeader,
   mcpOAuthBearerToken,
@@ -323,6 +326,7 @@ import {
 import { allowedCorsOrigin } from "./http/cors";
 import {
   createLocalBrowserBoundary,
+  createLocalCorsOriginPolicy,
   localBrowserRequestHost,
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
@@ -537,12 +541,22 @@ function signedStateSecret(
   return resolved.secret;
 }
 
-export function createAppComposition(deps: AppDependencies): {
+export function createAppComposition(
+  deps: AppDependencies,
+  lifecycle: {
+    /** A router alone cannot own a background charge loop. Only opt in when
+     * the host will call stopBillingAutoTopUps before closing its database. */
+    startBillingAutoTopUps?: boolean;
+  } = {},
+): {
   app: Hono;
   routeDeps: ApiRouteDeps;
   /** One pass renewing the holds of the browsers agent sessions hold; the
    * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
   renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
+  /** Stop admission synchronously, then drain the current top-up pass before
+   * closing the database. Embedded composition owners must call this too. */
+  stopBillingAutoTopUps: () => Promise<void>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -957,23 +971,23 @@ export function createAppComposition(deps: AppDependencies): {
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
-  const localCors = localBrowserBoundary
+  const localCorsOriginAllowed = createLocalCorsOriginPolicy(deps.settings, localBrowserBoundary);
+  const localCors = localCorsOriginAllowed
     ? cors({
         ...corsHeaders,
         credentials: true,
         origin: (origin, c) =>
-          localBrowserBoundary.originAllowed(origin, localBrowserRequestHost(c.req.raw))
-            ? origin
-            : null,
+          localCorsOriginAllowed(origin, localBrowserRequestHost(c.req.raw)) ? origin : null,
       })
     : null;
 
   app.use("*", (c, next) => {
     const origin = c.req.header("origin");
     if (localCors) {
-      // The boundary above already refused every other origin. Local mode
-      // never answers with wildcard CORS: a request without credentials acts
-      // as the local user, so any site could otherwise read its responses.
+      // Local mode never answers with wildcard CORS, in any environment: a
+      // request without credentials acts as the local user, so any site could
+      // otherwise read its responses. Origins outside the local policy get no
+      // CORS grant (in local development the boundary above refused them).
       return origin ? localCors(c, next) : next();
     }
     const middleware =
@@ -997,11 +1011,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web beacons and Site Data uploads enforce their own limits
-    // on the streamed body; the generic ceiling would buffer far more first.
+    // The anonymous web beacons, the OAuth protocol posts, and Site Data
+    // uploads enforce their own limits on the streamed body; the generic
+    // ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
       isAnalyticsConsentReportRequest(c.req.method, pathname) ||
+      isMcpOAuthProtocolPostRequest(c.req.method, pathname) ||
       isSessionHistoryImportRequest(c.req.method, pathname) ||
       isSiteDataFileUploadRequest(c.req.method, pathname)
     ) {
@@ -1283,6 +1299,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
+    // Email verification keeps only a password chosen in the verifying browser.
+    app.use("/v1/auth/sign-up/email", managedSignUpBrowserMiddleware(deps.settings));
+    app.use("/v1/auth/verify-email", managedSignUpBrowserMiddleware(deps.settings));
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
@@ -2743,7 +2762,15 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
+  const billingAutoTopUps = lifecycle.startBillingAutoTopUps
+    ? startBillingAutoTopUpMaintenance(routeDeps)
+    : null;
+  return {
+    app,
+    routeDeps,
+    renewBrowserHolds: browserSessionRoutes.renewBrowserHolds,
+    stopBillingAutoTopUps: () => billingAutoTopUps?.stop() ?? Promise.resolve(),
+  };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {

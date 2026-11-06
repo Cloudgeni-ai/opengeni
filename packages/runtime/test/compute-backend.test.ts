@@ -36,8 +36,12 @@ import {
   reconcileStaleComputeEnrollments,
   serializeEstablishedSandboxEnvelope,
   wakeComputeSandboxOnNoResponders,
+  buildComputeEnvironmentTemplate,
+  computeEnvironmentTemplateName,
+  resolveComputeProviderBinding,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
+import { COMPUTE_BINDING_FAILURE_CACHE_MS } from "../src/sandbox/providers/compute";
 import {
   AGENT_UNRESPONSIVE_DETAIL_KEY,
   AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
@@ -75,6 +79,8 @@ class FakeControlService {
   restarts = 0;
   /** Answer the next N creates with this status before succeeding. */
   failCreates: number[] = [];
+  /** Refuse the next create as invalid with this message. */
+  refuseCreate: string | null = null;
   /** Make the sandbox but never answer a create (every attempt is a 504). */
   loseCreateAnswers = false;
   /** Fail request lookups and deletes (the control service is unreachable for cleanup). */
@@ -83,6 +89,11 @@ class FakeControlService {
   readonly stallDeletes = new Set<string>();
   /** Sandboxes whose delete always fails. */
   readonly failDeletes = new Set<string>();
+  /** The team's templates, by id. */
+  readonly templates = new Map<
+    string,
+    { id: string; name?: string; image: string; source: string }
+  >();
   private readonly stalls = new Set<() => void>();
   private readonly server: ReturnType<typeof Bun.serve>;
   /** Called when the control service wakes a sandbox. */
@@ -123,6 +134,20 @@ class FakeControlService {
             return Response.json({ code: "request_gone", message: "gone" }, { status: 410 });
           return Response.json(this.view(box));
         }
+        if (parts[1] === "templates" && parts[2]) {
+          const template = this.template(parts[2]);
+          if (!template) {
+            return Response.json(
+              { code: "not_found", message: "no such template" },
+              { status: 404 },
+            );
+          }
+          if (request.method === "DELETE") {
+            this.templates.delete(template.id);
+            return new Response(null, { status: 204 });
+          }
+          return Response.json(this.templateView(template));
+        }
         if (request.method === "GET" && url.pathname === "/v1/sandboxes") {
           const wanted = [...url.searchParams];
           return Response.json(
@@ -139,6 +164,17 @@ class FakeControlService {
         if (request.method === "POST" && url.pathname === "/v1/sandboxes") {
           const status = this.failCreates.shift();
           if (status) return Response.json({ code: "busy", message: "try again" }, { status });
+          if (this.refuseCreate) {
+            const message = this.refuseCreate;
+            this.refuseCreate = null;
+            return Response.json({ code: "invalid", message }, { status: 400 });
+          }
+          if (body.template && !this.template(body.template)) {
+            return Response.json(
+              { code: "invalid", message: `no such template: ${body.template}` },
+              { status: 400 },
+            );
+          }
           const knownId = this.requestIds.get(body.request_id);
           let box = knownId ? this.boxes.get(knownId) : undefined;
           if (knownId && !box) {
@@ -163,6 +199,22 @@ class FakeControlService {
         }
         const box = parts[2] ? this.boxes.get(parts[2]) : undefined;
         if (!box) return Response.json({ code: "not_found", message: "none" }, { status: 404 });
+        if (request.method === "POST" && parts[3] === "templates") {
+          if (body?.name && this.template(body.name)) {
+            return Response.json(
+              { code: "exists", message: `a template named ${body.name} exists` },
+              { status: 409 },
+            );
+          }
+          const template = {
+            id: `tpl-${this.templates.size + 1}`,
+            ...(body?.name ? { name: body.name as string } : {}),
+            image: `captured-${this.templates.size + 1}`,
+            source: box.id,
+          };
+          this.templates.set(template.id, template);
+          return Response.json(this.templateView(template), { status: 201 });
+        }
         if (request.method === "POST" && parts[3] === "restart") {
           this.restarts += 1;
           this.onRestart(box);
@@ -197,11 +249,23 @@ class FakeControlService {
     return `http://127.0.0.1:${this.server.port}`;
   }
 
+  template(key: string) {
+    return (
+      this.templates.get(key) ?? [...this.templates.values()].find((each) => each.name === key)
+    );
+  }
+
+  templateView(template: { id: string; name?: string; image: string; source: string }) {
+    return { ...template, vcpus: 2, memory_mib: 4096, disk_mib: 8192, created_ms: 1 };
+  }
+
   view(box: FakeSandbox) {
     const agent = (box.body.init as { agent: { workspace_id: string; agent_id: string } }).agent;
     return {
       id: box.id,
-      image: (box.body.image as string | undefined) ?? "default",
+      image:
+        (box.body.image as string | undefined) ??
+        (box.body.template ? `template:${box.body.template as string}` : "default"),
       config: {},
       metadata: box.body.metadata,
       agent: { workspace: agent.workspace_id, agent: agent.agent_id },
@@ -519,6 +583,7 @@ function setup(
     startUnansweredMs?: number;
     unresponsiveRecoveryMs?: number;
     diskMib?: number;
+    template?: string;
   } = {},
 ) {
   const control = new FakeControlService();
@@ -542,6 +607,7 @@ function setup(
     vcpus: 2,
     memoryMib: 4096,
     ...(options.diskMib !== undefined ? { diskMib: options.diskMib } : {}),
+    ...(options.template !== undefined ? { template: options.template } : {}),
     readyTimeoutMs: options.readyTimeoutMs ?? 2_000,
     ...(options.controlTimeoutMs !== undefined
       ? { controlTimeoutMs: options.controlTimeoutMs }
@@ -575,6 +641,56 @@ describe("compute sandbox client", () => {
       (r) => r.method === "POST" && r.path === "/v1/sandboxes",
     )!.body as Record<string, unknown>;
     expect("disk_mib" in plainBody).toBe(false);
+  });
+
+  test("create boots a verified environment template instead of the image", async () => {
+    const { control, client } = setup({ template: "tpl-env" });
+    control.templates.set("tpl-env", { id: "tpl-env", image: "captured-env", source: "sbx-0" });
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const creates = control.requests.filter(
+      (r) => r.method === "POST" && r.path === "/v1/sandboxes",
+    );
+    expect(creates).toHaveLength(1);
+    const body = creates[0]!.body as Record<string, unknown>;
+    expect(body.template).toBe("tpl-env");
+    // A create names an image or a template, never both.
+    expect("image" in body).toBe(false);
+    expect(session.state.image).toBe("template:tpl-env");
+  });
+
+  test("a template deleted since it was chosen boots the plain image on a fresh enrollment", async () => {
+    const { control, plane, client } = setup({ template: "tpl-deleted" });
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const creates = control.requests.filter(
+      (r) => r.method === "POST" && r.path === "/v1/sandboxes",
+    );
+    expect(creates).toHaveLength(2);
+    const [first, second] = creates.map((r) => r.body as Record<string, any>);
+    expect(first!.template).toBe("tpl-deleted");
+    expect(second!.image).toBe("registry.test/compute:1");
+    expect("template" in second!).toBe(false);
+    // The sandbox runs on a fresh enrollment; the refused create's one is left
+    // to the stale-enrollment sweep, as for any refused create.
+    expect(first!.request_id).not.toBe(second!.request_id);
+    expect(plane.created.map((each) => each.enrollmentId)).toEqual([
+      first!.request_id,
+      second!.request_id,
+    ]);
+    expect(session.state.enrollmentId).toBe(second!.request_id);
+    expect(control.boxes.size).toBe(1);
+  });
+
+  test("other create failures are not retried without the template", async () => {
+    const { control, client } = setup({ template: "tpl-env" });
+    control.templates.set("tpl-env", { id: "tpl-env", image: "captured-env", source: "sbx-0" });
+    control.refuseCreate = "memory_mib is more than a host has";
+    await expect(
+      client.create(undefined, { opengeniCreateIdentity: identity }),
+    ).rejects.toBeInstanceOf(ComputeControlError);
+    const creates = control.requests.filter(
+      (r) => r.method === "POST" && r.path === "/v1/sandboxes",
+    );
+    expect(creates).toHaveLength(1);
   });
 
   test("create makes the enrollment, names the agent in the init and waits for it", async () => {
@@ -1556,6 +1672,323 @@ describe("compute control service client", () => {
     expect(await client.lookupRequest("req-2")).toEqual({ state: "gone" });
     expect(await client.linkKeys()).toEqual({ team: "opengeni", keys: [] });
   });
+
+  test("templates are captured, looked up and deleted; a taken name is not retried", async () => {
+    const control = new FakeControlService();
+    controls.push(control);
+    const client = new ComputeControlClient({
+      baseUrl: control.url,
+      apiKey: "control-key",
+      sleep: async () => {},
+    });
+    control.boxes.set("sbx-src", { id: "sbx-src", body: {}, createdMs: 1 });
+    const captured = await client.captureTemplate("sbx-src", "env-a", { timeoutMs: 5_000 });
+    expect(captured).toMatchObject({ id: "tpl-1", name: "env-a", source: "sbx-src" });
+    expect(control.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/sandboxes/sbx-src/templates",
+      body: { name: "env-a" },
+    });
+
+    const before = control.requests.length;
+    const taken = await client.captureTemplate("sbx-src", "env-a").catch((e: unknown) => e);
+    expect((taken as ComputeControlError).kind).toBe("exists");
+    expect((taken as ComputeControlError).retryable).toBe(false);
+    expect(control.requests.length).toBe(before + 1);
+
+    expect(await client.getTemplate("env-a")).toMatchObject({ id: "tpl-1" });
+    expect(await client.getTemplate("tpl-1")).toMatchObject({ name: "env-a" });
+    expect(await client.getTemplate("never")).toBeNull();
+    await client.deleteTemplate("tpl-1");
+    // Already gone is success.
+    await client.deleteTemplate("tpl-1");
+    expect(await client.getTemplate("env-a")).toBeNull();
+  });
+
+  test("a capture is asked once even when the client retries other requests", async () => {
+    let captures = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        captures += 1;
+        return new Response("busy", { status: 503 });
+      },
+    });
+    try {
+      const client = new ComputeControlClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        apiKey: "control-key",
+        maxAttempts: 3,
+        sleep: async () => {},
+      });
+      await expect(client.captureTemplate("sbx", "env-once")).rejects.toBeInstanceOf(
+        ComputeControlError,
+      );
+      expect(captures).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a capture's own timeout outlasts the client's request timeout", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return Response.json({ id: "tpl-slow", image: "img", source: "sbx" });
+      },
+    });
+    try {
+      const client = new ComputeControlClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        apiKey: "control-key",
+        requestTimeoutMs: 50,
+        maxAttempts: 1,
+        sleep: async () => {},
+      });
+      expect(await client.captureTemplate("sbx", "env-slow", { timeoutMs: 2_000 })).toMatchObject({
+        id: "tpl-slow",
+      });
+      await expect(client.getTemplate("env-slow")).rejects.toBeInstanceOf(ComputeControlError);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("compute environment templates", () => {
+  const settings = {
+    computeApiUrl: "https://compute.test/",
+    computeApiKey: "control-key",
+  } as never;
+  const REQUEST = "0f0e0d0c-0b0a-4908-8706-050403020100";
+
+  test("a build captures its live sandbox under the build's own name", async () => {
+    const captured: Array<{ sandboxId: string; name: string }> = [];
+    const built = await buildComputeEnvironmentTemplate(
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
+      {
+        linkKeys: async () => ({ team: "team-build", keys: [] }),
+        captureTemplate: async (sandboxId, name) => {
+          captured.push({ sandboxId, name });
+          return {
+            id: "tpl-9",
+            name,
+            image: "blake3-9",
+            source: sandboxId,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_mib: 1,
+            created_ms: 1,
+          };
+        },
+        getTemplate: async () => {
+          throw new Error("not asked");
+        },
+      },
+    );
+    expect(captured).toEqual([{ sandboxId: "sbx-build", name: `opengeni-environment-${REQUEST}` }]);
+    expect(built).toEqual({
+      provider: "compute",
+      backend: "compute",
+      imageId: "tpl-9",
+      imageDigest: "blake3-9",
+      providerBindingKey: "compute:https://compute.test:team-build",
+      providerBinding: { provider: "compute", apiUrl: "https://compute.test", team: "team-build" },
+      created: true,
+    });
+  });
+
+  test("a name another build already captured is reused and not this build's", async () => {
+    const built = await buildComputeEnvironmentTemplate(
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
+      {
+        linkKeys: async () => ({ team: "team-build", keys: [] }),
+        captureTemplate: async () => {
+          throw new ComputeControlError({ kind: "exists", status: 409, message: "exists" });
+        },
+        getTemplate: async (key) => ({
+          id: "tpl-earlier",
+          name: key,
+          image: "blake3-earlier",
+          source: "sbx-earlier",
+          vcpus: 2,
+          memory_mib: 4096,
+          disk_mib: 1,
+          created_ms: 1,
+        }),
+      },
+    );
+    expect(built.imageId).toBe("tpl-earlier");
+    expect(built.created).toBe(false);
+  });
+
+  test("a capture whose answer was lost is found by name and is this build's", async () => {
+    let captures = 0;
+    const built = await buildComputeEnvironmentTemplate(
+      {
+        settings,
+        session: { state: { sandboxId: "sbx-build" } },
+        requestId: REQUEST,
+        timeoutMs: 1,
+      },
+      {
+        linkKeys: async () => ({ team: "team-build", keys: [] }),
+        captureTemplate: async () => {
+          captures += 1;
+          throw new ComputeControlError({ kind: "transport", status: null, message: "timed out" });
+        },
+        getTemplate: async (key) => ({
+          id: "tpl-lost",
+          name: key,
+          image: "blake3-lost",
+          source: "sbx-build",
+          vcpus: 2,
+          memory_mib: 4096,
+          disk_mib: 1,
+          created_ms: 1,
+        }),
+      },
+    );
+    expect(captures).toBe(1);
+    expect(built).toMatchObject({ imageId: "tpl-lost", created: true });
+  });
+
+  test("a lost capture with nothing under its name fails, and a cancelled one is not looked up", async () => {
+    const lost = new ComputeControlError({ kind: "transport", status: null, message: "timed out" });
+    let lookups = 0;
+    const control = {
+      linkKeys: async () => ({ team: "team-build", keys: [] }),
+      captureTemplate: async () => {
+        throw lost;
+      },
+      getTemplate: async () => {
+        lookups += 1;
+        return null;
+      },
+    };
+    const input = {
+      settings,
+      session: { state: { sandboxId: "sbx-build" } },
+      requestId: REQUEST,
+      timeoutMs: 1,
+    };
+    await expect(buildComputeEnvironmentTemplate(input, control)).rejects.toBe(lost);
+    expect(lookups).toBe(1);
+    const stop = new AbortController();
+    stop.abort();
+    await expect(
+      buildComputeEnvironmentTemplate({ ...input, signal: stop.signal }, control),
+    ).rejects.toBe(lost);
+    expect(lookups).toBe(1);
+  });
+
+  test("a build never inherits a turn's lookup that fails", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return new Response("down", { status: 503 });
+      },
+    });
+    try {
+      const own = {
+        computeApiUrl: `http://127.0.0.1:${server.port}`,
+        computeApiKey: "shared-key",
+      } as never;
+      const turn = resolveComputeProviderBinding(own).catch((error: unknown) => error);
+      const build = await resolveComputeProviderBinding(own, {
+        linkKeys: async () => ({ team: "team-b", keys: [] }),
+      });
+      expect(build.binding.team).toBe("team-b");
+      expect(await turn).toBeInstanceOf(Error);
+      // A resolved team is then shared with turns.
+      expect((await resolveComputeProviderBinding(own)).binding.team).toBe("team-b");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a turn's failed team lookup is asked once and remembered briefly", async () => {
+    let asks = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        asks += 1;
+        return new Response("down", { status: 503 });
+      },
+    });
+    try {
+      const own = {
+        computeApiUrl: `http://127.0.0.1:${server.port}`,
+        computeApiKey: "turn-key",
+      } as never;
+      let clock = 1_000_000;
+      const now = () => clock;
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(1);
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(1);
+      clock += COMPUTE_BINDING_FAILURE_CACHE_MS;
+      await expect(resolveComputeProviderBinding(own, undefined, now)).rejects.toBeDefined();
+      expect(asks).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a build needs the live sandbox and a UUID request id", async () => {
+    const control = {
+      linkKeys: async () => ({ team: "team-build", keys: [] }),
+      captureTemplate: async () => {
+        throw new Error("not asked");
+      },
+      getTemplate: async () => null,
+    };
+    await expect(
+      buildComputeEnvironmentTemplate(
+        { settings, session: {}, requestId: REQUEST, timeoutMs: 1 },
+        control,
+      ),
+    ).rejects.toThrow("live sandbox");
+    expect(() => computeEnvironmentTemplateName("not-a-uuid")).toThrow();
+    expect(computeEnvironmentTemplateName(REQUEST)).toHaveLength(57);
+  });
+
+  test("the template namespace is the key's team, and a failed lookup is asked again", async () => {
+    const own = { computeApiUrl: "https://compute-binding.test", computeApiKey: "k1" } as never;
+    let asks = 0;
+    const failing = {
+      linkKeys: async () => {
+        asks += 1;
+        throw new Error("unreachable");
+      },
+    };
+    await expect(resolveComputeProviderBinding(own, failing)).rejects.toThrow("unreachable");
+    const working = {
+      linkKeys: async () => {
+        asks += 1;
+        return { team: "team-a", keys: [] };
+      },
+    };
+    expect((await resolveComputeProviderBinding(own, working)).key).toBe(
+      "compute:https://compute-binding.test:team-a",
+    );
+    expect((await resolveComputeProviderBinding(own, working)).key).toBe(
+      "compute:https://compute-binding.test:team-a",
+    );
+    expect(asks).toBe(2);
+  });
 });
 
 describe("compute at the transport points", () => {
@@ -1931,7 +2364,7 @@ describe("an exec whose agent stops answering and does not come back", () => {
     // Connected Machine.
     const text = renderSelfhostedFault(error, selfhostedFaultContext("compute"));
     expect(text).toContain(
-      "this chat's workspace machine stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+      "this chat's workspace machine stopped responding and didn't come back. It was restarted; re-run the command.",
     );
     expect(text).not.toStartWith("[connected machine]");
   }, 30_000);

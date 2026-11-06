@@ -952,10 +952,9 @@ const SettingsSchema = z.object({
   // call the public API with bearer credentials, but never receive credentialed
   // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
-  // Local development only (`local` access mode in the `local` environment):
-  // extra exact browser origins, comma-separated, that may call the
-  // unauthenticated API besides this stack's own web origin. The local browser
-  // boundary ignores `corsAllowOriginRegex`.
+  // `local` access mode only: extra exact browser origins, comma-separated,
+  // that may call the unauthenticated API besides this stack's own web and
+  // public origins. Local access mode ignores `corsAllowOriginRegex`.
   localAllowedOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
@@ -1729,6 +1728,11 @@ const SettingsSchema = z.object({
   // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
   computeImage: z.string().min(1).max(2048).optional(),
   computeDesktopImage: z.string().min(1).max(2048).optional(),
+  // A team template (id) new compute sandboxes boot from instead of the
+  // image: a verified Sandbox Environment's prebuilt disk. Never configured
+  // from the environment; a turn sets it only for fresh creates once that
+  // exact environment content was captured and cold-boot validated.
+  computeTemplate: z.string().min(1).max(128).optional(),
   computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
   computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
@@ -6625,15 +6629,18 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegati
 /**
  * First-party session tools need a shared HMAC identity even in the unauthenticated
  * local product mode. A fixed local-only value is no broader than that mode's
- * existing access boundary, while configured and managed deployments continue to
+ * existing access boundary, so it is used only when there is no shared-key
+ * perimeter: once `authRequired` is on, a delegated bearer passes that perimeter,
+ * so its signing secret must be one the deployment keeps private (an explicit
+ * secret, otherwise the deployment access key). Managed deployments continue to
  * require an operator-provided secret.
  */
 export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
-  const configuredAccessKey = settings.accessKey?.trim();
-  if (settings.productAccessMode === "configured" && settings.authRequired && configuredAccessKey) {
-    return configuredAccessKey;
+  if (settings.authRequired) {
+    const accessKey = settings.accessKey?.trim();
+    return settings.productAccessMode !== "managed" && accessKey ? accessKey : undefined;
   }
   return settings.productAccessMode === "local" &&
     (settings.environment === "local" || settings.environment === "test")

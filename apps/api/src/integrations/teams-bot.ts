@@ -30,6 +30,7 @@ import {
   resolveNamedManagedPersonalWorkspaceGrant,
   getTeamsInstallation,
   invalidateTeamsGroup,
+  clearTeamsContextConversation,
   teamsGroupRouteActive,
   type TeamsGroupAudience,
   getWorkspaceTeamsInstallation,
@@ -63,11 +64,13 @@ import {
 } from "@opengeni/db";
 import { parseRequestJson } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { teamsConnectionRefused, teamsLinkConflict } from "./teams-setup-refusals";
 import {
   teamsBotConfigured,
   teamsTenantEnabled,
   teamsServiceUrl,
   normalizeTeamsMessage,
+  teamsThreadlessConversationId,
   normalizeTeamsFeedback,
   teamsPersonalInstall,
   teamsRouteId,
@@ -76,8 +79,15 @@ import {
   type TeamsFeedback,
   type TeamsMessage,
   type TeamsLinkProof,
+  type TeamsMessageRejection,
   type TeamsPersonalInstall,
 } from "./teams-protocol";
+import {
+  loadTeamsMentionModelContext,
+  markTeamsContextMention,
+  recordTeamsContext,
+  reviseTeamsContext,
+} from "./teams-context";
 import {
   mintTeamsAdminState,
   teamsAdminAuthorizationUrl,
@@ -492,8 +502,22 @@ function experienceState(
   personal: boolean,
   i: TeamsInstallation | null,
   grant: AccessGrant | null,
+  sharedConversations = false,
 ): TeamsExperienceState {
-  return { personal, installation: i?.active ? "active" : "unavailable", linked: Boolean(grant) };
+  return {
+    personal,
+    installation: i?.active ? "active" : "unavailable",
+    linked: Boolean(grant),
+    sharedConversations,
+  };
+}
+/** Whether any group chat or channel of this tenant is on the allowlists. */
+function teamsSharedConversationsEnabled(deps: ApiRouteDeps, tenantId: string): boolean {
+  const prefix = `${tenantId}:`;
+  return [
+    ...deps.settings.teamsBotAllowedGroupChatIds,
+    ...deps.settings.teamsBotAllowedChannelIds,
+  ].some((id) => id.startsWith(prefix));
 }
 /**
  * The welcome for someone who just added the bot for themselves. In an
@@ -562,7 +586,15 @@ async function answerTeamsCommand(
     await sendTeamsReply(
       app,
       m,
-      teamsHelp(experienceState(m.personal, active, grant)),
+      teamsHelp(
+        experienceState(
+          m.personal,
+          active,
+          grant,
+          // Shared conversations only answer once the organization is connected.
+          Boolean(active) && teamsSharedConversationsEnabled(deps, m.tenantId),
+        ),
+      ),
       active ? () => proofLink(deps, m, active) : undefined,
     );
     return "help_sent";
@@ -749,8 +781,18 @@ export async function handleTeamsActivity(
   const change = teamsGroupMembershipChange(body, botId);
   if (change) {
     const installation = await getTeamsInstallation(deps.db, change.tenantId);
-    if (installation?.active)
+    if (installation?.active) {
       await invalidateTeamsGroup(deps.db, installation, change.conversationId);
+      // Someone added to the chat must not get answers built from
+      // messages Teams did not show them.
+      const added = (body as { membersAdded?: unknown[] } | null)?.membersAdded;
+      if (Array.isArray(added) && added.length)
+        await clearTeamsContextConversation(
+          deps.db,
+          installation,
+          teamsThreadlessConversationId(change.conversationId),
+        );
+    }
     return { status: 200 };
   }
   const install = teamsPersonalInstall(body);
@@ -765,9 +807,36 @@ export async function handleTeamsActivity(
     observed(await recordTeamsFeedback(deps, feedback));
     return { status: 200 };
   }
-  const m = normalizeTeamsMessage(body, (diagnostic) => {
+  // Edits and deletions update recorded context; they never start work.
+  try {
+    if (await reviseTeamsContext(deps, body)) {
+      observed("context_revised");
+      return { status: 200 };
+    }
+  } catch {
+    observed("context_revise_failed");
+    return { status: 200 };
+  }
+  const ignored: TeamsMessageRejection[] = [];
+  const m = normalizeTeamsMessage(body, (diagnostic) => ignored.push(diagnostic));
+  // Every human message in an approved channel or group chat is kept as
+  // bounded context for the next mention there, except commands to
+  // Opengeni such as "help". Only a mention below starts work; a failed
+  // write never blocks it.
+  let recorded = false;
+  if (!(m && teamsCommand(m.text)))
+    try {
+      recorded = await recordTeamsContext(deps, body);
+      if (recorded) observed("context_recorded");
+    } catch {
+      observed("context_record_failed");
+    }
+  for (const diagnostic of ignored) {
+    // With resource-specific consent most recorded messages carry no
+    // mention: that is expected, not worth a log line each.
+    if (recorded && diagnostic.reason === "missing_mention") continue;
     deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
-  });
+  }
   if (!m) return { status: 200 };
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
@@ -947,20 +1016,24 @@ async function status(deps: ApiRouteDeps, workspaceId: string, subjectId: string
     linked: Boolean(i?.active && (await getOwnTeamsLink(deps.db, i, subjectId))),
   };
 }
-function notApprovedInstaller(): HTTPException {
-  return new HTTPException(403, {
-    message: "This Teams identity is not approved to install the bot.",
-  });
+/** Neither an operator-approved installer nor a tenant that may set itself up. */
+function setupUnavailable(tenantId: string) {
+  return teamsConnectionRefused(
+    teamsSelfServeTenantAllowed(tenantId) ? "setup_unavailable" : "consumer_tenant",
+  );
 }
 function setupProof(deps: ApiRouteDeps, token: string): TeamsLinkProof {
-  const p = proof(deps, token);
-  if (
-    p.purpose !== "setup" ||
-    p.workspaceId !== null ||
-    p.generation !== null ||
-    !teamsTenantEnabled(deps.settings, p.tenantId)
-  )
-    throw notApprovedInstaller();
+  let p: TeamsLinkProof;
+  try {
+    p = proof(deps, token);
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 400)
+      throw teamsConnectionRefused("setup_link_invalid");
+    throw error;
+  }
+  if (p.purpose !== "setup" || p.workspaceId !== null || p.generation !== null)
+    throw teamsConnectionRefused("setup_link_invalid");
+  if (!teamsTenantEnabled(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
   return p;
 }
 function operatorApprovedInstaller(deps: ApiRouteDeps, p: TeamsLinkProof): boolean {
@@ -972,13 +1045,10 @@ async function requireSetupWorkspace(
   tenantId: string,
 ): Promise<void> {
   const workspace = await getWorkspace(deps.db, workspaceId);
-  if (workspace?.kind !== "shared")
-    throw new HTTPException(422, { message: "Install the Teams bot in a shared workspace." });
+  if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
   const existing = await getWorkspaceTeamsInstallation(deps.db, workspaceId);
   if (existing && existing.tenant_id !== tenantId)
-    throw new HTTPException(409, {
-      message: "This workspace is linked to another Teams organization.",
-    });
+    throw teamsConnectionRefused("workspace_linked_elsewhere");
 }
 function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
   return {
@@ -988,35 +1058,6 @@ function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
     redirectUri: new URL("/teams/connect", configuredBase(deps)).toString(),
   };
 }
-const ADMIN_PROOF_REFUSALS: Record<TeamsAdminProofError["code"], [400 | 403, string]> = {
-  state_invalid: [400, "This Microsoft sign-in expired. Start again from the setup link in Teams."],
-  state_expired: [400, "This Microsoft sign-in expired. Start again from the setup link in Teams."],
-  state_mismatch: [
-    400,
-    "This Microsoft sign-in belongs to another setup. Start again from the setup link in Teams.",
-  ],
-  consumer_tenant: [
-    403,
-    "Only a work or school Microsoft 365 organization can connect Opengeni for Teams.",
-  ],
-  token_exchange_failed: [
-    400,
-    "Microsoft sign-in couldn't be verified. Start again from the setup link in Teams.",
-  ],
-  id_token_invalid: [
-    400,
-    "Microsoft sign-in couldn't be verified. Start again from the setup link in Teams.",
-  ],
-  tenant_mismatch: [
-    403,
-    "Sign in to Microsoft with your account in the Teams organization you're connecting.",
-  ],
-  user_mismatch: [403, "Sign in to Microsoft with the same account you use in Teams."],
-  not_tenant_admin: [
-    403,
-    "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.",
-  ],
-};
 /**
  * The Microsoft sign-in must belong to this exact setup (proof nonce, tenant,
  * Teams user, Opengeni person and workspace) and prove a tenant administrator.
@@ -1042,8 +1083,7 @@ async function requireTenantAdministrator(
   } catch (error) {
     if (!(error instanceof TeamsAdminProofError)) throw error;
     deps.observability?.info("Teams self-serve setup refused", { reason: error.code });
-    const [statusCode, message] = ADMIN_PROOF_REFUSALS[error.code];
-    throw new HTTPException(statusCode, { message });
+    throw teamsConnectionRefused(error.code);
   }
 }
 /**
@@ -1060,7 +1100,7 @@ export async function startTeamsSetupSignIn(
   await requireSetupWorkspace(deps, grant.workspaceId, p.tenantId);
   // An operator-approved installer connects without a Microsoft sign-in.
   if (operatorApprovedInstaller(deps, p)) return { authorizationUrl: null };
-  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw notApprovedInstaller();
+  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
   const config = teamsAdminSignInConfig(deps);
   const { token, state } = mintTeamsAdminState(config.stateSecret, {
     proofNonce: p.nonce,
@@ -1083,54 +1123,48 @@ export async function completeTeamsSetup(
   input: {
     setupToken: string;
     microsoft?: { code: string; state: string } | undefined;
+    /**
+     * The installer's Opengeni account may be linked to another Teams account
+     * in this workspace: remove only that link, after the administrator and
+     * the binding are verified, so a refused setup changes nothing.
+     */
+    replaceOwnLink?: boolean | undefined;
   },
 ) {
-  const { setupToken, microsoft } = input;
+  const { setupToken, microsoft, replaceOwnLink } = input;
   const p = setupProof(deps, setupToken);
   const approved = operatorApprovedInstaller(deps, p);
   let admin: TeamsAdminIdentity | null = null;
   if (!approved) {
-    if (!microsoft || !teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
-      throw notApprovedInstaller();
+    if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
+      throw setupUnavailable(p.tenantId);
+    if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
     // Prove the tenant administrator before revealing anything about the
     // tenant's existing binding.
     admin = await requireTenantAdministrator(deps, p, grant, microsoft);
   }
   const workspace = await getWorkspace(deps.db, grant.workspaceId);
-  if (workspace?.kind !== "shared")
-    throw new HTTPException(422, { message: "Install the Teams bot in a shared workspace." });
+  if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
   const existingTenant = await getTeamsInstallation(deps.db, p.tenantId);
   // A Global Administrator may move a disconnected binding to this workspace,
   // so a binding left behind by someone else never locks the organization out.
   // An active binding is never moved or replaced through self-serve setup.
   let release: TeamsInstallation | null = null;
   if (existingTenant && existingTenant.workspace_id !== grant.workspaceId) {
-    if (existingTenant.active || !admin)
-      throw new HTTPException(409, {
-        message: existingTenant.active
-          ? "Opengeni is already connected for this Teams organization in another workspace. An admin of that workspace can disconnect it first."
-          : "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
-      });
+    if (existingTenant.active) throw teamsConnectionRefused("connected_elsewhere");
+    if (!admin) throw teamsConnectionRefused("linked_elsewhere");
     if (
       !admin.roles.some((role) => role.toLowerCase() === TEAMS_ADMIN_ROLE_IDS.globalAdministrator)
     )
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization was connected to another workspace and is disconnected. Reconnect it in that workspace, or ask a Microsoft 365 Global Administrator to connect it here.",
-      });
+      throw teamsConnectionRefused("move_requires_global_admin");
     release = existingTenant;
   }
   // Self-serve setup connects a new organization or reconnects a paused
   // binding in its own workspace. It never replaces an active installation.
-  if (!approved && existingTenant?.active)
-    throw new HTTPException(409, {
-      message: "Opengeni is already connected for this Teams organization.",
-    });
+  if (!approved && existingTenant?.active) throw teamsConnectionRefused("already_connected");
   const existingWorkspace = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
   if (existingWorkspace && existingWorkspace.tenant_id !== p.tenantId)
-    throw new HTTPException(409, {
-      message: "This workspace is linked to another Teams organization.",
-    });
+    throw teamsConnectionRefused("workspace_linked_elsewhere");
   // The old workspace's audit names the Microsoft administrator whose
   // authority moved the binding, not an Opengeni identity from elsewhere.
   const replaceInactive =
@@ -1144,8 +1178,8 @@ export async function completeTeamsSetup(
           },
         }
       : null;
-  try {
-    await installTeamsBot(deps.db, {
+  const install = () =>
+    installTeamsBot(deps.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       tenantId: p.tenantId,
@@ -1155,43 +1189,49 @@ export async function completeTeamsSetup(
       requireInactive: !approved,
       replaceInactive,
     });
+  try {
+    try {
+      await install();
+    } catch (error) {
+      if (
+        !replaceOwnLink ||
+        !existingWorkspace ||
+        teamsLinkConflict(error) !== "opengeni_account_linked"
+      )
+        throw error;
+      // The conflicting link is the caller's own in this workspace's
+      // installation, which is this tenant's. Nothing else is removed.
+      await removeTeamsLink(deps.db, existingWorkspace, grant.subjectId);
+      await install();
+    }
   } catch (error) {
     const cause = error as {
-      code?: string;
       constraint_name?: string;
-      cause?: { code?: string; constraint_name?: string };
+      cause?: { constraint_name?: string };
       message?: string;
     };
     if (cause.message === "teams_tenant_already_bound")
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
-      });
+      throw teamsConnectionRefused("linked_elsewhere");
     if (cause.message === "teams_installation_changed")
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization's connection changed while you were connecting it. Start again from the setup link in Teams.",
-      });
+      throw teamsConnectionRefused("connection_changed");
     if (cause.message === "teams_installation_already_active")
-      throw new HTTPException(409, {
-        message: "Opengeni is already connected for this Teams organization.",
-      });
+      throw teamsConnectionRefused("already_connected");
     if (
       (cause.constraint_name ?? cause.cause?.constraint_name) ===
       "teams_bot_installations_workspace_id_key"
     )
-      throw new HTTPException(409, {
-        message: "This workspace is linked to another Teams organization.",
-      });
-    if (
-      cause.message === "teams_identity_already_linked" ||
-      cause.code === "23505" ||
-      cause.cause?.code === "23505"
-    )
-      throw new HTTPException(409, {
-        message:
-          "This Teams link was already used or the account is already connected. Send the bot a new direct message to continue.",
-      });
+      throw teamsConnectionRefused("workspace_linked_elsewhere");
+    // One link per person on each side: the installer is told which side is
+    // already linked, never to whom. The page offers to unlink their own.
+    const conflict = teamsLinkConflict(error);
+    if (conflict)
+      throw teamsConnectionRefused(
+        conflict === "proof_used"
+          ? "setup_link_used"
+          : conflict === "other"
+            ? "connection_changed"
+            : conflict,
+      );
     throw error;
   }
   deps.observability?.info("Teams organization connected", {
@@ -1205,6 +1245,49 @@ export async function completeTeamsSetup(
       .catch(() => deps.observability?.info("Teams setup confirmation not delivered", {}));
   }
   return await status(deps, grant.workspaceId, grant.subjectId);
+}
+/**
+ * Links the signed-in person to the Teams account a link proof names, in the
+ * workspace's current installation. One Teams account per Opengeni account in
+ * a workspace and one Opengeni account per Teams account: a conflict says
+ * which side is already linked, never to whom.
+ */
+export async function linkTeamsAccount(deps: ApiRouteDeps, grant: AccessGrant, token: string) {
+  const p = proof(deps, token);
+  const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
+  if (
+    p.purpose !== "link" ||
+    p.workspaceId !== grant.workspaceId ||
+    !i?.active ||
+    i.tenant_id !== p.tenantId ||
+    i.generation !== p.generation ||
+    !teamsTenantEnabled(deps.settings, p.tenantId)
+  )
+    throw new HTTPException(403, {
+      message: "This Teams link does not match the current workspace installation.",
+    });
+  try {
+    await linkTeamsActor(deps.db, i, {
+      actorId: p.actorId,
+      subjectId: grant.subjectId,
+      nonce: p.nonce,
+    });
+  } catch (error) {
+    const conflict =
+      (error as { message?: unknown } | null)?.message === "teams_installation_changed"
+        ? "other"
+        : teamsLinkConflict(error);
+    if (!conflict) throw error;
+    throw teamsConnectionRefused(
+      conflict === "proof_used"
+        ? "link_used"
+        : conflict === "other"
+          ? "link_changed"
+          : conflict === "opengeni_account_linked"
+            ? "link_opengeni_account_linked"
+            : conflict,
+    );
+  }
 }
 export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(ENDPOINT, bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
@@ -1269,6 +1352,7 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
             .object({ code: z.string().min(1).max(4096), state: z.string().min(1).max(4096) })
             .strict()
             .optional(),
+          replaceOwnLink: z.boolean().optional(),
         })
         .strict(),
     );
@@ -1289,24 +1373,7 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
     if (grant.subjectId !== human.subjectId) throw new HTTPException(403);
     const { token } = await parseRequestJson(c, z.object({ token: z.string().max(4096) }).strict());
-    const p = proof(deps, token);
-    const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
-    if (
-      p.purpose !== "link" ||
-      p.workspaceId !== grant.workspaceId ||
-      !i?.active ||
-      i.tenant_id !== p.tenantId ||
-      i.generation !== p.generation ||
-      !teamsTenantEnabled(deps.settings, p.tenantId)
-    )
-      throw new HTTPException(403, {
-        message: "This Teams link does not match the current workspace installation.",
-      });
-    await linkTeamsActor(deps.db, i, {
-      actorId: p.actorId,
-      subjectId: grant.subjectId,
-      nonce: p.nonce,
-    });
+    await linkTeamsAccount(deps, grant, token);
     return c.json({ ok: true });
   });
   app.delete(`${ROOT}/link`, async (c) => {
@@ -1425,6 +1492,14 @@ async function drainRoute(
     }
     const text = inbound.payload.text;
     if (typeof text !== "string") throw new Error("teams_inbox_payload_invalid");
+    // Recorded channel or group chat messages before this mention: since the
+    // previous mention when it continues the conversation's chat.
+    const modelContext = await loadTeamsMentionModelContext(
+      deps,
+      i,
+      inbound.payload,
+      r.session_bound,
+    );
     const scoped = await catalogDeps(deps, grant);
     const admissionActor = await actorGrant(deps, i, inbound.actor_id);
     if (
@@ -1454,6 +1529,7 @@ async function drainRoute(
           {
             requestedSessionId: r.session_id,
             initialMessage: text,
+            ...(modelContext ? { modelContext } : {}),
             visibility: r.personal ? "private" : "workspace",
             idempotencyKey: `teams:${r.route_id}`,
             clientEventId: inbound.event_id,
@@ -1479,6 +1555,7 @@ async function drainRoute(
           r.session_id,
           {
             text,
+            ...(modelContext ? { modelContext } : {}),
             clientEventId: inbound.event_id,
             teamsConversation: {
               routeId: r.route_id,
@@ -1498,6 +1575,16 @@ async function drainRoute(
         ]);
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
+      // The chat has now seen this mention and its context: a later mention
+      // that continues the chat reads back only to here. Refused mentions
+      // stay ordinary context.
+      const { conversationId, eventId } = inbound.payload as Record<string, unknown>;
+      if (typeof conversationId === "string" && typeof eventId === "string")
+        await markTeamsContextMention(deps, i, { conversationId, eventId }).catch(() =>
+          deps.observability?.info("Teams authenticated activity outcome", {
+            reason: "context_mention_mark_failed",
+          }),
+        );
     } catch (error) {
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =

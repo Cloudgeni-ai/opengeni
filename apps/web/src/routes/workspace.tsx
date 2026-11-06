@@ -30,6 +30,7 @@ import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
@@ -107,11 +108,41 @@ function emptySlackAccessState(): SlackAccessState {
   return { request: null, error: null, busy: false };
 }
 
-export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspaceName: string }) {
-  return (
+export function SlackLinkAccessRequiredDescription({
+  workspaceName,
+  slackAccountLabel = null,
+}: {
+  workspaceName: string;
+  slackAccountLabel?: string | null | undefined;
+}) {
+  return slackAccountLabel ? (
+    <>
+      You need access to <strong>{workspaceName}</strong> to connect the Slack account{" "}
+      <strong>{slackAccountLabel}</strong>.
+    </>
+  ) : (
     <>
       You need access to <strong>{workspaceName}</strong> to connect your Slack account.
     </>
+  );
+}
+
+/**
+ * Names the Slack account a link would attach to the signed-in person. A link
+ * can come from someone else, so nothing is linked until they confirm it.
+ */
+export function SlackLinkConfirmationDescription({
+  slackAccountLabel,
+}: {
+  slackAccountLabel: string | null | undefined;
+}) {
+  return slackAccountLabel ? (
+    <>
+      Link <strong className="font-medium text-fg">{slackAccountLabel}</strong> to your Opengeni
+      account.
+    </>
+  ) : (
+    "Link this Slack account to your Opengeni account."
   );
 }
 
@@ -148,6 +179,52 @@ export function SlackLinkPanel({
         <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>
       </div>
     </section>
+  );
+}
+
+/**
+ * For someone who can already use the workspace: a link they opened is linked
+ * only after they confirm which Slack account it is, since the link may have
+ * come from someone else.
+ */
+export function SlackLinkConfirmDialog({
+  request,
+  busy,
+  error,
+  onLink,
+  onCancel,
+}: {
+  request: SlackUserLinkAccessRequest | null;
+  busy: boolean;
+  error: string | null;
+  onLink: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  return (
+    <ConfirmDialog
+      open={request?.status === "prepared" && request.canLink === true}
+      destructive={false}
+      onOpenChange={(open) => {
+        if (!open && !busy) onCancel();
+      }}
+      title="Link your Slack account?"
+      description={
+        <SlackLinkConfirmationDescription slackAccountLabel={request?.slackAccountLabel} />
+      }
+      confirmLabel="Link account"
+      confirmDisabled={busy}
+      onConfirm={async () => {
+        await onLink();
+        // The dialog closes once the request reads as linked.
+        return false;
+      }}
+    >
+      {error ? (
+        <p role="alert" className="text-sm text-danger">
+          {error}
+        </p>
+      ) : null}
+    </ConfirmDialog>
   );
 }
 
@@ -381,6 +458,9 @@ export function WorkspaceShellRouteContent({
       );
       if (!ownsSlackOperation(operation)) return;
       updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
+      if (request.status === "completed") {
+        completeSlackAccess(operation);
+      }
     } catch (error) {
       if (ownsSlackOperation(operation)) {
         updateSlackAccess(workspaceId, (current) => ({
@@ -400,7 +480,11 @@ export function WorkspaceShellRouteContent({
     }
   }
 
-  async function cancelSlackAccess() {
+  /**
+   * Cancel the request. In the narrow flow there is no workspace to stay in,
+   * so it goes home; someone already in the workspace (`stay`) stays there.
+   */
+  async function cancelSlackAccess(options?: { stay?: boolean }) {
     if (
       !slackAccessRequest ||
       (slackAccessRequest.status !== "prepared" && slackAccessRequest.status !== "pending")
@@ -419,6 +503,10 @@ export function WorkspaceShellRouteContent({
       if (!ownsSlackOperation(operation)) return;
       clearSlackLinkContinuation();
       if (!ownsSlackOperation(operation)) return;
+      if (options?.stay) {
+        updateSlackAccess(workspaceId, () => emptySlackAccessState());
+        return;
+      }
       await navigate({ to: "/", replace: true });
     } catch (error) {
       if (ownsSlackOperation(operation)) {
@@ -533,23 +621,14 @@ export function WorkspaceShellRouteContent({
                 </Button>
               }
             />
-          ) : slackAccessRequest?.status === "prepared" &&
-            slackAccessRequest.organizationMemberLink ? (
+          ) : slackAccessRequest?.status === "prepared" && slackAccessRequest.canLink ? (
             <SlackLinkPanel
               linked={false}
               title="Link your Slack account"
               description={
-                slackAccessRequest.organizationMemberLink.slackAccountLabel ? (
-                  <>
-                    Link{" "}
-                    <strong className="font-medium text-fg">
-                      {slackAccessRequest.organizationMemberLink.slackAccountLabel}
-                    </strong>{" "}
-                    to your Opengeni account.
-                  </>
-                ) : (
-                  "Link this Slack account to your Opengeni account."
-                )
+                <SlackLinkConfirmationDescription
+                  slackAccountLabel={slackAccessRequest.slackAccountLabel}
+                />
               }
               action={
                 <>
@@ -578,7 +657,16 @@ export function WorkspaceShellRouteContent({
                   ? "Access requested"
                   : "Workspace access required"
               }
-              description={<SlackLinkAccessRequiredDescription workspaceName={workspaceName} />}
+              description={
+                <SlackLinkAccessRequiredDescription
+                  workspaceName={workspaceName}
+                  slackAccountLabel={
+                    slackAccessRequest?.status === "prepared"
+                      ? slackAccessRequest.slackAccountLabel
+                      : null
+                  }
+                />
+              }
               action={
                 <div className="flex flex-wrap justify-center gap-2">
                   {slackAccessRequest?.status === "prepared" ? (
@@ -621,13 +709,22 @@ export function WorkspaceShellRouteContent({
   }
 
   return (
-    <AuthorizedWorkspaceShell
-      context={context}
-      workspaceId={workspaceId}
-      onMount={onAuthorizedShellMount}
-    >
-      <Outlet />
-    </AuthorizedWorkspaceShell>
+    <>
+      <SlackLinkConfirmDialog
+        request={slackAccessRequest}
+        busy={slackAccessBusy}
+        error={slackAccessError}
+        onLink={linkSlackAccount}
+        onCancel={() => void cancelSlackAccess({ stay: true })}
+      />
+      <AuthorizedWorkspaceShell
+        context={context}
+        workspaceId={workspaceId}
+        onMount={onAuthorizedShellMount}
+      >
+        <Outlet />
+      </AuthorizedWorkspaceShell>
+    </>
   );
 }
 

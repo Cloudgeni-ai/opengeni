@@ -152,7 +152,6 @@ describe("organization MCP action catalog", () => {
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
       "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
-      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
     // An agent with the person's full access approves sign-ins and manages
@@ -717,7 +716,7 @@ describe("organization MCP browser-only actions", () => {
           for (const tool of ["opengeni_action_describe", "opengeni_action_call"]) {
             expect(await call(tool, { id })).toEqual({
               isError: true,
-              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the web app in a browser.`,
             });
           }
         }

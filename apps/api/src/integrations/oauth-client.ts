@@ -2007,7 +2007,7 @@ function operatorClientForAs(
   settings: Settings,
   as: AuthorizationServerMetadata,
 ): OAuthClientRegistration | null {
-  const entry = operatorClientEntryFor(settings, [as.issuer, as.authorizationServer]);
+  const entry = operatorClientEntryFor(settings, as);
   if (!entry) {
     return null;
   }
@@ -2024,11 +2024,20 @@ function operatorClientForAs(
   };
 }
 
+/**
+ * The client pre-registered for an authorization server. Deployment-managed
+ * clients match by origin; their providers' profiles pin the issuer and OAuth
+ * endpoint origins and every other flow refuses those identities. Operator
+ * clients have no such pins, so they match only the authorization server whose
+ * metadata was actually fetched, and the issuer only when it names that same
+ * server: a metadata `issuer` is otherwise just a claim made by the server that
+ * also chooses the token endpoint the client secret is sent to.
+ */
 function operatorClientEntryFor(
   settings: Settings,
-  candidates: string[],
+  as: { issuer: string; authorizationServer: string },
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
-  const candidateOrigins = candidates.flatMap((candidate) => {
+  const candidateOrigins = [as.issuer, as.authorizationServer].flatMap((candidate) => {
     try {
       return [new URL(candidate).origin];
     } catch {
@@ -2046,14 +2055,19 @@ function operatorClientEntryFor(
   }
   return findIntegrationsOauthClient(
     parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson),
-    candidates,
+    normalizedIssuerKey(as.issuer) === normalizedIssuerKey(as.authorizationServer)
+      ? [as.issuer, as.authorizationServer]
+      : [as.authorizationServer],
   );
 }
 
 /** Secret-free readiness for the exact registered client used by Gmail setup. */
 export function gmailOAuthClientConfigured(settings: Settings): boolean {
   if (!settings.googleConnectorSetupEnabled) return false;
-  const entry = operatorClientEntryFor(settings, ["https://accounts.google.com"]);
+  const entry = operatorClientEntryFor(settings, {
+    issuer: "https://accounts.google.com",
+    authorizationServer: "https://accounts.google.com",
+  });
   return Boolean(
     entry &&
     isConfidentialOAuthClient({
@@ -2584,7 +2598,7 @@ async function clientForState(
       ),
     };
   }
-  const entry = operatorClientEntryFor(settings, [state.issuer, state.authorizationServer]);
+  const entry = operatorClientEntryFor(settings, state);
   if (!entry || entry.clientId !== state.clientId) {
     throw new HTTPException(400, {
       message: "operator OAuth client credentials are no longer available",

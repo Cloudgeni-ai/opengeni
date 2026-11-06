@@ -31,7 +31,7 @@ import { projectReasoningConfigurations, supportsReasoningConfiguration } from "
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import {
   resolveRigProviderImageForRun,
-  rigProviderImageSourceImage,
+  rigProviderImageContentSourceImage,
   settingsWithWorkspaceSandboxImage,
 } from "@opengeni/core";
 import { requestStaleRigProviderImageRefresh } from "../rig-provider-image-refresh";
@@ -357,8 +357,8 @@ export async function prepareGovernanceAndModel(
   requestStaleRigProviderImageRefresh({
     selection: providerImageSelection,
     turnUsesDeploymentBase:
-      rigProviderImageSourceImage(logicalSandboxSettings, turn.sandboxBackend) ===
-      rigProviderImageSourceImage(capabilitySettings, turn.sandboxBackend),
+      rigProviderImageContentSourceImage(logicalSandboxSettings, turn.sandboxBackend) ===
+      rigProviderImageContentSourceImage(capabilitySettings, turn.sandboxBackend),
     workspaceId: input.workspaceId,
     versionId: rigVersion?.id ?? null,
     start: deps.startRigProviderImageRefresh,

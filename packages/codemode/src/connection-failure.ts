@@ -95,7 +95,7 @@ function targetOf(url: string): { hostname: string; host: string } {
     const parsed = new URL(url);
     return { hostname: parsed.hostname, host: parsed.host };
   } catch {
-    return { hostname: "the Opengeni host", host: "the Opengeni host" };
+    return { hostname: "the tool host", host: "the tool host" };
   }
 }
 

@@ -233,3 +233,47 @@ test("a custom renderer and a parsed presentation read the exact output first", 
   expect(searchView.container.textContent).toContain("Loading output…");
   await searchView.unmount();
 });
+
+test("a running setup step names its environment and counts up while it runs", async () => {
+  const startedAt = new Date(Date.now() - 41_500).toISOString();
+  const running = {
+    kind: "startup-phase",
+    id: "rig-running",
+    turnId: "turn-setup",
+    phase: "rig",
+    status: "running",
+    subject: "cloudgeni",
+    startedAt,
+    completedAt: null,
+    durationMs: null,
+    outcome: null,
+    occurredAt: startedAt,
+  } as const;
+  const Row = ActivityRow as unknown as ComponentType<{ item: unknown }>;
+  const view = await renderComponent(<Row item={running} />);
+  try {
+    const elapsed = () =>
+      Number(/Setting up cloudgeni · (\d+)s/.exec(view.container.textContent ?? "")?.[1]);
+    const first = elapsed();
+    expect(first).toBeGreaterThanOrEqual(41);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    });
+    // It counts up while running, however long the first render took.
+    expect(elapsed()).toBeGreaterThan(first);
+    await view.rerender(
+      <Row
+        item={{
+          ...running,
+          status: "complete",
+          completedAt: new Date().toISOString(),
+          durationMs: 66_400,
+        }}
+      />,
+    );
+    expect(view.container.textContent).toContain("Sandbox Environment ready");
+    expect(view.container.textContent).toContain("1m 06s");
+  } finally {
+    await view.unmount();
+  }
+});

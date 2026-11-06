@@ -178,6 +178,18 @@ segment to another speaker and text edits), `useRecordingPeople` and
 `recordings` client such as a host proxy that implements only the methods the
 mounted hooks call.
 
+A host that serves the API from its own origin with
+`createSessionProxyHandler` forwards the recordings routes as they are. A
+custom proxy, or a test double of one, must answer them with the API's own
+shapes or with an error: `GET …/recordings` (including
+`?purpose=dictation`, which every composer with voice input reads to offer
+saved dictations) answers `{ recordings: [...], nextBefore }`, so a stub with
+no recordings answers `{ "recordings": [], "nextBefore": null }`.
+`listRecordings` rejects any other success body (another route's body,
+`{ items }`, `{}`) with `OpenGeniApiError` code `invalid_response`: a
+meetings list shows its error, and the composer simply offers no saved
+dictation.
+
 `@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
 the console uses:
 
@@ -1122,7 +1134,8 @@ from the speakers named as them, in meetings transcribed while the setting
 was on, both before and after they agreed. It is the speech-weighted mean of
 those speakers' vectors, with each meeting
 counting for at most two minutes and speakers with under four seconds of
-speech skipped. Renaming a speaker to someone else takes its voice back out.
+speech skipped. Renaming a speaker to someone else takes its voice back out,
+and so does deleting the meeting.
 Voiceprints are kept apart by kind of audio (microphone, call audio from the
 computer, and room or uploaded audio) and by speaker model, because vectors
 from different models don't compare.
@@ -1311,4 +1324,6 @@ catalog covers them. The app's status names problems by code
 ## Deletion
 
 `DELETE …/recordings/:recordingId` hides the recording at once; the worker
-then removes its audio, transcripts and speaker matches.
+then removes its audio, transcripts and speaker matches. Its speakers' voices
+leave the voiceprints they taught when it is hidden, so a deleted meeting
+never suggests anyone.

@@ -510,7 +510,7 @@ export class SandboxBoxNotSavedError extends Error {
 
   constructor() {
     super(
-      "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then.",
+      "The workspace machine can't start programs and its files couldn't be saved yet. It will be replaced once they're saved; retry then.",
     );
   }
 }

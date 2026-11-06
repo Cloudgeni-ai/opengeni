@@ -1168,20 +1168,25 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             payload.subjectId === undefined
               ? undefined
               : writableSubjectId(payload.subjectId, grant.subjectId);
-          if (
-            existing &&
-            (payload.credential !== undefined ||
-              (payload.providerDomain !== undefined &&
-                canonicalProviderDomain(payload.providerDomain) !== existing.providerDomain) ||
+          // Generic credentials are bound to their destination only by these row
+          // fields, so changing them moves where the stored secret is sent.
+          const changesCredentialDestination =
+            existing !== null &&
+            ((payload.providerDomain !== undefined &&
+              canonicalProviderDomain(payload.providerDomain) !== existing.providerDomain) ||
               (payload.kind !== undefined && payload.kind !== existing.kind) ||
-              (subjectId !== undefined && subjectId !== existing.subjectId) ||
-              payload.grantedScopes?.some((scope) => !existing.grantedScopes.includes(scope)) ||
               (payload.metadata !== undefined &&
                 ["mcpUrl", "resource", "credentialRole"].some(
                   (field) =>
                     stableJson(payload.metadata?.[field] ?? null) !==
                     stableJson(existing.metadata[field] ?? null),
-                )) ||
+                )));
+          if (
+            existing &&
+            (payload.credential !== undefined ||
+              changesCredentialDestination ||
+              (subjectId !== undefined && subjectId !== existing.subjectId) ||
+              payload.grantedScopes?.some((scope) => !existing.grantedScopes.includes(scope)) ||
               (payload.expiresAt !== undefined &&
                 existing.expiresAt !== null &&
                 (payload.expiresAt === null ||
@@ -1189,6 +1194,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               (payload.status === "active" && existing.status !== "active"))
           ) {
             assertOrganizationIntegrationAllowed(policy, null);
+          }
+          if (changesCredentialDestination && existing.subjectId === null) {
+            // A shared credential stays bound to the destination it was issued
+            // for: only integration administrators may move a shared connection,
+            // and only together with a credential issued for the new destination.
+            requireWorkspaceIntegrationAdministration(grant);
+            if (payload.credential === undefined) {
+              throw new HTTPException(400, {
+                message:
+                  "changing where a shared connection's credential is sent requires a new credential",
+              });
+            }
           }
           if (payload.credential !== undefined) {
             assertBrokeredApiKeyCredential(payload.kind ?? existing?.kind, payload.credential);
@@ -1877,8 +1894,9 @@ function assertNotReservedApiIntegrationOAuthMetadata(
 /**
  * Members hold `connections:write` so they can connect their own accounts and
  * add shared credentials. What the whole workspace runs on (its model-provider
- * keys and its Slack bot) stays a settings action, held by workspace admins,
- * Personal workspace owners and integration-management keys.
+ * keys and its Slack bot), and moving a shared credential to another
+ * destination, stays a settings action, held by workspace admins, Personal
+ * workspace owners and integration-management keys.
  */
 export function requireWorkspaceIntegrationAdministration(grant: {
   permissions: Parameters<typeof hasPermission>[0];

@@ -418,10 +418,10 @@ describe("computer session and action text", () => {
     expect(computerTargetsText([target])).not.toContain("off screen");
   });
 
-  test("says once when someone other than Opengeni used the computer within the last minute", () => {
+  test("says once when someone else used the computer within the last minute", () => {
     const line =
-      "Someone other than Opengeni used this computer's keyboard, mouse or trackpad 12 s ago and may be using it now.";
-    expect(Buffer.byteLength(line)).toBe(110);
+      "Someone else used this computer's keyboard, mouse or trackpad 12 s ago and may be using it now.";
+    expect(Buffer.byteLength(line)).toBe(95);
     const marked = { ...target, personInputSecondsAgo: 12 };
     expect(computerTargetsText([marked, { ...marked, id: "window:2" }])).toBe(
       [

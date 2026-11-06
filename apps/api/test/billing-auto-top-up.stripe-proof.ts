@@ -7,13 +7,20 @@ import {
   billingAutoTopUpStore,
   createDb,
   ensureManagedAccessForUser,
+  enqueueBillingAutoTopUpNotification,
   getCreditLedgerEntry,
   autoTopUpCreditKey,
+  listBillingCreditAlertAccounts,
   upsertBillingCustomer,
   type AutoTopUpStore,
 } from "@opengeni/db";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { testSettings } from "@opengeni/testing/settings";
 import { rawRows } from "../../../packages/db/src/database";
 import { StripeAutoTopUps } from "../src/billing-auto-top-up";
+import { billingAutoTopUpMaintenance } from "../src/billing-auto-top-up-maintenance";
+import { createBillingAutoTopUpService } from "../src/routes/billing-auto-top-up";
+import { handleStripeWebhookEvent } from "../src/routes/billing";
 
 export async function runStripeAutoTopUpProof(input: {
   key: string;
@@ -28,7 +35,7 @@ export async function runStripeAutoTopUpProof(input: {
     "stripe_proof_data",
   );
   if (!fixture) throw new Error("Real restricted PostgreSQL is required");
-  const client = createDb(fixture.appUrl, { max: 4, searchPath: fixture.schema });
+  const client = createDb(fixture.appUrl, { max: 2, searchPath: fixture.schema });
   const customerIds: string[] = [];
   const sessionIds: string[] = [];
   const evidence: Record<string, unknown> = {
@@ -40,6 +47,8 @@ export async function runStripeAutoTopUpProof(input: {
     if (!condition) throw new Error(message);
   };
   try {
+    await fixture.admin`insert into auth_users(id,name,email,email_verified)
+      values (${input.userId}, 'Stripe proof owner', 'auto-topup-81ed4694@example.test', true)`;
     await fixture.admin`insert into managed_accounts(id, name, external_source, external_id)
       values (${input.accountId}, 'Stripe proof local mirror', 'better-auth:user', ${input.userId})`;
     const context = await ensureManagedAccessForUser(client.db, {
@@ -69,13 +78,7 @@ export async function runStripeAutoTopUpProof(input: {
       providerCustomerId: customer.id,
       email: customer.email,
     });
-    const root = billingAutoTopUpStore(client.db, async (tx, event) => {
-      // The existing append-only request table acts as this disposable fixture's
-      // outbox: inserts roll back with settlement, exactly like the real port.
-      await tx.execute(sql`insert into billing_auto_top_up_mutations(account_id, operation_key, actor_subject, request)
-        values (${event.accountId}::uuid, md5(${`${event.kind}:${event.operationKey}`})::uuid, 'stripe-proof-outbox', ${JSON.stringify(event)}::jsonb)
-        on conflict do nothing`);
-    });
+    const root = billingAutoTopUpStore(client.db, enqueueBillingAutoTopUpNotification);
     let rollbackSettlement = false;
     const store: AutoTopUpStore = {
       locked: (accountId, run) =>
@@ -209,7 +212,36 @@ export async function runStripeAutoTopUpProof(input: {
       input.accountId,
       autoTopUpCreditKey(operation!.operation_key),
     )), "Rolled-back settlement granted credits");
-    await Promise.all(Array.from({ length: 4 }, () => service.process(input.accountId)));
+    const recoveryDeps = {
+      db: client.db,
+      settings: testSettings({
+        billingMode: "stripe",
+        stripeSecretKey: input.key,
+        billingAutoTopUpEnabled: false,
+      }),
+    } as ApiRouteDeps;
+    const recovery = createBillingAutoTopUpService(recoveryDeps, stripe);
+    const recoveryErrors: unknown[] = [];
+    const maintenance = billingAutoTopUpMaintenance({
+      discover: (after, limit) => listBillingCreditAlertAccounts(client.db, after, limit),
+      process: (accountId) => recovery.process(accountId),
+      onError: (error) => {
+        recoveryErrors.push(error);
+      },
+    });
+    const recoveredPayment = await stripe.paymentIntents.retrieve(operation!.payment_intent_id!);
+    await Promise.all([
+      maintenance.run(),
+      handleStripeWebhookEvent(recoveryDeps, stripe, {
+        id: `evt_fixture_${crypto.randomUUID()}`,
+        type: "payment_intent.succeeded",
+        livemode: false,
+        data: { object: recoveredPayment },
+      } as Stripe.Event),
+      recovery.process(input.accountId),
+    ]);
+    maintenance.stop();
+    require(recoveryErrors.length === 0, "Maintenance recovery failed");
     require(confirmations === 1, "Recovery repeated confirmation despite known success");
     require((
       await getCreditLedgerEntry(
@@ -222,6 +254,7 @@ export async function runStripeAutoTopUpProof(input: {
     evidence.recoveredCreditReceipt = autoTopUpCreditKey(operation!.operation_key);
     evidence.taxCalculation = operation!.intent.taxCalculationId;
     evidence.createTimeoutConfirmTimeoutRollbackRecovered = true;
+    evidence.disabledMaintenanceAndWebhookRaceRecovered = true;
 
     await applyCreditLedgerEntryOnce(client.db, {
       accountId: input.accountId,
@@ -293,11 +326,24 @@ export async function runStripeAutoTopUpProof(input: {
     evidence.notificationKinds = await root.locked(input.accountId, async (account) => {
       const rows = await rawRows<{ kind: string }>(
         account.tx,
-        sql`select request->>'kind' as kind from billing_auto_top_up_mutations
-        where account_id = ${input.accountId}::uuid and actor_subject = 'stripe-proof-outbox' order by created_at`,
+        sql`select kind from billing_credit_notifications
+        where account_id = ${input.accountId}::uuid order by created_at,id`,
       );
       return rows.map((row) => row.kind);
     });
+    require(JSON.stringify(evidence.notificationKinds) ===
+      JSON.stringify([
+        "topup_success",
+        "topup_failed",
+        "topup_success",
+        "cap_reached",
+      ]), "Shared outbox did not contain exactly the committed operation outcomes");
+    const [deliveries] =
+      await fixture.admin`select count(*)::int as count from billing_credit_notification_deliveries
+      where account_id=${input.accountId} and subject_id=${subject} and status='pending'`;
+    require(deliveries!.count ===
+      4, "Shared outbox did not fan out exactly once to the current owner");
+    evidence.sharedOutboxOwnerDeliveries = deliveries!.count;
     evidence.customerId = customer.id;
     return evidence;
   } finally {

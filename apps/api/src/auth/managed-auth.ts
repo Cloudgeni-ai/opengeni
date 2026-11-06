@@ -53,6 +53,12 @@ import {
   createManagedAuthNewSignupsGate,
   type ManagedAuthNewSignupsGate,
 } from "./new-signups-gate";
+import {
+  currentManagedSignUpBrowser,
+  managedSignUpRequestPassword,
+  rememberManagedSignUpPassword,
+  settleManagedSignUpPasswordOnVerification,
+} from "./managed-sign-up-browser";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
@@ -692,8 +698,20 @@ export function createManagedAuth(
       // Non-local deployments require verification unless explicitly overridden.
       requireEmailVerification,
       revokeSessionsOnPasswordReset: true,
-      onExistingUserSignUp: async ({ user }) => {
+      onExistingUserSignUp: async ({ user }, request) => {
         if (requireEmailVerification && !user.emailVerified) {
+          // The stored password stays as it is; this sign-up's password is
+          // remembered for its browser and becomes the account's password
+          // only if the address is verified from that browser.
+          const nonce = currentManagedSignUpBrowser();
+          const password = nonce ? await managedSignUpRequestPassword(request) : null;
+          if (nonce && password !== null) {
+            await rememberManagedSignUpPassword(pool, {
+              userId: user.id,
+              nonce,
+              passwordHash: await (await auth.$context).password.hash(password),
+            });
+          }
           const url = await verificationUrl(settings, user.email);
           await sendManagedAuthEmail(
             managedEmailTransport,
@@ -724,6 +742,14 @@ export function createManagedAuth(
           emailVerificationMessage(user.email, url),
         );
       },
+      // Verifying keeps only the password the verifying browser chose at
+      // sign-up (see managed-sign-up-browser.ts) and discards every other.
+      beforeEmailVerification: async (user) => {
+        await settleManagedSignUpPasswordOnVerification(pool, {
+          userId: user.id,
+          nonce: currentManagedSignUpBrowser(),
+        });
+      },
       afterEmailVerification: async (user) => {
         funnel?.recordEmailVerified();
         await ensureManagedAccessForUser(db, {
@@ -747,6 +773,22 @@ export function createManagedAuth(
             },
           }),
           after: async (account) => {
+            // A new email sign-up's own password, remembered for its browser
+            // like a repeated sign-up's (see onExistingUserSignUp).
+            const nonce = currentManagedSignUpBrowser();
+            if (
+              requireEmailVerification &&
+              nonce &&
+              account.providerId === "credential" &&
+              typeof account.password === "string" &&
+              account.password
+            ) {
+              await rememberManagedSignUpPassword(pool, {
+                userId: account.userId,
+                nonce,
+                passwordHash: account.password,
+              });
+            }
             if (
               !["google", "github"].includes(account.providerId) ||
               currentManagedSignInConnectIntent()

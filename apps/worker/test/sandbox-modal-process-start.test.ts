@@ -309,7 +309,7 @@ describe("a Modal box whose replacement cannot be saved yet", () => {
       const failure = agentRunFailurePayload(error);
       expect(failure).toMatchObject({ code: "sandbox_process_start_failed", retryable: false });
       expect(failure.error).toBe(
-        "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then.",
+        "The workspace machine can't start programs and its files couldn't be saved yet. It will be replaced once they're saved; retry then.",
       );
     }
   });

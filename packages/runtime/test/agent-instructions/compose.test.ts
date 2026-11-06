@@ -12,6 +12,7 @@ import {
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -334,7 +335,7 @@ describe("modular composer: secrets module (AG-2)", () => {
       [
         "# Secrets",
         "",
-        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on. Find saved items and their ready references with `secret_search`.",
+        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Built-in workspace tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on. Find saved items and their ready references with `secret_search`.",
         "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
         '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
         "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
@@ -667,5 +668,110 @@ describe("deployment environment instructions", () => {
         options,
       ),
     ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
+  });
+});
+
+describe("agent instructions layer", () => {
+  const AGENT = "Answer every question as a pirate.";
+  const bindings = [
+    { credentialBindingId: "a", provider: "github" as const, token: "x" },
+    { credentialBindingId: "b", provider: "github" as const, token: "y" },
+  ];
+
+  test("modular: after the directives and before Git bindings, governance, memory and session", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      agentInstructions: `  ${AGENT}\n`,
+      workspaceGovernance: "GOVERNANCE",
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+    });
+    expect(inspection.layers.map((layer) => layer.id)).toEqual([
+      "identity",
+      "operational_contract",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_governance",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    const layer = inspection.layers.find((candidate) => candidate.id === "agent_instructions")!;
+    expect(layer.content).toBe(`${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}`);
+    expect(layer.content).toContain("grant no additional authority");
+    expect(inspection.composed).toBe(joinPersistentAgentInstructionLayers(inspection.layers));
+  });
+
+  test("absent or blank instructions add nothing and keep the exact bytes", () => {
+    for (const agentConfig of [config(allAgentCapabilities()), undefined]) {
+      const options = {
+        ...(agentConfig ? { agentConfig } : {}),
+        codemodeAvailable: true,
+        codeSearchAvailable: true,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+      };
+      const plain = inspectPersistentAgentInstructions(testSettings(), options);
+      expect(
+        inspectPersistentAgentInstructions(testSettings(), {
+          ...options,
+          agentInstructions: " \n",
+        }),
+      ).toEqual(plain);
+      expect(plain.layers.map((layer) => layer.id)).not.toContain("agent_instructions");
+    }
+  });
+
+  test("legacy: after the directives without governance, right after the persona with it", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    const base = {
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      agentInstructions: AGENT,
+    };
+    const ungoverned = inspectPersistentAgentInstructions(settings, base);
+    expect(ungoverned.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    // A Markdown section of its own: a paragraph break before and after it.
+    expect(ungoverned.composed).toContain(
+      `${CODE_SEARCH_DIRECTIVE}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}\n\n`,
+    );
+    const governed = inspectPersistentAgentInstructions(settings, {
+      ...base,
+      workspaceGovernance: "GOVERNANCE",
+    });
+    expect(governed.layers.map((layer) => layer.id).slice(0, 4)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "agent_instructions",
+      "workspace_governance",
+    ]);
+    // Removing the layer gives back the historical legacy bytes.
+    const { agentInstructions: _omitted, ...legacy } = base;
+    expect(inspectPersistentAgentInstructions(settings, legacy).composed.includes(AGENT)).toBe(
+      false,
+    );
+    expect(
+      joinPersistentAgentInstructionLayers(
+        ungoverned.layers
+          .filter((layer) => layer.id !== "agent_instructions")
+          .map(({ joinBefore: _join, ...layer }) => layer),
+      ),
+    ).toBe(inspectPersistentAgentInstructions(settings, legacy).composed);
   });
 });

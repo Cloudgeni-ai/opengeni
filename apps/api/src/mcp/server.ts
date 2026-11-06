@@ -2981,7 +2981,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
+        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. A button to ask that agent is added under your answer. Don't mention the suggestion in your answer.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -3408,6 +3408,14 @@ export async function assertGoalReactivationAllowed(
   }
 }
 
+/**
+ * `wait_for_input`'s description: the single statement of how a wait behaves.
+ * It names no tool or feature a session may lack (goals, child sessions,
+ * Steer, Codemode); the system prompt adds that guidance only where it applies.
+ */
+export const WAIT_FOR_INPUT_DESCRIPTION =
+  "End this turn and wait out of turn. If you are only waiting for the person's answer, do not call it: reply and end your turn, and their answer arrives as a new message. Use it only while something you started is still running or for an explicit timer, not for work you can still advance; for a long or uncertain wait, use it in place of sleeping or polling inside the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary. On success the runtime ends the turn after this tool batch. A new message, scheduled input, the result of work you started through your tools (outside systems such as CI only through a configured event trigger or schedule), or the deadline starts the next turn. timeoutSeconds is a safety deadline, not a blocking wait: choose it for the dependency or an explicit check or update cadence, potentially hours or days within the schema limits, not for reassurance; no short wait or status check is needed first, and the deadline never cancels a command. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep the same reason and pass the time remaining. If less than the schema minimum remains or the deadline has passed, a turn that only answered a question and consumed no other machine input may end without a new wait; otherwise register a valid wait if still needed and say how the deadline changed.";
+
 function registerGoalTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3536,7 +3544,7 @@ function registerGoalTools(
         changeKind: z4.enum(["refinement", "adaptation", "replacement"]),
         rationale: goalRationale,
         expectedObjectiveRevision: z4.number().int().positive(),
-        idempotencyKey: z4.string().uuid(),
+        idempotencyKey: z4.guid(),
       },
     },
     async ({
@@ -3590,7 +3598,7 @@ function registerGoalTools(
         "Record concrete progress toward the unchanged active goal. progressNote is a short human-readable status with useful milestones, at most 8192 UTF-8 bytes. Use normal spaces and sentences; summarize instead of compressing words. It is not the deliverable, a raw command transcript, or instructions for the next turn; the final answer still belongs in chat. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
         progressNote: progressNoteSchema,
-        idempotencyKey: z4.string().uuid(),
+        idempotencyKey: z4.guid(),
         reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
@@ -3625,14 +3633,16 @@ function registerGoalTools(
   server.registerTool(
     "wait_for_input",
     {
-      description:
-        "End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, not a blocking wait: pick it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits, not for unchanged reassurance unless an explicit update cadence requires it. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep it by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; otherwise register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read instead of ending the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary.",
+      // The one statement of how a wait behaves. The system prompt says only
+      // when to end a turn on one, and only for the features a session has,
+      // so this text names no tool or feature a session may lack.
+      description: WAIT_FOR_INPUT_DESCRIPTION,
       inputSchema: {
         reply: z4
           .string()
           .nullish()
           .describe(
-            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call. Omit it when there is nothing new to tell them.",
+            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
           ),
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user (at most 2048 UTF-8 bytes): one short, natural sentence with normal spacing saying what you are waiting for, without internal IDs, cursors, commit hashes, paths or continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -3642,7 +3652,7 @@ function registerGoalTools(
           .int()
           .min(SESSION_INPUT_WAIT_MIN_SECONDS)
           .max(SESSION_INPUT_WAIT_MAX_SECONDS),
-        idempotencyKey: z4.string().uuid().optional(),
+        idempotencyKey: z4.guid().optional(),
       },
     },
     async ({ reason, timeoutSeconds, idempotencyKey }) => {
@@ -3690,7 +3700,7 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the Opengeni runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
+        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
         evidence: z4
           .string()
@@ -4987,7 +4997,9 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the " +
+        browserExtension(deps.settings).name +
+        " extension (" +
         browserExtension(deps.settings).installUrl +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
@@ -5019,7 +5031,9 @@ function registerConnectedMachineTools(
     "connected_machine_enable_screen_control",
     {
       description:
-        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the " +
+        browserExtension(deps.settings).name +
+        " extension (" +
         browserExtension(deps.settings).installUrl +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
@@ -6702,7 +6716,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(SessionMcpCredentialUpdateInput).optional(),
@@ -6816,7 +6830,7 @@ function registerWorkspaceOrchestrationTools(
           "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           reason: z4.string().min(1).max(500).optional(),
           workspaceId: workspaceIdToolInput(),
         },
@@ -6886,7 +6900,7 @@ function registerWorkspaceOrchestrationTools(
           "Resume the selected session workstream through older parent/workspace pauses. This creates no message.",
         inputSchema: {
           sessionId: z4.string().uuid(),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           reason: z4.string().min(1).max(500).optional(),
           workspaceId: workspaceIdToolInput(),
         },
@@ -6957,7 +6971,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: {
           sessionId: z4.string().uuid(),
           instruction: z4.string().min(1),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           workspaceId: workspaceIdToolInput(),
         },
       },
@@ -7038,7 +7052,7 @@ function registerWorkspaceOrchestrationTools(
             sessionId: z4.string().uuid(),
             requestId: z4.string().uuid(),
             response: SubmitHumanInputResponseRequest,
-            idempotencyKey: z4.string().uuid(),
+            idempotencyKey: z4.guid(),
           },
         },
         async ({ sessionId, requestId, response, idempotencyKey }) => {
@@ -7645,8 +7659,12 @@ function registerCapabilityDiscoveryTools(
     {
       description:
         (deps.settings.githubPersonalOauthEnabled
-          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself."
-          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself.") +
+          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+            browserExtension(deps.settings).name +
+            " Chrome extension link; never paste an enroll token into the chat yourself."
+          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+            browserExtension(deps.settings).name +
+            " Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -7731,7 +7749,7 @@ function registerCapabilityDiscoveryTools(
           eventId,
           message:
             item.id === PERSONAL_GITHUB_CAPABILITY_ID
-              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories Opengeni may use as them.`
+              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories the agent may use as them.`
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
@@ -8253,7 +8271,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description: deps.settings.githubPersonalOauthEnabled
-        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
         : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },

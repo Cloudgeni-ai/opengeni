@@ -62,8 +62,18 @@ describe("Teams welcome and help", () => {
     expect(reply.text).toContain("**Opengeni help**");
     expect(reply.text).toContain("**unlink**");
     expect(reply.text).toContain("thumbs up or down");
+    expect(reply.text).toContain("open Opengeni in your web browser");
     expect(reply.text).not.toMatch(/https?:/);
     expect(teamsHelp(state)).toEqual(reply);
+  });
+  test("help in a 1:1 chat mentions group chats only when the organization has one enabled", () => {
+    const tip = "In a group chat or channel where Opengeni is enabled";
+    const personal = { personal: true, installation: "active", linked: true } as const;
+    expect(teamsHelp(personal).text).not.toContain(tip);
+    expect(teamsHelp({ ...personal, sharedConversations: true }).text).toContain(tip);
+    const shared = { ...personal, personal: false, sharedConversations: true };
+    expect(teamsHelp(shared).text).toContain("Mention me in this conversation");
+    expect(teamsHelp(shared).text).not.toContain(tip);
   });
   test("only an unlinked person in a connected organization's 1:1 chat gets a link button", () => {
     for (const state of states) {

@@ -166,9 +166,9 @@ describe("a workspace machine's clock and resolver are repaired at turn setup", 
       }),
     ).toBe(
       [
-        "[Opengeni checked this chat's workspace machine before this turn]",
-        "- Its clock said 2001-01-01 00:00 UTC, so Opengeni set it to 2026-11-04 13:46 UTC.",
-        "- It could not look up staging.app.opengeni.ai, so Opengeni restored /etc/resolv.conf to the platform name servers (169.254.0.22); the previous file is /etc/resolv.conf.opengeni-replaced.",
+        "[This chat's workspace machine was checked before this turn]",
+        "- Its clock said 2001-01-01 00:00 UTC, so it was set to 2026-11-04 13:46 UTC.",
+        "- It could not look up staging.app.opengeni.ai, so /etc/resolv.conf was restored to the platform name servers (169.254.0.22); the previous file is /etc/resolv.conf.opengeni-replaced.",
       ].join("\n"),
     );
     expect(ownedBoxRepairNote({})).toBeNull();
@@ -182,9 +182,9 @@ describe("a workspace machine's clock and resolver are repaired at turn setup", 
       }),
     ).toBe(
       [
-        "[Opengeni checked this chat's workspace machine before this turn]",
-        "- Its clock says 2001-01-01 00:00 UTC, but the time is 2026-11-04 13:46 UTC, and Opengeni could not set it; TLS and git may fail until it is fixed.",
-        "- It cannot look up staging.app.opengeni.ai, and Opengeni left /etc/resolv.conf unchanged because it already lists only the platform name server, so the network itself is failing.",
+        "[This chat's workspace machine was checked before this turn]",
+        "- Its clock says 2001-01-01 00:00 UTC, but the time is 2026-11-04 13:46 UTC, and it could not be set; TLS and git may fail until it is fixed.",
+        "- It cannot look up staging.app.opengeni.ai, and /etc/resolv.conf was left unchanged because it already lists only the platform name server, so the network itself is failing.",
       ].join("\n"),
     );
   });

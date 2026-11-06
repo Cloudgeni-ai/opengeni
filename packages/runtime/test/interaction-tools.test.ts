@@ -7146,7 +7146,7 @@ describe("interaction attempt tools", () => {
     );
     expect(result.content[1]).toEqual({
       type: "text",
-      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+      text: "Not zoomed: this server does not support region, so this is the full screenshot of the target.",
     });
     expect(result.content[2]).toMatchObject({ type: "image" });
   });

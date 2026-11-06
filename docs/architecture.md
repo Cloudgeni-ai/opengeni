@@ -1695,6 +1695,11 @@ Accepted turns freeze model choice, provider/deployment routing, billing,
 governance, initiating authority, and tool/connection delegations. Recovery
 reuses these snapshots, never mutable workspace defaults.
 
+Chat streaming completion is checked in `packages/runtime/src/model-provider-routing.ts`
+before the SDK can release tool calls: transport EOF alone is not completion.
+Missing primary-choice finish evidence stops without automatic replay; see
+[`model-providers.md`](model-providers.md).
+
 Built-in tool and MCP-server defaults inherit independently when their
 `settings.sessionToolDefaults` key is absent. Arrays, including empty ones,
 remain exact selections; atomic settings updates use `null` to remove only
@@ -1923,6 +1928,15 @@ keeps recipients current. Billing events never enter workspace feeds merely
 because a recipient is a workspace administrator. See
 [credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
 API/SDK and the transaction-compatible top-up enqueue seam.
+
+Opt-in automatic credit top-ups use the API's
+`apps/api/src/billing-auto-top-up-maintenance.ts` keyset discovery loop and the
+tagged billing webhook handlers. Both construct the same durable payment service
+with `packages/db/src/billing-auto-top-up-notifications.ts` as the shared outbox
+adapter. Fresh-charge activation is independent of recovery: reserved payments
+and undelivered terminal notifications continue reconciling while the feature is
+off. See [automatic credit top-ups](automatic-credit-top-ups.md) for consent,
+canonical PaymentIntent recovery, tax-inclusive caps and the invoice boundary.
 
 Connected subscriptions serve app-origin work on qualifying paid plans, with
 no usage fee. API-origin work refuses them at admission and before model calls;

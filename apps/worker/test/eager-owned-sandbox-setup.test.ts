@@ -260,6 +260,8 @@ describe("a prestarted setup on a full /workspace", () => {
         cause: { kind: "no_space" },
       }),
       attachGitCredentialRenewal: async () => undefined,
+      prepareCodemodeTokenSeed: async () => undefined,
+      attachCodemodeTokenRenewal: async () => undefined,
     } as unknown as EagerOwnedSandboxSetupDeps;
     const preparedInput = { input: "hello", persistedHistoryCount: 0 };
     await runEagerOwnedSandboxSetup(deps, {
@@ -271,7 +273,7 @@ describe("a prestarted setup on a full /workspace", () => {
       "- Connected-account credentials for the shell were not written, so commands that use them can fail. No space left on the workspace machine's disk.",
     );
     expect(preparedInput.input).toContain(
-      "- Opengeni tools in the shell (ogtool and the Codemode client) were not installed.",
+      "- The workspace tools in the shell (ogtool and the Codemode client) were not installed.",
     );
   });
 });
