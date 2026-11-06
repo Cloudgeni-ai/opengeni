@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
--- Validates the check 1292 added NOT VALID. Every existing row has a null
--- all_repositories_access, and 1292's routine is the only writer.
+-- Validates the check 1296 added NOT VALID. Every existing row has a null
+-- all_repositories_access, and 1296's routine is the only writer.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
