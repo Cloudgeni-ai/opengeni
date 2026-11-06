@@ -2149,6 +2149,7 @@ export const FORCE_RLS_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2615,6 +2616,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  // 1290_model_call_credit_holds: in-flight model call holds, deleted at settlement.
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
