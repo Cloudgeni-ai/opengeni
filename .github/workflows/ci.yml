@@ -2244,12 +2244,23 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: bun install --frozen-lockfile
 
-      - name: Bake and sign exact-SHA canary agent
+      # Third-party tools install and the build runs before, and without, the
+      # signing key; only the final signing step receives it.
+      - name: Install pinned canary agent build and signing tools
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: scripts/install-agent-build-tools.sh zigbuild rsign
+
+      - name: Bake exact-SHA canary agent
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
+        run: scripts/bake-agent.sh build
+
+      - name: Sign exact-SHA canary agent
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
-          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
-        run: scripts/bake-agent.sh
+        run: scripts/bake-agent.sh sign
 
       - name: Require complete exact-SHA canary agent bake
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
