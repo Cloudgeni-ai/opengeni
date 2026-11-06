@@ -34,11 +34,7 @@ const { prepareSandboxAgent } = (await import(
     import.meta.url,
   ).href
 )) as {
-  prepareSandboxAgent: (input: {
-    agent: unknown;
-    session: unknown;
-    capabilities: unknown[];
-  }) => PreparedSandboxAgent;
+  prepareSandboxAgent: (input: { agent: unknown; session: unknown }) => PreparedSandboxAgent;
 };
 
 /** A provided session whose every method call is a use of the workspace. */
@@ -70,7 +66,8 @@ async function firstRequestInstructions(
     ...(deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
   }) as unknown as { defaultManifest: Manifest };
   const { session, uses } = recordingSession(agent.defaultManifest);
-  const prepared = prepareSandboxAgent({ agent, session, capabilities: [] });
+  // The agent's own capabilities, cloned and bound to the session per run.
+  const prepared = prepareSandboxAgent({ agent, session });
   try {
     return { text: await prepared.instructions(new RunContext({}), prepared), uses };
   } catch {
