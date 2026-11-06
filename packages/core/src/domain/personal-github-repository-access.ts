@@ -29,8 +29,9 @@ import {
  * - Only these repositories: the repository must be in the saved list with
  *   enough access, and accepted work must still see the same list.
  * - All my repositories: any repository GitHub lets the person use, up to the
- *   chosen access. Accepted work keeps working while the mode stays on; it
- *   stops when the mode is turned off or narrowed.
+ *   chosen access. Accepted work keeps working while the mode stays as it
+ *   was; it stops for good when the mode is turned off or its access changes,
+ *   even if it is turned back on later.
  *
  * `personalGitHubRepositoryAuthority` is the pure decision over state the
  * caller already read. `checkPersonalGitHubRepositoryAccess` reads that state
@@ -134,6 +135,12 @@ export function personalGitHubRepositoryAuthority(input: {
     return { allowed: false, reason: "outside_accepted_work" };
   }
   if (current.allRepositoriesAccess) {
+    if (
+      accepted?.allRepositoriesAccess &&
+      accepted.selectionGeneration < (current.allRepositoriesGeneration ?? 0)
+    ) {
+      return { allowed: false, reason: "selection_changed" };
+    }
     return personalGitHubAccessCovers(current.allRepositoriesAccess, access)
       ? { allowed: true, mode: "all", allRepositoriesAccess: current.allRepositoriesAccess }
       : { allowed: false, reason: "write_denied" };
@@ -270,9 +277,21 @@ export function personalGitHubRepositoryFromProvider(
 }
 
 async function readBoundedJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (text.length > LIVE_REPOSITORY_RESPONSE_MAX_BYTES) throw new Error("response too large");
-  return JSON.parse(text) as unknown;
+  if (!response.body) return JSON.parse(await response.text()) as unknown;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > LIVE_REPOSITORY_RESPONSE_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("response too large");
+    }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
 /**
@@ -312,7 +331,22 @@ export async function livePersonalGitHubRepository(input: {
     }
     path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
   }
-  const response = await input.githubGet(new URL(path, PERSONAL_GITHUB_API_ORIGIN));
+  let response = await input.githubGet(new URL(path, PERSONAL_GITHUB_API_ORIGIN));
+  // A renamed or transferred repository answers its old name with a redirect
+  // to /repositories/<id> on the same API origin; follow that one hop.
+  if ([301, 302, 307, 308].includes(response.status)) {
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => undefined);
+    const target = location ? new URL(location, PERSONAL_GITHUB_API_ORIGIN) : null;
+    if (
+      !target ||
+      target.origin !== PERSONAL_GITHUB_API_ORIGIN ||
+      !/^\/repositories\/[1-9]\d*$/u.test(target.pathname)
+    ) {
+      throw new Error("GitHub redirected the repository lookup elsewhere");
+    }
+    response = await input.githubGet(new URL(target.pathname, PERSONAL_GITHUB_API_ORIGIN));
+  }
   if (response.status === 404) {
     await response.body?.cancel().catch(() => undefined);
     rememberLiveRepository(key, {

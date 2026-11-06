@@ -537,10 +537,14 @@ export function personalConnectionDelegationsFromParent(input: {
       if (resource.credentialBindingId !== snapshot.credentialBindingId) {
         throw new Error("agent-created personal GitHub repository exceeds parent authority");
       }
-      if (!parent && allRepositoriesAccess) {
-        if (resource.access === "write" && allRepositoriesAccess !== "write") {
-          throw new Error("agent-created personal GitHub repository exceeds parent authority");
-        }
+      if (parent && (resource.access !== "write" || parent.access === "write")) {
+        return { ...parent, access: resource.access };
+      }
+      // Not covered by the parent's own list: All my repositories decides.
+      if (
+        allRepositoriesAccess &&
+        (resource.access !== "write" || allRepositoriesAccess === "write")
+      ) {
         return {
           repositoryId: resource.repositoryId,
           fullName: personalGitHubFullNameFromUri(resource.uri),
@@ -550,10 +554,7 @@ export function personalConnectionDelegationsFromParent(input: {
           selectionGeneration: snapshot.selectionGeneration,
         };
       }
-      if (!parent || (resource.access === "write" && parent.access !== "write")) {
-        throw new Error("agent-created personal GitHub repository exceeds parent authority");
-      }
-      return { ...parent, access: resource.access };
+      throw new Error("agent-created personal GitHub repository exceeds parent authority");
     });
     return [
       {
@@ -652,10 +653,18 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
   subjectId: string;
   connections: ConnectionMetadata[];
   resources: ResourceRef[];
+  /** The deployment offers All my repositories. */
+  allRepositoriesEnabled: boolean;
   authoritySelection?: McpConnectionAccountSelection;
 }): Promise<McpPersonalConnectionDelegation | null> {
   const resources = personalGitHubRepositoryResources(input.resources);
   if (resources.length === 0) {
+    if (!input.allRepositoriesEnabled) {
+      if (input.authoritySelection) {
+        throw new Error("personal GitHub connection authority requires selected repositories");
+      }
+      return null;
+    }
     const all = await personalGitHubAllRepositoriesDelegation({
       db: input.db,
       accountId: input.accountId,
@@ -728,7 +737,9 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
   const selectedById = new Map(
     selection.repositories.map((repository) => [repository.repositoryId, repository]),
   );
-  const allRepositoriesAccess = selection.allRepositoriesAccess;
+  const allRepositoriesAccess = input.allRepositoriesEnabled
+    ? selection.allRepositoriesAccess
+    : null;
   const repositories = resources.map((resource) => {
     if (allRepositoriesAccess) {
       // All my repositories: GitHub decides on every use (the Git broker,
@@ -1186,7 +1197,8 @@ export async function availableMcpAccountBindings(input: {
 export async function freezePersonalConnectionDelegations(input: {
   db: Database;
   workspaceId: string;
-  settings: Pick<Settings, "mcpServers"> & Partial<Pick<Settings, "githubPersonalOauthEnabled">>;
+  settings: Pick<Settings, "mcpServers"> &
+    Partial<Pick<Settings, "githubPersonalOauthEnabled" | "githubPersonalAllRepositoriesEnabled">>;
   tools: ToolRef[];
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
@@ -1219,9 +1231,13 @@ export async function freezePersonalConnectionDelegations(input: {
   if (personalGitHubResources.length > 0 && input.source.kind === "none") {
     throw new Error("personal GitHub repository authority requires an authenticated causal human");
   }
-  // All my repositories can give any of the person's chats Your GitHub.
-  const mayUsePersonalGitHub =
-    personalGitHubResources.length > 0 || input.settings.githubPersonalOauthEnabled === true;
+  // All my repositories can give any of the person's chats Your GitHub. Until
+  // the deployment offers it, no turn is given that delegation shape (older
+  // releases cannot read it), even for a person who chose it earlier.
+  const allRepositoriesEnabled =
+    input.settings.githubPersonalOauthEnabled === true &&
+    input.settings.githubPersonalAllRepositoriesEnabled === true;
+  const mayUsePersonalGitHub = personalGitHubResources.length > 0 || allRepositoriesEnabled;
   if (servers.length === 0 && !includeFirstPartyConnections && !mayUsePersonalGitHub) {
     return [];
   }
@@ -1332,6 +1348,7 @@ export async function freezePersonalConnectionDelegations(input: {
         subjectId: ownerSubjectId,
         connections: visibleConnections,
         resources: input.resources ?? [],
+        allRepositoriesEnabled,
         ...(personalGitHubAuthoritySelection
           ? { authoritySelection: personalGitHubAuthoritySelection }
           : {}),

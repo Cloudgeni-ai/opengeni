@@ -7682,6 +7682,11 @@ export type PersonalGitHubRepositorySelectionState = {
   selectionGeneration: number;
   /** "All my repositories": null keeps only `repositories`. */
   allRepositoriesAccess: "read" | "write" | null;
+  /**
+   * The selection generation at which All my repositories was last turned
+   * on, off or changed. Work accepted under the mode before it stays stopped.
+   */
+  allRepositoriesGeneration?: number | null | undefined;
   repositories: PersonalGitHubSelectedRepositoryRecord[];
 };
 
@@ -13668,6 +13673,10 @@ function personalGitHubRepositorySelectionStateFromDatabase(
       record.allRepositoriesAccess === "read" || record.allRepositoriesAccess === "write"
         ? record.allRepositoriesAccess
         : null,
+    allRepositoriesGeneration:
+      record.allRepositoriesGeneration === null || record.allRepositoriesGeneration === undefined
+        ? null
+        : Number(record.allRepositoriesGeneration),
     repositories: record.repositories.map((item) => {
       const repository = item as Record<string, unknown>;
       return {

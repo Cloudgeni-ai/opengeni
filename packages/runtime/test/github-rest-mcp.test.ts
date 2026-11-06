@@ -391,8 +391,24 @@ describe("GitHub read tools", () => {
     const server = openServer(async (url) => {
       const href = String(url);
       urls.push(href);
+      if (href.startsWith("https://api.github.com/user/repos")) {
+        return response([
+          {
+            id: 77,
+            full_name: "acme/widgets",
+            owner: { id: 1, login: "acme", type: "Organization" },
+          },
+          {
+            id: 78,
+            full_name: "acme/gadgets",
+            owner: { id: 1, login: "acme", type: "Organization" },
+          },
+          { id: 79, full_name: "friend/tool", owner: { id: 9, login: "friend", type: "User" } },
+        ]);
+      }
       if (href.startsWith("https://api.github.com/user/orgs")) {
-        return response([{ id: 1, login: "acme", description: "Acme", node_id: "x" }]);
+        // Needs read:org, which Your GitHub does not hold.
+        return response({ message: "Resource not accessible" }, 403);
       }
       if (href === "https://api.github.com/users/acme") {
         return response({ login: "acme", type: "Organization" });
@@ -402,10 +418,15 @@ describe("GitHub read tools", () => {
         items: [{ id: 77, full_name: "acme/widgets", private: true, default_branch: "trunk" }],
       });
     });
-    const orgs = await server.callToolResult("organizations_list", { limit: 10 });
-    expect(orgs.structuredContent.data.organizations).toEqual([
-      { id: 1, login: "acme", description: "Acme" },
-    ]);
+    const orgs = await server.callToolResult("organizations_list", {});
+    expect(orgs.isError).toBeUndefined();
+    expect(orgs.structuredContent.data).toEqual({
+      organizations: [{ id: 1, login: "acme" }],
+      complete: true,
+    });
+    const scan = new URL(urls[0]!);
+    expect(scan.pathname).toBe("/user/repos");
+    expect(scan.searchParams.get("affiliation")).toBe("organization_member,collaborator");
     const repos = await server.callToolResult("owner_repositories_list", {
       owner: "acme",
       filter: "widg",
@@ -415,7 +436,7 @@ describe("GitHub read tools", () => {
       fullName: "acme/widgets",
       private: true,
     });
-    const search = new URL(urls[2]!);
+    const search = new URL(urls[3]!);
     expect(search.pathname).toBe("/search/repositories");
     expect(search.searchParams.get("q")).toBe("widg in:name org:acme");
   });
@@ -528,6 +549,7 @@ describe("GitHub read tools", () => {
     });
     expect(seen[1]?.url).toBe("https://results.blob.example/job-11.txt?sig=abc");
     expect(seen[1]?.authorization).toBeNull();
+    // This host ignores Range (200), so the log is streamed.
     const data = result.structuredContent.data;
     expect(data.text.endsWith("line 4999")).toBe(true);
     expect(data.text.startsWith("line ")).toBe(true);
@@ -535,6 +557,73 @@ describe("GitHub read tools", () => {
     expect(data.endByte).toBe(data.totalBytes);
     expect(data.nextOffset).toBeNull();
     expect(JSON.stringify(result)).not.toContain("sig=abc");
+  });
+
+  test("reads only the wanted bytes from a host that honours Range", async () => {
+    const log = Array.from({ length: 5_000 }, (_, index) => `line ${index}`).join("\n");
+    const bytes = new TextEncoder().encode(log);
+    const ranges: Array<string | null> = [];
+    const server = buildServer(async (url, init) => {
+      if (String(url).startsWith("https://api.github.com/")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://results.blob.example/job-11.txt?sig=abc" },
+        });
+      }
+      const range = new Headers(init?.headers).get("range");
+      ranges.push(range);
+      const suffix = /^bytes=-(\d+)$/u.exec(range ?? "");
+      const span = /^bytes=(\d+)-(\d+)$/u.exec(range ?? "");
+      const start = suffix ? bytes.length - Number(suffix[1]) : Number(span![1]);
+      if (start >= bytes.length) {
+        return new Response(null, {
+          status: 416,
+          headers: { "content-range": `bytes */${bytes.length}` },
+        });
+      }
+      const end = suffix ? bytes.length - 1 : Math.min(Number(span![2]), bytes.length - 1);
+      return new Response(bytes.slice(start, end + 1), {
+        status: 206,
+        headers: { "content-range": `bytes ${start}-${end}/${bytes.length}` },
+      });
+    });
+    const tail = await server.callToolResult("workflow_job_logs_get", {
+      repository: repository.fullName,
+      jobId: 11,
+      maxBytes: 2_048,
+    });
+    const data = tail.structuredContent.data;
+    expect(ranges[0]).toBe("bytes=-2048");
+    expect(data.text.endsWith("line 4999")).toBe(true);
+    expect(data.text.startsWith("line ")).toBe(true);
+    expect(data).toMatchObject({
+      endByte: bytes.length,
+      totalBytes: bytes.length,
+      nextOffset: null,
+    });
+    const page = await server.callToolResult("workflow_job_logs_get", {
+      repository: repository.fullName,
+      jobId: 11,
+      offset: 100,
+      maxBytes: 1_024,
+    });
+    expect(ranges[1]).toBe("bytes=100-1123");
+    expect(page.structuredContent.data).toMatchObject({
+      startByte: 100,
+      endByte: 1_124,
+      totalBytes: bytes.length,
+      nextOffset: 1_124,
+    });
+    const past = await server.callToolResult("workflow_job_logs_get", {
+      repository: repository.fullName,
+      jobId: 11,
+      offset: bytes.length + 10,
+    });
+    expect(past.structuredContent.data).toMatchObject({
+      text: "",
+      totalBytes: bytes.length,
+      nextOffset: null,
+    });
   });
 
   test("refuses a log location that is not https", async () => {
@@ -577,6 +666,22 @@ describe("readLogWindow", () => {
     expect(tail.text).toBe("four\n");
     expect(tail.endByte).toBe(text.length);
     expect(tail.totalBytes).toBe(text.length);
+  });
+
+  test("keeps what it read when the stream fails part way", async () => {
+    let sent = false;
+    const failing = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) {
+          controller.error(new Error("timed out"));
+          return;
+        }
+        sent = true;
+        controller.enqueue(new TextEncoder().encode("first part\n"));
+      },
+    });
+    const window = await readLogWindow(failing, { offset: 0, maxBytes: 100 });
+    expect(window).toMatchObject({ text: "first part\n", totalBytes: null, nextOffset: 11 });
   });
 
   test("stops at the scan limit and says where to continue", async () => {

@@ -2132,6 +2132,7 @@ export const personalGitHubRepositorySelectionHeads = pgTable(
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     /** "All my repositories": null, or the access every repository the person can reach gets. */
     allRepositoriesAccess: text("all_repositories_access"),
+    allRepositoriesGeneration: bigint("all_repositories_generation", { mode: "number" }),
     updatedBySubjectId: text("updated_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

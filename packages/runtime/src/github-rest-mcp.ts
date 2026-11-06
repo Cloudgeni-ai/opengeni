@@ -17,8 +17,12 @@ const MAX_PAGE_SIZE = 50;
 const MAX_TEXT = 64 * 1024;
 const LOG_DEFAULT_BYTES = 32 * 1024;
 const LOG_MAX_BYTES = 256 * 1024;
-/** A job log read stops here; longer logs are read with `offset`. */
+/**
+ * Without range support from the log host, a read streams the log and stops
+ * here. Hosts that honour Range (GitHub's log storage does) have no limit.
+ */
 const LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024;
+const ORGANIZATION_SCAN_PAGES = 10;
 const CONNECTOR_OUTCOME_META_KEY = "opengeni/connectorActionOutcome";
 
 export type GitHubRestAuthorityKind = "workspace_app" | "personal_oauth";
@@ -233,25 +237,31 @@ export const GITHUB_REST_MCP_TOOLS: GitHubTool[] = [
     ...repositoryProperties(),
     workflow: stringProperty("Workflow file name (ci.yml) or numeric id.", 256),
     branch: stringProperty("Head branch.", 512),
-    pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+    pullNumber: {
+      ...integer(1, Number.MAX_SAFE_INTEGER),
+      description: "Runs for this pull request's current head commit.",
+    },
     headSha: stringProperty("Exact head commit SHA.", 40),
     event: stringProperty("Triggering event, such as push or pull_request.", 64),
-    status: enumProperty([
-      "queued",
-      "in_progress",
-      "completed",
-      "requested",
-      "waiting",
-      "pending",
-      "success",
-      "failure",
-      "cancelled",
-      "skipped",
-      "timed_out",
-      "action_required",
-      "neutral",
-      "stale",
-    ]),
+    status: {
+      description: "A run status or conclusion.",
+      ...enumProperty([
+        "queued",
+        "in_progress",
+        "completed",
+        "requested",
+        "waiting",
+        "pending",
+        "success",
+        "failure",
+        "cancelled",
+        "skipped",
+        "timed_out",
+        "action_required",
+        "neutral",
+        "stale",
+      ]),
+    },
     limit: integer(1, MAX_PAGE_SIZE),
     page: integer(1, 100),
   }),
@@ -267,19 +277,24 @@ export const GITHUB_REST_MCP_TOOLS: GitHubTool[] = [
   ),
   tool(
     "workflow_job_logs_get",
-    "Read one workflow job's log. Returns the end of the log by default; pass offset to read from that byte (earlier parts: startByte minus maxBytes), and nextOffset to continue.",
+    "Read one workflow job's log. Returns the end of the log by default. To read further, pass offset = nextOffset; to read earlier, pass offset = max(0, startByte - maxBytes). totalBytes is null when the log's length is unknown.",
     {
       ...repositoryProperties(),
       jobId: integer(1, Number.MAX_SAFE_INTEGER),
-      offset: { type: "integer", minimum: 0, maximum: LOG_SCAN_MAX_BYTES },
+      offset: {
+        type: "integer",
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
+        description: "Byte to start from. Omit for the end of the log.",
+      },
       maxBytes: integer(1_024, LOG_MAX_BYTES),
     },
     ["repository", "jobId"],
   ),
   tool(
     "organizations_list",
-    "List the GitHub organizations the connected person belongs to.",
-    { limit: integer(1, 100), page: integer(1, 100) },
+    "List the GitHub organizations the connected person can reach repositories in. complete is false when there were too many repositories to look through.",
+    {},
     [],
   ),
   tool(
@@ -797,21 +812,71 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     throw new GitHubRestInputError("Repository is outside the accepted GitHub resource set");
   }
 
+  /**
+   * Your GitHub holds only the repo scope, and GitHub's organization list
+   * needs read:org, so organizations come from the repositories the person
+   * can reach as a member or collaborator. Public memberships /user/orgs
+   * still returns are added when it answers.
+   */
+  private async listOrganizations(toolName: string): Promise<unknown> {
+    const organizations = new Map<string, { id: number | null; login: string }>();
+    let last: GitHubProviderResult | null = null;
+    let complete = false;
+    for (let page = 1; page <= ORGANIZATION_SCAN_PAGES; page += 1) {
+      const url = new URL("/user/repos", GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("affiliation", "organization_member,collaborator");
+      url.searchParams.set("per_page", "100");
+      url.searchParams.set("page", String(page));
+      last = await this.request(toolName, null, url, { method: "GET" }, true);
+      if (!Array.isArray(last.payload)) {
+        throw new GitHubRestProviderError("GitHub returned an invalid list response");
+      }
+      for (const repository of last.payload) {
+        const owner = objectRecord(objectRecord(repository).owner);
+        const login = optionalOutputString(owner.login, 128);
+        if (owner.type !== "Organization" || !login) continue;
+        organizations.set(login.toLowerCase(), { id: outputInteger(owner.id), login });
+      }
+      if (last.payload.length < 100) {
+        complete = true;
+        break;
+      }
+    }
+    try {
+      const memberships = await this.request(
+        toolName,
+        null,
+        new URL("/user/orgs?per_page=100", GITHUB_REST_API_ORIGIN),
+        { method: "GET" },
+        true,
+      );
+      if (Array.isArray(memberships.payload)) {
+        for (const row of memberships.payload) {
+          const organization = projectOrganization(row);
+          if (organization.login && !organizations.has(organization.login.toLowerCase())) {
+            organizations.set(organization.login.toLowerCase(), {
+              id: organization.id,
+              login: organization.login,
+            });
+          }
+        }
+      }
+    } catch {
+      // Needs read:org for private memberships; the repository scan stands alone.
+    }
+    return resultEnvelope(
+      {
+        organizations: [...organizations.values()].sort((a, b) => a.login.localeCompare(b.login)),
+        complete,
+      },
+      last!,
+    );
+  }
+
   private async executeAccount(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     const limit = String(optionalPositiveInteger(args.limit, "limit", 100) ?? 30);
     const page = String(optionalPositiveInteger(args.page, "page", 100) ?? 1);
-    if (toolName === "organizations_list") {
-      const url = new URL("/user/orgs", GITHUB_REST_API_ORIGIN);
-      url.searchParams.set("per_page", limit);
-      url.searchParams.set("page", page);
-      const result = await this.request(toolName, null, url, { method: "GET" }, true);
-      if (!Array.isArray(result.payload))
-        throw new GitHubRestProviderError("GitHub returned an invalid list response");
-      return resultEnvelope(
-        { organizations: result.payload.map(projectOrganization), page: Number(page) },
-        result,
-      );
-    }
+    if (toolName === "organizations_list") return await this.listOrganizations(toolName);
     const owner = requiredString(args.owner, "owner", 39);
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
       throw new GitHubRestInputError("owner must be a GitHub user or organization login");
@@ -976,10 +1041,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     const offset =
       args.offset === undefined
         ? undefined
-        : typeof args.offset === "number" &&
-            Number.isSafeInteger(args.offset) &&
-            args.offset >= 0 &&
-            args.offset <= LOG_SCAN_MAX_BYTES
+        : typeof args.offset === "number" && Number.isSafeInteger(args.offset) && args.offset >= 0
           ? args.offset
           : (() => {
               throw new GitHubRestInputError("offset is invalid");
@@ -1038,11 +1100,18 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
         throw new GitHubRestProviderError("GitHub returned an invalid log location");
       }
       try {
-        // No GitHub credential and no GitHub headers on the storage host.
+        // No GitHub credential and no GitHub headers on the storage host;
+        // only the byte range wanted.
         logResponse = await this.fetchImpl(target, {
           method: "GET",
           redirect: "follow",
-          headers: { "user-agent": "OpenGeni-GitHub-Bridge/1" },
+          headers: {
+            "user-agent": "OpenGeni-GitHub-Bridge/1",
+            range:
+              offset === undefined
+                ? `bytes=-${maxBytes}`
+                : `bytes=${offset}-${offset + maxBytes - 1}`,
+          },
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (error) {
@@ -1058,6 +1127,26 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
         payload = null;
       }
       throw new GitHubRestProviderError(providerError(response.status, payload));
+    }
+    if (logResponse.status === 416) {
+      // The offset is past the end of the log.
+      await logResponse.body?.cancel().catch(() => undefined);
+      const total = contentRangeTotal(logResponse.headers.get("content-range"));
+      const at = offset ?? 0;
+      return resultEnvelope(
+        { jobId, text: "", startByte: at, endByte: at, totalBytes: total, nextOffset: null },
+        meta,
+      );
+    }
+    if (logResponse.status === 206 && logResponse.body) {
+      const range = parseContentRange(logResponse.headers.get("content-range"));
+      if (range) {
+        const window = await readRangedLogWindow(logResponse.body, range, {
+          tail: offset === undefined,
+          maxBytes,
+        });
+        return resultEnvelope({ jobId, ...window }, meta);
+      }
     }
     if (!logResponse.ok || !logResponse.body) {
       await logResponse.body?.cancel().catch(() => undefined);
@@ -1954,9 +2043,80 @@ function projectWorkflowJob(value: unknown) {
   };
 }
 
+function parseContentRange(
+  value: string | null,
+): { start: number; end: number; total: number | null } | null {
+  const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/u.exec(value?.trim() ?? "");
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = match[3] === "*" ? null : Number(match[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return null;
+  if (total !== null && (!Number.isSafeInteger(total) || end >= total)) return null;
+  return { start, end, total };
+}
+
+function contentRangeTotal(value: string | null): number | null {
+  const match = /^bytes \*\/(\d+)$/u.exec(value?.trim() ?? "");
+  const total = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(total) ? total : null;
+}
+
+/** One ranged response (206) as a log window; a tail starts on a whole line. */
+export async function readRangedLogWindow(
+  body: ReadableStream<Uint8Array>,
+  range: { start: number; end: number; total: number | null },
+  options: { tail: boolean; maxBytes: number },
+): Promise<{
+  text: string;
+  startByte: number;
+  endByte: number;
+  totalBytes: number | null;
+  nextOffset: number | null;
+}> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  const limit = Math.min(options.maxBytes, range.end - range.start + 1);
+  try {
+    while (kept < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const piece = value.subarray(0, limit - kept);
+      chunks.push(piece);
+      kept += piece.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  let bytes = new Uint8Array(kept);
+  let position = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, position);
+    position += chunk.byteLength;
+  }
+  let startByte = range.start;
+  if (options.tail && startByte > 0) {
+    const newline = bytes.indexOf(10);
+    if (newline >= 0 && newline < bytes.byteLength - 1) {
+      bytes = bytes.subarray(newline + 1);
+      startByte += newline + 1;
+    }
+  }
+  const endByte = startByte + bytes.byteLength;
+  return {
+    text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+    startByte,
+    endByte,
+    totalBytes: range.total,
+    nextOffset: range.total === null || endByte < range.total ? endByte : null,
+  };
+}
+
 /**
  * Keep one window of a streamed log: `maxBytes` from `offset`, or the last
- * `maxBytes` when no offset is given. Stops reading after LOG_SCAN_MAX_BYTES.
+ * `maxBytes` when no offset is given. Stops reading after LOG_SCAN_MAX_BYTES,
+ * and keeps what it has when the stream fails part way.
  */
 export async function readLogWindow(
   body: ReadableStream<Uint8Array>,
@@ -1979,7 +2139,14 @@ export async function readLogWindow(
   const start = options.offset ?? 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let next: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        next = await reader.read();
+      } catch (error) {
+        if (seen === 0) throw error;
+        break;
+      }
+      const { done, value } = next;
       if (done) {
         complete = true;
         break;

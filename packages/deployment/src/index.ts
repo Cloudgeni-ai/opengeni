@@ -1675,6 +1675,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
       );
+      if (env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED !== undefined) {
+        vars.push("OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED");
+      }
     }
     for (const key of [
       "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
@@ -2689,6 +2692,10 @@ function runtimeEnvValues(
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
             env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED,
           ),
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",

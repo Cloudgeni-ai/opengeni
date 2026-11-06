@@ -2264,6 +2264,12 @@ const SettingsSchema = z.object({
   /** Default-off rollout for the in-process GitHub repository API tool surface. */
   githubRestMcpEnabled: EnvBoolean.default(false),
   githubPersonalOauthEnabled: EnvBoolean.default(false),
+  /**
+   * Lets people choose "All my repositories" for Your GitHub. Default off
+   * until every API and worker runs a release that reads that delegation
+   * shape; turning it on is a rollout step, not a permission.
+   */
+  githubPersonalAllRepositoriesEnabled: EnvBoolean.default(false),
   githubPersonalOauthClientId: z.string().optional(),
   githubPersonalOauthClientSecret: z.string().optional(),
   githubAppSlug: z.string().optional(),
@@ -6446,6 +6452,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
     githubRestMcpEnabled: optional("OPENGENI_GITHUB_REST_MCP_ENABLED"),
     githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
+    githubPersonalAllRepositoriesEnabled: optional(
+      "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+    ),
     githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
     githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),

@@ -206,7 +206,14 @@ export type ListPersonalGitHubRepositoriesQuery = z.infer<
 
 export const PersonalGitHubRepositoryCatalogItem = /* @__PURE__ */ defineSchema(() =>
   PersonalGitHubRepository.safeExtend({
+    /** The person's saved choice for this repository; null when not chosen. */
     selectedAccess: PersonalGitHubRepositoryAccess.nullable(),
+    /**
+     * The access work gets now: the saved choice, or in All my repositories
+     * that mode's access lowered to GitHub's permission. Null when unusable.
+     * Absent from older servers, where `selectedAccess` is the answer.
+     */
+    effectiveAccess: PersonalGitHubRepositoryAccess.nullable().optional(),
   }).strict(),
 );
 export type PersonalGitHubRepositoryCatalogItem = z.infer<
@@ -350,6 +357,8 @@ export const PersonalGitHubConnectionStatusResponse = /* @__PURE__ */ defineSche
   z
     .object({
       enabled: primitives.boolean,
+      /** People may choose "All my repositories" on this deployment. */
+      allRepositoriesAvailable: primitives.boolean.optional(),
       connection: ConnectionMetadata.nullable(),
       reviewUrl: z.string().url().nullable(),
     })

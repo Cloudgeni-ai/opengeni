@@ -63,6 +63,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     return c.json(
       PersonalGitHubConnectionStatusResponse.parse({
         enabled: deps.settings.githubPersonalOauthEnabled,
+        allRepositoriesAvailable:
+          deps.settings.githubPersonalOauthEnabled &&
+          deps.settings.githubPersonalAllRepositoriesEnabled,
         connection: canonicalPersonalGitHubConnection(connections),
         reviewUrl: personalGitHubReviewUrl(deps.settings),
       }),
@@ -154,16 +157,20 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         const allRepositoriesAccess = selection.allRepositoriesAccess;
         return c.json(
           ListPersonalGitHubRepositoriesResponse.parse({
-            // In All my repositories every listed repository is usable, at
-            // the access it actually gets.
-            repositories: page.repositories.map((repository) => ({
-              ...repository,
-              selectedAccess: allRepositoriesAccess
-                ? personalGitHubAllRepositoriesEffectiveAccess(allRepositoriesAccess, repository)
-                : (selectedAccessById.get(repository.repositoryId) ?? null),
-            })),
+            // `selectedAccess` stays the saved choice; in All my repositories
+            // every listed repository is usable at `effectiveAccess`.
+            repositories: page.repositories.map((repository) => {
+              const selectedAccess = selectedAccessById.get(repository.repositoryId) ?? null;
+              return {
+                ...repository,
+                selectedAccess,
+                effectiveAccess: allRepositoriesAccess
+                  ? personalGitHubAllRepositoriesEffectiveAccess(allRepositoriesAccess, repository)
+                  : selectedAccess,
+              };
+            }),
             nextCursor: page.nextPage,
-            selection,
+            selection: publicSelectionState(selection),
           }),
         );
       } catch (error) {
@@ -191,6 +198,18 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         connectionId,
       });
       const request = await parseRequestJson(c, ReplacePersonalGitHubRepositorySelectionsRequest);
+      if (
+        request.allRepositoriesAccess &&
+        !(
+          deps.settings.githubPersonalOauthEnabled &&
+          deps.settings.githubPersonalAllRepositoriesEnabled
+        )
+      ) {
+        throw new HTTPException(409, {
+          message:
+            "All my repositories is not available on this deployment yet. Choose repositories instead.",
+        });
+      }
       try {
         const current = await loadRepositorySelectionState(deps, access.grant, connection);
         assertRepositoryConnectionAuthorityFence(current, request);
@@ -217,7 +236,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
             ? { allRepositoriesAccess: request.allRepositoriesAccess }
             : {}),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+        return c.json(PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)));
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }
@@ -302,7 +321,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           idempotencyKey: request.idempotencyKey,
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+        return c.json(PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)));
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }
@@ -323,6 +342,14 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
+}
+
+/** The selection as clients see it; the mode's generation is server-only. */
+function publicSelectionState(
+  state: DbPersonalGitHubRepositorySelectionState,
+): Omit<DbPersonalGitHubRepositorySelectionState, "allRepositoriesGeneration"> {
+  const { allRepositoriesGeneration: _generation, ...rest } = state;
+  return rest;
 }
 
 async function loadRepositorySelectionState(

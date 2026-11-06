@@ -1,13 +1,18 @@
 -- deployment-mode: rolling
--- "All my repositories" for Your GitHub (docs/github-integration.md).
+-- "All my repositories" for Your GitHub (docs/personal-github.md).
 --
 -- 1. personal_github_repository_selection_heads.all_repositories_access is
 --    null (only the selected repositories, as before) or the access every
 --    repository the person can reach on GitHub gets ('read' or 'write').
 --    The selected rows stay while it is on, so turning it off restores them.
 --    The check is added NOT VALID; 1282 validates it.
+--    all_repositories_generation is the selection generation at which the
+--    mode last changed: work accepted under the mode before then (it was
+--    turned off, or its access changed) stays stopped when it is turned on
+--    again.
 -- 2. get_self_personal_github_repository_selection also returns
---    allRepositoriesAccess. Older binaries ignore the extra key.
+--    allRepositoriesAccess and allRepositoriesGeneration. Older binaries
+--    ignore the extra keys.
 -- 3. mutate_self_personal_github_repository_selection keeps accepting the
 --    repository array (the mode is unchanged, as older binaries expect) and
 --    also accepts {"repositories": [...], "allRepositoriesAccess": ...},
@@ -22,6 +27,8 @@ SET LOCAL statement_timeout = '5min';
 
 ALTER TABLE personal_github_repository_selection_heads
   ADD COLUMN all_repositories_access text;
+ALTER TABLE personal_github_repository_selection_heads
+  ADD COLUMN all_repositories_generation bigint;
 ALTER TABLE personal_github_repository_selection_heads
   ADD CONSTRAINT personal_github_repository_selection_heads_all_access_chk CHECK (
     all_repositories_access IS NULL OR all_repositories_access IN ('read', 'write')
@@ -109,6 +116,7 @@ CREATE OR REPLACE FUNCTION get_self_personal_github_repository_selection(p_accou
         'providerPrincipalId', head_row.provider_principal_id,
         'selectionGeneration', head_row.generation,
         'allRepositoriesAccess', head_row.all_repositories_access,
+        'allRepositoriesGeneration', head_row.all_repositories_generation,
         'repositories', selected_rows
       );
     END
@@ -133,6 +141,7 @@ CREATE OR REPLACE FUNCTION mutate_self_personal_github_repository_selection(p_ac
       v_mode text;
       head_found boolean;
       current_mode text;
+      mode_generation bigint;
     BEGIN
       IF p_account_id IS DISTINCT FROM
           nullif(current_setting('opengeni.account_id', true), '')::uuid
@@ -354,18 +363,22 @@ CREATE OR REPLACE FUNCTION mutate_self_personal_github_repository_selection(p_ac
       ) INTO authority_changed;
       next_generation := CASE
         WHEN authority_changed THEN current_generation + 1 ELSE current_generation END;
+      mode_generation := CASE
+        WHEN v_mode_given AND v_mode IS DISTINCT FROM current_mode THEN next_generation
+        WHEN head_found THEN head_row.all_repositories_generation
+        ELSE NULL END;
 
       INSERT INTO personal_github_repository_selection_heads (
         connection_id, account_id, origin_workspace_id, owner_subject_id,
         provider_principal_id, credential_binding_id,
         connection_authority_generation, generation, updated_by_subject_id,
-        all_repositories_access
+        all_repositories_access, all_repositories_generation
       ) VALUES (
         p_connection_id, p_account_id, p_origin_workspace_id, p_owner_subject_id,
         connection_row.metadata ->> 'providerPrincipalId',
         (connection_row.metadata ->> 'credentialBindingId')::uuid,
         connection_row.authority_generation, next_generation, p_owner_subject_id,
-        CASE WHEN v_mode_given THEN v_mode ELSE current_mode END
+        CASE WHEN v_mode_given THEN v_mode ELSE current_mode END, mode_generation
       ) ON CONFLICT (connection_id) DO UPDATE SET
         provider_principal_id = EXCLUDED.provider_principal_id,
         credential_binding_id = EXCLUDED.credential_binding_id,
@@ -373,6 +386,7 @@ CREATE OR REPLACE FUNCTION mutate_self_personal_github_repository_selection(p_ac
         generation = EXCLUDED.generation,
         updated_by_subject_id = EXCLUDED.updated_by_subject_id,
         all_repositories_access = EXCLUDED.all_repositories_access,
+        all_repositories_generation = EXCLUDED.all_repositories_generation,
         updated_at = clock_timestamp();
 
       FOR item IN SELECT value FROM jsonb_array_elements(v_repositories) incoming(value)

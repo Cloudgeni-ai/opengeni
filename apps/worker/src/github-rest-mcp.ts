@@ -735,7 +735,9 @@ function githubGetWith(headers: Record<string, string>) {
     }
     return await fetch(url, {
       method: "GET",
-      redirect: "error",
+      // A renamed repository answers with a same-origin redirect; the shared
+      // lookup follows it only to api.github.com.
+      redirect: "manual",
       headers: {
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
@@ -792,18 +794,25 @@ function personalRepositoryResolver(
       personalReconnectOr(error, () => personalConnectionNeedsReconnect(input));
     try {
       const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
-      const { snapshot, current } = await validatePersonalConnection(
+      const { snapshot, current, metadata } = await validatePersonalConnection(
         input,
         delegation.connectionId,
         true,
       );
       const acceptedAccess = snapshot.allRepositoriesAccess;
-      const currentAccess = current.allRepositoriesAccess;
-      if (!acceptedAccess || !currentAccess) {
+      const decision = personalGitHubRepositoryAuthority({
+        current,
+        metadata,
+        accepted: snapshot,
+        repository: { fullName },
+        access: "read",
+      });
+      if (!acceptedAccess || !decision.allowed || decision.mode !== "all") {
         throw new GitHubRestAuthorityError(
-          "All my repositories was turned off for this GitHub account. Start a new message to use the new choice.",
+          "All my repositories changed for this GitHub account. Start a new message to use the new choice.",
         );
       }
+      const currentAccess = decision.allRepositoriesAccess;
       const destination = `${GITHUB_REST_API_ORIGIN}/repos/${fullName}`;
       const { headers } = await resolvePersonalCredential(
         input,

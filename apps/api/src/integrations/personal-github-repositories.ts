@@ -200,10 +200,13 @@ type SearchCacheEntry = {
   complete: boolean;
 };
 const searchCache = new Map<string, SearchCacheEntry>();
+/** One scan per connection at a time; concurrent searches share it. */
+const searchScans = new Map<string, Promise<SearchCacheEntry>>();
 
 /** Tests only. */
 export function clearPersonalGitHubRepositorySearchCache(): void {
   searchCache.clear();
+  searchScans.clear();
 }
 
 /**
@@ -268,29 +271,41 @@ export async function searchLivePersonalGitHubRepositories(
     }
   }
   const key = `${connection.id}|${input.expectedConnectionAuthorityGeneration}`;
-  const now = Date.now();
   let cached = searchCache.get(key);
-  if (!cached || cached.expiresAt <= now) {
-    cached = { expiresAt: now + SEARCH_CACHE_TTL_MS, repositories: [], complete: false };
-    for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
-      const result = await listLivePersonalGitHubRepositories(deps, {
-        ...input,
-        page,
-        limit: SEARCH_PAGE_SIZE,
-      });
-      cached.repositories.push(...result.repositories);
-      if (result.nextPage === null) {
-        cached.complete = true;
-        break;
-      }
+  if (!cached || cached.expiresAt <= Date.now()) {
+    let scan = searchScans.get(key);
+    if (!scan) {
+      scan = (async () => {
+        const entry: SearchCacheEntry = {
+          expiresAt: 0,
+          repositories: [],
+          complete: false,
+        };
+        for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
+          const result = await listLivePersonalGitHubRepositories(deps, {
+            ...input,
+            page,
+            limit: SEARCH_PAGE_SIZE,
+          });
+          entry.repositories.push(...result.repositories);
+          if (result.nextPage === null) {
+            entry.complete = true;
+            break;
+          }
+        }
+        entry.expiresAt = Date.now() + SEARCH_CACHE_TTL_MS;
+        searchCache.delete(key);
+        while (searchCache.size >= SEARCH_CACHE_MAX) {
+          const oldest = searchCache.keys().next().value;
+          if (oldest === undefined) break;
+          searchCache.delete(oldest);
+        }
+        searchCache.set(key, entry);
+        return entry;
+      })().finally(() => searchScans.delete(key));
+      searchScans.set(key, scan);
     }
-    searchCache.delete(key);
-    while (searchCache.size >= SEARCH_CACHE_MAX) {
-      const oldest = searchCache.keys().next().value;
-      if (oldest === undefined) break;
-      searchCache.delete(oldest);
-    }
-    searchCache.set(key, cached);
+    cached = await scan;
   }
   for (const repository of cached.repositories) {
     if (repository.fullName.toLowerCase().includes(needle)) add(repository);
