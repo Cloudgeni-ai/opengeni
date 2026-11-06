@@ -1971,8 +1971,6 @@ describe("durable active-goal wake", () => {
   });
 
   test("a shared-core Codex capacity wait blocks synthesis and exposes its durable retry time", async () => {
-    // After the drained cutover (0680) the core waiter is the only Codex
-    // waiter written; the legacy waiter table is frozen.
     const ctx = await runningGoalFixture();
     const goal = await getSessionGoalWithContinuation(
       client.db,

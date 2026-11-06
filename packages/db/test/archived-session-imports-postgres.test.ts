@@ -199,15 +199,17 @@ describe("archived import PostgreSQL persistence", () => {
         );
       }
       const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
+      const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
       const options = {
         expectedRole: "opengeni_app",
         rlsStrategy: "force" as const,
         targetSchema: "public",
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
-      // Later maintenance cutovers (Slack quotas, Claude account pools and the
-      // organization key scope join) intentionally require a new binary. Keep the
-      // immutable evaluator and complete catalog and check two of those gaps.
+      // Later maintenance cutovers (Slack quotas, Claude account pools, the
+      // organization key scope join and the retired-feature contraction)
+      // intentionally require a new binary. Keep the immutable evaluator and
+      // complete catalog and check two of those gaps.
       const laterQuotaGap =
         "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
       const missingScopeTable = (violations: string[]) =>
@@ -225,6 +227,16 @@ describe("archived import PostgreSQL persistence", () => {
         (violations: string[]) =>
           violations.includes(laterQuotaGap) && missingScopeTable(violations),
       );
+      // The old provisioner grants on Variable Set routines unconditionally, so
+      // once the contraction drops them it can no longer run here at all: the
+      // fleet must be on the current runtime before that migration applies.
+      await expect(
+        oldProvision.provisionRoles(shared.adminUrl, {
+          appRole: "opengeni_app",
+          appPassword: new URL(shared.appUrl).password,
+          rlsStrategy: "force",
+        }),
+      ).rejects.toThrow("scheduled_variable_set_expected_generation_for_attempt");
       await provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
