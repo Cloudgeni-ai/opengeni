@@ -86,11 +86,6 @@ async function organization(): Promise<Fixture> {
     workspaceId: access.defaultWorkspaceId!,
     subjectId,
   };
-  // 0680 seeds every new organization enabled on the shared core.
-  const [cutover] = await shared!.admin<{ enabled: boolean }[]>`
-    select enabled from subscription_provider_cutovers
-    where account_id = ${fixture.accountId}::uuid and provider = 'codex'`;
-  expect(cutover?.enabled).toBe(true);
   return fixture;
 }
 

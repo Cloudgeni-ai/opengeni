@@ -3584,11 +3584,30 @@ export function buildOpenGeniAgent(
     : skillComposition.index.length > 0
       ? skillCatalogFromComposition(skillComposition)
       : undefined;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image:
+      options.imageGeneration?.kind === "native_hosted" &&
+      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
+        ? null
+        : (options.imageGeneration?.kind ?? null),
+    video: Boolean(options.videoGeneration),
+  });
+  // This build attaches every media tool it has, so an empty surface proves
+  // the turn has none: the media guidance would describe tools it cannot use.
+  const mediaToolsAbsent =
+    resolveAgentToolFamilies(options.agentConfig).media &&
+    mediaTools.hosted.length === 0 &&
+    mediaTools.runtime.length === 0;
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
     ...(options.agentConfig && !options.agentPromptResources
-      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      ? {
+          agentPromptResources: {
+            ...agentPromptResourcesFor(settings, resources, options),
+            ...(mediaToolsAbsent ? { mediaTools: false } : {}),
+          },
+        }
       : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -3606,14 +3625,6 @@ export function buildOpenGeniAgent(
     humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
-  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
-    image:
-      options.imageGeneration?.kind === "native_hosted" &&
-      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
-        ? null
-        : (options.imageGeneration?.kind ?? null),
-    video: Boolean(options.videoGeneration),
-  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send

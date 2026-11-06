@@ -327,11 +327,28 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     control.activityError = error;
     return claimedResult({ status: "recovering", deferredUntilWake: true });
   }
+  // Call-scoped proof that an in-flight exec_command never dispatched its
+  // command: the provider's typed pre-dispatch refusal in the error, or a call
+  // whose every operation was still waiting for (or had failed in) sandbox
+  // resolution, which settling closes so it never dispatches later. Those
+  // calls settle as not started (replay safe), never unknown, whether this
+  // turn recovers or fails.
+  const commandCallsNotStarted = (): string[] =>
+    isRoutingMutationOutcomeUnknownError(error)
+      ? []
+      : [
+          ...new Set([
+            ...toolCallCommandNotStartedCallIds(error),
+            ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
+          ]),
+        ];
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before
   // another turn-worker dispatch; shorter non-rotation transitions retain
-  // their existing paced retry.
+  // their existing paced retry. A command still waiting for the box (for
+  // example while setup found it could not start programs and asked for its
+  // replacement) never reached it, so it settles as not started.
   const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
   const leaseControlError =
     error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
@@ -360,6 +377,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         transitionPending && !sandboxLifecycleWait
           ? sandboxDeadlineRotationRecoveryDelayMs(settings)
           : undefined;
+      const notStartedToolCallIds = commandCallsNotStarted();
       const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
@@ -386,6 +404,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           : {}),
         ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
         ...(transitionRetryAfterMs !== undefined ? { retryAfterMs: transitionRetryAfterMs } : {}),
+        ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -1347,20 +1366,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
-  // Call-scoped proof that an in-flight exec_command never dispatched its
-  // command: the provider's typed pre-dispatch refusal in the error, or a call
-  // whose every operation was still waiting for (or had failed in) sandbox
-  // resolution, which settling closes so it never dispatches later. Those
-  // calls settle as not started (replay safe), never unknown, whether this
-  // turn recovers or fails.
-  const notStartedToolCallIds = isRoutingMutationOutcomeUnknownError(error)
-    ? []
-    : [
-        ...new Set([
-          ...toolCallCommandNotStartedCallIds(error),
-          ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
-        ]),
-      ];
+  const notStartedToolCallIds = commandCallsNotStarted();
   // Custody decides whether replay is safe, not what caused the failure. Keep
   // the existing diagnostic in the permission-controlled terminal event;
   // never copy it into logs or use its retry classification for admission.

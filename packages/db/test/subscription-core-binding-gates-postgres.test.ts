@@ -112,10 +112,6 @@ async function organization(): Promise<Org> {
       ${accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
       '{}'::jsonb, false, '{}'::jsonb, true, false
     )`;
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', true)
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
   return {
     accountId,
     ownerSubjectId,

@@ -24,6 +24,7 @@ import {
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  countWebhookDeliveriesForEvent,
   dismissInboxNotification,
   getInboxTidyPolicy,
   getManagedUserByEmail,
@@ -147,7 +148,9 @@ export async function personLabel(
 export function registerNotificationTools(input: RegisterNotificationToolsInput): void {
   const { server, deps, grant, sessionId, authorize, attempt, json } = input;
 
-  const appendOwn = async (events: Array<{ type: string; payload: unknown }>) => {
+  const appendOwn = async (
+    events: Array<{ type: string; payload: unknown }>,
+  ): Promise<Array<{ id: string }>> => {
     const claims = attempt();
     const appended = await appendAndPublishTurnEventsFenced(
       deps.db,
@@ -162,6 +165,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     if (!appended.accepted) {
       throw new Error("The calling turn was replaced before the notification committed.");
     }
+    return appended.events;
   };
 
   server.registerTool(
@@ -288,13 +292,32 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         );
       }
       const payload = parsed.data;
-      await appendOwn([{ type: "session.notification.posted", payload }]);
+      const [posted] = await appendOwn([{ type: "session.notification.posted", payload }]);
+      // No person owns this session (a key or service started it): Opengeni
+      // notifies nobody itself, but an integration subscribed to notifications
+      // through a webhook receives it and delivers it. Runs of an ownerless
+      // scheduled task are not offered this tool at all.
+      const handedToIntegration =
+        target === null && posted
+          ? (await countWebhookDeliveriesForEvent(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              eventId: posted.id,
+            })) > 0
+          : false;
       return json({
         ok: true,
         key: resolvedKey,
-        // No person owns this session (a key or service started it): nobody is notified.
-        delivered: target !== null,
-        ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
+        // Handed off is not proof a person got it, and not a failure either.
+        ...(handedToIntegration
+          ? {
+              handedToIntegration: true,
+              note: "No person owns this session, so Opengeni notified no one itself. The notification was handed to the integration that delivers this workspace's notifications; don't retry it or report it as failed.",
+            }
+          : {
+              delivered: target !== null,
+              ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
+            }),
         ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });

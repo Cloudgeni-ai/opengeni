@@ -10,7 +10,8 @@
    steer-waiting, steered, waiting, long, empty, error, and automation runs:
    automation, automation-live, automation-quiet). `&legacy=1` delivers an
    automation run the way Opengeni recorded it before runs had a plain
-   description. `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   description; `&ids=1` puts internal IDs in what the run's event and an
+   earlier setup update say. `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
    messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
@@ -77,6 +78,8 @@ const steering = scenario === "steer-waiting" || scenario === "steered";
 const RUN_TURN = "5a1c0000-0000-4000-8000-0000000000d1";
 const automationRun = scenario.startsWith("automation");
 const legacyRun = params.get("legacy") === "1";
+const withIds = params.get("ids") === "1";
+const ORGANISATION_ID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c";
 const selectedStatus =
   scenario === "running" || scenario === "waiting" || steering || scenario === "automation-live"
     ? "running"
@@ -178,6 +181,26 @@ const humanInputRequests: unknown[] = [];
 function automationRunEvents() {
   const instructions =
     "Continue this conversation when a ticket is assigned to the signed-in user. The recipient is the assignee (confirm through acme__list_my_tickets). Read the event, check that the ticket is still open, and tell the person what it is about and what to do first. If it is already closed, do nothing.";
+  if (withIds) {
+    push(
+      "system.update.delivered",
+      {
+        updateIds: ["5a1c0000-0000-4000-8000-0000000000f1"],
+        count: 1,
+        members: [
+          {
+            id: "5a1c0000-0000-4000-8000-0000000000f1",
+            kind: "capability_setup_completed",
+            classification: "info",
+            sourceId: "5a1c0000-0000-4000-8000-0000000000f2",
+            summary: `Acme Helpdesk is connected for the support team. Organisation: ${ORGANISATION_ID}.`,
+          },
+        ],
+      },
+      3,
+      null,
+    );
+  }
   push(
     "system.update.delivered",
     {
@@ -195,7 +218,11 @@ function automationRunEvents() {
                 summary: "Ticket assigned to you",
                 automation: {
                   name: "Ticket assigned to you",
-                  eventSummaries: ["T-4907 Refund request from Contoso"],
+                  eventSummaries: [
+                    withIds
+                      ? `T-4907 Refund request from Contoso (organisation ${ORGANISATION_ID})`
+                      : "T-4907 Refund request from Contoso",
+                  ],
                   eventCount: 1,
                 },
               }),

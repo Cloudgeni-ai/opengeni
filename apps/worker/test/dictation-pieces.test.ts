@@ -6,6 +6,8 @@ import {
   readPcmWav,
 } from "../src/activities/dictation-pieces";
 import { mapConcurrently } from "../src/activities/concurrently";
+import { dictationPieceLimitMilliseconds } from "../src/activities/recordings";
+import type { DictationProvider } from "@opengeni/core/transcription-service";
 
 const RATE = 16_000;
 
@@ -23,6 +25,28 @@ function speech(seconds: number, pauses: number[]): Uint8Array {
 }
 
 describe("dictation pieces", () => {
+  test("a piece is no longer than every model that may hear it takes in one request", () => {
+    const model = (maxDurationSeconds: number | null, maxFileBytes: number | null) =>
+      ({
+        id: "voice",
+        model: { capabilities: { maxDurationSeconds, maxFileBytes } },
+      }) as unknown as DictationProvider;
+    const service = { maxDurationSeconds: 120, maxSizeBytes: 25 * 1024 * 1024 };
+    // The service's own limit when every model takes more.
+    expect(dictationPieceLimitMilliseconds([model(600, null)], service)).toBe(120_000);
+    // The shortest model's length.
+    expect(dictationPieceLimitMilliseconds([model(600, null), model(45, null)], service)).toBe(
+      45_000,
+    );
+    // A file limit, with a tenth spare, for a 16 kHz WAV piece (32 kB a second).
+    expect(dictationPieceLimitMilliseconds([model(null, 1_600_000)], service)).toBe(45_000);
+    // A short dictation is then still one piece, a long one is cut to fit.
+    expect(dictationPiecePlan(45_000)).toMatchObject({
+      wholeMilliseconds: 45_000,
+      maxMilliseconds: 45_000,
+    });
+  });
+
   test("reads back the WAV it writes", () => {
     const wav = readPcmWav(speech(2, []));
     expect(wav?.sampleRate).toBe(RATE);
@@ -30,28 +54,30 @@ describe("dictation pieces", () => {
     expect(readPcmWav(new Uint8Array([1, 2, 3]))).toBeNull();
   });
 
-  test("a short dictation is one piece, never cut", () => {
-    const wav = readPcmWav(speech(20, [10]))!;
-    expect(planDictationPieces(wav)).toEqual([0, 20 * RATE]);
+  test("a dictation up to two minutes is one piece, never cut", () => {
+    const wav = readPcmWav(speech(115, [10, 60]))!;
+    expect(planDictationPieces(wav)).toEqual([0, 115 * RATE]);
   });
 
   test("a long dictation is cut in its pauses, near the target length", () => {
-    const wav = readPcmWav(speech(70, [6, 14, 31, 47, 60]))!;
+    const pauses = [20, 70, 88, 140, 175, 230, 262];
+    const wav = readPcmWav(speech(300, pauses))!;
     const cuts = planDictationPieces(wav).map((sample) => sample / RATE);
     expect(cuts[0]).toBe(0);
-    expect(cuts.at(-1)).toBe(70);
+    expect(cuts.at(-1)).toBe(300);
+    expect(cuts.length).toBeGreaterThan(2);
     // Every inner cut is inside a pause.
     for (const cut of cuts.slice(1, -1)) {
-      expect([14, 31, 47, 60].some((pause) => cut >= pause && cut <= pause + 0.5)).toBe(true);
+      expect(pauses.some((pause) => cut >= pause && cut <= pause + 0.5)).toBe(true);
     }
     // No piece is longer than the most a model takes, nor shorter than the least.
     for (let index = 1; index < cuts.length; index += 1) {
       const length = cuts[index]! - cuts[index - 1]!;
-      expect(length).toBeLessThanOrEqual(50);
-      expect(length).toBeGreaterThanOrEqual(8);
+      expect(length).toBeLessThanOrEqual(120);
+      expect(length).toBeGreaterThanOrEqual(30);
     }
     // The rest after the last cut is short enough to be heard whole.
-    expect(70 - cuts.at(-2)!).toBeLessThanOrEqual(25);
+    expect(300 - cuts.at(-2)!).toBeLessThanOrEqual(120);
   });
 
   test("with no pause at all, pieces still fit the model", () => {

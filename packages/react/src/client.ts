@@ -249,7 +249,10 @@ export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
 export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "getSessionLineage">;
 
-/** Exact client surface required by {@link useFileAttachments}. */
+/**
+ * Exact client surface required by {@link useFileAttachments}. The optional
+ * reads show stored files: a restored draft's metadata and image previews.
+ */
 export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile"> &
   Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "getFile">>;
 

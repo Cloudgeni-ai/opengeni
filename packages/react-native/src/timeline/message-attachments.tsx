@@ -1,4 +1,9 @@
-import type { FileAsset, OpenGeniClient, ResourceRef } from "@opengeni/sdk";
+import type { OpenGeniClient, ResourceRef } from "@opengeni/sdk";
+import {
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "@opengeni/react/session";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Image, Linking, Pressable, Text, View } from "react-native";
 import { Icon } from "./icon";
@@ -81,43 +86,24 @@ function Attachment(props: {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const [asset, setAsset] = useState<FileAsset | null>(null);
-  const [url, setUrl] = useState<string | null>(null);
   const [ratio, setRatio] = useState(1);
-  const [failed, setFailed] = useState(false);
   const { client, workspaceId, sessionId } = props;
   const fileId = props.resource.fileId;
-
-  useEffect(() => {
-    let current = true;
-    setAsset(null);
-    setUrl(null);
-    setFailed(false);
-    const options = sessionId ? { sessionId } : {};
-    void (async () => {
-      try {
-        const file = await client.getFile(workspaceId, fileId, options);
-        if (!current) return;
-        setAsset(file);
-        if (!file.contentType.startsWith("image/")) return;
-        const signed = await client.createFileDownloadUrl(workspaceId, fileId, options);
-        if (current) setUrl(signed.url);
-      } catch {
-        if (current) setFailed(true);
-      }
-    })();
-    return () => {
-      current = false;
-    };
-  }, [client, fileId, sessionId, workspaceId]);
+  const source = useMemo(
+    () => ({ client, workspaceId, sessionId }),
+    [client, sessionId, workspaceId],
+  );
+  const fileIds = useMemo(() => [fileId], [fileId]);
+  const stored = useStoredFiles(source, fileIds);
+  const asset = stored.ready ? (stored.files.get(fileId) ?? null) : null;
+  // The stored copy, re-signed once if it stops loading before falling back to a chip.
+  const preview = useStoredFilePreview(source, asset);
+  const url = preview.url ?? null;
+  const failed = (stored.ready && !asset) || preview.failed;
 
   const open = async () => {
     try {
-      const target =
-        url ??
-        (await client.createFileDownloadUrl(workspaceId, fileId, sessionId ? { sessionId } : {}))
-          .url;
-      await Linking.openURL(target);
+      await Linking.openURL(url ?? (await readStoredFilePreviewUrl(source, fileId)));
     } catch {
       // Opening is best effort; the chip stays.
     }
@@ -156,7 +142,7 @@ function Attachment(props: {
               const { width, height } = event.nativeEvent.source;
               if (width > 0 && height > 0) setRatio(width / height);
             }}
-            onError={() => setFailed(true)}
+            onError={preview.onError}
             style={{ width: "100%", height: "100%" }}
           />
         ) : (

@@ -113,7 +113,6 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       // compute capability. WITH CHECK false does not create a write lane.
       { table: "workspace_memberships", policy: "scoped_compute_capability_lock" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
-      { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
       // Vault routines (0739) read memberships and workspaces for reach. Same
       // shape as the lanes above (owner-only, capability-gated), and also
       // scoped TO the routine owner, so it is inert for every other role.

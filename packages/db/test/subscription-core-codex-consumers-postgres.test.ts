@@ -337,22 +337,6 @@ function authorizationCases(harness: "template" | "owner-migrated") {
       connectionId,
       status: "active",
     });
-    // The obsolete account switch is not designation authority. Scope,
-    // status, ownership and the live designation still fence every read.
-    await shared!.admin`
-      update subscription_provider_cutovers set enabled = false
-      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
-    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
-      connectionId,
-      status: "active",
-    });
-    await shared!.admin`
-      delete from subscription_provider_cutovers
-      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
-    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
-      connectionId,
-      status: "active",
-    });
     // The designation is per workspace: the Personal workspace has none.
     expect(
       await resolveSubscriptionCoreCodexAppsDesignation(client!.db, {
@@ -1005,11 +989,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       select connection_id::text as connection_id, choice from subscription_session_bindings
       where session_id = ${sessionId}::uuid`;
     expect(binding).toEqual({ connection_id: connectionId, choice: "explicit" });
-    // The legacy pointer column is never written with a core id.
-    const [legacy] = await shared!.admin<{ pinned: string | null; last: string | null }[]>`
-      select codex_pinned_credential_id::text as pinned, codex_last_credential_id::text as last
-      from sessions where id = ${sessionId}::uuid`;
-    expect(legacy).toEqual({ pinned: null, last: null });
 
     const pointers = await getSubscriptionCoreCodexSessionPointers(client!.db, {
       accountId: org.accountId,

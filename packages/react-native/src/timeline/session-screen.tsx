@@ -11,6 +11,7 @@ import {
   type PendingPrompt,
   type AgentMessageItem,
   type AuthNeededItem,
+  type StoredFileSource,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
@@ -25,15 +26,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  Pressable,
-  Text,
-  View,
-  type TextInput,
-} from "react-native";
+import { ActivityIndicator, Alert, Pressable, Text, View, type TextInput } from "react-native";
 import { annotationHasNote } from "@opengeni/react/timeline-model";
 import {
   defaultChatComposerMessages,
@@ -43,6 +36,11 @@ import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import type { NativeFileAttachmentsResult } from "../attachments";
+import {
+  StoredFileImage,
+  useNativeComposerAttachments,
+  type NativeComposerAttachment,
+} from "../stored-file-image";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { Button } from "./controls";
@@ -61,7 +59,13 @@ import {
   type NativeAnnotationLike,
 } from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  OpenGeniClient,
+  ResourceRef,
+  Session,
+  SessionBackgroundCommand,
+} from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -494,7 +498,12 @@ function SessionScreenBody({
         header: (
           <>
             {composerSlots?.header}
-            <AttachmentChips attachments={attachments} />
+            <AttachmentChips
+              attachments={attachments}
+              restoredResources={composer.restoredResources}
+              onRemoveRestoredResource={composer.removeRestoredResource}
+              fileSource={composer.fileSource}
+            />
             {draftAnnotations.length > 0 && composer.removeAnnotation ? (
               <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
                 <AnnotationsChip
@@ -541,6 +550,7 @@ function SessionScreenBody({
               queue={queue}
               composer={composer}
               singleSend={composer.singleSend === true}
+              fileSource={composer.fileSource ?? attachments.fileSource}
               onComposerFocus={() => composerInput.current?.focus()}
               onReviewAnnotations={setQueuedReview}
               leading={
@@ -872,12 +882,38 @@ function StuckCard({
   );
 }
 
-/** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
-export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+/**
+ * Composer attachment chips: name, upload state, tap to retry a failure,
+ * remove. Images show as pictures, loaded from the server when there is no
+ * local photo (a restored draft, another device). `restoredResources` are
+ * files restored into the composer from a saved draft.
+ */
+export function AttachmentChips({
+  attachments,
+  restoredResources,
+  onRemoveRestoredResource,
+  fileSource,
+}: {
+  attachments: NativeFileAttachmentsResult;
+  restoredResources?: readonly ResourceRef[] | undefined;
+  onRemoveRestoredResource?: ((index: number) => void) | undefined;
+  /** Where stored files are read from; defaults to the attachments' own chat. */
+  fileSource?: StoredFileSource | undefined;
+}) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  if (attachments.attachments.length === 0) return null;
+  const source = fileSource ?? attachments.fileSource;
+  const items = useNativeComposerAttachments(
+    source,
+    attachments.attachments,
+    onRemoveRestoredResource ? restoredResources : undefined,
+  );
+  const remove = (item: NativeComposerAttachment) =>
+    item.restoredIndex === undefined
+      ? attachments.remove(item.id)
+      : onRemoveRestoredResource?.(item.restoredIndex);
+  if (items.length === 0) return null;
   return (
     <View
       style={{
@@ -888,10 +924,10 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
         paddingTop: 10,
       }}
     >
-      {attachments.attachments.map((item) => {
+      {items.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
-        if (item.kind === "image" && item.previewUri) {
+        if (item.kind === "image" && (item.previewUri || item.file)) {
           // Photos show as photos, as on the web: a thumbnail with its state on top.
           return (
             <View key={item.id} style={{ width: 56, height: 56 }}>
@@ -914,10 +950,22 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                   backgroundColor: c["surface-2"],
                 }}
               >
-                <Image
-                  source={{ uri: item.previewUri }}
+                <StoredFileImage
+                  source={source}
+                  file={item.file}
+                  localUri={item.previewUri}
                   style={{ width: "100%", height: "100%" }}
-                  resizeMode="cover"
+                  fallback={
+                    <View
+                      style={{
+                        flex: 1,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Icon name="image" size={18} color={c["fg-subtle"]} />
+                    </View>
+                  }
                 />
                 {busy || failed ? (
                   <View
@@ -947,7 +995,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                 accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                   name: item.name,
                 })}
-                onPress={() => attachments.remove(item.id)}
+                onPress={() => remove(item)}
                 hitSlop={8}
                 style={{
                   position: "absolute",
@@ -1011,7 +1059,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
               accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                 name: item.name,
               })}
-              onPress={() => attachments.remove(item.id)}
+              onPress={() => remove(item)}
               hitSlop={6}
               style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
             >
