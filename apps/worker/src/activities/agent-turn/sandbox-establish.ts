@@ -6,7 +6,6 @@ import {
   getLiveEnrollmentConnection,
   countSessionTurnSandboxProcessStartRestarts,
   SANDBOX_PROCESS_START_RESTART_OPERATION,
-  readLease,
   resolvePersonalMachineRouteForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
@@ -79,21 +78,13 @@ import {
   isLazySandboxProvisionRetryable,
   createTurnSandboxProvisioner,
   trackPhysicalSandboxResume,
-  TurnOperationCancelledError,
 } from "./sandbox-provision";
-import {
-  createBackgroundSandboxPreparation,
-  preparationBackgroundPublisher,
-  preparationPublisher,
-  type BackgroundSandboxPreparation,
-} from "./background-sandbox-preparation";
 import {
   resolveActiveSandboxBackend,
   managedSandboxOwnershipForTurn,
   shouldEstablishSandboxForTurn,
   sandboxEstablishPolicyDecision,
   shouldPrefetchManagedSandbox,
-  shouldPrepareManagedSandboxInBackground,
   reconcileActiveSandboxPointer,
   readTurnRouteFact,
   sandboxSettingsForRoute,
@@ -734,9 +725,10 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // proxy's first default-pointer op. A chat-only turn never calls it, so
         // no lease row, no provider box, no warm-meter interval.
         //
-        // A repository turn prepares its box in the background behind the
-        // first model request. Start create now and join it at get(); do not
-        // await here or we serialize the provider create before tools.
+        // A repository turn's box is likely to be used by a tool. Start create
+        // now and join it at get(); do not await here or we serialize the
+        // provider create before tools. The repository skill index no longer
+        // reaches the box before the model (shouldDeferRepositorySkillIndex).
         if (sandboxState.sandboxHolderId && sandboxState.sandboxGroupId) {
           const lazyHolderId = sandboxState.sandboxHolderId;
           const lazyGroupId = sandboxState.sandboxGroupId;
@@ -1047,8 +1039,6 @@ export async function bindLazySandboxProvisioner(
     connectionScope,
     codemodeAuthority,
     objectStorage,
-    machinePrimary,
-    turnResources,
   } = deps;
   const {
     releaseLateSandbox,
@@ -1072,25 +1062,6 @@ export async function bindLazySandboxProvisioner(
       backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
     } as EstablishedSandboxSession["client"];
     let lazySandboxEstablishmentSettled = false;
-    // A repository turn prepares its box behind the first model request
-    // instead of in front of it. Everything this preparation publishes goes
-    // through these gates, which close if the turn ends without needing it.
-    let preparation: BackgroundSandboxPreparation<ResumedTurnSandbox> | null = null;
-    const preparationGate = {
-      get abandoned() {
-        return preparation?.abandoned === true;
-      },
-    };
-    const publishPreparation = preparationPublisher(preparationGate, eventing.publish);
-    const publishPreparationInBackground = preparationBackgroundPublisher(
-      preparationGate,
-      eventing.publishInBackground,
-    );
-    const throwIfPreparationAbandoned = (): void => {
-      if (preparationGate.abandoned) {
-        throw new TurnOperationCancelledError(new Error("TURN_ENDED_BEFORE_SANDBOX_WAS_NEEDED"));
-      }
-    };
     sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
       async () => {
         throwIfWorkerShuttingDown();
@@ -1101,7 +1072,7 @@ export async function bindLazySandboxProvisioner(
         startRunGitCredentialsMint();
         const provisioned = await (sandboxState.prefetchedManagedBox ??
           sandboxState.resumeManagedGroupBox());
-        if (!preparationGate.abandoned) await publishSandboxLifecycleEvents(provisioned);
+        await publishSandboxLifecycleEvents(provisioned);
         // Return the REAL established box (NOT a copy whose session is the routing
         // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
         // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
@@ -1115,7 +1086,7 @@ export async function bindLazySandboxProvisioner(
       {
         signal: sandboxResumeSignal,
         onStarted: async ({ provisionId }) => {
-          await publishPreparation?.(
+          await eventing.publish?.(
             [
               {
                 type: "sandbox.operation.started",
@@ -1147,7 +1118,6 @@ export async function bindLazySandboxProvisioner(
         },
         beforeCompleted: async (provisioned, settlement) => {
           throwIfTurnOperationCancelled(sandboxResumeSignal);
-          throwIfPreparationAbandoned();
           startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
           sandboxState.setupBoxSession = provisioned.established.session;
           sandboxState.resolvedSandbox = provisioned;
@@ -1162,7 +1132,7 @@ export async function bindLazySandboxProvisioner(
               backend: activeSandboxBackend ?? groupBoxBackend,
             },
             async () =>
-              publishPreparation?.(
+              eventing.publish?.(
                 [
                   {
                     type: "sandbox.operation.completed",
@@ -1202,8 +1172,8 @@ export async function bindLazySandboxProvisioner(
             observability,
             provider: deps.turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
-            publish: publishPreparation,
-            publishInBackground: publishPreparationInBackground,
+            publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
           });
           const setupReplayGuard = createSandboxSetupReplayGuard();
           try {
@@ -1274,7 +1244,7 @@ export async function bindLazySandboxProvisioner(
                       ? { priorSoftSetupFailures: [materialization.value] }
                       : {}),
                     onRuntimeEvent: async (event) => {
-                      await publishPreparation?.(
+                      await eventing.publish?.(
                         [{ type: event.type, payload: event.payload }],
                         true,
                       );
@@ -1323,8 +1293,6 @@ export async function bindLazySandboxProvisioner(
                 ),
               (measurement) => {
                 if (eventing.firstModelRequestPreparationRecorded) return;
-                // Background preparation does not hold up the model request.
-                if (preparation && !preparation.joined) return;
                 sandboxState.firstModelPreparationNestedSandboxMs +=
                   measurement.durationSeconds * 1_000;
                 sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
@@ -1354,15 +1322,7 @@ export async function bindLazySandboxProvisioner(
             }
             await toolResultSpill.materializeDeferred();
             throwIfTurnOperationCancelled(sandboxResumeSignal);
-            throwIfPreparationAbandoned();
           } catch (error) {
-            // The turn ended without needing this box: its setup was stopped
-            // on purpose, so this is not a failure to recover from.
-            if (preparationGate.abandoned) {
-              throw error instanceof TurnOperationCancelledError
-                ? error
-                : new TurnOperationCancelledError(error);
-            }
             // Nothing the model asked for has reached the box yet, and every
             // setup step above is idempotent, so an unanswered agent lets the
             // same turn retry instead of failing it, and a box that cannot
@@ -1398,7 +1358,7 @@ export async function bindLazySandboxProvisioner(
         onFailed: async (error, settlement) => {
           if (lazySandboxEstablishmentSettled) return;
           const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
-          await publishPreparation?.(
+          await eventing.publish?.(
             [
               {
                 type: "sandbox.operation.failed",
@@ -1432,36 +1392,6 @@ export async function bindLazySandboxProvisioner(
         },
       },
     );
-    const provisioner = sandboxState.turnSandboxProvisioner;
-    if (
-      shouldPrepareManagedSandboxInBackground({
-        establishPolicy,
-        machinePrimary,
-        groupBoxBackend,
-        hasRepositoryResources: turnResources.some((resource) => resource.kind === "repository"),
-      })
-    ) {
-      const sandboxGroupId = sandboxState.sandboxGroupId!;
-      preparation = createBackgroundSandboxPreparation({
-        provisioner,
-        homeBoxWarm: async () => {
-          const lease = await readLease(db, input.workspaceId, sandboxGroupId);
-          return Boolean(
-            lease?.instanceId && (lease.liveness === "warm" || lease.liveness === "draining"),
-          );
-        },
-        onBackgroundFailure: (error) => {
-          // The provisioner already published the failure; the first sandbox
-          // tool call receives the same result.
-          observability.warn("Background sandbox preparation failed", {
-            error: errorMessage(error),
-          });
-        },
-      });
-      sandboxState.backgroundSandboxPreparation = preparation;
-      sandboxState.turnSandboxProvisioner = preparation.provisioner;
-      preparation.start();
-    }
     sandboxState.lazyOwnedSandbox = wrapLazyTurnBoxWithRouting(
       {
         db,

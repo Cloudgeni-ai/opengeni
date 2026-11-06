@@ -371,7 +371,6 @@ type DiscoveredWorkspaceSkill = {
 export class WorkspaceSkillsCapability extends Capability {
   readonly type = "workspace-skills";
   private discovery?: Promise<WorkspaceSkillDiscovery>;
-  private indexDecision?: Promise<boolean>;
 
   constructor(
     private readonly searchPaths: readonly WorkspaceSkillSearchPath[],
@@ -484,7 +483,7 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override async instructions(): Promise<string | null> {
-    if (!(await this.indexLiveWorkspace())) return deferredRepositorySkillsNotice(this.searchPaths);
+    if (this.options.deferred) return deferredRepositorySkillsNotice(this.searchPaths);
     const { skills, warnings, unavailable, degraded } = await this.discover();
     const warningText = warnings.length
       ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
@@ -521,37 +520,24 @@ ${available}
 - Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
 - Do not assume a skill remains applicable on later turns; evaluate the current request again.${warningText}`;
   }
-
-  /**
-   * Whether this run indexes the live workspace. Asked once per capability
-   * (one agent build, so one turn): later runs of the same turn keep the same
-   * instructions even after background preparation finishes. A failing check
-   * defers too: the index must never be the reason the model waits.
-   */
-  private indexLiveWorkspace(): Promise<boolean> {
-    const indexReady = this.options.indexReady;
-    if (!indexReady) return Promise.resolve(true);
-    return (this.indexDecision ??= indexReady().then(
-      (ready) => ready,
-      () => false,
-    ));
-  }
 }
 
 export type WorkspaceSkillsOptions = Readonly<{
   /**
-   * Resolves true when the workspace can be indexed now, false while it is
-   * still being prepared in the background. Absent: always index.
+   * Do not index the workspace for this run: listing it would be the first
+   * workspace operation and would prepare the workspace before the model
+   * answers. The model is told where to look instead; the instructions never
+   * touch the session, and the reader still works for exact identifiers.
    */
-  indexReady?: () => Promise<boolean>;
+  deferred?: boolean;
 }>;
 
-/** The model is told where to look instead of waiting for the workspace. */
+/** Where to look, instead of an index that would prepare the workspace first. */
 function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSearchPath[]): string {
   const folders = searchPaths.map((searchPath) => searchPath.path).join(", ");
   return `## Repository skills
 
-The workspace is still being prepared in the background, so repository skills are not indexed for this run. Sandbox tools wait until it is ready. If the task involves the repository, check these folders for skills and read any relevant SKILL.md before acting: ${folders}.`;
+Repository skills are not listed here because the repository is prepared only when a tool first uses the workspace, so that first tool call can take longer. If the task involves the repository, check these folders for skills and read any relevant SKILL.md before acting: ${folders}.`;
 }
 
 /** Short, class-specific model notice for an index that could not be built. */

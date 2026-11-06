@@ -33,7 +33,6 @@ import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming"
 import type { RunAgentTurnResult } from "../types";
 import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
-import type { BackgroundSandboxPreparation } from "./background-sandbox-preparation";
 import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
 import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
@@ -144,8 +143,6 @@ export type SandboxRuntimeState = {
     durationSeconds: number;
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
-  /** Repository-turn preparation the first model request does not wait for. */
-  backgroundSandboxPreparation: BackgroundSandboxPreparation<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
   /** Physical resumeBoxForTurn promises still running for this attempt; the
    * finalizer joins them so a cancelled establish completes its own cleanup. */
@@ -372,7 +369,6 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxMs: 0,
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
-      backgroundSandboxPreparation: null,
       resumeManagedGroupBox: null,
       inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,

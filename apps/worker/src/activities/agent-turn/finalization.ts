@@ -183,15 +183,6 @@ async function finalizeTurnAttemptSteps(
     stopLeaseHeartbeat,
     turnCompletionMemoryCollector,
   } = deps;
-  // Box preparation that ran behind the model request and that nothing in
-  // this turn asked for stops with the turn. It publishes nothing further, and
-  // its setup commands are stopped by the sandbox writer drain below instead
-  // of holding the next turn behind setup this turn never needed.
-  if (sandboxState.backgroundSandboxPreparation?.abandonIfUnjoined()) {
-    observability.info("Background sandbox preparation stopped with its turn", {
-      attemptId: input.attemptId,
-    });
-  }
   // This is the logical ownership boundary. Abort before any fallible
   // housekeeping so a still-pending provider establish releases its private
   // holder/timer even when Temporal itself never delivered cancellation.

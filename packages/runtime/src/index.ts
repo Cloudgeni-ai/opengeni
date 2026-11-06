@@ -2762,12 +2762,12 @@ export type BuildAgentOptions = {
    */
   turnCancellationSignal?: AbortSignal;
   /**
-   * Decides, when the model's instructions are first built, whether repository
-   * skills are indexed from the live workspace (true) or left for the model to
-   * find (false) because the workspace is still being prepared in the
-   * background. Absent means the live workspace is always indexed.
+   * Leave repository skills unindexed for this turn and tell the model where
+   * to look instead. Set when indexing would be the operation that prepares
+   * the workspace (box, environment setup, clone) before the first model
+   * request; that preparation then starts when a tool first uses it.
    */
-  repositorySkillIndexReady?: () => Promise<boolean>;
+  deferRepositorySkillIndex?: boolean;
   /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
@@ -3961,9 +3961,7 @@ export function buildOpenGeniAgent(
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
-      ...(options.repositorySkillIndexReady
-        ? { repositorySkillIndexReady: options.repositorySkillIndexReady }
-        : {}),
+      ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -5476,7 +5474,7 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
-    repositorySkillIndexReady?: () => Promise<boolean>;
+    deferRepositorySkillIndex?: boolean;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5573,9 +5571,7 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
-        options.repositorySkillIndexReady
-          ? { indexReady: options.repositorySkillIndexReady }
-          : {},
+        options.deferRepositorySkillIndex ? { deferred: true } : {},
       ),
     );
   }

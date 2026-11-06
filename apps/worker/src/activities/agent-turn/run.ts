@@ -153,7 +153,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-import { assertTurnSandboxBackendServed } from "./sandbox-route";
+import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -1873,6 +1873,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
+            deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({
+              establishPolicy,
+              machinePrimary,
+              groupBoxBackend,
+              hasRepositoryResources: turnResources.some(
+                (resource) => resource.kind === "repository",
+              ),
+            }),
             postToolPreparationStartedAt,
             codexContext,
           });

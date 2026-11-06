@@ -176,10 +176,11 @@ export function sandboxEstablishPolicyDecision(input: {
 }
 
 /**
- * A repository turn prepares its managed box in the background (see
- * `shouldPrepareManagedSandboxInBackground`). Starting the managed-box
- * establish as soon as its inputs exist lets the provider create overlap
- * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
+ * A repository turn's box is likely to be used by a tool (see
+ * `shouldDeferRepositorySkillIndex`). Starting the managed-box establish as
+ * soon as its inputs exist lets the provider create overlap
+ * tools/history/agent and the model's first response; `get()` still owns
+ * clone/setup, at the first sandbox operation.
  *
  * Do not flip those turns to eager: that serializes create BEFORE tools and
  * increases first-token latency. Chat-only turns without a repository still
@@ -204,13 +205,14 @@ export function shouldPrefetchManagedSandbox(input: {
 }
 
 /**
- * A repository turn on a lazily provisioned managed box prepares that box
- * (create, environment setup, repository clone) in the background instead of
- * in front of the first model request. Only repository skill indexing used to
- * reach the box before the model ran; that index now waits only for a box that
- * was already warm. The first sandbox tool call joins the same preparation.
+ * On a lazily provisioned managed box, indexing a repository's skills would
+ * be the turn's first workspace operation: the first model request would wait
+ * for the box, its environment setup and the clone, even when the turn needs
+ * no tool. Such turns leave the index out and prepare the workspace at the
+ * first sandbox tool call instead. Connected Machines and eagerly established
+ * boxes are already prepared and keep the live index.
  */
-export function shouldPrepareManagedSandboxInBackground(input: {
+export function shouldDeferRepositorySkillIndex(input: {
   establishPolicy: "eager" | "on-demand";
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];

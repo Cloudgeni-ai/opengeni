@@ -217,18 +217,22 @@ describe("workspace repository skills", () => {
     expect(entries[0]?.description).toBe("Maintain Opengeni source code.");
   });
 
-  test("a workspace still being prepared is not touched before the model runs", async () => {
+  test("a deferred index never touches the workspace before the model runs", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
         "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
     });
     let operations = 0;
     const listDir = session.listDir!;
+    const readFile = session.readFile!;
     session.listDir = async (args) => {
       operations++;
       return listDir(args);
     };
-    let decisions = 0;
+    session.readFile = async (args) => {
+      operations++;
+      return readFile(args);
+    };
     const capability = workspaceSkills(
       [
         { path: ".agents/skills", source: "workspace .agents/skills" },
@@ -236,46 +240,51 @@ describe("workspace repository skills", () => {
       ],
       [],
       [],
-      {
-        indexReady: async () => {
-          decisions++;
-          return false;
-        },
-      },
+      { deferred: true },
     ).bind(session);
 
     const instructions = await capability.instructions();
     expect(operations).toBe(0);
     expect(instructions).toContain("## Repository skills");
-    expect(instructions).toContain("still being prepared");
+    expect(instructions).toContain("prepared only when a tool first uses the workspace");
     expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
     expect(instructions).not.toContain("repository:");
-    // Frozen for the turn: a later run keeps the same instructions.
-    expect(await capability.instructions()).toBe(instructions);
-    expect(decisions).toBe(1);
+
+    // The reader still discovers live when a tool asks for an exact skill.
+    const tool = capability
+      .tools()
+      .find(
+        (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+      );
+    if (tool?.type !== "function") throw new Error("missing reader");
+    const result = JSON.parse(
+      (await tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" }),
+      )) as string,
+    );
+    expect(result.files[0].content).toContain("# Guidance");
+    expect(operations).toBeGreaterThan(0);
   });
 
-  test("a failing readiness check defers instead of failing instructions", async () => {
+  test("agent capabilities keep a deferred repository index through SDK clone and bind", async () => {
     const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
-    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }], [], [], {
-      indexReady: async () => {
-        throw new Error("lease read failed");
-      },
-    }).bind(session);
-    expect(await capability.instructions()).toContain("still being prepared");
-  });
-
-  test("a ready workspace is indexed live", async () => {
-    const session = fakeSession({
-      ".agents/skills/opengeni/SKILL.md":
-        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
+    session.listDir = async () => {
+      throw new Error("the workspace must not be prepared before the model runs");
+    };
+    const capabilities = buildAgentCapabilities(testSettings(), [], {
+      ...repositoryWorkspaceSkillPathsOption([
+        { kind: "repository", uri: "https://github.com/example/app", ref: "main" },
+      ]),
+      deferRepositorySkillIndex: true,
+      structuredToolTransport: false,
     });
-    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }], [], [], {
-      indexReady: async () => true,
-    }).bind(session);
-    const instructions = await capability.instructions();
-    expect(instructions).toContain("repository:.agents/skills/opengeni/SKILL.md");
-    expect(instructions).not.toContain("still being prepared");
+    const capability = capabilities.find((entry) => entry.type === "workspace-skills")!;
+    const instructions = await capability
+      .clone()
+      .bind(session)
+      .instructions(new Manifest({ root: "/workspace" }));
+    expect(instructions).toContain("prepared only when a tool first uses the workspace");
   });
 
   test("advertised repository skills have an explicit live reader", async () => {
