@@ -111,6 +111,8 @@ test("setup never submits on page load and only sends the proof after explicit s
   const requests: any[][] = [];
   prepare(async (...args) => {
     requests.push(args);
+    // An operator-approved installer needs no Microsoft sign-in.
+    if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl: null };
     return {};
   });
   const view = await render(<TeamsConnectRoute />);
@@ -131,11 +133,13 @@ test("setup never submits on page load and only sends the proof after explicit s
         .querySelector("form")!
         .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
     );
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.slice(0, 3)).toEqual([
-      "PUT",
-      `/v1/workspaces/${ws}/integrations/teams/bot`,
-      { setupToken: "setup-proof" },
+    expect(requests.map((request) => request.slice(0, 3))).toEqual([
+      [
+        "POST",
+        `/v1/workspaces/${ws}/integrations/teams/bot/microsoft-sign-in`,
+        { setupToken: "setup-proof" },
+      ],
+      ["PUT", `/v1/workspaces/${ws}/integrations/teams/bot`, { setupToken: "setup-proof" }],
     ]);
     expect(window.location.hash).toBe("");
     expect(view.container.textContent).toContain("Teams is connected");
@@ -144,15 +148,72 @@ test("setup never submits on page load and only sends the proof after explicit s
       window.dispatchEvent(new Event("hashchange"));
     });
     expect(view.container.textContent).toContain("Connect Teams to Opengeni");
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     await act(async () =>
       view.container
         .querySelector("form")!
         .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
     );
-    expect(requests[1]?.[2]).toEqual({ setupToken: "replacement-proof" });
+    expect(requests[2]?.[2]).toEqual({ setupToken: "replacement-proof" });
+    expect(requests[3]?.[2]).toEqual({ setupToken: "replacement-proof" });
   } finally {
     await view.cleanup();
+  }
+});
+
+test("self-serve setup signs in with Microsoft, then finishes on return with the code", async () => {
+  window.history.replaceState(null, "", "/teams/connect#teams_setup=setup-proof");
+  const authorizationUrl = "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?x=1";
+  const requests: any[][] = [];
+  prepare(async (...args) => {
+    requests.push(args);
+    if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl };
+    return {};
+  });
+  const assigned: string[] = [];
+  const assign = window.location.assign;
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => assigned.push(url),
+  });
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () =>
+      view.container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(assigned).toEqual([authorizationUrl]);
+    expect(requests.map((request) => request[0])).toEqual(["POST"]);
+  } finally {
+    await view.cleanup();
+    Object.defineProperty(window.location, "assign", { configurable: true, value: assign });
+  }
+  // Microsoft returns to the setup page in the same tab.
+  window.history.replaceState(null, "", "/teams/connect?code=microsoft-code&state=signed-state");
+  const returned = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests.at(-1)?.slice(0, 3)).toEqual([
+      "PUT",
+      `/v1/workspaces/${ws}/integrations/teams/bot`,
+      { setupToken: "setup-proof", microsoft: { code: "microsoft-code", state: "signed-state" } },
+    ]);
+    expect(window.location.search).toBe("");
+    expect(returned.container.textContent).toContain("Teams is connected");
+  } finally {
+    await returned.cleanup();
+  }
+  // The code and the pending setup are single-use.
+  window.history.replaceState(null, "", "/teams/connect?code=microsoft-code&state=signed-state");
+  const reloaded = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests).toHaveLength(2);
+    expect(reloaded.container.textContent).toContain("get a new setup link");
+  } finally {
+    await reloaded.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
   }
 });
 
