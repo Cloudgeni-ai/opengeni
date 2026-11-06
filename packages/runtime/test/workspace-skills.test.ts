@@ -246,11 +246,13 @@ describe("workspace repository skills", () => {
     const instructions = await capability.instructions();
     expect(operations).toBe(0);
     expect(instructions).toContain("## Repository skills");
-    expect(instructions).toContain("prepared only when a tool first uses the workspace");
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
     expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
-    // No skill is listed, and the notice says how to read one.
-    expect(instructions).not.toContain("repository:.agents");
-    expect(instructions).toContain("repository_skill_read (repository:<skill folder>/SKILL.md)");
+    // No skill is listed, and the notice says how to name one: repository:
+    // and the SKILL.md path from the workspace root, shown with a real folder.
+    expect(instructions).not.toContain("repository:.agents/skills/opengeni");
+    expect(instructions).toContain("(paths from the workspace root)");
+    expect(instructions).toContain("such as repository:.agents/skills/<skill>/SKILL.md");
 
     // The reader still discovers live when a tool asks for an exact skill, and
     // its description names skills the way the notice does, not by an index.
@@ -260,8 +262,17 @@ describe("workspace repository skills", () => {
         (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
       );
     if (tool?.type !== "function") throw new Error("missing reader");
-    expect(tool.description).toContain("repository:<skill folder>/SKILL.md");
+    expect(tool.description).toContain(
+      "repository: followed by its SKILL.md path from the workspace root",
+    );
     expect(tool.description).not.toContain("Repository skills index");
+    // A wrong name is told the identifiers that exist.
+    const miss = (await tool.invoke(
+      undefined!,
+      JSON.stringify({ skill: "repository:.agents/skills/opengeni" }),
+    )) as string;
+    expect(miss).toContain("Repository Skill is not in this index");
+    expect(miss).toContain("repository:.agents/skills/opengeni/SKILL.md");
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
@@ -289,7 +300,7 @@ describe("workspace repository skills", () => {
       .clone()
       .bind(session)
       .instructions(new Manifest({ root: "/workspace" }));
-    expect(instructions).toContain("prepared only when a tool first uses the workspace");
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
   });
 
   test("advertised repository skills have an explicit live reader", async () => {

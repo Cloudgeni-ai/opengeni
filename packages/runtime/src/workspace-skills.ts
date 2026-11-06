@@ -428,7 +428,7 @@ export class WorkspaceSkillsCapability extends Capability {
       tool({
         name: "repository_skill_read",
         description: this.options.deferred
-          ? "Read current repository Skill files from the bound workspace. Name a skill as repository:<skill folder>/SKILL.md, for a skill folder in one of the folders the Repository skills section lists. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines."
+          ? "Read current repository Skill files from the bound workspace. Name a skill as repository: followed by its SKILL.md path from the workspace root, for a skill folder in one of the folders the Repository skills section lists. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines."
           : "Read current repository Skill files from the bound workspace. Use the exact repository: identifier from the Repository skills index. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.",
         parameters: z.object({
           skill: z.string().min(1),
@@ -447,7 +447,7 @@ export class WorkspaceSkillsCapability extends Capability {
           if (!skill)
             throw new SkillFileError(
               "missing_file",
-              "Repository Skill is not in this index. Use its exact repository: identifier.",
+              repositorySkillMissMessage((await this.discover()).skills),
             );
           const session = requireWorkspaceSkillSession(this._session);
           const root = skill.path.slice(0, -SKILL_FILE.length - 1);
@@ -536,9 +536,20 @@ export type WorkspaceSkillsOptions = Readonly<{
 /** Where to look, instead of an index that would prepare the workspace first. */
 function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSearchPath[]): string {
   const folders = searchPaths.map((searchPath) => searchPath.path).join(", ");
+  const example = searchPaths[0]?.path ?? ".agents/skills";
   return `## Repository skills
 
-Repository skills are not listed here: the repository is prepared only when a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders}, and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read (repository:<skill folder>/SKILL.md).`;
+Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. Its identifier is repository: followed by the SKILL.md path, such as repository:${example}/<skill>/SKILL.md.`;
+}
+
+const MISS_LISTED_SKILLS = 20;
+
+/** A miss names the identifiers that do exist, so the next call can use one. */
+function repositorySkillMissMessage(skills: readonly WorkspaceSkill[]): string {
+  if (!skills.length) return "Repository Skill is not in this index: no repository skills were found.";
+  const listed = skills.slice(0, MISS_LISTED_SKILLS).map(repositorySkillId).join(", ");
+  const more = skills.length > MISS_LISTED_SKILLS ? `, and ${skills.length - MISS_LISTED_SKILLS} more` : "";
+  return `Repository Skill is not in this index. Use one of these exact identifiers: ${listed}${more}.`;
 }
 
 /** Short, class-specific model notice for an index that could not be built. */

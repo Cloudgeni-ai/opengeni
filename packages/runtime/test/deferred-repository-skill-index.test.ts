@@ -101,7 +101,7 @@ describe("a repository chat on a lazily provisioned box", () => {
     const { text, uses } = await firstRequestInstructions(true);
     expect(uses).toEqual([]);
     expect(text).toContain("## Repository skills");
-    expect(text).toContain("prepared only when a tool first uses the workspace");
+    expect(text).toContain("may not be ready until a tool first uses the workspace");
   });
 
   test("the live index is what used the workspace before", async () => {
