@@ -555,7 +555,7 @@ function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSear
   const example = searchPaths[0]?.path ?? ".agents/skills";
   return `## Repository skills
 
-Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. Its identifier is repository: followed by the SKILL.md path, such as repository:${example}/<folder>/SKILL.md.`;
+Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. A skill's identifier is repository: followed by its SKILL.md path, such as repository:${example}/<folder>/SKILL.md.`;
 }
 
 const MISS_LISTED_SKILLS = 20;
@@ -573,8 +573,12 @@ function repositorySkillMissMessage(discovery: WorkspaceSkillDiscovery, deferred
           "; ",
         )}${warnings.length > MISS_LISTED_WARNINGS ? `; and ${warnings.length - MISS_LISTED_WARNINGS} more` : ""}.`
     : "";
+  // A deferred reader discovers again on the next call; a live index keeps
+  // what it found when the run started, so a retry there cannot succeed.
   if (unavailable)
-    return `Repository skills could not be read: the workspace is unreachable. Try again once workspace tools respond.${skipped}`;
+    return deferred
+      ? `Repository skills could not be read: the workspace is unreachable. Try again once workspace tools respond.${skipped}`
+      : `Repository skills could not be read: the workspace was unreachable when this run started. Once workspace tools respond, read the skill's SKILL.md with file tools.${skipped}`;
   if (degraded)
     return `Repository skills could not be read (${degradedRepositorySkillsCause(degraded)}). Read the skill's SKILL.md with file tools instead.${skipped}`;
   const missing = deferred

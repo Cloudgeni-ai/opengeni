@@ -320,6 +320,37 @@ describe("workspace repository skills", () => {
     expect(result.files[0].content).toContain("# Guidance");
   });
 
+  test("concurrent deferred reads share one discovery, and both retry after it fails", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let discoveries = 0;
+    let failing = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    session.listDir = async (args) => {
+      if (args.path === ".agents/skills") discoveries++;
+      if (failing) {
+        await gate;
+        throw new Error("transient provision failure");
+      }
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    const pending = [reader.invoke(undefined!, id), reader.invoke(undefined!, id)];
+    // Both reads are waiting on the same discovery before it fails.
+    await Bun.sleep(10);
+    release();
+    for (const output of await Promise.all(pending))
+      expect(String(output)).toContain("transient provision failure");
+    expect(discoveries).toBe(1);
+    failing = false;
+    const results = await Promise.all([reader.invoke(undefined!, id), reader.invoke(undefined!, id)]);
+    for (const output of results)
+      expect(JSON.parse(output as string).files[0].content).toContain("# Guidance");
+    expect(discoveries).toBe(2);
+  });
+
   test("a deferred miss names skipped skill folders and why", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
@@ -856,7 +887,10 @@ description: Prepare a safe release.
           undefined!,
           JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
         ),
-      ).toContain("Repository skills could not be read: the workspace is unreachable.");
+      ).toContain(
+        // This run keeps its index, so the text does not invite a retry.
+        "the workspace was unreachable when this run started. Once workspace tools respond, read the skill's SKILL.md with file tools.",
+      );
       expect(calls).toBe(2);
     });
   }
