@@ -13051,6 +13051,50 @@ export const githubInstallationRepositories = pgTable(
   }),
 );
 
+/**
+ * Repositories GitHub recently reported removed from a bound installation.
+ * GitHub's list can lag its webhook: a list read within the hold window never
+ * adds such a repository back (migration 1290).
+ */
+export const githubInstallationRepositoryRemovals = pgTable(
+  "github_installation_repository_removals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: integer("installation_id").notNull(),
+    repositoryId: bigint("repository_id", { mode: "number" }).notNull(),
+    removedAt: timestamp("removed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    repository: uniqueIndex("github_installation_repository_removals_repo_uq").on(
+      table.workspaceId,
+      table.installationId,
+      table.repositoryId,
+    ),
+    account: index("github_installation_repository_removals_account_idx").on(table.accountId),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "github_installation_repository_removals_workspace_account_fk",
+    }).onDelete("cascade"),
+    installationBinding: foreignKey({
+      columns: [table.workspaceId, table.installationId],
+      foreignColumns: [githubInstallations.workspaceId, githubInstallations.installationId],
+      name: "github_installation_repository_removals_installation_fk",
+    }).onDelete("cascade"),
+    ids: check(
+      "github_installation_repository_removals_ids_check",
+      sql`${table.installationId} > 0 AND ${table.repositoryId} > 0`,
+    ),
+  }),
+);
+
 export const usageEvents = pgTable(
   "usage_events",
   {

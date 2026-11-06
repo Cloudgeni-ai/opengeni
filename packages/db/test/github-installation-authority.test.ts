@@ -382,6 +382,12 @@ describe("GitHub installation allowlists follow GitHub", () => {
       await apply({ kind: "mirror", repositoryIds: [1, 2, 3], observedAt: at(3_000) }),
     ).toMatchObject({ applied: false, repositoryIds: [1, 3] });
     expect(await allowed([2])).toBe(false);
+    // GitHub's list can lag its webhook: a newer list that still names the
+    // removed repository does not add it back within the hold window.
+    expect(
+      await apply({ kind: "mirror", repositoryIds: [1, 2, 3], observedAt: at(3_500) }),
+    ).toMatchObject({ applied: true, changed: false, repositoryIds: [1, 3] });
+    expect(await allowed([2])).toBe(false);
     // A late removal still removes, without moving the fence back.
     await apply({ kind: "mirror", repositoryIds: [1, 3, 4], observedAt: at(5_000) });
     expect(
@@ -440,6 +446,13 @@ describe("GitHub installation allowlists follow GitHub", () => {
       authorityInput(workspace, { installationId, repositoryIds: [1, 2] }),
     );
     expect(Date.parse(rebound!.updatedAt)).toBe(removedAt.getTime() + 1);
+    // The proof was read before the removal: the re-bind does not restore the
+    // removed repository, and leaves new ones to the sync that follows it.
+    expect(rebound!.repositoryIds).toEqual([]);
+    const allowed = (ids: number[]) =>
+      areGitHubRepositoriesAllowedForWorkspace(db, workspace.workspaceId, installationId, ids);
+    expect(await allowed([1])).toBe(false);
+    expect(await allowed([2])).toBe(false);
     // A list read before the removal still cannot apply.
     expect(
       await applyGitHubInstallationRepositoryObservation(db, {
@@ -450,7 +463,7 @@ describe("GitHub installation allowlists follow GitHub", () => {
     ).toMatchObject({ applied: false });
   });
 
-  test("a binding without an owner proof never follows GitHub", async () => {
+  test("a binding without an owner proof never follows GitHub's lists, but its removals apply", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     await bindGitHubInstallationRepositories(db, {
@@ -480,8 +493,17 @@ describe("GitHub installation allowlists follow GitHub", () => {
         observation: { kind: "remove", repositoryIds: "all", observedAt: new Date() },
       }),
     ).toBeNull();
-    const [stored] = await listGitHubInstallationAccessForWorkspace(db, workspace.workspaceId);
+    let [stored] = await listGitHubInstallationAccessForWorkspace(db, workspace.workspaceId);
     expect(stored!.repositoryIds).toEqual([7821]);
+    expect(
+      await applyGitHubInstallationRepositoryObservation(db, {
+        ...workspace,
+        installationId: 7804,
+        observation: { kind: "remove", repositoryIds: [7821], observedAt: new Date() },
+      }),
+    ).toMatchObject({ applied: true, removed: [7821], repositoryIds: [] });
+    [stored] = await listGitHubInstallationAccessForWorkspace(db, workspace.workspaceId);
+    expect(stored!.repositoryIds).toEqual([]);
   });
 });
 

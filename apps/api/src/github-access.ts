@@ -33,10 +33,7 @@ import {
   createGitHubRepositoryCatalog,
   type GitHubRepositoryCatalog,
 } from "./github-repository-catalog";
-import {
-  requestGitHubInstallationRepositorySync,
-  withoutRecentlyRemovedGitHubRepositories,
-} from "./github-installation-sync";
+import { requestGitHubInstallationRepositorySync } from "./github-installation-sync";
 
 /** How often a passive read may ask GitHub about one installation by itself. */
 const GITHUB_BACKGROUND_SYNC_INTERVAL_MS = 60_000;
@@ -381,14 +378,7 @@ async function followGitHubRepositoryLists(
     listed.set(repository.installationId, ids);
   }
   for (const binding of bindings) {
-    const live = new Set(
-      withoutRecentlyRemovedGitHubRepositories(
-        deps,
-        binding.installationId,
-        listed.get(binding.installationId) ?? [],
-        new Date(observed.fetchedAt),
-      ),
-    );
+    const live = new Set(listed.get(binding.installationId) ?? []);
     const stored = allowed.get(binding.installationId) ?? new Set<number>();
     // GitHub also lists nothing for an installation suspended or removed
     // since the lifecycle check above; its webhook says which it was.

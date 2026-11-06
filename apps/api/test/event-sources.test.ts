@@ -23,12 +23,14 @@ import {
   markRecordingChunksUploaded,
   reserveRecordingChunks,
   createOrganizationApiKey,
+  applyGitHubInstallationRepositoryObservation,
   createWorkspace,
   deleteGitHubInstallationBinding,
   encryptEnvironmentValue,
   ensureExternalIdentity,
   eventOccurrenceProducerKey,
   getScheduledTask,
+  GITHUB_REMOVED_REPOSITORY_HOLD_MS,
   githubInstallationRouteKey,
   listGitHubInstallationAccessForWorkspace,
   markEventOccurrenceStarted,
@@ -2472,13 +2474,28 @@ describe("GitHub event sources", () => {
     // The resync the removal started read 602 again and did not restore it.
     expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601]);
 
-    // Shared again on GitHub: it is back at once.
+    // An "added" delivery may arrive out of order with the removal: within the
+    // hold window the repository stays out.
     await deliver({
       action: "added",
       repository_selection: "selected",
       repositories_added: [{ id: 602 }],
       repositories_removed: [],
     });
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601]);
+
+    // A list read after the window adds it back.
+    const result = await applyGitHubInstallationRepositoryObservation(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      installationId,
+      observation: {
+        kind: "mirror",
+        repositoryIds: [601, 602],
+        observedAt: new Date(Date.now() + GITHUB_REMOVED_REPOSITORY_HOLD_MS + 1_000),
+      },
+    });
+    expect(result?.added).toEqual([602]);
     expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601, 602]);
   });
 
@@ -2529,6 +2546,35 @@ describe("GitHub event sources", () => {
     );
     expect(response.status).toBe(200);
     expect(await f.json(response)).toEqual({ deliveries: 0 });
+  });
+
+  test("with event triggers off, a forged removal or uninstall changes nothing", async () => {
+    const installationId = installation();
+    const f = await githubFixture(fakeGitHubApp([]), { enabled: false });
+    await f.bind(installationId, [641, 642]);
+    const removal = JSON.stringify({
+      action: "removed",
+      installation: { id: installationId },
+      repository_selection: "selected",
+      repositories_added: [],
+      repositories_removed: [{ id: 642 }],
+    });
+    const uninstall = JSON.stringify({ action: "deleted", installation: { id: installationId } });
+    const forged = [
+      signed(removal, "installation_repositories", crypto.randomUUID(), "not-the-secret"),
+      signed(uninstall, "installation", crypto.randomUUID(), "not-the-secret"),
+    ];
+    const { "x-hub-signature-256": _signature, ...unsignedHeaders } = signed(
+      uninstall,
+      "installation",
+    ).headers;
+    const unsigned = { method: "POST", headers: unsignedHeaders, body: uninstall };
+    for (const request of [...forged, unsigned]) {
+      const response = await f.app.request("/v1/webhooks/github", request);
+      expect(response.status).toBe(401);
+    }
+    await settleGitHubInstallationRepositorySyncs();
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([641, 642]);
   });
 
   test("an event that removes a repository still reaches the workspace's GitHub source", async () => {

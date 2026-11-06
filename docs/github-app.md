@@ -120,11 +120,16 @@ installation follows GitHub's selection for it without another proof:
 
 - A repository added to the installation, including a new repository of an
   **All repositories** installation, becomes usable in each bound workspace.
-- A repository removed from the installation, deleted, or no longer listed
-  stops being usable at once. An uninstalled App empties every bound allowlist.
-- A workspace never holds a repository GitHub does not list for the
-  installation, and the binding's owner proof and audit fields are unchanged.
-  Bindings without an owner-authority receipt never follow GitHub.
+- A repository GitHub reports removed from the installation (an
+  `installation_repositories` removal or a `repository` deletion) stops being
+  usable as soon as the webhook arrives. An uninstalled App empties every
+  bound allowlist. A repository that leaves the installation without such a
+  webhook (for example one transferred out of an **All repositories**
+  installation) disappears at the next listing that reads GitHub.
+- Opengeni only adds repositories GitHub lists for the installation, and the
+  binding's owner proof and audit fields are unchanged. Only bindings with an
+  owner-authority receipt take GitHub's later lists; GitHub's removals narrow
+  every binding, including older ones without a receipt.
 
 GitHub reports changes in two ways, and either repairs the other:
 
@@ -133,12 +138,15 @@ GitHub reports changes in two ways, and either repairs the other:
    so new repositories of an **All repositories** installation arrive at once).
    They apply whenever `OPENGENI_GITHUB_WEBHOOK_SECRET` is set, even with event
    triggers off, and after the delivery reaches the workspaces' GitHub event
-   sources. Removals in the delivery apply before Opengeni answers, and the
-   removed repositories stay out of lists that API process reads in the next
-   five minutes (GitHub's list can lag its webhook). Additions are never taken
-   from the body: Opengeni reads the installation's complete list from GitHub,
-   one read per installation at a time. A new binding, or a re-bind, also
-   reads it once committed.
+   sources. Removals in the delivery apply before Opengeni answers. Each
+   binding stores a removal marker in the database, so a list read within
+   five minutes of the removal, on any API replica, does not add the
+   repository back (GitHub's list can lag its webhook); a repository shared
+   again shows up after that window. Additions are never taken from the body:
+   Opengeni reads the installation's complete list from GitHub, one read per
+   installation and API replica at a time. A new binding, or a re-bind, also
+   reads it once committed; a re-bind keeps out repositories removed since
+   its proof was read.
 2. Every repository listing (the composer menu, the GitHub settings page, the
    `github_repositories_list` tool) already reads GitHub's list through the
    short-lived per-process cache. A list GitHub just returned is applied to the
@@ -158,7 +166,7 @@ bind stamps its proof time; the fence is sound while clock skew between API
 replicas and the database stays far below GitHub's webhook latency, as it does
 with ordinary NTP time sync.
 Cross-workspace lookup by installation uses the read-only installation lane of
-migration 1282 (`opengeni.github_installation_id`); each write runs in its
+migration 1290 (`opengeni.github_installation_id`); each write runs in its
 workspace's own RLS scope. Suspension needs no allowlist change: the live
 lifecycle check makes the binding unusable while the installation is
 suspended, and the allowlist is kept for when it returns.
