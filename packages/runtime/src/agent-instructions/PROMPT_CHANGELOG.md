@@ -1,5 +1,17 @@
 # Modular prompt changelog
 
+The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
+chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
+keeps its meaning: precedence over the default behavior, no extra authority,
+and a later developer message may replace it. Nothing binds a chat to an agent
+yet, so no live prompt changes. The developer-message texts and their legacy
+parse forms are unchanged.
+
+```text
+- The agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.
++ These take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.
+```
+
 Three pieces of text now follow state the session actually has. Compositions
 with the state keep their bytes (`modular-parity-lock.test.ts`; its
 "none-with-features" cases now include workspace connectors, a setup-card

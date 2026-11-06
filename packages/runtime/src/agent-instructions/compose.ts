@@ -116,7 +116,7 @@ export const SESSION_INSTRUCTIONS_PREAMBLE =
  * nothing beyond what the rules above already allow.
  */
 export const AGENT_INSTRUCTIONS_PREAMBLE =
-  "# Instructions for this agent\n\nThe agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.\n\n";
+  "# Instructions for this agent\n\nThese take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.\n\n";
 
 /** The agent instructions layer text, or undefined when there are none. */
 export function agentInstructionsLayerContent(
