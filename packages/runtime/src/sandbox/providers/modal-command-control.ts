@@ -23,6 +23,7 @@ import { classifyProviderSandboxFailure } from "../provider-errors";
 import { commandControlPlane } from "./modal-command-client";
 import {
   MODAL_ROUTER_READ_MAX_WAIT_MS,
+  MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
@@ -44,6 +45,19 @@ type RouterEntry = {
 type RouterLookup = { controller: AbortController; waiters: number; settled: boolean };
 /** A post-EOF exit re-poll may finish this long after the read deadline. */
 const REPOLL_GRACE_MS = 250;
+/** Allowance past a read's own window, granted by the outer read budget. */
+const READ_SETTLEMENT_ALLOWANCE_MS = 5_000;
+/**
+ * Once the router reports an exit, the rest of that command's output is finite
+ * and the router delivers it at its own latency. Finish reading it this long
+ * past the read's deadline (inside the settlement allowance) instead of
+ * returning the exited command as running.
+ */
+export const MODAL_EXITED_TAIL_READ_MS = 4_000;
+/** Exited commands whose tail read ended without EOF, most often because a
+ * background child still holds the pipe. Later reads skip the tail wait. */
+const OPEN_TAIL_MEMORY = 256;
+type RawStreamPage = { bytes: Buffer; eof: boolean };
 type ControlObservation = { command: ModalRouterProviderCommand; output: string };
 type SupervisionControlResult = {
   state: "idle" | "running" | "quiescent";
@@ -129,6 +143,7 @@ export class ModalCommandControl {
    * Start. A failed Start retires the entry so the next one re-resolves. */
   private readonly taskIds = new Map<string, Promise<string>>();
   private readonly controlHelpers = new Map<string, ControlHelper>();
+  private readonly openTails = new Set<string>();
   private readonly client: ReturnType<typeof commandControlPlane>;
   private closed = false;
 
@@ -807,7 +822,7 @@ export class ModalCommandControl {
     const deadline = performance.now() + Math.max(1, waitMs);
     const timeout = setTimeout(
       () => budget.abort(new Error("Modal command read budget exhausted")),
-      Math.max(1, waitMs) + 5_000,
+      Math.max(1, waitMs) + READ_SETTLEMENT_ALLOWANCE_MS,
     );
     let lastError: unknown;
     try {
@@ -944,16 +959,88 @@ export class ModalCommandControl {
         let exit = (results[2] as PromiseFulfilledResult<number | null>).value;
         if (exit === null && stdout.eof && stderr.eof)
           exit = await this.pollAfterEof(router, command, cancellation.signal, deadline);
-        return collectModalRawOutputPage(
-          command,
-          { stdout, stderr },
-          { source: "router_poll", code: exit },
-        );
+        let streams = { stdout, stderr };
+        if (exit !== null && !(stdout.eof && stderr.eof))
+          streams = await this.readExitedTail(
+            router,
+            command,
+            streams,
+            cancellation.signal,
+            deadline,
+          );
+        return collectModalRawOutputPage(command, streams, { source: "router_poll", code: exit });
       });
     } finally {
       clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
     }
+  }
+
+  /** The router answered the exit poll, but a stream's remaining bytes or EOF
+   * had not arrived by the read deadline. The caller's short slice is a
+   * polling cadence, not a bound on the router's own delivery latency: when
+   * that latency exceeds the slice, every page of an exited command would end
+   * before EOF and report it as running until a later, longer read happened to
+   * catch the tail. Finish the now finite tail within the settlement
+   * allowance instead. Bytes stay bounded by one page; a fault or a tail that
+   * stays open (a background child holding the pipe) keeps what was read and
+   * leaves the exit for a later page, and only caller cancellation
+   * propagates. A tail that stayed open is remembered so later reads of that
+   * command do not wait for it again. */
+  private async readExitedTail(
+    router: ModalCommandRouterWire,
+    command: ModalRouterProviderCommand,
+    streams: { stdout: RawStreamPage; stderr: RawStreamPage },
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<{ stdout: RawStreamPage; stderr: RawStreamPage }> {
+    const key = `${command.taskId}:${command.execId}`;
+    if (this.openTails.has(key)) return streams;
+    const until = deadline + MODAL_EXITED_TAIL_READ_MS;
+    const drain = async (stream: "stdout" | "stderr"): Promise<RawStreamPage> => {
+      const page = streams[stream];
+      if (page.eof) return page;
+      const chunks = [page.bytes];
+      let length = page.bytes.length;
+      let eof = false;
+      while (length < MODAL_ROUTER_READ_PAGE_BYTES) {
+        signal.throwIfAborted();
+        const wait = Math.min(MODAL_ROUTER_READ_MAX_WAIT_MS, Math.floor(until - performance.now()));
+        if (wait <= 0) break;
+        let next: RawStreamPage;
+        try {
+          next = await router.read(
+            command,
+            stream,
+            command.streams[stream].byteOffset + length,
+            wait,
+            signal,
+          );
+        } catch {
+          signal.throwIfAborted();
+          break;
+        }
+        const part = next.bytes.subarray(0, MODAL_ROUTER_READ_PAGE_BYTES - length);
+        chunks.push(part);
+        length += part.length;
+        if (next.eof && part.length === next.bytes.length) {
+          eof = true;
+          break;
+        }
+        if (next.bytes.length === 0) break;
+      }
+      return { bytes: Buffer.concat(chunks, length), eof };
+    };
+    const [stdout, stderr] = await Promise.all([drain("stdout"), drain("stderr")]);
+    // A full page is ordinary progress through a long tail, not an open pipe.
+    if (
+      [stdout, stderr].some((page) => !page.eof && page.bytes.length < MODAL_ROUTER_READ_PAGE_BYTES)
+    ) {
+      if (this.openTails.size >= OPEN_TAIL_MEMORY)
+        this.openTails.delete(this.openTails.values().next().value!);
+      this.openTails.add(key);
+    }
+    return { stdout, stderr };
   }
 
   /** TaskExecPoll is a point-in-time status, issued concurrently with stream

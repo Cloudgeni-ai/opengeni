@@ -3894,6 +3894,14 @@ blocker and preventing idle drain and capture until the provider deadline.
 The durable record keeps at most 16 MiB per stream plus the stream's final
 page, with explicit markers where output was skipped; later bytes are still
 read, and live output returned to the agent is not capped.
+A turn reads a foreground command in short slices (250 ms), but the router can
+deliver the last bytes and EOF later than that, for example on a busy box
+shared by several sessions. Once the exit poll reports an exit, a read keeps
+reading the remaining output for up to four seconds past its slice, within one
+page, so the command returns at its exit with its output instead of reporting
+"running" until the reaper's slower reads settle it. A command whose pipe stays
+open after exit (a background child still writing to it) pays this wait once;
+later reads of it return at their slice.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
