@@ -566,7 +566,7 @@ exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
 omits the run's line, work and answer, unless the run asked the person
 something or holds another item that waits on them.
 
-Since migration 1281 an agent message whose text is the no-reply token, and a
+Since migration 1289 an agent message whose text is the no-reply token, and a
 `turn.completed` whose `output` is (without a recorded `reply`), is not
 attention: the event cursor trigger leaves `last_meaningful_sequence` where it
 was, so a quiet turn sets no unread mark. Its turn opens no inbox reply item
