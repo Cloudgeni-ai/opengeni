@@ -3814,7 +3814,12 @@ binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
-`OPENGENI_RUNTIME_BUILD_ID`. The signed agent embeds matching browserd, the
+`OPENGENI_RUNTIME_BUILD_ID`. The release jobs install the build and signing
+tools at the exact versions pinned in `scripts/install-agent-build-tools.sh`,
+run `scripts/bake-agent.sh build` without the signing key, and give
+`OPENGENI_AGENT_MINISIGN_KEY` only to a final `scripts/bake-agent.sh sign`
+step, which runs nothing but the pinned signer over the already-built,
+checksummed assets. The signed agent embeds matching browserd, the
 pinned browser driver, and the native computer helper; adjacent helpers from
 another download are not its default runtime. The image gate requires all four
 assets plus checksums and signatures for each architecture. The API serves a

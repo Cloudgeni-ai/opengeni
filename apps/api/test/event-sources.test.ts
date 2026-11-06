@@ -1445,11 +1445,17 @@ describe("MCP event sources", () => {
     });
     app = f.app;
     const started: EventOccurrenceToStart[] = [];
-    const pump = async () => {
+    /** One pass of the subscription pump; `now` is the time its steps see. */
+    const pump = async (now?: Date) => {
       await shared.admin`update mcp_event_subscriptions
         set next_action_at = now() - interval '1 second', lease_until = null
         where workspace_id = ${f.workspace.id}`;
-      await pumpDueMcpEventSubscriptions({ db: db.db, settings: f.settings, bus: f.bus });
+      await pumpDueMcpEventSubscriptions({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        ...(now ? { now: () => now } : {}),
+      });
     };
     const dispatch = async () => {
       await makeDue(f.workspace.id);
@@ -1463,7 +1469,8 @@ describe("MCP event sources", () => {
       });
     };
     const subscriptions = async () =>
-      await shared.admin`select mode, cursor, gap_pending, server_subscription_id, failures
+      await shared.admin`select mode, poll_reason, poll_reason_at, route_id, cursor, gap_pending,
+          server_subscription_id, failures
         from mcp_event_subscriptions where workspace_id = ${f.workspace.id}`;
     const createSource = async () => {
       const created = await f.app.request(f.sources, {
@@ -1959,16 +1966,124 @@ describe("MCP event sources", () => {
       data: { reason: "dns" },
     });
     await f.pump();
-    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", failures: 0 }]);
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "poll", poll_reason: "callback_failed", failures: 0 },
+    ]);
     await f.fake.emit("ticket.closed", { title: "Polled instead" });
     await f.pump();
-    // Polling sticks: the webhook is not tried again.
+    // Polling sticks for a day: the webhook is not tried again meanwhile.
     expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
     expect(f.fake.requestsFor("events/poll")).toHaveLength(2);
     expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
       "Polled instead",
     ]);
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("active");
+  });
+
+  test("a polled stream moves to webhook once its server offers it, losing and repeating no event", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    await f.pump();
+    // The type offers only polling, so it polls for want of a webhook.
+    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", poll_reason: "not_offered" }]);
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Polled" }, { eventId: "t-1" });
+    await f.pump();
+
+    // The server starts offering webhook delivery while an event waits to be polled.
+    await f.fake.emit(
+      "ticket.created",
+      { queue: "billing", title: "Replayed" },
+      { eventId: "t-2" },
+    );
+    f.fake.setEventTypes([{ ...TICKET_CREATED, delivery: ["poll", "webhook"] }, TICKET_CLOSED]);
+    const [polling] = await f.subscriptions();
+    const polls = f.fake.requestsFor("events/poll").length;
+    // The step reads the event types again an hour on and sees the webhook.
+    await f.pump(new Date(Date.now() + 61 * 60_000));
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "webhook", poll_reason: null, poll_reason_at: null, failures: 0 },
+    ]);
+    // It subscribed from its last poll cursor and stopped polling.
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
+    expect(f.fake.requestsFor("events/subscribe")[0]?.params).toMatchObject({
+      cursor: polling!.cursor,
+    });
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(polls);
+
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Pushed" }, { eventId: "t-3" });
+    // The server sends an event that already arrived by poll; it is stored once.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Polled" }, { eventId: "t-1" });
+    await f.pump();
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(polls);
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Pushed",
+      "Replayed",
+      "Polled",
+    ]);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toContain(automation.id);
+  });
+
+  test("a failed move to webhook keeps the stream polling, and it tries again a day later", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    await f.automation(source.id, "ticket.created", { queue: "billing" });
+    await f.pump();
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Before" }, { eventId: "t-1" });
+    await f.pump();
+
+    f.fake.setEventTypes([{ ...TICKET_CREATED, delivery: ["poll", "webhook"] }, TICKET_CLOSED]);
+    await f.fake.emit(
+      "ticket.created",
+      { queue: "billing", title: "Meanwhile" },
+      { eventId: "t-2" },
+    );
+    f.fake.failNext("events/subscribe", {
+      code: -32_027,
+      message: "Callback endpoint error",
+      data: { reason: "dns" },
+    });
+    const failedAt = new Date(Date.now() + 61 * 60_000);
+    await f.pump(failedAt);
+    // The step polled instead, so the waiting event still arrived.
+    const [failed] = await f.subscriptions();
+    expect(failed).toMatchObject({
+      mode: "poll",
+      poll_reason: "callback_failed",
+      route_id: null,
+      failures: 0,
+    });
+    expect(new Date(failed!.poll_reason_at).getTime()).toBe(failedAt.getTime());
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Meanwhile",
+      "Before",
+    ]);
+
+    // For a day it keeps polling and doesn't try the webhook.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Still polled" });
+    await f.pump(new Date(failedAt.getTime() + 23 * 60 * 60_000));
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "poll", poll_reason: "callback_failed" },
+    ]);
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Still polled",
+      "Meanwhile",
+      "Before",
+    ]);
+
+    // A day after the failure it tries again, from the cursor polling reached.
+    const [polling] = await f.subscriptions();
+    await f.pump(new Date(failedAt.getTime() + 24 * 60 * 60_000 + 1_000));
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(2);
+    expect(f.fake.requestsFor("events/subscribe")[1]?.params).toMatchObject({
+      cursor: polling!.cursor,
+    });
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "webhook", poll_reason: null, failures: 0 },
+    ]);
+    expect(await f.events(source.id)).toHaveLength(3);
   });
 
   test("a server built for ChatGPT's earlier draft works over webhooks", async () => {
