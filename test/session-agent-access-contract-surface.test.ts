@@ -77,6 +77,7 @@ const MIDDLEWARE_EXEMPT_OPERATIONS = {
 const OUT_OF_MODULE_HANDLER_MARKERS = [
   "requireSessionAuthorization(",
   "requireAgentSessionAccess(",
+  "sessionReadDenied(",
 ];
 
 /**
