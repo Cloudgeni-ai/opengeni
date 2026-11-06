@@ -7,8 +7,6 @@ import { z } from "zod";
 const callbacks = new Set([
   "/v1/integrations/slack/callback",
   "/v1/integrations/fiken/callback",
-  "/v1/integrations/atlassian/callback",
-  "/v1/integrations/google-drive/callback",
   "/v1/integrations/oauth/callback",
   "/v1/integrations/provider-oauth/callback",
   "/v1/integrations/github-personal/oauth/callback",

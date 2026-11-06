@@ -65,7 +65,6 @@ import {
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
-import { startAtlassianOAuth } from "../integrations/atlassian";
 import { startSlackBotInstall } from "../integrations/slack-install";
 import { startPersonalGitHubOAuth } from "../integrations/personal-github";
 import { socialOAuthClientFor, startSocialOAuth } from "../integrations/social-oauth";
@@ -75,12 +74,8 @@ import {
 } from "../integrations/github-app-connect";
 import { githubAppMissingSettings } from "@opengeni/github";
 import { isPersonalGitHubConnection } from "@opengeni/contracts/personal-github";
-import { startGoogleDriveOAuth } from "../integrations/google-drive";
-import {
-  GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  googleDriveScopesAllowCapability,
-} from "@opengeni/contracts/google-drive";
-import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
+import { GOOGLE_DRIVE_CREDENTIAL_ROLE } from "@opengeni/contracts/google-drive";
+import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   curatedOAuthReadiness,
   startApiIntegrationProviderOAuth,
@@ -584,28 +579,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
-        if (connection.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE)
-          return [
-            ConnectAccount.parse({
-              id: connection.id,
-              version: connection.version,
-              providerId: googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
-                ? "google-drive-publish"
-                : "google-drive-knowledge",
-              label: String(
-                connection.metadata.googleEmail ??
-                  connection.metadata.googleDisplayName ??
-                  "Google Drive",
-              ),
-              ownership: "personal",
-              status:
-                connection.status === "revoked"
-                  ? "disabled"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
-            }),
-          ];
+        // Retired native Google Drive source connections are not offered.
+        if (connection.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE) return [];
         if (isFikenConnection(connection))
           return [
             ConnectAccount.parse({
@@ -1511,8 +1486,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
-    if (input.providerId === "atlassian")
-      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
+    // The native Atlassian and Google Drive source connectors were removed with
+    // Integration Knowledge sync; their provider ids stay accepted until the
+    // next SDK major. Atlassian and Google Drive connect through MCP.
+    if (["atlassian", "google-drive-knowledge", "google-drive-publish"].includes(input.providerId))
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     if (
       ["gmail", "google-drive", "google-calendar"].includes(input.providerId) &&
       input.ownership !== "personal"
@@ -1849,9 +1827,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "mcp-headers",
             "fiken-token",
             "fiken-oauth",
-            "atlassian",
-            "google-drive-knowledge",
-            "google-drive-publish",
             "slack-bot",
             "github-personal",
           ].includes(input.providerId)
@@ -2012,12 +1987,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         )
           throw new HTTPException(422, { message: "This connector is workspace-owned" });
         if (
-          [
-            "atlassian",
-            "google-drive-knowledge",
-            "google-drive-publish",
-            "github-personal",
-          ].includes(input.providerId) &&
+          ["github-personal"].includes(input.providerId) &&
           (input.ownership !== "personal" || !isPersonalConnectionOwnerPrincipal(authorization))
         )
           throw new HTTPException(422, { message: "This connector requires personal ownership" });
@@ -2043,76 +2013,46 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     ...(input.reconnectAccountId ? { connectionId: input.reconnectAccountId } : {}),
                   },
                 )
-              : ["google-drive-knowledge", "google-drive-publish"].includes(input.providerId)
-                ? await startGoogleDriveOAuth(
+              : input.providerId === "fiken-oauth"
+                ? await startFikenOAuth(
                     { ...deps, db: tx },
                     {
                       ...scope,
+                      personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
                       requestUrl: c.req.url,
                       connectAttemptId: id,
+                      payload: input.reconnectAccountId
+                        ? { connectionId: input.reconnectAccountId }
+                        : {},
+                    },
+                  )
+                : await startApiIntegrationProviderOAuth(
+                    { ...deps, db: tx },
+                    {
+                      ...scope,
+                      personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+                      ...(continuation ? { externalContinuation: continuation } : {}),
+                      connectAttemptId: id,
+                      // Lets the callback finish setup with exactly this request's rights.
+                      finishPermissions: curatedConnectFinishPermissions((permission) =>
+                        permission === "capabilities:manage"
+                          ? hasIntegrationAdminPermission(authorization.grant)
+                          : hasPermission(
+                              authorization.grant.permissions,
+                              permission,
+                              authorization.grant.permissionMode,
+                            ),
+                      ),
+                      requestUrl: c.req.url,
                       payload: {
-                        capability:
-                          input.providerId === "google-drive-publish" ? "publish" : "source_read",
+                        definitionId: input.providerId,
+                        ownership: input.ownership,
                         ...(input.reconnectAccountId
                           ? { connectionId: input.reconnectAccountId }
                           : {}),
                       },
                     },
-                  )
-                : input.providerId === "atlassian"
-                  ? await startAtlassianOAuth(
-                      { ...deps, db: tx },
-                      {
-                        ...scope,
-                        requestUrl: c.req.url,
-                        connectAttemptId: id,
-                        payload: input.reconnectAccountId
-                          ? { connectionId: input.reconnectAccountId }
-                          : {},
-                      },
-                    )
-                  : input.providerId === "fiken-oauth"
-                    ? await startFikenOAuth(
-                        { ...deps, db: tx },
-                        {
-                          ...scope,
-                          personalOwnershipAllowed:
-                            isPersonalConnectionOwnerPrincipal(authorization),
-                          requestUrl: c.req.url,
-                          connectAttemptId: id,
-                          payload: input.reconnectAccountId
-                            ? { connectionId: input.reconnectAccountId }
-                            : {},
-                        },
-                      )
-                    : await startApiIntegrationProviderOAuth(
-                        { ...deps, db: tx },
-                        {
-                          ...scope,
-                          personalOwnershipAllowed:
-                            isPersonalConnectionOwnerPrincipal(authorization),
-                          ...(continuation ? { externalContinuation: continuation } : {}),
-                          connectAttemptId: id,
-                          // Lets the callback finish setup with exactly this request's rights.
-                          finishPermissions: curatedConnectFinishPermissions((permission) =>
-                            permission === "capabilities:manage"
-                              ? hasIntegrationAdminPermission(authorization.grant)
-                              : hasPermission(
-                                  authorization.grant.permissions,
-                                  permission,
-                                  authorization.grant.permissionMode,
-                                ),
-                          ),
-                          requestUrl: c.req.url,
-                          payload: {
-                            definitionId: input.providerId,
-                            ownership: input.ownership,
-                            ...(input.reconnectAccountId
-                              ? { connectionId: input.reconnectAccountId }
-                              : {}),
-                          },
-                        },
-                      );
+                  );
         if (!started.authorizationUrl)
           throw new HTTPException(502, { message: "provider did not return an authorization URL" });
         const reconnect = input.reconnectAccountId
@@ -2132,24 +2072,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             state: "requires_user_action",
             credentialsCommitted: false,
             integrationInstalled: false,
-            completionRequirement: [
-              "github-personal",
-              "slack-bot",
-              "fiken-oauth",
-              "atlassian",
-              "google-drive-knowledge",
-              "google-drive-publish",
-            ].includes(input.providerId)
+            completionRequirement: ["github-personal", "slack-bot", "fiken-oauth"].includes(
+              input.providerId,
+            )
               ? "connection"
               : "integration",
-            ...([
-              "github-personal",
-              "slack-bot",
-              "fiken-oauth",
-              "atlassian",
-              "google-drive-knowledge",
-              "google-drive-publish",
-            ].includes(input.providerId)
+            ...(["github-personal", "slack-bot", "fiken-oauth"].includes(input.providerId)
               ? {}
               : {
                   installationTarget: input.installationTarget ?? {

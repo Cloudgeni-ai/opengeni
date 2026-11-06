@@ -37,7 +37,6 @@ export default defineConfig({
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",
     "src/google-drive.ts",
-    "src/google-drive-native-retirement.ts",
     "src/knowledge-source-sync-retirement.ts",
     "src/github-repository.ts",
     "src/github-repository-contracts.ts",

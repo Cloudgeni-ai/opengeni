@@ -48,10 +48,6 @@ import {
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
   AtlassianConnectionMetadata,
-  AtlassianDisconnectRequest,
-  AtlassianLifecycleActionRequest,
-  AtlassianOAuthStartRequest,
-  AtlassianOAuthStartResponse,
 } from "@opengeni/contracts/atlassian";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
@@ -85,10 +81,6 @@ import {
 import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GoogleDriveConnectionMetadata,
-  GoogleDriveDisconnectRequest,
-  GoogleDriveLifecycleActionRequest,
-  GoogleDriveOAuthStartRequest,
-  GoogleDriveOAuthStartResponse,
 } from "@opengeni/contracts/google-drive";
 import {
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -135,17 +127,10 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
-import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
+import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import {
-  completeGoogleDriveOAuthCallback,
-  disconnectGoogleDrive,
-  startGoogleDriveOAuth,
-  transitionGoogleDriveLifecycle,
-} from "../integrations/google-drive";
 import {
   completeApiIntegrationProviderOAuth,
   isApiIntegrationProviderOAuthState,
@@ -157,12 +142,6 @@ import {
 } from "../integrations/microsoft-admin-consent";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
-import {
-  completeAtlassianOAuthCallback,
-  disconnectAtlassian,
-  startAtlassianOAuth,
-  transitionAtlassianLifecycle,
-} from "../integrations/atlassian";
 import {
   completeMcpOAuthCallback,
   integrationBaseUrl,
@@ -829,167 +808,37 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.redirect(result.redirectTo, 302);
   });
 
-  app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {
-    assertIntegrationsEnabled();
-    const workspaceId = c.req.param("workspaceId");
-    // The Drive connector writes only a personal Connection, so only a managed
-    // human may start it.
-    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
-    assertPersonalConnectionOwnerPrincipal(access, "Google Drive");
-    requireLegacyOAuthActor(access);
-    const grant = access.grant;
-    const parsed = parseRequestBody(GoogleDriveOAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid Google Drive install request",
-    });
-    return c.json(
-      GoogleDriveOAuthStartResponse.parse(
-        await startGoogleDriveOAuth(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          requestUrl: c.req.url,
-          payload: parsed,
-        }),
-      ),
-    );
-  });
-
-  app.post("/v1/workspaces/:workspaceId/connections/atlassian/install", async (c) => {
-    assertIntegrationsEnabled();
-    const workspaceId = c.req.param("workspaceId");
-    // The Atlassian connector writes only a personal Connection, so only a
-    // managed human may start it.
-    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
-    assertPersonalConnectionOwnerPrincipal(access, "Atlassian");
-    requireLegacyOAuthActor(access);
-    const grant = access.grant;
-    const parsed = parseRequestBody(AtlassianOAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid Atlassian install request",
-    });
-    return c.json(
-      AtlassianOAuthStartResponse.parse(
-        await startAtlassianOAuth(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          requestUrl: c.req.url,
-          payload: parsed,
-        }),
-      ),
-    );
-  });
-
-  app.get("/v1/integrations/atlassian/callback", async (c) => {
-    assertIntegrationsEnabled();
-    const result = await completeAtlassianOAuthCallback(deps, {
-      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
-      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
-      requestUrl: c.req.url,
-    });
-    if (result.exactReturn)
-      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
-    return c.redirect(result.redirectTo, 302);
-  });
-
+  // Native Atlassian and Google Drive source routes stay in the public SDK
+  // until its next major; Knowledge sync was removed, so they answer 410.
   app.patch(
     "/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/lifecycle",
     async (c) => {
       assertIntegrationsEnabled();
-      const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = parseRequestBody(AtlassianLifecycleActionRequest, await c.req.json(), {
-        status: 400,
-        message: "invalid Atlassian lifecycle request",
-      });
-      return c.json(
-        ConnectionResponse.parse({
-          connection: await transitionAtlassianLifecycle(deps, {
-            workspaceId,
-            subjectId: grant.subjectId,
-            connectionId: c.req.param("connectionId"),
-            payload: parsed,
-          }),
-        }),
-      );
+      await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:write");
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     },
   );
-
-  app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
-    assertIntegrationsEnabled();
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    // Knowledge sync from integrations is retired; the route stays for old clients.
-    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-  });
-
-  app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
-    assertIntegrationsEnabled();
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
-    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-  });
-
-  app.get("/v1/integrations/google-drive/callback", async (c) => {
-    assertIntegrationsEnabled();
-    const input = {
-      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
-      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
-      ...(c.req.query("picked_file_ids") ? { pickedFileIds: c.req.query("picked_file_ids") } : {}),
-      requestUrl: c.req.url,
-    };
-    const result = await completeGoogleDriveOAuthCallback(deps, input);
-    if (result.exactReturn)
-      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
-    return c.redirect(result.redirectTo, 302);
-  });
 
   app.patch(
     "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/lifecycle",
     async (c) => {
       assertIntegrationsEnabled();
-      const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = parseRequestBody(GoogleDriveLifecycleActionRequest, await c.req.json(), {
-        status: 400,
-        message: "invalid Google Drive lifecycle request",
-      });
-      return c.json(
-        ConnectionResponse.parse({
-          connection: await transitionGoogleDriveLifecycle(deps, {
-            workspaceId,
-            subjectId: grant.subjectId,
-            connectionId: c.req.param("connectionId"),
-            payload: parsed,
-          }),
-        }),
-      );
+      await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:write");
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     },
   );
 
-  app.get(
-    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
-    async (c) => {
-      assertIntegrationsEnabled();
-      const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "connections:read");
-      // Knowledge sync from integrations is retired; the route stays for old clients.
-      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
-    },
-  );
+  app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
+    assertIntegrationsEnabled();
+    await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:read");
+    throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
+  });
 
-  app.post(
-    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
-    async (c) => {
-      assertIntegrationsEnabled();
-      const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
-      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
-    },
-  );
+  app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
+    assertIntegrationsEnabled();
+    await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:write");
+    throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
+  });
 
   app.get("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1145,7 +994,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
             throw new HTTPException(422, {
-              message: "use the dedicated Google Drive reconnect or source-selection flow",
+              message: "this retired Google Drive connection can only be disconnected",
             });
           }
           if (existing?.metadata.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
@@ -1156,7 +1005,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
             throw new HTTPException(422, {
-              message: "use the dedicated Atlassian reconnect or source-selection flow",
+              message: "this retired Atlassian connection can only be disconnected",
             });
           }
           if (existing && isPersonalGitHubConnection(existing)) {
@@ -1420,36 +1269,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
     }
-    const isGoogleDrive =
-      existing.subjectId === grant.subjectId &&
-      existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
-      existing.kind === "oauth2" &&
-      GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
-    const isAtlassian =
-      existing.subjectId === grant.subjectId &&
-      existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
-      existing.kind === "oauth2" &&
-      AtlassianConnectionMetadata.safeParse(existing.metadata).success;
     const workspaceProviderKind = workspaceProviderApiKeyConnectionKind(existing);
     const disconnectPayload = await c.req.json().catch(() => null);
-    const googleDriveDisconnect = isGoogleDrive
-      ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
-      : null;
-    if (googleDriveDisconnect && !googleDriveDisconnect.success) {
-      throw requestValidationError(googleDriveDisconnect.error, "body", {
-        status: 400,
-        message: "invalid Google Drive disconnect request",
-      });
-    }
-    const atlassianDisconnect = isAtlassian
-      ? AtlassianDisconnectRequest.safeParse(disconnectPayload)
-      : null;
-    if (atlassianDisconnect && !atlassianDisconnect.success) {
-      throw requestValidationError(atlassianDisconnect.error, "body", {
-        status: 400,
-        message: "invalid Atlassian disconnect request",
-      });
-    }
     const personalGitHubDisconnect = isPersonalGitHub
       ? PersonalGitHubDisconnectRequest.safeParse(disconnectPayload)
       : null;
@@ -1459,70 +1280,48 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid personal GitHub disconnect request",
       });
     }
-    if (
-      existing.status === "revoked" &&
-      !isGoogleDrive &&
-      !isAtlassian &&
-      !isPersonalGitHub &&
-      !workspaceProviderKind
-    ) {
+    if (existing.status === "revoked" && !isPersonalGitHub && !workspaceProviderKind) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
     // Each writer records the disconnect in its own transaction.
     const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
-    const connection = isGoogleDrive
-      ? await disconnectGoogleDrive(deps, {
+    const connection = isPersonalGitHub
+      ? await disconnectPersonalGitHub(deps, {
           workspaceId,
           subjectId: grant.subjectId,
-          connection: existing,
-          payload: googleDriveDisconnect!.data,
+          connectionId,
+          payload: personalGitHubDisconnect!.data,
           audit,
         })
-      : isAtlassian
-        ? await disconnectAtlassian(deps, {
+      : isOpenGeniSlackBotConnection(existing)
+        ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+            accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
-            connection: existing,
-            payload: atlassianDisconnect!.data,
+            connectionId,
+            expectedVersion: existing.version,
+            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+            slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
             audit,
           })
-        : isPersonalGitHub
-          ? await disconnectPersonalGitHub(deps, {
+        : workspaceProviderKind
+          ? await revokeWorkspaceProviderApiKeyConnections(db, workspaceProviderKind, {
+              accountId: grant.accountId,
               workspaceId,
-              subjectId: grant.subjectId,
               connectionId,
-              payload: personalGitHubDisconnect!.data,
+              expectedVersion: existing.version,
+              updatedBySubjectId: grant.subjectId,
               audit,
             })
-          : isOpenGeniSlackBotConnection(existing)
-            ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-                accountId: grant.accountId,
-                workspaceId,
-                subjectId: grant.subjectId,
-                connectionId,
-                expectedVersion: existing.version,
-                credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-                credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-                slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
-                audit,
-              })
-            : workspaceProviderKind
-              ? await revokeWorkspaceProviderApiKeyConnections(db, workspaceProviderKind, {
-                  accountId: grant.accountId,
-                  workspaceId,
-                  connectionId,
-                  expectedVersion: existing.version,
-                  updatedBySubjectId: grant.subjectId,
-                  audit,
-                })
-              : await revokeConnection(
-                  db,
-                  workspaceId,
-                  connectionId,
-                  grant.subjectId,
-                  existing.version,
-                  { audit },
-                );
+          : await revokeConnection(
+              db,
+              workspaceId,
+              connectionId,
+              grant.subjectId,
+              existing.version,
+              { audit },
+            );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
@@ -1920,7 +1719,7 @@ function assertNotDirectGoogleDriveOAuth(
     GoogleDriveConnectionMetadata.safeParse(metadata).success
   ) {
     throw new HTTPException(422, {
-      message: "Google Drive credentials must use the dedicated OAuth connection flow",
+      message: "Google Drive connects through its MCP connection",
     });
   }
 }
@@ -1935,7 +1734,7 @@ function assertNotDirectAtlassianOAuth(
     AtlassianConnectionMetadata.safeParse(metadata).success
   ) {
     throw new HTTPException(422, {
-      message: "Atlassian credentials must use the dedicated OAuth connection flow",
+      message: "Atlassian connects through its hosted MCP server",
     });
   }
 }

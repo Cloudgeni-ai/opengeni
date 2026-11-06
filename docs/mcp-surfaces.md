@@ -912,8 +912,8 @@ credential ports are separate authorities and are not covered by migration 0264.
 Activated Atlassian is omitted from direct turns, and scheduled tasks reject
 activated MCP, Google Drive, and Atlassian selections, until their dedicated
 acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack and
-social surfaces remain explicit successors (scheduled knowledge-source sync is
-retired);
+social surfaces remain explicit successors (scheduled knowledge-source sync was
+removed);
 workspace and `legacy_user` connections remain on their bounded compatibility
 path rather than being silently upgraded.
 

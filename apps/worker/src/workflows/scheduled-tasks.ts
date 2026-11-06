@@ -65,8 +65,7 @@ export async function scheduledTaskFireWorkflow(
   // manual histories is retired. Remove this call once no open run carries
   // the non-deprecated marker.
   deprecatePatch("scheduled-task-manual-initiator-v1");
-  // Dispatch settles every outcome itself. Retired Knowledge-source tasks
-  // return a blocked result, so no source-sync child workflow is started.
+  // Dispatch settles every outcome itself.
   await scheduledTaskActivity.dispatchScheduledTaskRun(
     scheduledTaskDispatchInput(input, workflowInfo().workflowId),
   );

@@ -3806,6 +3806,7 @@ export type ScheduledTaskAgentConfig = {
   pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Skip an occurrence instead of running without an unusable pinned account. */
   pinnedAccountsRequired?: true | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -3850,6 +3851,7 @@ export type ScopedKnowledgeScope =
   | { kind: "workspace"; workspaceId: string; subjectId: null }
   | { kind: "personal"; workspaceId: string | null; subjectId: string };
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncLimits = {
   maxItems: number;
   maxBytes: number;
@@ -8172,6 +8174,7 @@ export type ScheduledTaskAgentConfigInput = {
    * omitted runs follow the workspace's agent defaults.
    */
   agent?: AgentConfigRequest | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
@@ -8280,6 +8283,7 @@ export type CreateAgentScheduledTaskRequest = {
   creatorLocked?: boolean | undefined;
 };
 
+/** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
@@ -8351,6 +8355,7 @@ export type UpdateScheduledTaskRequest = {
 
 export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncRunSummary = {
   phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
   scanned: number;

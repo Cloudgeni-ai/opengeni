@@ -62,7 +62,6 @@ import {
   type ModelCompactionPolicy,
   Entitlements,
   EntitlementsMode,
-  KnowledgeSourceSyncLimits,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   McpServerConnectionRef as PublicMcpServerConnectionRef,
@@ -162,8 +161,6 @@ export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
 export const SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS = 120_000;
 export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
-export const GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS = 60_000;
-export const GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS = 60_000;
 // Admission waits are observational: successful capture/teardown returns as
 // soon as the DB fence clears. This ceiling only covers the unhealthy path. It
 // allows one scheduled inventory and one complete successor claim without
@@ -813,49 +810,9 @@ const SettingsSchema = z.object({
     .trim()
     .regex(/^\/[a-z0-9_-]{1,31}$/u)
     .default("/opengeni"),
-  googleDriveClientId: z.string().optional(),
-  googleDriveClientSecret: z.string().optional(),
-  googleDriveSyncMaxItems: z.coerce.number().int().positive().max(10_000).default(500),
-  googleDriveSyncMaxBytes: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(5_000_000_000)
-    .default(500_000_000),
-  googleDriveSyncMaxFileBytes: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(5_000_000_000)
-    .default(100_000_000),
-  googleDriveSyncMaxProviderRequests: z.coerce.number().int().positive().max(10_000).default(1_000),
-  googleDriveSyncMaxElapsedSeconds: z.coerce.number().int().positive().max(3_600).default(300),
-  googleDriveSyncMaxFailureDetails: z.coerce.number().int().positive().max(100).default(25),
-  googleDriveProviderRequestTimeoutMs: z.coerce
-    .number()
-    .int()
-    .min(1_000)
-    .max(GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS)
-    .default(30_000),
-  googleDriveProviderRetryAttempts: z.coerce.number().int().min(1).max(5).default(3),
-  googleDriveProviderRetryInitialDelayMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(30_000)
-    .default(250),
-  googleDriveProviderRetryMaxDelayMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS)
-    .default(5_000),
-  googleDriveProviderRetryBudgetMs: z.coerce.number().int().positive().max(120_000).default(15_000),
   fikenClientId: z.string().optional(),
   fikenClientSecret: z.string().optional(),
   googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
-  atlassianClientId: z.string().optional(),
-  atlassianClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -2593,42 +2550,6 @@ export function getArtifactMaterializerSettings(
 
 export type McpServerConfig = Settings["mcpServers"][number];
 
-export type GoogleDriveProviderRetryOptions = {
-  requestTimeoutMs: number;
-  attempts: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  budgetMs: number;
-};
-
-/** Freeze one validated provider-neutral budget into every newly created or
- * updated Google Drive knowledge-source schedule. Existing schedules retain
- * their persisted limits until an authorized source save updates them. */
-export function configuredGoogleDriveSyncLimits(settings: Settings) {
-  return KnowledgeSourceSyncLimits.parse({
-    maxItems: settings.googleDriveSyncMaxItems,
-    maxBytes: settings.googleDriveSyncMaxBytes,
-    maxFileBytes: settings.googleDriveSyncMaxFileBytes,
-    maxProviderRequests: settings.googleDriveSyncMaxProviderRequests,
-    maxElapsedSeconds: settings.googleDriveSyncMaxElapsedSeconds,
-    maxFailureDetails: settings.googleDriveSyncMaxFailureDetails,
-  });
-}
-
-/** Bounded in-activity retry policy for individual Google Drive requests. The
- * durable sync workflow remains authoritative after this local budget ends. */
-export function googleDriveProviderRetryOptions(
-  settings: Settings,
-): GoogleDriveProviderRetryOptions {
-  return {
-    requestTimeoutMs: settings.googleDriveProviderRequestTimeoutMs,
-    attempts: settings.googleDriveProviderRetryAttempts,
-    initialDelayMs: settings.googleDriveProviderRetryInitialDelayMs,
-    maxDelayMs: settings.googleDriveProviderRetryMaxDelayMs,
-    budgetMs: settings.googleDriveProviderRetryBudgetMs,
-  };
-}
-
 /** Return only a credential-free HTTP(S) origin. Reject path, user-info, query,
  * and fragment input instead of reflecting it into callbacks or evidence. */
 export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string | null {
@@ -2650,11 +2571,6 @@ export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string
     return null;
   }
   return parsed.origin;
-}
-
-export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
-  const origin = canonicalPublicOrigin(publicBaseUrl);
-  return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
 }
 
 /** Exact callback registered on the environment-specific personal GitHub OAuth App. */
@@ -6022,32 +5938,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     slackAccessMode: optional("OPENGENI_SLACK_ACCESS_MODE"),
     slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
-    googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
-    googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
-    googleDriveSyncMaxItems: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS"),
-    googleDriveSyncMaxBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES"),
-    googleDriveSyncMaxFileBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES"),
-    googleDriveSyncMaxProviderRequests: optional(
-      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS",
-    ),
-    googleDriveSyncMaxElapsedSeconds: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS"),
-    googleDriveSyncMaxFailureDetails: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS"),
-    googleDriveProviderRequestTimeoutMs: optional(
-      "OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS",
-    ),
-    googleDriveProviderRetryAttempts: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS"),
-    googleDriveProviderRetryInitialDelayMs: optional(
-      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS",
-    ),
-    googleDriveProviderRetryMaxDelayMs: optional(
-      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
-    ),
-    googleDriveProviderRetryBudgetMs: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS"),
     fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
     fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
-    atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
-    atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
@@ -12650,11 +12543,6 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
-  if (Boolean(settings.googleDriveClientId) !== Boolean(settings.googleDriveClientSecret)) {
-    throw new Error(
-      "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
-    );
-  }
   if (
     Boolean(settings.githubPersonalOauthClientId) !==
     Boolean(settings.githubPersonalOauthClientSecret)
@@ -12725,78 +12613,6 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Fiken OAuth integration is configured",
-      );
-    }
-  }
-  if (settings.googleDriveClientId) {
-    if (!settings.integrationsEnabled) {
-      throw new Error(
-        "OPENGENI_INTEGRATIONS_ENABLED=true is required when the Google Drive integration is configured",
-      );
-    }
-    if (!settings.publicBaseUrl) {
-      throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
-      );
-    }
-    if (!googleDriveOAuthCallbackUrl(settings.publicBaseUrl)) {
-      throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when the Google Drive integration is configured",
-      );
-    }
-    if (
-      !settings.publicBaseUrl.startsWith("https://") &&
-      !["local", "test"].includes(settings.environment)
-    ) {
-      throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL must use https when the Google Drive integration is configured outside local/test",
-      );
-    }
-    if (!settings.integrationsStateSecret) {
-      throw new Error(
-        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
-      );
-    }
-  }
-  if (settings.googleDriveSyncMaxFileBytes > settings.googleDriveSyncMaxBytes) {
-    throw new Error(
-      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES must not exceed OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES",
-    );
-  }
-  if (
-    settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryMaxDelayMs
-  ) {
-    throw new Error(
-      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
-    );
-  }
-  if (settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryBudgetMs) {
-    throw new Error(
-      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS",
-    );
-  }
-  if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
-    throw new Error(
-      "OPENGENI_ATLASSIAN_CLIENT_ID and OPENGENI_ATLASSIAN_CLIENT_SECRET must be configured together",
-    );
-  }
-  if (settings.atlassianClientId) {
-    if (!settings.publicBaseUrl) {
-      throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL is required when the Atlassian integration is configured",
-      );
-    }
-    if (
-      !settings.publicBaseUrl.startsWith("https://") &&
-      !["local", "test"].includes(settings.environment)
-    ) {
-      throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL must use https when the Atlassian integration is configured outside local/test",
-      );
-    }
-    if (!settings.integrationsStateSecret) {
-      throw new Error(
-        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Atlassian integration is configured",
       );
     }
   }

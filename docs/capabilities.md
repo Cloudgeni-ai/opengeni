@@ -514,17 +514,14 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet. The one
-exception is a retired Knowledge Source facet: a configured binding keeps its
-historical definition when a new revision no longer publishes it.
+and reject an upgrade that would silently remove a configured facet.
 
 The Knowledge Source facet kind (`knowledge_source`, for example the former
-Drive and OneDrive `drive-content` facets) is retired. No integration publishes
-it, configuring one returns 410, and its browse and source routes return 410.
-Existing bindings stay listed as retired with Remove only; unconfigured ones are
-hidden. Stored selections, imported records and run history remain available
-as evidence. New recurring Drive or OneDrive work uses an ordinary agent
-schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive and OneDrive `drive-content` facets) was removed with integration
+Knowledge sync; migration 1275 deleted its stored definitions and bindings. The
+kind stays in the public SDK enum until the next major, and the facet browse
+and source routes answer 410. Recurring Drive or OneDrive work uses an ordinary
+agent schedule with the account's tools. See [Google Drive](google-drive.md) for the
 Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be
@@ -818,12 +815,11 @@ surfaces of their own.
 **Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
 Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
 events, post as Opengeni, or hold their own identity in the other product.
-Previous Google Drive and Atlassian connections retain historical cleanup
-surfaces; their native source setup is retired. Every integration's page renders through the same component
+Google Drive and Atlassian connect only through their hosted MCP servers; the
+removed native source connections are not shown. Every integration's page renders through the same component
 (`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
-`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
 `use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
 `use-sharepoint-integration.tsx`) maps

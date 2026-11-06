@@ -538,8 +538,6 @@ describe("API Integration provider OAuth", () => {
     for (const suffix of [
       "connections/slack-bot/install",
       "connections/fiken/oauth/start",
-      "connections/google-drive/install",
-      "connections/atlassian/install",
       "connections/github/oauth/start",
       "connections/example/github/reconnect",
     ]) {

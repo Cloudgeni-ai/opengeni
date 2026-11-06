@@ -107,32 +107,25 @@ function mcpOperationAuthorityTables(includeWorkspaceMembership = false): Runtim
 }
 
 function googleDriveAuthorityTables(): RuntimeTablePosture[] {
-  return [
-    "connections",
-    "files",
-    "google_drive_object_acl_evidence",
-    "google_drive_object_acl_principals",
-    "knowledge_document_versions",
-    "knowledge_providers",
-    "knowledge_source_sync_index_obligations",
-    "knowledge_source_sync_states",
-  ].map((name) => ({
-    name,
-    owner: "opengeni_migrator",
-    rlsEnabled: false,
-    rlsForced: false,
-    rlsActive: false,
-    policyCount: 0,
-    artifactOutboxDispatcherPolicy: false,
-    artifactMaterializerPolicy: false,
-    select: false,
-    insert: false,
-    update: false,
-    delete: false,
-    truncate: false,
-    references: false,
-    trigger: false,
-  }));
+  return ["connections", "files", "knowledge_document_versions", "knowledge_providers"].map(
+    (name) => ({
+      name,
+      owner: "opengeni_migrator",
+      rlsEnabled: false,
+      rlsForced: false,
+      rlsActive: false,
+      policyCount: 0,
+      artifactOutboxDispatcherPolicy: false,
+      artifactMaterializerPolicy: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+      truncate: false,
+      references: false,
+      trigger: false,
+    }),
+  );
 }
 
 function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {

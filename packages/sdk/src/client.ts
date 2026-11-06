@@ -7359,7 +7359,7 @@ export class OpenGeniClient {
     };
   }
 
-  /** Browse first-party Atlassian sources without choosing or starting sync. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7370,6 +7370,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -7382,6 +7383,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async setAtlassianLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -10563,7 +10565,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Browse source metadata through one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -10584,7 +10586,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -11246,6 +11248,11 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /**
+   * @deprecated The native Google Drive source connection was removed with
+   * Integration Knowledge sync. Use `deleteConnection`; this method goes in
+   * the next SDK major.
+   */
   async disconnectGoogleDriveConnection(
     workspaceId: string,
     connectionId: string,
@@ -11259,6 +11266,7 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async transitionGoogleDriveLifecycle(
     workspaceId: string,
     connectionId: string,

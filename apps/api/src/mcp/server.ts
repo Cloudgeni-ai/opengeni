@@ -2524,10 +2524,11 @@ export function buildOpenGeniMcpServer(
           );
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
-        const agentRunUsageIdempotencyKey =
-          task.action.kind === "agent_turn"
-            ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
-            : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
+        const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+          grant.workspaceId,
+          task.id,
+          triggerToken,
+        );
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
         await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
