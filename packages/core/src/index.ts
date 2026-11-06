@@ -225,7 +225,12 @@ export {
 } from "./billing-origin";
 export { turnAppActionGrant } from "./app-action-turn-grant";
 
-export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
+export {
+  agentPrivateFileOwnerSubjectId,
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./domain/file-owner";
 
 export { prepareKnowledgeFile } from "./domain/knowledge-files";
 export { prepareKnowledgeSave } from "./domain/knowledge-preparation";

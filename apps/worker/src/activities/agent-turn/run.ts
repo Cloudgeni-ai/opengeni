@@ -1,6 +1,7 @@
-import { unboundGitHubRepositoryResources } from "@opengeni/core";
+import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
+  getSlackPrivateSessionOwnerSubjectId,
   canSpendSubscriptionCoreCodexExtraCredits,
   reserveSubscriptionCoreCodexRequest,
   settleSubscriptionCoreCodexRequest,
@@ -633,7 +634,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             provider: turnExecutionPolicy.providerId,
             backend: turn.sandboxBackend,
           },
-          () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+          () =>
+            Promise.all([
+              getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+              getSlackPrivateSessionOwnerSubjectId(db, input.workspaceId, input.sessionId),
+            ]),
         ),
       ]);
       // Observe both operations before failure handling; the policy write
@@ -641,7 +646,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (learningResult.status === "rejected") throw learningResult.reason;
       if (attachmentResult.status === "rejected") throw attachmentResult.reason;
       const learning = learningResult.value;
-      const attachmentAuthority = attachmentResult.value;
+      const [attachmentAuthority, slackPrivateOwnerSubjectId] = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
@@ -663,8 +668,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // same root-scoped audience as native attempt-authorized tool reads.
           agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
-          privateFileOwnerSubjectId:
-            learning.defaultScope === "personal" ? learning.subjectId : null,
+          // A private Slack session is its owner's, like an Only-me session.
+          privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+            learning,
+            slackPrivateOwnerSubjectId,
+          ),
         },
         async () => {
           if (!leases.codex.holderId) {
