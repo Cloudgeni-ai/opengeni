@@ -22,6 +22,8 @@ import {
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   replayAppliedSessionFork,
+  sessionAgentRequiresPrivateChat,
+  SessionAgentRequiresPrivateChatError,
   sessionHasLiveAttempts,
   SessionTenancyAccessError,
   SessionTenancyInvalidRequestError,
@@ -297,6 +299,12 @@ export async function updateManagedHumanSessionVisibility(
     operation: "session.visibility.write",
     surface: authorizationSurface,
   });
+  if (
+    request.visibility === "workspace" &&
+    (await sessionAgentRequiresPrivateChat(deps.db, { workspaceId, sessionId }))
+  ) {
+    throw new SessionAgentRequiresPrivateChatError();
+  }
   if (request.visibility === "private") {
     await requireDeploymentAllowsOnlyMe(deps, {
       workspaceId,

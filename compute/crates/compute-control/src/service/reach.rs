@@ -170,6 +170,10 @@ impl<S: Store> Service<S> {
                 epoch,
             };
             let (next, now) = self.settle(id, asked, &answered).await?;
+            // It exists nowhere, and its row is gone: not asked again.
+            if next == Next::Forget {
+                return Err(Failure::NotFound);
+            }
             if let Next::AdoptHere(_) = next {
                 // Given back to the same host under a new epoch, to adopt
                 // the archive there; elsewhere if it refuses outright.

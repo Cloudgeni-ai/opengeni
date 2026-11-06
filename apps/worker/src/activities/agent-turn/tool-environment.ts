@@ -99,6 +99,11 @@ import {
   createWebSearchBilling,
   pendingSessionRepositoryCleanup,
   withoutRemovedRepositories,
+  connectionReconnectDay,
+  connectionsNeedingReconnectFor,
+  listConnectionsNeedingReconnect,
+  postConnectionNeedsReauthNotice,
+  type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
@@ -128,6 +133,7 @@ import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } 
 import {
   unavailableMcpConnectorReasonText,
   unavailableMcpOperationalContext,
+  type McpConnectorAccountNeedingReconnect,
   type UnavailableMcpConnector,
 } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
@@ -415,6 +421,40 @@ export function unavailableMcpConnectorsForPolicy(input: {
   };
 }
 
+/**
+ * Pair this chat's connection-backed connectors with the accounts of theirs
+ * that stopped working. Matched by provider: a connector's address can be a
+ * bridge to the same provider rather than the endpoint it was connected for.
+ */
+export function mcpAccountsNeedingReconnect(
+  servers: readonly {
+    id: string;
+    name?: string | undefined;
+    connectionRef?: { providerDomain: string } | undefined;
+  }[],
+  inventory: readonly ConnectionNeedingReconnect[],
+): McpConnectorAccountNeedingReconnect[] {
+  const accounts: McpConnectorAccountNeedingReconnect[] = [];
+  const seen = new Set<string>();
+  for (const server of servers) {
+    if (!server.connectionRef) continue;
+    for (const connection of connectionsNeedingReconnectFor(inventory, {
+      providerDomain: server.connectionRef.providerDomain,
+    })) {
+      if (seen.has(connection.connectionId)) continue;
+      seen.add(connection.connectionId);
+      accounts.push({
+        connector: { id: server.id, name: server.name },
+        account: connection.account,
+        ownership: connection.ownership,
+        stoppedWorkingOn: connectionReconnectDay(connection.since),
+        reconnectHere: connection.addedHere,
+      });
+    }
+  }
+  return accounts;
+}
+
 export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const {
     input,
@@ -469,9 +509,31 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...deps.unavailableMcpConnectors.connectors,
     ...accountRoutes.unavailable,
   ];
+  // Accounts of this chat's connectors that were connected but stopped
+  // working, so the model can say so plainly and offer to reconnect them.
+  const connectionBackedServers = canonicalRunSettings.mcpServers.filter(
+    (server) => server.connectionRef,
+  );
+  const needsReconnect =
+    connectionBackedServers.length === 0
+      ? []
+      : mcpAccountsNeedingReconnect(
+          connectionBackedServers,
+          await listConnectionsNeedingReconnect(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: turn.initiatingHumanSubjectId ?? null,
+          }).catch((error: unknown) => {
+            observability.warn("Connections needing reconnect were not read", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return [];
+          }),
+        );
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     connectors: unavailableMcpConnectors,
     omittedCount: deps.unavailableMcpConnectors.omittedCount,
+    needsReconnect,
   });
   // Tool discovery reports the same connectors beside runtime failures.
   const preparationUnavailableMcpServers = new Map(
@@ -497,6 +559,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     turn,
+    // The owner hears once, on their inbox and phone, that it stopped working.
+    onConnectionNeedsReauth: (broken) =>
+      postConnectionNeedsReauthNotice({ db, bus, observability }, broken),
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();

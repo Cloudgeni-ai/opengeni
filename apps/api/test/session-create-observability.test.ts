@@ -86,7 +86,8 @@ function productionRoute() {
       withEffectivePolicy, measureSessionCreatePhase,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
-      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources } = ports;
+      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
+      defaultAgentChatVisibility } = ports;
     ${code}
     return handler;
   `,
@@ -155,6 +156,8 @@ function routeFixture() {
     siteViewConversationContext: async () => {
       throw new Error("Unexpected Site view context");
     },
+    // No agent in this payload: the Only me agent default changes nothing.
+    defaultAgentChatVisibility: async () => {},
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;

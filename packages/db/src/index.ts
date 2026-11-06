@@ -37,6 +37,8 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./session-resource-removal";
 import { admitRequestedRepositories } from "./session-resource-removal";
+export * from "./github-gateway";
+import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
@@ -86,6 +88,7 @@ import {
 } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
 export * from "./slack-agents";
+export * from "./agents";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
@@ -30259,6 +30262,11 @@ export type ConnectorActionInvocation = {
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
   /**
+   * Ask even when the policy allows: destructive or unrecognised requests
+   * (the personal GitHub gateway). An explicit Block still blocks.
+   */
+  minimumDecision?: "ask";
+  /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation). It is admitted once, from
    * the rejected round of a request that asked.
@@ -31372,8 +31380,8 @@ export async function beginConnectorActionExecution(
   if (!normalized.connectionId) {
     return { allowed: true, managed: false };
   }
-  const resolveFrom = (snapshot: ConnectorActionPolicySnapshotEntry[]) =>
-    resolveConnectorActionPolicy(snapshot, {
+  const resolveFrom = (snapshot: ConnectorActionPolicySnapshotEntry[]) => {
+    const resolved = resolveConnectorActionPolicy(snapshot, {
       connectionId: normalized.connectionId!,
       serverId: normalized.serverId,
       toolName: normalized.toolName,
@@ -31382,6 +31390,20 @@ export async function beginConnectorActionExecution(
         ? { defaultDecision: normalized.defaultDecision }
         : {}),
     });
+    if (
+      invocation.minimumDecision === "ask" &&
+      (!resolved.managed || connectorActionPolicyDecision(resolved) === "allow")
+    ) {
+      return {
+        managed: true,
+        source: "default",
+        entry: null,
+        decision: "ask",
+        actionName: normalized.toolName,
+      } as const satisfies ResolvedConnectorActionPolicy;
+    }
+    return resolved;
+  };
   return await runConnectorActionLedgerTransaction(
     db,
     {
@@ -31928,6 +31950,12 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  /**
+   * The agent the chat is started with. It runs on the agent's current
+   * revision (`agent_prompt_revision`); the agent must be one of this
+   * workspace's that the creating person can see.
+   */
+  agent?: { id: string } | null;
   /**
    * No person will see or answer a question until the task ends. Recorded only
    * under the reserved metadata key, which a caller-supplied value never sets.
@@ -32624,6 +32652,51 @@ async function siteHomeChannelId(
   return home?.channelId ?? null;
 }
 
+/** The agent a new chat starts with is gone, or not one its creator can see. */
+export class SessionAgentNotFoundError extends Error {
+  readonly name = "SessionAgentNotFoundError";
+  constructor(
+    readonly agentId: string,
+    readonly reason: "not_found" | "child_chat" | "requires_private_chat" = "not_found",
+  ) {
+    super(
+      reason === "child_chat"
+        ? "A chat started from another chat follows its parent; start the agent in a new chat."
+        : reason === "requires_private_chat"
+          ? "This agent is Only me, so its chats are Only me too. Start this chat as Only me."
+          : "That agent is not available in this workspace.",
+    );
+  }
+}
+
+/**
+ * The agent and revision a new chat binds to, read in the chat's workspace.
+ * Only me agents count only for their owner, in their Only me chats; a child
+ * session never binds.
+ */
+async function sessionAgentBinding(
+  tx: Database,
+  input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId" | "visibility">,
+  agentId: string,
+): Promise<{ agentId: string; revision: number }> {
+  if (input.parentSessionId) throw new SessionAgentNotFoundError(agentId, "child_chat");
+  const subjectId = input.subjectId ?? null;
+  const [row] = await rawRows<{ id: string; current_revision: number; visibility: string }>(
+    tx,
+    sql`select a.id::text as id, a.current_revision, a.visibility
+      from agents a
+      where a.workspace_id = ${input.workspaceId}::uuid and a.id = ${agentId}::uuid
+        and (a.visibility = 'workspace'
+          ${subjectId ? sql`or a.owner_subject_id = ${subjectId}` : sql``})`,
+  );
+  if (!row) throw new SessionAgentNotFoundError(agentId);
+  // Others in a shared chat would run on the owner's private Instructions.
+  if (row.visibility !== "workspace" && input.visibility !== "user_private") {
+    throw new SessionAgentNotFoundError(agentId, "requires_private_chat");
+  }
+  return { agentId: row.id, revision: Number(row.current_revision) };
+}
+
 async function createSessionInTransaction(
   tx: SessionActivityDatabase,
   input: SessionCreateInput,
@@ -32913,12 +32986,18 @@ async function createSessionInTransaction(
   const removedRepositories = input.parentSessionId
     ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
     : [];
+  const agentBinding = input.agent
+    ? await sessionAgentBinding(tx as unknown as Database, input, input.agent.id)
+    : null;
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
         id,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
+        ...(agentBinding
+          ? { agentId: agentBinding.agentId, agentPromptRevision: agentBinding.revision }
+          : {}),
         initialMessage: input.initialMessage,
         initialModelContext: input.initialModelContext ?? null,
         title: AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -44006,9 +44085,23 @@ export type SessionAgentPrompt = {
 const AGENT_PROMPT_REVISION_METADATA_KEY = "opengeniAgentPromptRevision";
 
 /**
+ * An Only me agent serves only its owner's Only me chats. A chat shared
+ * later, or one whose agent became Only me, continues as a plain chat.
+ * `a` is the agent; the session is read by id.
+ */
+function boundAgentServesChatSql(input: { workspaceId: string; sessionId: string }): SQL {
+  return sql`(a.visibility = 'workspace' or exists (
+    select 1 from sessions chat
+    where chat.workspace_id = ${input.workspaceId}::uuid
+      and chat.id = ${input.sessionId}::uuid
+      and chat.visibility = 'user_private'
+      and chat.owner_subject_id = a.owner_subject_id))`;
+}
+
+/**
  * The bound agent's rows, read as the system: the session's binding to its
- * agent is the authorization, so an Only me agent stays visible to turns
- * that act for no person or for someone other than its owner.
+ * agent, with {@link boundAgentServesChatSql} for prompt reads, is the
+ * authorization, whoever the turn acts for.
  */
 async function readBoundAgentRows<T extends Record<string, unknown>>(
   db: Database,
@@ -44092,9 +44185,11 @@ export async function readSessionAgentPrompt(
         scope,
         sql`select r.instructions
           from agent_revisions r
+          join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
             and r.agent_id = ${agentId}::uuid
-            and r.revision = ${revision}::integer`,
+            and r.revision = ${revision}::integer
+            and ${boundAgentServesChatSql(input)}`,
       )
     : undefined;
   return { agentId, revision, instructions: row?.instructions ?? null };
@@ -44135,7 +44230,8 @@ export async function ensureSessionAgentInstructions(
             and r.agent_id = a.id
             and r.revision = a.current_revision
           where a.workspace_id = ${input.workspaceId}::uuid
-            and a.id = ${prompt.agentId}::uuid`,
+            and a.id = ${prompt.agentId}::uuid
+            and ${boundAgentServesChatSql(input)}`,
       )
     : undefined;
   return await ensureSessionContextSnapshot(
@@ -93870,23 +93966,40 @@ export async function acceptSessionApprovalDecision(
             pendingCall !== undefined
               ? pendingCall.interruptionKind === "approval" ||
                 pendingCall.interruptionKind === "interaction_intervention"
-              : // Programmatic approval ids are operation UUIDs.
-                UUID_PATTERN.test(approvalId) &&
-                (
-                  await tx
-                    .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
-                    .from(schema.sessionAttemptCodemodeCalls)
-                    .where(
-                      and(
-                        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
-                        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
-                        eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
-                        eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
-                        eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
-                      ),
-                    )
-                    .limit(1)
-                ).length > 0;
+              : isGitHubGatewayApprovalId(approvalId)
+                ? // A gh request held by the GitHub gateway: still undecided.
+                  (
+                    await tx
+                      .select({ id: schema.connectorActionRequests.id })
+                      .from(schema.connectorActionRequests)
+                      .where(
+                        and(
+                          eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+                          eq(schema.connectorActionRequests.sessionId, input.sessionId),
+                          eq(schema.connectorActionRequests.turnId, liveTurn.id),
+                          eq(schema.connectorActionRequests.approvalId, approvalId),
+                          eq(schema.connectorActionRequests.status, "pending"),
+                        ),
+                      )
+                      .limit(1)
+                  ).length > 0
+                : // Programmatic approval ids are operation UUIDs.
+                  UUID_PATTERN.test(approvalId) &&
+                  (
+                    await tx
+                      .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+                      .from(schema.sessionAttemptCodemodeCalls)
+                      .where(
+                        and(
+                          eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+                          eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+                          eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
+                          eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
+                          eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+                        ),
+                      )
+                      .limit(1)
+                  ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
         }
         // The call runs on the turn's frozen accounts, never the approver's:
@@ -95811,6 +95924,7 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
+    agentId: row.agentId ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),
@@ -96947,6 +97061,7 @@ export {
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type ConnectionCredentialLookupInput,
+  type ConnectionNeedsReauth,
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,

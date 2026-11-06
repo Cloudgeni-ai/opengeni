@@ -51,6 +51,7 @@ for (const scenario of [
       spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
+      spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "registerPendingSessionToolCallInTransaction").mockResolvedValue({
         accepted: true,

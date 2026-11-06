@@ -147,6 +147,7 @@ export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/personal-github-repository-access";
+export * from "./domain/connections-needing-reconnect";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,
@@ -161,6 +162,7 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
+export * from "./domain/agents";
 export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
 export * from "./domain/project-audience";

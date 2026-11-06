@@ -323,6 +323,16 @@ sign-in or a personal sign-in not usable in this workspace) instead of a bare
 HTTP 401. The notice is a new item of the current turn and never changes text
 an earlier request sent. Connectors the agent configuration excludes are not
 reported.
+
+An account whose refresh grant the provider rejected (status `needs_reauth`)
+is named, not hidden. The turn that first finds it broken posts one inbox
+notice to the person who started that turn, deduplicated per connection. The
+turn notice lists accounts that need reconnecting with the day they stopped
+working, and `capability_catalog_search` returns them in `setup.reconnect`.
+`capability_authorization_request` with that `connectionId` (chosen
+automatically when exactly one account fits) posts a card that reconnects the
+same account rather than a fresh Connect, which the already-connected account
+would refuse. An account added in another workspace is reconnected there.
 Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.

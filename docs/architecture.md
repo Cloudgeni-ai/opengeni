@@ -2442,6 +2442,16 @@ Canonical: `packages/core/src/domain/github-action-policies.ts`,
 `apps/api/src/routes/github.ts`, and
 `apps/web/src/components/capabilities/use-github-integration.tsx`.
 
+Repositories mounted as the person (Your GitHub) reach GitHub through the API:
+Git through the personal smart-HTTP broker, and `gh` in managed sandboxes
+through the personal GitHub gateway, which adds the person's token per request
+and maps each REST or GraphQL request (and each push that deletes or rewrites a
+ref) to the same `github_personal` action policy, recording asks in
+`connector_action_requests`. Canonical: `apps/api/src/routes/personal-github-git-broker.ts`,
+`apps/api/src/routes/personal-github-gateway.ts`,
+`apps/api/src/integrations/github-gateway-requests.ts`, and the `gh` wrapper in
+`packages/runtime/src/index.ts`; see [`personal-github.md`](personal-github.md).
+
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
