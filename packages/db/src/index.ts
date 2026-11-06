@@ -1391,6 +1391,7 @@ export * from "./managed-auth-new-signups-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
+export * from "./model-call-credit-holds";
 export * from "./slack-user-link-access";
 export * from "./slack-routing";
 export * from "./slack-routing-personal-workspace";
