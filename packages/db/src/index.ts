@@ -37,6 +37,8 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./session-resource-removal";
 import { admitRequestedRepositories } from "./session-resource-removal";
+export * from "./github-gateway";
+import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
@@ -30235,6 +30237,11 @@ export type ConnectorActionInvocation = {
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
   /**
+   * Ask even when the policy allows: destructive or unrecognised requests
+   * (the personal GitHub gateway). An explicit Block still blocks.
+   */
+  minimumDecision?: "ask";
+  /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation). It is admitted once, from
    * the rejected round of a request that asked.
@@ -31348,8 +31355,8 @@ export async function beginConnectorActionExecution(
   if (!normalized.connectionId) {
     return { allowed: true, managed: false };
   }
-  const resolveFrom = (snapshot: ConnectorActionPolicySnapshotEntry[]) =>
-    resolveConnectorActionPolicy(snapshot, {
+  const resolveFrom = (snapshot: ConnectorActionPolicySnapshotEntry[]) => {
+    const resolved = resolveConnectorActionPolicy(snapshot, {
       connectionId: normalized.connectionId!,
       serverId: normalized.serverId,
       toolName: normalized.toolName,
@@ -31358,6 +31365,20 @@ export async function beginConnectorActionExecution(
         ? { defaultDecision: normalized.defaultDecision }
         : {}),
     });
+    if (
+      invocation.minimumDecision === "ask" &&
+      (!resolved.managed || connectorActionPolicyDecision(resolved) === "allow")
+    ) {
+      return {
+        managed: true,
+        source: "default",
+        entry: null,
+        decision: "ask",
+        actionName: normalized.toolName,
+      } as const satisfies ResolvedConnectorActionPolicy;
+    }
+    return resolved;
+  };
   return await runConnectorActionLedgerTransaction(
     db,
     {
@@ -93846,23 +93867,40 @@ export async function acceptSessionApprovalDecision(
             pendingCall !== undefined
               ? pendingCall.interruptionKind === "approval" ||
                 pendingCall.interruptionKind === "interaction_intervention"
-              : // Programmatic approval ids are operation UUIDs.
-                UUID_PATTERN.test(approvalId) &&
-                (
-                  await tx
-                    .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
-                    .from(schema.sessionAttemptCodemodeCalls)
-                    .where(
-                      and(
-                        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
-                        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
-                        eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
-                        eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
-                        eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
-                      ),
-                    )
-                    .limit(1)
-                ).length > 0;
+              : isGitHubGatewayApprovalId(approvalId)
+                ? // A gh request held by the GitHub gateway: still undecided.
+                  (
+                    await tx
+                      .select({ id: schema.connectorActionRequests.id })
+                      .from(schema.connectorActionRequests)
+                      .where(
+                        and(
+                          eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+                          eq(schema.connectorActionRequests.sessionId, input.sessionId),
+                          eq(schema.connectorActionRequests.turnId, liveTurn.id),
+                          eq(schema.connectorActionRequests.approvalId, approvalId),
+                          eq(schema.connectorActionRequests.status, "pending"),
+                        ),
+                      )
+                      .limit(1)
+                  ).length > 0
+                : // Programmatic approval ids are operation UUIDs.
+                  UUID_PATTERN.test(approvalId) &&
+                  (
+                    await tx
+                      .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+                      .from(schema.sessionAttemptCodemodeCalls)
+                      .where(
+                        and(
+                          eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+                          eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+                          eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
+                          eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
+                          eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+                        ),
+                      )
+                      .limit(1)
+                  ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
         }
         // The call runs on the turn's frozen accounts, never the approver's:

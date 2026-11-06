@@ -381,6 +381,10 @@ import {
   isPersonalGitHubGitBrokerRequest,
   registerPersonalGitHubGitBrokerRoutes,
 } from "./routes/personal-github-git-broker";
+import {
+  isPersonalGitHubGatewayRequest,
+  registerPersonalGitHubGatewayRoutes,
+} from "./routes/personal-github-gateway";
 import { registerDesktopDistributionRoutes } from "./routes/desktop-distribution";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
@@ -1007,7 +1011,10 @@ export function createAppComposition(
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
     const pathname = new URL(c.req.url).pathname;
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, pathname)) {
+    if (
+      isPersonalGitHubGitBrokerRequest(c.req.method, pathname) ||
+      isPersonalGitHubGatewayRequest(pathname)
+    ) {
       await next();
       return;
     }
@@ -1170,7 +1177,11 @@ export function createAppComposition(
     // Git's credential helper supplies the exact encrypted broker bearer in
     // Authorization. It cannot also supply the deployment access key, and the
     // route performs its own attempt-bound authorization before every use.
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+    const pathname = new URL(c.req.url).pathname;
+    if (
+      isPersonalGitHubGitBrokerRequest(c.req.method, pathname) ||
+      isPersonalGitHubGatewayRequest(pathname)
+    ) {
       await next();
       return;
     }
@@ -2598,6 +2609,7 @@ export function createAppComposition(
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
+  registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
