@@ -19,17 +19,30 @@ const AV1_BRANDS = new Set(["avif", "avis"]);
 export type HeifImageKind = "HEIC" | "HEIF";
 
 // The part of libheif-js's JavaScript API (single-file build) used here.
-type HeifDisplayBuffer = { data: Uint8ClampedArray; width: number; height: number };
 type LibHeifImage = {
+  handle: unknown;
   get_width(): number;
   get_height(): number;
   is_primary(): boolean;
   has_alpha_channel(): boolean;
-  display(target: HeifDisplayBuffer, done: (result: HeifDisplayBuffer | null) => void): void;
   free(): void;
 };
+type LibHeifPlane = { id: number; width: number; height: number; stride: number; data: Uint8Array };
 type LibHeifModule = {
   HeifDecoder: new () => { decode(bytes: Uint8Array): LibHeifImage[] };
+  heif_js_decode_image2(
+    handle: unknown,
+    colorspace: unknown,
+    chroma: unknown,
+  ):
+    | { code?: number; image: unknown; channels: LibHeifPlane[] }
+    | null
+    | undefined
+    | Promise<{ code?: number; image: unknown; channels: LibHeifPlane[] } | null | undefined>;
+  heif_image_release(image: unknown): void;
+  heif_colorspace: { heif_colorspace_RGB: unknown };
+  heif_chroma: { heif_chroma_interleaved_RGBA: unknown };
+  heif_channel: { heif_channel_interleaved: number };
 };
 type LibHeifFactory = () => Promise<LibHeifModule>;
 
@@ -115,13 +128,17 @@ async function decodeToJpeg(
   // shared instance would keep the largest photo's decode buffers for the
   // life of the process. Instantiating takes a few milliseconds.
   const libheif = await createLibHeif();
-  const decoder = new libheif.HeifDecoder();
-  const images = decoder.decode(bytes);
+  let pixels: Uint8Array;
+  let width: number;
+  let height: number;
+  let hasAlpha: boolean;
+  let images: LibHeifImage[] = [];
   try {
+    images = new libheif.HeifDecoder().decode(bytes);
     const image = images.find((candidate) => candidate.is_primary()) ?? images[0];
     if (!image) throw new HeifDecodeError("The HEIF file contains no decodable image.");
-    const width = image.get_width();
-    const height = image.get_height();
+    width = image.get_width();
+    height = image.get_height();
     if (
       !Number.isSafeInteger(width) ||
       !Number.isSafeInteger(height) ||
@@ -131,26 +148,43 @@ async function decodeToJpeg(
     ) {
       throw new HeifDecodeError("The HEIF image dimensions are outside the decoding limit.");
     }
-    const hasAlpha = image.has_alpha_channel();
-    const pixels = await new Promise<Uint8ClampedArray>((resolve, reject) => {
-      image.display(
-        { data: new Uint8ClampedArray(width * height * 4), width, height },
-        (result) => {
-          if (result) resolve(result.data);
-          else reject(new HeifDecodeError("The HEIF image could not be decoded."));
-        },
-      );
-    });
-    const raw = sharp(Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength), {
-      raw: { width, height, channels: 4 },
-    });
-    const opaque = hasAlpha ? raw.flatten({ background: "#ffffff" }) : raw.removeAlpha();
-    const data = await opaque.jpeg({ quality }).toBuffer();
-    return { data, width, height };
+    hasAlpha = image.has_alpha_channel();
+    // Decodes the whole image (all tiles, rotation and mirroring applied).
+    const decoded = await libheif.heif_js_decode_image2(
+      image.handle,
+      libheif.heif_colorspace.heif_colorspace_RGB,
+      libheif.heif_chroma.heif_chroma_interleaved_RGBA,
+    );
+    if (!decoded || decoded.code) throw new HeifDecodeError("The HEIF image could not be decoded.");
+    const plane = decoded.channels.find(
+      (channel) => channel.id === libheif.heif_channel.heif_channel_interleaved,
+    );
+    if (!plane || plane.width !== width || plane.height !== height) {
+      throw new HeifDecodeError("The HEIF image decoded to unexpected dimensions.");
+    }
+    const rowBytes = width * 4;
+    pixels = new Uint8Array(rowBytes * height);
+    for (let row = 0; row < height; row += 1) {
+      const start = row * plane.stride;
+      pixels.set(plane.data.subarray(start, start + rowBytes), row * rowBytes);
+    }
+    libheif.heif_image_release(decoded.image);
+  } catch (error) {
+    // Anything the decoder does with these bytes is deterministic.
+    if (error instanceof HeifDecodeError) throw error;
+    throw new HeifDecodeError(
+      `The HEIF image could not be decoded: ${error instanceof Error ? error.message : String(error)}`,
+    );
   } finally {
     // The module instance, with its context and memory, is dropped here.
     for (const image of images) image.free();
   }
+  const raw = sharp(Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength), {
+    raw: { width, height, channels: 4 },
+  });
+  const opaque = hasAlpha ? raw.flatten({ background: "#ffffff" }) : raw.removeAlpha();
+  const data = await opaque.jpeg({ quality }).toBuffer();
+  return { data, width, height };
 }
 
 type ViewImageArgs = { path: string; runAs?: string };

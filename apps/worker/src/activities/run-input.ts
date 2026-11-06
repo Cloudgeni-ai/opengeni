@@ -29,6 +29,7 @@ import {
 } from "@opengeni/db";
 import {
   createModelImageSizer,
+  HeifDecodeError,
   heifToJpeg,
   sniffHeifImage,
   sniffModelImageType,
@@ -365,7 +366,9 @@ function convertsHeifAttachments(item: Record<string, unknown>): boolean {
 // Process-wide, keyed by the verified sha256 of the original file, so a long
 // conversation decodes each photo once per worker rather than every turn.
 // Decoding is deterministic, so every worker derives the same JPEG. A file
-// that does not decode is remembered too, and stays reference-only.
+// the decoder rejects is remembered too, and stays reference-only; any other
+// failure is thrown, so the turn retries like a failed storage read rather than
+// one worker showing the photo and another not.
 type HeifRendition = { dataUrl: string; kind: HeifImageKind } | null;
 const heifRenditions = new Map<string, HeifRendition>();
 let heifRenditionBytes = 0;
@@ -386,8 +389,9 @@ async function heifRendition(checksum: string, bytes: Uint8Array): Promise<HeifR
       const jpeg = await heifToJpeg(bytes);
       rendition = { dataUrl: `data:image/jpeg;base64,${jpeg.data.toString("base64")}`, kind };
     } catch (error) {
-      console.error("HEIF attachment could not be converted; showing it by reference", {
-        errorType: safeErrorType(error),
+      if (!(error instanceof HeifDecodeError)) throw error;
+      console.error("HEIF attachment does not decode; showing it by reference", {
+        reason: error.message,
       });
     }
   }
