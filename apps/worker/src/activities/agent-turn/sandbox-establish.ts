@@ -1091,7 +1091,7 @@ export async function bindLazySandboxProvisioner(
         throw new TurnOperationCancelledError(new Error("TURN_ENDED_BEFORE_SANDBOX_WAS_NEEDED"));
       }
     };
-    const provisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
+    sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
       async () => {
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
@@ -1432,7 +1432,7 @@ export async function bindLazySandboxProvisioner(
         },
       },
     );
-    sandboxState.turnSandboxProvisioner = provisioner;
+    const provisioner = sandboxState.turnSandboxProvisioner;
     if (
       shouldPrepareManagedSandboxInBackground({
         establishPolicy,
