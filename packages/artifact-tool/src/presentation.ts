@@ -3,6 +3,10 @@ import { boundInspectionRecords, defineHelpEntries, filterHelpEntries } from "./
 import type { HelpOptions } from "./spreadsheet-types";
 import { presentationLossState } from "./presentation-pptx-state";
 import {
+  MAX_PRESENTATION_TABLE_COLUMNS as MAX_TABLE_COLUMNS,
+  MAX_PRESENTATION_TABLE_ROWS as MAX_TABLE_ROWS,
+} from "./presentation-table-limits";
+import {
   canonicalizeRasterDataUrl,
   encodeRasterBase64,
   normalizeRasterContentType,
@@ -1812,8 +1816,6 @@ const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_URI_LENGTH = 4_096;
 const MAX_RENDER_DIMENSION = 32_768;
 const MAX_RENDER_PIXELS = 67_108_864;
-const MAX_TABLE_ROWS = 10_000;
-const MAX_TABLE_COLUMNS = 1_024;
 const MAX_TABLE_SPAN = 1_024;
 const MAX_GROUP_DEPTH = 32;
 const MAX_GROUP_CHILDREN = 100_000;

@@ -178,11 +178,16 @@ jobs:
             compute/deploy/host/compute-host-certificate \
             compute/deploy/host/test-compute-host-certificate \
             compute/deploy/host/agent-inputs compute/deploy/host/test-agent-inputs compute/ci/*.sh \
+            compute/deploy/host/state-volume compute/deploy/host/test-state-volume \
             deploy/terraform/gcp-compute/host-startup.sh
       - name: host certificate script
         run: compute/deploy/host/test-compute-host-certificate
       - name: what the agent starts with (install.sh restarts it only when that changed)
         run: compute/deploy/host/test-agent-inputs
+      - name: the state volume (a host keeps a file system it finds, on loop devices)
+        run: |
+          command -v mkfs.xfs >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs; }
+          sudo compute/deploy/host/test-state-volume
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
       - name: Terraform (GCP host fleet)
         run: |

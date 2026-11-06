@@ -174,6 +174,49 @@ describe("system prompt cache split experiment", () => {
     expect(a[1]).toContain("Policy A.");
   });
 
+  test("on: every chat of one agent shares a stable prefix through its instructions", () => {
+    const agent = "Answer every question as a pirate.";
+    const a = instructions(true, "Workspace global policy: Answer in Norwegian.", {
+      agentInstructions: agent,
+      sessionInstructions: "Session A",
+    });
+    const b = instructions(true, "Workspace global policy: Use metric units.", {
+      agentInstructions: agent,
+      sessionInstructions: "Session B",
+    });
+    const [stableA, tailA] = splitStableSystemPromptPrefix(a)!;
+    const [stableB] = splitStableSystemPromptPrefix(b)!;
+    expect(stableA).toBe(stableB);
+    expect(stableA).toEndWith(agent);
+    expect(tailA).toContain("Norwegian");
+    expect(tailA).not.toContain(agent);
+    // Another agent's chats share the platform prefix, not this agent's block.
+    const other = instructions(true, "Policy.", { agentInstructions: "Be terse." });
+    const [stableOther] = splitStableSystemPromptPrefix(other)!;
+    expect(stableOther).toEndWith("Be terse.");
+    expect(
+      stableOther.startsWith(stableA.slice(0, stableA.indexOf("# Instructions for this agent"))),
+    ).toBe(true);
+  });
+
+  test("on: a legacy agent chat with the shared persona extends the prefix through its instructions", () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      experimentSystemPromptCacheSplit: true,
+    });
+    const legacy = (session: string) =>
+      inspectPersistentAgentInstructions(settings, {
+        agentInstructions: "Answer as a pirate.",
+        workspaceMemory: "MEMORY",
+        sessionInstructions: session,
+      }).composed;
+    const [stableA, tailA] = splitStableSystemPromptPrefix(legacy("Session A"))!;
+    const [stableB] = splitStableSystemPromptPrefix(legacy("Session B"))!;
+    expect(stableA).toBe(stableB);
+    expect(stableA).toEndWith("Answer as a pirate.");
+    expect(tailA).toContain("Session A");
+  });
+
   test("on: the Claude subscription billing block adds no breakpoint", () => {
     const prompt = instructions(true, "Policy.");
     const request = body(prompt, laterTurn);

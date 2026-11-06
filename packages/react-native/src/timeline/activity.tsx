@@ -11,6 +11,7 @@ import {
   pathDirname,
   presentsToolOutputPreview,
   sandboxRowTitle,
+  formatElapsed,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
@@ -37,6 +38,7 @@ import {
   ShimmerText,
   TermBlock,
   ROW_MIN_HEIGHT,
+  useLiveNow,
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
@@ -602,16 +604,20 @@ function StartupPhaseRow({
   const failed = item.status === "failed";
   const t = useOpenGeniText();
   const running = item.status === "running";
+  const nowMs = useLiveNow(running);
   const duration = startupDuration(item.durationMs);
+  const title = item.blockedReason
+    ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
+    : startupPhaseTitle(t, item.phase, item.status, item.outcome, item.subject);
+  // A running step says how long it has run so far, as the turn header does.
+  const startedMs = Date.parse(item.startedAt);
+  const elapsed =
+    running && Number.isFinite(startedMs) ? formatElapsed(t, Math.max(0, nowMs - startedMs)) : null;
   return (
     <ActivityDisclosure
       icon="bot"
       iconTone={failed ? "failed" : running ? "running" : "muted"}
-      title={
-        item.blockedReason
-          ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
-          : startupPhaseTitle(t, item.phase, item.status, item.outcome)
-      }
+      title={elapsed ? `${title} · ${elapsed}` : title}
       preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
       failed={failed}

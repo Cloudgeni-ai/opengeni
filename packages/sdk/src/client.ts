@@ -7949,8 +7949,9 @@ export class OpenGeniClient {
   }
 
   /**
-   * Link the Slack account as a member of the organization, without workspace
-   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   * Link the request's Slack account once the person confirmed it (offered as
+   * `canLink`, naming the account in `slackAccountLabel`). Preparing a request
+   * never links it; this confirmation is required for every link.
    */
   async linkSlackUserAsOrganizationMember(
     workspaceId: string,

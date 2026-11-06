@@ -68,15 +68,6 @@ function needsPerson(item: InboxItemRow): boolean {
   return item.kind === "question" || item.kind === "approval" || item.kind === "goal_paused";
 }
 
-/** The person a session works for (its owner, else who started it), or null when no person does. */
-async function sessionOwner(
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
-  return await getSessionInboxRecipient(deps.db, workspaceId, sessionId);
-}
-
 /** Whether `ancestorId` is `sessionId` or one of the sessions above it (bounded). */
 async function isSelfOrAncestor(
   deps: ApiRouteDeps,
@@ -375,7 +366,14 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     },
     async ({ dismissItemIds, snooze, unsnoozeItemIds }) => {
       await authorize();
-      const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
+      // The person whose message started this turn, as for notify_user: a
+      // shared chat's other members never reach its owner's inbox.
+      const owner = await getSessionInboxRecipient(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        attempt().callerTurnId,
+      );
       if (!owner) {
         return json({ ok: true, items: [], dismissed: [], snoozed: [], unsnoozed: [] });
       }

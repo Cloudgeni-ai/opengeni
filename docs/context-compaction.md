@@ -401,6 +401,23 @@ the start of every later request:
   appends a new item that replaces the old one; withdrawn governance appends an
   explicit "no workspace governance" item. Compaction re-adds only the latest
   governance item after the Skill catalog.
+- An agent's Instructions are the exception that is allowed in the system
+  prompt, because every chat of one agent shares them: chats bound to an agent
+  revision (`sessions.agent_prompt_revision`) carry that revision as their own
+  layer, at the end of the cached stable prefix. An edit made during a chat
+  does not rewrite it. It arrives as a developer history item
+  (`<opengeni_agent_instructions>`) before the turn that first sees it, frozen
+  for that turn's attempts like governance. Compaction drops these items and
+  folds the newest revision they showed into `sessions.agent_prompt_revision`
+  in the same transaction as the replacement, so the next turn's system prompt
+  carries it. Only developer items count, and the fold only moves the
+  revision forward to a revision of the chat's own agent. A turn that
+  continues after compaction keeps its system prompt (its attempts all use the
+  revision its first attempt recorded), so the newest item is re-added after
+  the governance item for the rest of it. That item repeats the whole folded
+  text (up to 20,000 characters) on every request until the next compaction or
+  turn; this is accepted because it stays in the cached prefix of the
+  continuing turn. See `docs/run-lifecycle.md`, "Agent instructions".
 - Files attached to one turn are described in that turn's own input, never in
   the system prompt.
 - Per-request billing metadata in the first system block does not affect the

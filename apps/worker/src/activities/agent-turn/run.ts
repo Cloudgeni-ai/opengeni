@@ -1,14 +1,16 @@
-import { unboundGitHubRepositoryResources } from "@opengeni/core";
+import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
+  getSlackPrivateSessionOwnerSubjectId,
   canSpendSubscriptionCoreCodexExtraCredits,
   reserveSubscriptionCoreCodexRequest,
   settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
+  readSessionAgentPrompt,
 } from "@opengeni/db";
-import { routingEnabled } from "../../sandbox-routing";
+import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
@@ -153,7 +155,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-import { assertTurnSandboxBackendServed } from "./sandbox-route";
+import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -632,7 +634,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             provider: turnExecutionPolicy.providerId,
             backend: turn.sandboxBackend,
           },
-          () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+          () =>
+            Promise.all([
+              getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+              getSlackPrivateSessionOwnerSubjectId(db, input.workspaceId, input.sessionId),
+            ]),
         ),
       ]);
       // Observe both operations before failure handling; the policy write
@@ -640,7 +646,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (learningResult.status === "rejected") throw learningResult.reason;
       if (attachmentResult.status === "rejected") throw attachmentResult.reason;
       const learning = learningResult.value;
-      const attachmentAuthority = attachmentResult.value;
+      const [attachmentAuthority, slackPrivateOwnerSubjectId] = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
@@ -662,8 +668,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // same root-scoped audience as native attempt-authorized tool reads.
           agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
-          privateFileOwnerSubjectId:
-            learning.defaultScope === "personal" ? learning.subjectId : null,
+          // A private Slack session is its owner's, like an Only-me session.
+          privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+            learning,
+            slackPrivateOwnerSubjectId,
+          ),
         },
         async () => {
           if (!leases.codex.holderId) {
@@ -1376,6 +1385,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ),
               ),
             );
+          // The agent revision in this chat's system prompt, read once so every
+          // compaction and the turn itself use the same instructions. The
+          // turn's first attempt records it, so retries build the same prompt.
+          const agentPrompt = await readSessionAgentPrompt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const compactionPrep = await prepareCompaction({
             entitlements,
             input,
@@ -1397,6 +1419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             portableModelSwitchPending,
             resolvedModel,
@@ -1624,6 +1647,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             initialGitCredentials,
             startRunGitCredentialsMint,
             attachGitCredentialRenewal,
+            prepareCodemodeTokenSeed,
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
@@ -1824,6 +1848,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leases,
             turn,
             session,
+            agentPrompt,
             fileAuthoritySubjectId,
             capabilitySettings,
             humanInputResume,
@@ -1876,6 +1901,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
+            deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({
+              lazyEnabled: lazyProvisionEnabled(settings),
+              machinePrimary,
+              groupBoxBackend,
+              hasRepositoryResources: turnResources.some(
+                (resource) => resource.kind === "repository",
+              ),
+            }),
             postToolPreparationStartedAt,
             codexContext,
           });
@@ -1979,6 +2012,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
@@ -2034,6 +2068,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leases,
               runWorkspaceMutationForSandbox,
               attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
+              attachCodemodeTokenRenewal,
               attachRunCredentialRenewal,
               activeSandboxBackend,
               groupBoxBackend,
@@ -2207,6 +2243,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               throwIfTurnCancelled,
               setLastInputTokensFenced,
               attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
               attachCodemodeTokenRenewal,
               attachRunCredentialRenewal,
               withProviderRequestContext,
