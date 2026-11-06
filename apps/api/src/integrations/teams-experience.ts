@@ -91,12 +91,14 @@ function withNextStep(
 /** Sent once when someone adds the bot for themselves. */
 export function teamsWelcome(state: TeamsExperienceState): TeamsExperienceReply {
   return withNextStep(
-    [
-      "**Welcome to Opengeni**",
-      ABOUT,
-      LIMITS.map((line) => `- ${line}`).join("\n"),
-      "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
-    ].join("\n\n"),
+    teamsMarkdown(
+      [
+        "**Welcome to Opengeni**",
+        ABOUT,
+        LIMITS.map((line) => `- ${line}`).join("\n"),
+        "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
+      ].join("\n\n"),
+    ),
     state,
     "welcome",
   );
@@ -123,12 +125,14 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
     "Use the thumbs up or down on a reply to tell us how it went.",
   ];
   return withNextStep(
-    [
-      "**Opengeni help**",
-      `${ABOUT} Describe what you need and I'll reply here when the task is done.`,
-      `**Commands**\n${commands.join("\n")}`,
-      `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
-    ].join("\n\n"),
+    teamsMarkdown(
+      [
+        "**Opengeni help**",
+        `${ABOUT} Describe what you need and I'll reply here when the task is done.`,
+        `**Commands**\n${commands.join("\n")}`,
+        `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
+      ].join("\n\n"),
+    ),
     state,
     "help",
   );
@@ -169,6 +173,30 @@ export function teamsAiGeneratedEntity() {
     "@context": "https://schema.org" as const,
     "@id": "" as const,
     additionalType: ["AIGeneratedContent"],
+  };
+}
+
+/** A link shown as a button under a notice instead of a bare URL in its text. */
+export type TeamsNoticeLink = { title: string; url: string };
+
+/**
+ * A notice from Opengeni itself, such as "Started", as an Adaptive Card: its
+ * paragraphs and a button that opens the link. In a channel thread Teams
+ * starts a new message header after a card, so the agent's answer that
+ * follows gets its own header and AI label instead of being grouped under the
+ * notice.
+ */
+export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
+  return {
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json" as const,
+    type: "AdaptiveCard" as const,
+    version: "1.2" as const,
+    body: text
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean)
+      .map((paragraph) => ({ type: "TextBlock" as const, text: paragraph, wrap: true })),
+    actions: [{ type: "Action.OpenUrl" as const, title: link.title, url: link.url }],
   };
 }
 
@@ -254,6 +282,61 @@ function heading(line: string): { level: number; text: string } | null {
   if (end < text.length && (end === 0 || text[end - 1] === " " || text[end - 1] === "\t"))
     text = text.slice(0, end).trimEnd();
   return { level: match[1]!.length, text };
+}
+
+/**
+ * A line that is bold and nothing else, such as `**Next steps**` or
+ * `**Risks:**`: agents use it as a heading. Bounded and linear: the bold text
+ * can't contain the delimiter character.
+ */
+function boldHeading(line: string): boolean {
+  return (
+    line.length <= 300 &&
+    (/^ {0,3}\*\*(?=\S)[^*\n]*[^*\s]\*\*:?[ \t]*$/.test(line) ||
+      /^ {0,3}__(?=\S)[^_\n]*[^_\s]__:?[ \t]*$/.test(line))
+  );
+}
+
+/** Ordinary paragraph text: not a list, quote, heading, code, fence or spacer. */
+function paragraphLine(line: string): boolean {
+  return (
+    Boolean(line.trim()) &&
+    !/^[ \t]/.test(line) &&
+    !/^(?:(?:[-*+]|\d{1,9}[.)]|#{1,6})(?:[ \t]|$)|>|`{3,}|~{3,}|<br>$)/.test(line) &&
+    !boldHeading(line)
+  );
+}
+
+/**
+ * Teams shows paragraphs with no gap between them, so a heading right after
+ * a paragraph would sit directly under it. An empty `<br>` paragraph before
+ * the heading gives it the gap a heading needs. Lists, quotes and code
+ * already have a gap after them, and the first line needs none.
+ */
+const HEADING_GAP = "<br>";
+function gapBeforeHeading(out: string[]): void {
+  let previous = out.length - 1;
+  while (previous >= 0 && !out[previous]!.trim()) previous -= 1;
+  if (previous < 0 || !paragraphLine(out[previous]!)) return;
+  if (out.at(-1)!.trim()) out.push("");
+  out.push(HEADING_GAP, "");
+}
+
+/**
+ * One table row as list items. Teams can't show tables in text messages, and
+ * cells joined on one line run together, so a row becomes a bullet led by its
+ * first cell with every other cell on its own line beneath it.
+ */
+function tableRowItems(header: string[], cells: string[]): string[] {
+  const lead = cells[0] ?? "";
+  const rest = cells.slice(1).flatMap((cell, column) => {
+    if (!cell) return [];
+    const title = header[column + 1];
+    return [title ? `${title}: ${cell}` : cell];
+  });
+  if (!lead) return rest.length ? [`- ${rest[0]}`, ...rest.slice(1).map((x) => `  - ${x}`)] : [];
+  const bold = header.length > 1 && !lead.includes("**") ? `**${lead}**` : lead;
+  return [`- ${bold}`, ...rest.map((item) => `  - ${item}`)];
 }
 
 /**
@@ -369,8 +452,11 @@ function escapeTags(line: string, images = false): string {
  * bold, italics, strikethrough, links, lists, quotes, code and headings up to
  * level three; tables, images and horizontal rules show as raw characters,
  * and text that looks like an HTML tag disappears. Tables become one list
- * item per row, deeper headings become bold lines, images become links, rules
- * are dropped and tag-like text is escaped. Code blocks are left as written.
+ * item per row with its other cells beneath it, deeper headings become bold
+ * lines, images become links, rules are dropped and tag-like text is escaped.
+ * Teams leaves no gap between paragraphs, so a heading or a bold heading line
+ * after a paragraph gets an empty paragraph before it, and a bold heading
+ * line is kept on its own line. Code blocks are left as written.
  */
 export function teamsMarkdown(input: string): string {
   const lines = input.replace(/\r\n?/g, "\n").split("\n");
@@ -422,12 +508,7 @@ export function teamsMarkdown(input: string): string {
         while (index + 1 < lines.length && tableRow(lines[index + 1]!)) {
           const cells = tableCells(lines[index + 1]!);
           index += 1;
-          const pairs = cells.flatMap((cell, column) => {
-            if (!cell) return [];
-            const title = header[column];
-            return [title ? `**${title}:** ${cell}` : cell];
-          });
-          if (pairs.length) rows.push(escapeTags(`- ${pairs.join("; ")}`));
+          for (const item of tableRowItems(header, cells)) rows.push(escapeTags(item));
         }
         out.push(...(rows.length ? rows : [escapeTags(header.filter(Boolean).join(" · "))]));
         continue;
@@ -435,6 +516,7 @@ export function teamsMarkdown(input: string): string {
     }
     const title = heading(line);
     if (title) {
+      gapBeforeHeading(out);
       out.push(
         escapeTags(
           title.level <= 3 ? `${"#".repeat(title.level)} ${title.text}` : `**${title.text}**`,
@@ -450,11 +532,23 @@ export function teamsMarkdown(input: string): string {
       plainLine === index - 1 &&
       previous.trim()
     ) {
-      out[out.length - 1] = `${line.trim()[0] === "=" ? "#" : "##"} ${out.at(-1)!.trim()}`;
+      const text = out.pop()!.trim();
+      gapBeforeHeading(out);
+      out.push(`${line.trim()[0] === "=" ? "#" : "##"} ${text}`);
       continue;
     }
     if (/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
       out.push("");
+      continue;
+    }
+    if (boldHeading(line)) {
+      // A heading line that continues a paragraph starts its own instead.
+      if (out.length && out.at(-1)!.trim() && paragraphLine(out.at(-1)!)) out.push("");
+      gapBeforeHeading(out);
+      out.push(escapeTags(line.trim()));
+      // The next line would otherwise join it on the same line.
+      const next = lines[index + 1];
+      if (next !== undefined && next.trim() && paragraphLine(next)) out.push("");
       continue;
     }
     if (line.trim() && !/^ {0,3}(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^(?: {4}|\t)/.test(line))

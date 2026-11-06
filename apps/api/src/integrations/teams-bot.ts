@@ -114,11 +114,13 @@ import {
   teamsHelp,
   teamsMarkdown,
   teamsMarkdownParts,
+  teamsNoticeCard,
   teamsAccountReply,
   teamsWelcome,
   type TeamsCommand,
   type TeamsExperienceReply,
   type TeamsExperienceState,
+  type TeamsNoticeLink,
 } from "./teams-experience";
 
 import {
@@ -191,26 +193,43 @@ function teamsReceipt(response: unknown): string | null {
   const id = (response as { id?: unknown } | null | undefined)?.id;
   return typeof id === "string" && id ? id : null;
 }
-/** Text is Teams Markdown. An agent reply carries Teams' AI label and feedback buttons. */
+/**
+ * Text is Teams Markdown. An agent reply carries Teams' AI label and feedback
+ * buttons. A notice with a link goes out as a card whose button opens it.
+ */
 async function send(
   app: App,
   m: TeamsTarget,
   text: string,
-  options: { ai?: boolean } = {},
+  options: { ai?: boolean; link?: TeamsNoticeLink } = {},
 ): Promise<string | null> {
   const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
-  const response = await client.conversations.createActivity(deliveryConversation(m), {
-    type: "message",
-    text,
-    textFormat: "markdown",
-    ...(m.threadId ? { replyToId: m.threadId } : {}),
-    ...(options.ai
+  const response = await client.conversations.createActivity(
+    deliveryConversation(m),
+    options.link
       ? {
-          entities: [teamsAiGeneratedEntity()],
-          channelData: { feedbackLoop: { type: "default" } },
+          type: "message",
+          ...(m.threadId ? { replyToId: m.threadId } : {}),
+          attachments: [
+            {
+              contentType: "application/vnd.microsoft.card.adaptive",
+              content: teamsNoticeCard(text, options.link),
+            },
+          ],
         }
-      : {}),
-  });
+      : {
+          type: "message",
+          text,
+          textFormat: "markdown",
+          ...(m.threadId ? { replyToId: m.threadId } : {}),
+          ...(options.ai
+            ? {
+                entities: [teamsAiGeneratedEntity()],
+                channelData: { feedbackLoop: { type: "default" } },
+              }
+            : {}),
+        },
+  );
   return teamsReceipt(response);
 }
 /** Shows that Opengeni is working on a reply. Teams clears it when the next message arrives. */
@@ -1509,17 +1528,27 @@ export function teamsTextParts(text: string): string[] {
 type TeamsSender = (
   message: Pick<TeamsMessage, "serviceUrl" | "conversationId" | "threadId" | "botId">,
   text: string,
-  options?: { ai?: boolean },
+  options?: { ai?: boolean; link?: TeamsNoticeLink },
 ) => Promise<string | null>;
+/** Opens the chat's session in Opengeni. */
+function sessionLink(deps: ApiRouteDeps, r: TeamsRoute): TeamsNoticeLink {
+  return { title: "Open in Opengeni", url: sessionUrl(deps, r) };
+}
 function admissionNotice(
   deps: ApiRouteDeps,
   r: TeamsRoute,
   kind: "admission" | "audience_changed",
-): string {
+): { text: string; link: TeamsNoticeLink } {
   const url = new URL(`/workspaces/${r.workspace_id}/plugins`, configuredBase(deps)).toString();
   return kind === "audience_changed"
-    ? `This chat's visibility changed, so your message was not added. Continue in Opengeni: ${url}`
-    : `Opengeni could not start this task. Check your workspace access and chat settings: ${url}`;
+    ? {
+        text: "This chat's visibility changed, so your message was not added. Continue in Opengeni.",
+        link: { title: "Continue in Opengeni", url },
+      }
+    : {
+        text: "Opengeni could not start this task. Check your workspace access and chat settings in Opengeni.",
+        link: { title: "Open Opengeni", url },
+      };
 }
 async function drainRoute(
   deps: ApiRouteDeps,
@@ -1654,11 +1683,20 @@ async function drainRoute(
         turnId = accepted.turn.id;
       }
       if (!r.session_bound)
-        await enqueueTeamsOutput(deps.db, i, r, 0, [
-          r.personal
-            ? `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`
-            : `Started. Follow progress or approve requests: ${sessionUrl(deps, r)}`,
-        ]);
+        await enqueueTeamsOutput(
+          deps.db,
+          i,
+          r,
+          0,
+          [
+            r.personal
+              ? "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands."
+              : "Started. Follow progress or approve requests in Opengeni.",
+          ],
+          undefined,
+          undefined,
+          "session",
+        );
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
       // The chat has now seen this mention and its context: a later mention
@@ -1675,7 +1713,7 @@ async function drainRoute(
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =
           error.message === "teams_session_audience_changed" ? "audience_changed" : "admission";
-        await enqueueTeamsOutput(deps.db, i, r, -1, [admissionNotice(deps, r, noticeKind)], {
+        await enqueueTeamsOutput(deps.db, i, r, -1, [admissionNotice(deps, r, noticeKind).text], {
           eventId: inbound.event_id,
           kind: noticeKind,
         });
@@ -1754,10 +1792,19 @@ async function drainRoute(
           event.type === "session.requiresAction" ||
           event.type === "session.humanInput.requested"
         )
-          text = `Your task needs your input or approval. Open the secure Opengeni chat: ${sessionUrl(deps, r)}`;
+          text = "Your task needs your input or approval in the secure Opengeni chat.";
         else if (event.type === "turn.failed")
-          text = `The task could not finish. Open Opengeni for details: ${sessionUrl(deps, r)}`;
-        await enqueueTeamsOutput(deps.db, i, r, event.sequence, text ? teamsReplyParts(text) : []);
+          text = "The task could not finish. The details are in Opengeni.";
+        await enqueueTeamsOutput(
+          deps.db,
+          i,
+          r,
+          event.sequence,
+          text ? [text] : [],
+          undefined,
+          undefined,
+          text ? "session" : undefined,
+        );
         if (text && event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
       }
     }
@@ -1816,6 +1863,14 @@ async function drainRoute(
     return;
   }
   try {
+    const notice =
+      Number(output.source_sequence) === -1
+        ? admissionNotice(
+            deps,
+            r,
+            output.payload.notice === "audience_changed" ? "audience_changed" : "admission",
+          )
+        : null;
     const id = await deliver(
       {
         serviceUrl: r.service_url,
@@ -1823,14 +1878,12 @@ async function drainRoute(
         threadId: r.thread_id,
         botId: r.bot_id,
       },
-      Number(output.source_sequence) === -1
-        ? admissionNotice(
-            deps,
-            r,
-            output.payload.notice === "audience_changed" ? "audience_changed" : "admission",
-          )
-        : output.payload.text,
-      { ai: Number(output.source_sequence) !== -1 && output.payload.ai === true },
+      notice ? notice.text : output.payload.text,
+      notice
+        ? { link: notice.link }
+        : output.payload.link === "session"
+          ? { link: sessionLink(deps, r) }
+          : { ai: output.payload.ai === true },
     );
     await settleTeamsOutput(deps.db, i, output.operation_id, {
       state: "delivered",
