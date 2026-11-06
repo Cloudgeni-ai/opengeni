@@ -24894,7 +24894,13 @@ export async function getRigVersionById(
 }
 
 export type RigProviderImageBuildClaim =
-  | { status: "claimed"; image: RigProviderImage }
+  | {
+      status: "claimed";
+      image: RigProviderImage;
+      /** The record this claim replaced, if any: a provider image it named is
+       * no longer referenced once the new build is published. */
+      replaced: RigProviderImage | null;
+    }
   | {
       status: "ready" | "in_progress" | "unsupported" | "conflict";
       image: RigProviderImage;
@@ -25038,7 +25044,7 @@ export async function claimRigVersionProviderImageBuild(
           eq(schema.rigVersions.id, input.versionId),
         ),
       );
-    return { status: "claimed", image: claimed };
+    return { status: "claimed", image: claimed, replaced: existing ?? null };
   });
 }
 

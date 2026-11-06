@@ -596,7 +596,9 @@ describe("rig provider image build ledger", () => {
       image: rotatedBuild,
       staleAfterMs: 60_000,
     });
-    expect(rotation).toEqual({ status: "claimed", image: rotatedBuild });
+    // The claim names the ready record it replaced, so a build can release the
+    // provider image nothing references any more once its own is published.
+    expect(rotation).toEqual({ status: "claimed", image: rotatedBuild, replaced: oldReady });
     expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
       rotatedBuild,
     );
