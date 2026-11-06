@@ -65,7 +65,7 @@ BEGIN
     and ("event".turn_association is null or "event".turn_association = 'current')
     and ("event".type <> 'agent.message.completed' or coalesce("event".payload ->> 'text', '') <> '')
     and ("event".type <> 'agent.message.completed' or coalesce("event".payload ->> 'phase', '') <> 'commentary')
-    -- 1278: an answer that is the no-reply token is nothing for the person.
+    -- 1281: an answer that is the no-reply token is nothing for the person.
     and ("event".type <> 'agent.message.completed'
       or not opengeni_private.no_reply_text_v1("event".payload ->> 'text'))
     and ("event".type <> 'turn.completed'
@@ -251,7 +251,7 @@ BEGIN
       AND NOT opengeni_private.session_hands_back_v1(NEW.session_id, NEW.turn_id) THEN
       v_rule := NULL;
     END IF;
-    -- 1278: a finished turn's push says what the chat shows, its answer. A
+    -- 1281: a finished turn's push says what the chat shows, its answer. A
     -- turn with no answer, or whose answer is the no-reply token (nothing
     -- for the person), sends none.
     IF v_rule = 'reply_ready' THEN
@@ -459,12 +459,12 @@ BEGIN
           AND event.type = 'agent.message.completed'
           AND event.turn_id = NEW.turn_id
           AND event.sequence < NEW.sequence
-          -- 1278: the answer, as the chat and the phone push show it.
+          -- 1281: the answer, as the chat and the phone push show it.
           AND coalesce(event.payload ->> 'phase', '') <> 'commentary'
           AND nullif(btrim(event.payload ->> 'text'), '') IS NOT NULL
         ORDER BY event.sequence DESC
         LIMIT 1;
-        -- 1278: an answer that is the no-reply token is nothing for the
+        -- 1281: an answer that is the no-reply token is nothing for the
         -- person, so a quiet turn opens no item.
         IF v_reply IS NOT NULL AND NOT opengeni_private.no_reply_text_v1(v_reply) THEN
           v_reply := regexp_replace(v_reply, '^\s+|\s+$', '', 'g');

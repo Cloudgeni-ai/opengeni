@@ -27,7 +27,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { withSessionActivityRlsContext } from "../src/database";
 import { noReplyTextSql } from "../src/session-meaningful-events";
 
-const MIGRATION = "1278_quiet_replies_leave_no_trace.sql";
+const MIGRATION = "1281_quiet_replies_leave_no_trace.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 setDefaultTimeout(60_000);
@@ -176,7 +176,7 @@ async function unreadFrontier(owner: Person) {
   return cursor!.last_meaningful_sequence;
 }
 
-describe("1278 a quiet run leaves no trace for the person", () => {
+describe("1281 a quiet run leaves no trace for the person", () => {
   test("is a rolling migration that replaces functions in place", async () => {
     if (!client) return;
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();

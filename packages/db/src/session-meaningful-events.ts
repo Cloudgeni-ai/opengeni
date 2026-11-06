@@ -117,7 +117,7 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "07
  * migration 0774 partial-index predicate, which also counts a task usage limit
  * stop as an actionable boundary.
  *
- * Since migration 1278 an answer that is exactly the no-reply token is not
+ * Since migration 1281 an answer that is exactly the no-reply token is not
  * attention either (`noReplyAnswerExcludedSql`): it is nothing for the person
  * and no timeline draws it. That exclusion is a filter on top of the 0774
  * index predicate, so queries keep using that index.
@@ -139,7 +139,7 @@ export function meaningfulAttentionIndexPredicateSql(alias: string): SQL {
 /**
  * The no-reply token test, as SQL over a text expression: the same
  * normalization as `isNoReplyText` in `@opengeni/contracts/no-reply` and
- * migration 1278's `opengeni_private.no_reply_text_v1`. Code-owned literals,
+ * migration 1281's `opengeni_private.no_reply_text_v1`. Code-owned literals,
  * so the predicate needs no runtime routine or parameter.
  */
 export function noReplyTextSql(text: SQL): SQL {
@@ -152,7 +152,7 @@ const NO_REPLY_WRAPPING_PATTERN_LITERAL = `'^[[:space:]\`*_"''“”]+|[[:space:
 
 /**
  * An agent message, or a turn's output, that is the no-reply token is not an
- * answer for the person: migration 1278's cursor trigger does not count it as
+ * answer for the person: migration 1281's cursor trigger does not count it as
  * attention, so a quiet run sets no unread mark. A turn that recorded a
  * `reply` keeps it.
  */
