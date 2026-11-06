@@ -6843,6 +6843,11 @@ export type GitHubAppApiPort = {
    * only on `installationIds` (one GitHub instance per port): the API caches
    * it briefly per installation set and shares it across workspaces, which
    * apply their own bindings and allowlists to it on every read.
+   *
+   * Workspace allowlists follow this list, so it must be the installations'
+   * live, uncached list from GitHub, and a failure must throw rather than
+   * return an empty list (which would read as "the installation shares
+   * nothing").
    */
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
   /**

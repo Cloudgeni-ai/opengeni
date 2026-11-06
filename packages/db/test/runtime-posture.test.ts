@@ -2184,6 +2184,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1293 GitHub installation repository removal markers: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1257 automatic top-ups: three FORCE-RLS tables; two mutable journals
           // and one append-only consent/mutation receipt table, never DELETE.
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
@@ -2277,6 +2283,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
         1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
         2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
+        1 + // 1293 GitHub installation repository removal markers: full-DML, FORCE-RLS.
         3 + // 1243 agents (full DML), Slack installations (full DML), revisions (read and insert): FORCE-RLS.
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
@@ -2292,6 +2299,8 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
       expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
+      expect(FORCE_RLS_TABLES).toContain("github_installation_repository_removals");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("github_installation_repository_removals");
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("site_sidebar_states");
