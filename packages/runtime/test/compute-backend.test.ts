@@ -662,9 +662,13 @@ describe("compute sandbox client", () => {
     expect(first!.template).toBe("tpl-deleted");
     expect(second!.image).toBe("registry.test/compute:1");
     expect("template" in second!).toBe(false);
-    // The refused create's enrollment is discarded; the sandbox runs the other.
+    // The sandbox runs on a fresh enrollment; the refused create's one is left
+    // to the stale-enrollment sweep, as for any refused create.
     expect(first!.request_id).not.toBe(second!.request_id);
-    expect(plane.revoked).toContain(first!.request_id);
+    expect(plane.created.map((each) => each.enrollmentId)).toEqual([
+      first!.request_id,
+      second!.request_id,
+    ]);
     expect(session.state.enrollmentId).toBe(second!.request_id);
     expect(control.boxes.size).toBe(1);
   });
