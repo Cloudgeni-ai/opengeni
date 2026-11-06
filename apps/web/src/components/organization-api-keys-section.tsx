@@ -1,6 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   DEVELOPER_SETUP_API_KEY_PRESET,
+  OWNER_LEVEL_API_KEY_CREATOR_SENTENCE,
   serviceAccountAllowsPermission,
   type Permission,
 } from "@opengeni/contracts";
@@ -106,6 +107,29 @@ const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
     description: "Pick exactly what it can do.",
   },
 ];
+
+/** What a choice's key would hold, as the server judges it. */
+function choiceKey(choice: KeyAccessChoice): Parameters<typeof isMemberLevelApiKey>[0] {
+  if (choice === "developer_setup")
+    return { permissions: DEVELOPER_SETUP_API_KEY_PRESET.permissions, permissionMode: "legacy" };
+  if (choice === "full")
+    return { permissions: presetPermissions("full"), permissionMode: "explicit" };
+  if (choice === "read")
+    return { permissions: presetPermissions("read_only"), permissionMode: "explicit" };
+  return { permissions: [], permissionMode: "explicit" };
+}
+
+/**
+ * For an organization admin who isn't the owner: choices whose key would hold
+ * people, key or billing administration stay visible, off, saying who can.
+ */
+function memberLevelAccessChoices(): SelectOption<KeyAccessChoice>[] {
+  return KEY_ACCESS_CHOICES.map((choice) =>
+    isMemberLevelApiKey(choiceKey(choice.value))
+      ? choice
+      : { ...choice, disabled: true, disabledReason: OWNER_LEVEL_API_KEY_CREATOR_SENTENCE },
+  );
+}
 
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
@@ -435,9 +459,7 @@ function CreateApiKeyPage({
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
   // Full access and Developer setup manage keys or budgets: the owner's to give.
-  const accessChoices = memberLevelOnly
-    ? KEY_ACCESS_CHOICES.filter((choice) => choice.value === "read" || choice.value === "custom")
-    : KEY_ACCESS_CHOICES;
+  const accessChoices = memberLevelOnly ? memberLevelAccessChoices() : KEY_ACCESS_CHOICES;
   const [access, setAccess] = useState<KeyAccessChoice>(memberLevelOnly ? "read" : "full");
   const [custom, setCustom] = useState<string[]>(() => presetPermissions("read_only"));
   const [scope, setScope] = useState<OrganizationWorkspaceScope>({ kind: "all" });
@@ -623,6 +645,7 @@ function CreateApiKeyPage({
               <PermissionChecklist
                 selected={custom}
                 canGrant={memberLevelOnly ? memberLevelPermission : () => true}
+                {...(memberLevelOnly ? { withheldHint: "only the organization owner" } : {})}
                 onChange={(next) => {
                   setCustom(next);
                   setAccessError({});

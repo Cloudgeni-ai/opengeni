@@ -42,6 +42,7 @@ import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
   type MintedRunGitCredentials,
+  type MintedSandboxCodemodeToken,
   type SandboxCodemodeAuthority,
 } from "../environment";
 import { rigProviderImageSourceImage } from "@opengeni/core";
@@ -183,7 +184,7 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
   throwIfWorkerShuttingDown: () => void;
@@ -733,9 +734,10 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // proxy's first default-pointer op. A chat-only turn never calls it, so
         // no lease row, no provider box, no warm-meter interval.
         //
-        // A repository still forces that first default-pointer op before HTTP
-        // (workspace-skill catalog in Agent.instructions). Start create now and
-        // join it at get(); do not await here or we serialize Modal before tools.
+        // A repository turn's box is likely to be used by a tool. Start create
+        // now and join it at get(); do not await here or we serialize the
+        // provider create before tools. The repository skill index no longer
+        // reaches the box before the model (shouldDeferRepositorySkillIndex).
         if (sandboxState.sandboxHolderId && sandboxState.sandboxGroupId) {
           const lazyHolderId = sandboxState.sandboxHolderId;
           const lazyGroupId = sandboxState.sandboxGroupId;
@@ -1308,7 +1310,7 @@ export async function bindLazySandboxProvisioner(
             );
             await attachCodemodeTokenRenewal(
               provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
+              lazyCodemodeToken,
               provisioned,
             );
             await attachGitCredentialRenewal(

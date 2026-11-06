@@ -74,6 +74,16 @@ export {
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
+import { withViewableHeifImages } from "./heif-image";
+export {
+  HeifDecodeError,
+  heifToJpeg,
+  sniffHeifImage,
+  withViewableHeifImages,
+  type HeifImageKind,
+  type HeifJpegOptions,
+  type HeifJpegRendition,
+} from "./heif-image";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -284,7 +294,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
-import { uniqueListedMcpTools } from "./mcp-listed-tools";
+import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -479,6 +489,7 @@ import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   agentSharesWorkspace,
+  agentInstructionsLayerContent,
   composeModularAgentInstructions,
   NEUTRAL_AGENT_IDENTITY,
   resolveAgentIdentity,
@@ -493,7 +504,9 @@ import {
   type WorkspaceEnvironmentContext,
 } from "./agent-instructions";
 export {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
+  agentInstructionsLayerContent,
   DEFAULT_AGENT_IDENTITY,
   NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
@@ -783,6 +796,8 @@ export {
 } from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
+  INCOMPLETE_CHAT_COMPLETION_CODE,
+  IncompleteChatCompletionError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
@@ -2749,6 +2764,14 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
+  /**
+   * The instructions of the agent revision this chat is bound to
+   * (`sessions.agent_prompt_revision`), composed as their own layer after the
+   * Codemode/code-search directives and before Git bindings, memory and
+   * session instructions. Omitted for every chat not bound to an agent
+   * revision, whose instructions stay byte-identical.
+   */
+  agentInstructions?: string;
 
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
@@ -2761,6 +2784,14 @@ export type BuildAgentOptions = {
    * holding Steer/Pause behind its requested yield or natural exit.
    */
   turnCancellationSignal?: AbortSignal;
+  /**
+   * Leave repository skills unindexed and tell the model where to look
+   * instead. Set for sessions whose workspace is provisioned lazily, where
+   * indexing would be the operation that prepares it (box, environment setup,
+   * clone) before the first model request; that preparation then starts when
+   * a tool first uses it.
+   */
+  deferRepositorySkillIndex?: boolean;
   /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
@@ -3122,6 +3153,7 @@ function inspectModularAgentInstructions(
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
@@ -3155,19 +3187,11 @@ export function inspectPersistentAgentInstructions(
     ),
     settings,
   );
-  if (settings.experimentSystemPromptCacheSplit) {
-    // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every interactive session; a workspace
-    // persona is not.
-    recordStableSystemPromptPrefix(
-      personaTemplate === settings.agentInstructionsTemplate &&
-        !options.workspaceEnvironment &&
-        !options.rig &&
-        !options.unattended
-        ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
-        : OPENGENI_OPERATIONAL_INSTRUCTIONS,
-    );
-  }
+  const sharedPersona =
+    personaTemplate === settings.agentInstructionsTemplate &&
+    !options.workspaceEnvironment &&
+    !options.rig &&
+    !options.unattended;
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
       id: "operational_contract",
@@ -3176,6 +3200,14 @@ export function inspectPersistentAgentInstructions(
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
   ];
+  const agentLayer = agentInstructionsLayerContent(options.agentInstructions);
+  // The agent layer is a Markdown section: it and the layer after it start on
+  // their own paragraph. Chats without one keep the historical joins.
+  let paragraphBreakNext = false;
+  const add = (layer: PersistentAgentInstructionLayerDraft) => {
+    layers.push(paragraphBreakNext ? { ...layer, joinBefore: "\n\n" } : layer);
+    paragraphBreakNext = layer.id === "agent_instructions";
+  };
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
     title: string,
@@ -3183,21 +3215,31 @@ export function inspectPersistentAgentInstructions(
   ) => {
     const trimmed = content?.trim();
     if (!trimmed) return;
-    layers.push({ id, title, content: trimmed });
+    add({ id, title, content: trimmed });
+  };
+  const pushAgentInstructions = () => {
+    if (agentLayer)
+      add({
+        id: "agent_instructions",
+        title: "Agent instructions",
+        content: agentLayer,
+        joinBefore: "\n\n",
+      });
   };
   if (!options.workspaceGovernance?.trim()) {
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
+    pushAgentInstructions();
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
@@ -3208,28 +3250,50 @@ export function inspectPersistentAgentInstructions(
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
+    // Directives follow the session text on this path, so the agent layer
+    // sits right after the persona to stay ahead of session instructions.
+    pushAgentInstructions();
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
     if (skillCatalogLayerApplies(options))
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+  }
+  if (settings.experimentSystemPromptCacheSplit) {
+    // The deployment persona with no workspace environment or sandbox
+    // environment is shared by every interactive session; a workspace
+    // persona is not. An agent chat extends it through the agent's
+    // instructions, which every chat of that agent shares.
+    let stable = sharedPersona
+      ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
+      : OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    if (sharedPersona && agentLayer) {
+      const through = layers.findIndex((layer) => layer.id === "agent_instructions");
+      const directives = layers.slice(2, through);
+      if (
+        through > 1 &&
+        directives.every((layer) => layer.id === "codemode" || layer.id === "code_search")
+      )
+        stable = joinPersistentAgentInstructionLayers(layers.slice(0, through + 1));
+    }
+    recordStableSystemPromptPrefix(stable);
   }
   return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }
@@ -3965,6 +4029,7 @@ export function buildOpenGeniAgent(
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
+      ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -5228,6 +5293,27 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 }
 
 /**
+ * Bind the filesystem capability to a view of its session whose `view_image`
+ * shows HEIC/HEIF photos as a JPEG, the format attached photos reach the model
+ * in, so a photo looks the same whether it was attached or found in the
+ * sandbox. Like {@link neutralizeStructuredToolTransport}, this is an own
+ * property that `Capability.clone()` carries onto each per-run instance, and it
+ * must bind and return `this`.
+ */
+function showHeifImagesAsJpeg(capability: ReturnType<typeof filesystem>): void {
+  const bind = capability.bind;
+  const bindViewingHeif = function (this: typeof capability, session: unknown): unknown {
+    return bind.call(
+      this,
+      (session && typeof session === "object"
+        ? withViewableHeifImages(session)
+        : session) as Parameters<typeof bind>[0],
+    );
+  };
+  (capability as unknown as { bind: typeof bindViewingHeif }).bind = bindViewingHeif;
+}
+
+/**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
  * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
@@ -5477,6 +5563,7 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+    deferRepositorySkillIndex?: boolean;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5531,6 +5618,7 @@ function buildAgentCapabilitiesFromComposition(
   const filesystemCapability = filesystem({
     configureTools: configureFilesystemTools,
   });
+  showHeifImagesAsJpeg(filesystemCapability);
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
@@ -5573,6 +5661,7 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
+        options.deferRepositorySkillIndex ? { deferred: true } : {},
       ),
     );
   }
@@ -10273,6 +10362,11 @@ export class PrefixedMcpServer implements MCPServer {
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // Opengeni's own server validates every UUID itself; the model needs
+          // only `format: "uuid"`, not the regular expression repeating it.
+          if (this.firstPartyCatalog) {
+            tool = { ...tool, inputSchema: withoutRedundantUuidPatterns(tool.inputSchema) };
+          }
           // A recoverable operation is never filled, so it keeps its own schema.
           const defaults = configuredMcpOperationRecovery(this, tool.name)
             ? { inputSchema: tool.inputSchema, filled: [] }

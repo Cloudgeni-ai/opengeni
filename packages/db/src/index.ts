@@ -193,7 +193,7 @@ import {
   parseSessionRemovedRepositories,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE, WORKSPACE_OWNER_PERMISSIONS } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -380,6 +380,7 @@ import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import {
   currentSessionAttachmentReadAccess,
   currentSessionRlsActorInitiatingHumanSubjectId,
+  withoutSessionRlsActor,
 } from "./database";
 import {
   ambientBillingOrigin,
@@ -428,6 +429,11 @@ import {
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
   workspaceGovernanceContextItem,
+  AGENT_INSTRUCTIONS_CONTEXT_PREFIX,
+  agentInstructionsContextItem,
+  agentInstructionsContextText,
+  readAgentInstructionsContext,
+  sameAgentInstructionsContext,
   sessionTurnSurfaceOrNull,
   type SessionTurnSurface,
 } from "@opengeni/contracts";
@@ -981,6 +987,8 @@ import {
   type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
@@ -2365,37 +2373,8 @@ export async function resolveDocumentIndexAuthority(
   };
 }
 
-export const allWorkspacePermissions: Permission[] = [
-  "workspace:read",
-  "workspace:admin",
-  "members:manage",
-  "sessions:create",
-  "sessions:read",
-  "sessions:control",
-  "files:upload",
-  "files:read",
-  "documents:manage",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "github:manage",
-  "github:use",
-  "api_keys:manage",
-  "connections:read",
-  "connections:write",
-  "connections:personal",
-  "capabilities:manage",
-  "secrets:list",
-  "secrets:read",
-  "secrets:write",
-  "secrets:use",
-  "mcp_servers:attach",
-  "goals:manage",
-  "enrollments:read",
-  "enrollments:manage",
-  "artifacts:read",
-  "artifacts:publish",
-];
+/** A Workspace owner's permissions; shared with the API key creator rule. */
+export const allWorkspacePermissions: Permission[] = [...WORKSPACE_OWNER_PERMISSIONS];
 
 export { managedPersonalWorkspacePermissions };
 
@@ -8995,6 +8974,9 @@ export function durableUserHistoryItem(
       ? {
           [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
           [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+          [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: [
+            ...MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS,
+          ],
         }
       : {}),
     ...(annotations.length > 0
@@ -15627,6 +15609,42 @@ export async function getSlackInteractionSessionAccess(
       )
       .limit(1);
     return row ?? null;
+  });
+}
+
+/**
+ * The person a private Slack interaction (a bot DM or a private handoff)
+ * reserved this session's root for, or null. Session authorization fences such
+ * a session to that person, so the files it produces belong to them alone, as
+ * an Only-me session's do. A session that does not exist yet is its own root,
+ * which covers a Slack session that is about to be created on its reservation.
+ */
+export async function getSlackPrivateSessionOwnerSubjectId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ owning_subject_id: string }>(
+      scopedDb,
+      sql`
+        select slack.owning_subject_id
+        from ${schema.slackInteractions} slack
+        where slack.workspace_id = ${workspaceId}
+          and slack.visibility = 'private'
+          and slack.session_reservation_id = coalesce(
+            (
+              select session.root_session_id
+              from ${schema.sessions} session
+              where session.workspace_id = ${workspaceId}
+                and session.id = ${sessionId}::uuid
+            ),
+            ${sessionId}::uuid
+          )
+        limit 1
+      `,
+    );
+    return row?.owning_subject_id ?? null;
   });
 }
 
@@ -24847,7 +24865,13 @@ export async function getRigVersionById(
 }
 
 export type RigProviderImageBuildClaim =
-  | { status: "claimed"; image: RigProviderImage }
+  | {
+      status: "claimed";
+      image: RigProviderImage;
+      /** The record this claim replaced, if any: a provider image it named is
+       * no longer referenced once the new build is published. */
+      replaced: RigProviderImage | null;
+    }
   | {
       status: "ready" | "in_progress" | "unsupported" | "conflict";
       image: RigProviderImage;
@@ -24991,7 +25015,7 @@ export async function claimRigVersionProviderImageBuild(
           eq(schema.rigVersions.id, input.versionId),
         ),
       );
-    return { status: "claimed", image: claimed };
+    return { status: "claimed", image: claimed, replaced: existing ?? null };
   });
 }
 
@@ -43850,6 +43874,8 @@ type SessionContextChannel = {
   contentPrefix: string;
   read: (item: Record<string, unknown>) => string | null;
   item: (text: string) => Record<string, unknown>;
+  /** Texts the model reads the same way; defaults to exact equality. */
+  same?: (left: string, right: string) => boolean;
 };
 
 const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
@@ -43866,6 +43892,15 @@ const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   contentPrefix: WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
   read: readWorkspaceGovernanceContext,
   item: workspaceGovernanceContextItem,
+};
+
+const AGENT_INSTRUCTIONS_CHANNEL: SessionContextChannel = {
+  label: "Agent instructions",
+  metadataKey: "opengeniAgentInstructionsHistoryId",
+  contentPrefix: AGENT_INSTRUCTIONS_CONTEXT_PREFIX,
+  read: readAgentInstructionsContext,
+  item: agentInstructionsContextItem,
+  same: sameAgentInstructionsContext,
 };
 
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
@@ -43928,6 +43963,182 @@ export async function ensureSessionWorkspaceGovernance(
   return visible === null || visible === WORKSPACE_GOVERNANCE_NONE ? null : visible;
 }
 
+/**
+ * The agent revision baked into a chat's system prompt
+ * (`sessions.agent_prompt_revision`) and its instructions. Null for every chat
+ * not bound to an agent revision, which never gets the agent layer. A deleted
+ * agent (its revisions go with it) or a missing revision reads as
+ * `instructions: null`, so the chat continues as a plain chat.
+ */
+export type SessionAgentPrompt = {
+  agentId: string | null;
+  revision: number;
+  instructions: string | null;
+};
+
+/** Turn metadata key freezing the prompt revision for every attempt of a turn. */
+const AGENT_PROMPT_REVISION_METADATA_KEY = "opengeniAgentPromptRevision";
+
+/**
+ * The bound agent's rows, read as the system: the session's binding to its
+ * agent is the authorization, so an Only me agent stays visible to turns
+ * that act for no person or for someone other than its owner.
+ */
+async function readBoundAgentRows<T extends Record<string, unknown>>(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+  query: SQL,
+): Promise<T | undefined> {
+  return await withoutSessionRlsActor(() =>
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => (await rawRows<T>(scopedDb, query))[0],
+    ),
+  );
+}
+
+/**
+ * Pass `turn` from a turn attempt: the first attempt records the revision in
+ * the turn's metadata and later attempts reuse it, so every attempt of a turn
+ * builds the same system prompt even after an earlier attempt's compaction
+ * folded a newer revision into the session.
+ */
+export async function readSessionAgentPrompt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turn?: { turnId: string; expectedExecutionGeneration: number; expectedAttemptId: string };
+  },
+): Promise<SessionAgentPrompt | null> {
+  const scope = { accountId: input.accountId, workspaceId: input.workspaceId };
+  const session = await withRlsContext(db, scope, async (scopedDb) => {
+    const [row] = await rawRows<{ agent_id: string | null; revision: number | null }>(
+      scopedDb,
+      sql`select s.agent_id::text as agent_id, s.agent_prompt_revision as revision
+        from sessions s
+        where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
+    );
+    return row;
+  });
+  if (!session || session.revision === null || session.revision === undefined) return null;
+  let revision = Number(session.revision);
+  const turn = input.turn;
+  if (turn) {
+    revision = await withRlsContext(db, scope, async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.turnId,
+          executionGeneration: turn.expectedExecutionGeneration,
+          attemptId: turn.expectedAttemptId,
+        });
+        if (!fence.allowed) throw new Error("Agent prompt attempt is fenced");
+        const frozen = fence.turn.metadata[AGENT_PROMPT_REVISION_METADATA_KEY];
+        if (frozen !== undefined) {
+          if (typeof frozen !== "number" || !Number.isSafeInteger(frozen) || frozen < 1)
+            throw new Error("Invalid agent prompt revision receipt");
+          return frozen;
+        }
+        await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: { ...fence.turn.metadata, [AGENT_PROMPT_REVISION_METADATA_KEY]: revision },
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, turn.turnId),
+            ),
+          );
+        return revision;
+      }),
+    );
+  }
+  const agentId = session.agent_id ?? null;
+  const row = agentId
+    ? await readBoundAgentRows<{ instructions: string }>(
+        db,
+        scope,
+        sql`select r.instructions
+          from agent_revisions r
+          where r.workspace_id = ${input.workspaceId}::uuid
+            and r.agent_id = ${agentId}::uuid
+            and r.revision = ${revision}::integer`,
+      )
+    : undefined;
+  return { agentId, revision, instructions: row?.instructions ?? null };
+}
+
+/**
+ * Deliver an edit of the chat's agent made since its system prompt was built:
+ * once per logical turn, as a developer history item before the turn that
+ * first sees the new revision. Retries reuse the turn's snapshot. Nothing is
+ * written while the newest item (or, without one, the system prompt) already
+ * shows the current instructions; a revision that changed only other fields
+ * shows nothing new. A deleted agent withdraws an earlier edit item and the
+ * chat continues as a plain chat; an agent whose current revision cannot be
+ * read changes nothing. Returns the model-visible item text, or null when the
+ * system prompt alone applies.
+ */
+export async function ensureSessionAgentInstructions(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    prompt: SessionAgentPrompt;
+  },
+): Promise<string | null> {
+  const { prompt, ...scope } = input;
+  const current = prompt.agentId
+    ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
+        db,
+        input,
+        sql`select a.current_revision as revision, r.instructions
+          from agents a
+          left join agent_revisions r
+            on r.workspace_id = a.workspace_id
+            and r.agent_id = a.id
+            and r.revision = a.current_revision
+          where a.workspace_id = ${input.workspaceId}::uuid
+            and a.id = ${prompt.agentId}::uuid`,
+      )
+    : undefined;
+  return await ensureSessionContextSnapshot(
+    db,
+    {
+      ...scope,
+      text: !current
+        ? agentInstructionsContextText({ kind: "deleted" })
+        : current.instructions === null || current.instructions === undefined
+          ? null
+          : agentInstructionsContextText({
+              kind: "revision",
+              revision: Number(current.revision),
+              instructions: current.instructions,
+            }),
+      baselineText: agentInstructionsContextText(
+        prompt.instructions === null
+          ? { kind: "deleted" }
+          : {
+              kind: "revision",
+              revision: prompt.revision,
+              instructions: prompt.instructions,
+            },
+      ),
+    },
+    AGENT_INSTRUCTIONS_CHANNEL,
+  );
+}
+
 async function ensureSessionContextSnapshot(
   db: Database,
   input: {
@@ -43937,13 +44148,24 @@ async function ensureSessionContextSnapshot(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    text: string;
+    /**
+     * The current text, or null when it cannot be read: the turn then keeps
+     * whatever the model already reads and nothing is written.
+     */
+    text: string | null;
     /** Write nothing when the session has no earlier item of this channel. */
     omitWhenAbsent?: boolean;
+    /**
+     * What the model already reads when the session has no earlier item of
+     * this channel (its system prompt). Text the model reads the same way
+     * writes nothing, and the turn is frozen without an item.
+     */
+    baselineText?: string;
   },
   channel: SessionContextChannel,
 ): Promise<string | null> {
   const lower = channel.label.toLowerCase();
+  const same = channel.same ?? ((left: string, right: string) => left === right);
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -43995,8 +44217,14 @@ async function ensureSessionContextSnapshot(
           if (previousText === null) throw new Error(`Missing durable ${lower} snapshot`);
           return previousText;
         }
+        const text = input.text;
         let historyId = previous?.id;
-        if (!previous && input.omitWhenAbsent) {
+        if (
+          !previous &&
+          (text === null ||
+            input.omitWhenAbsent ||
+            (input.baselineText !== undefined && same(input.baselineText, text)))
+        ) {
           await tx
             .update(schema.sessionTurns)
             .set({
@@ -44011,7 +44239,9 @@ async function ensureSessionContextSnapshot(
             );
           return null;
         }
-        if (previousText !== input.text) {
+        const written =
+          text !== null && (previousText === null || !same(previousText, text)) ? text : null;
+        if (written !== null) {
           const [boundary] = await tx
             .select({ position: schema.sessionHistoryItems.position })
             .from(schema.sessionHistoryItems)
@@ -44056,7 +44286,7 @@ async function ensureSessionContextSnapshot(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 position,
-                item: channel.item(input.text),
+                item: channel.item(written),
               },
               "item",
               "itemCodecVersion",
@@ -44076,7 +44306,7 @@ async function ensureSessionContextSnapshot(
               eq(schema.sessionTurns.id, input.turnId),
             ),
           );
-        return input.text;
+        return written ?? previousText;
       }),
   );
 }
@@ -45366,6 +45596,13 @@ export async function applyContextCompaction(
      * another model: switch the session to portable compaction with it.
      */
     switchToPortableCompaction?: boolean;
+    /**
+     * Agent chats: the newest agent revision the summarized history showed.
+     * It becomes the revision baked into the system prompt from the next turn
+     * on (`sessions.agent_prompt_revision`), in the same transaction as the
+     * replacement, because the edit items that carried it are not retained.
+     */
+    agentPromptRevision?: number;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
@@ -45374,6 +45611,26 @@ export async function applyContextCompaction(
     input.replacementTurnIds.length !== input.replacementItems.length
   ) {
     throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
+  let agentPromptRevision = input.agentPromptRevision;
+  if (agentPromptRevision !== undefined) {
+    if (!Number.isSafeInteger(agentPromptRevision) || agentPromptRevision < 1)
+      throw new Error("Invalid agent prompt revision");
+    // Fold only a revision of the chat's own agent. Revisions are immutable
+    // and go only with their agent, so the check cannot go stale before the
+    // update below in any way that matters.
+    const ownRevision = await readBoundAgentRows<{ found: number }>(
+      db,
+      input,
+      sql`select 1 as found
+        from sessions s
+        join agent_revisions r
+          on r.workspace_id = s.workspace_id
+          and r.agent_id = s.agent_id
+          and r.revision = ${agentPromptRevision}::integer
+        where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
+    );
+    if (!ownRevision) agentPromptRevision = undefined;
   }
   return await withSessionActivityRlsContext(
     db,
@@ -45556,6 +45813,18 @@ export async function applyContextCompaction(
               eq(schema.sessions.id, input.sessionId),
             ),
           );
+        if (agentPromptRevision !== undefined) {
+          // Only a chat already bound to an agent revision is folded, and only
+          // forward: a plain chat never becomes an agent chat here, and a
+          // retried attempt's compaction never moves the prompt back.
+          await tx.execute(sql`
+            update sessions set agent_prompt_revision = ${agentPromptRevision}::integer
+            where workspace_id = ${input.workspaceId}::uuid
+              and id = ${input.sessionId}::uuid
+              and agent_id is not null
+              and agent_prompt_revision < ${agentPromptRevision}::integer
+          `);
+        }
         return {
           applied: true as const,
           supersededFrom,
@@ -77187,6 +77456,10 @@ export type ClaimSessionWorkForAttemptInput = {
   /** Internal worker-build declaration, never request-derived or universally
    * stamped by createDb. Only builds that always reconstruct the warning opt in. */
   filesystemDiscontinuityProtocol?: 1 | 2 | 3 | 4;
+  /** Internal worker-build declaration: this build adds the agent
+   * instructions layer and channel. Without it, a claim of a chat bound to an
+   * agent revision is refused (SQLSTATE 55000, migration 1276). */
+  agentInstructionsProtocol?: 1;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -78369,10 +78642,15 @@ async function acknowledgeConsumedChildSequencesInTransaction(
   });
 }
 
-/** Scope the worker-build declaration to registration, including nested claims. */
+/**
+ * Scope the worker-build declarations (filesystem discontinuity and agent
+ * instructions protocols) to registration, including nested claims. One
+ * statement reads the prior values, one sets them and one restores them.
+ */
 async function withSandboxRecoveryWarningClaimProtocol<T>(
   tx: Database,
   version: 1 | 2 | 3 | 4 | undefined,
+  agentInstructionsVersion: 1 | undefined,
   register: () => Promise<T>,
 ): Promise<T> {
   const [prior] = await rawRows<{
@@ -78380,13 +78658,15 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
     automatic_protocol: string;
     fresh_protocol: string;
     explicit_protocol: string;
+    agent_instructions_protocol: string;
   }>(
     tx,
     sql`select
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as consent_protocol,
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v2', true), '') as automatic_protocol,
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v3', true), '') as fresh_protocol,
-      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v4', true), '') as explicit_protocol`,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v4', true), '') as explicit_protocol,
+      coalesce(current_setting('opengeni.agent_instructions_protocol_v1', true), '') as agent_instructions_protocol`,
   );
   // Each protocol version reconstructs every earlier warning kind as well.
   await tx.execute(
@@ -78394,7 +78674,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
       set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 || version === 2 || version === 3 || version === 4 ? "1" : ""}, true),
       set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 || version === 3 || version === 4 ? "2" : ""}, true),
       set_config('opengeni.filesystem_discontinuity_protocol_v3', ${version === 3 || version === 4 ? "3" : ""}, true),
-      set_config('opengeni.filesystem_discontinuity_protocol_v4', ${version === 4 ? "4" : ""}, true)`,
+      set_config('opengeni.filesystem_discontinuity_protocol_v4', ${version === 4 ? "4" : ""}, true),
+      set_config('opengeni.agent_instructions_protocol_v1', ${agentInstructionsVersion === 1 ? "1" : ""}, true)`,
   );
   let completed = false;
   try {
@@ -78407,7 +78688,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
         set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.consent_protocol ?? ""}, true),
         set_config('opengeni.filesystem_discontinuity_protocol_v2', ${prior?.automatic_protocol ?? ""}, true),
         set_config('opengeni.filesystem_discontinuity_protocol_v3', ${prior?.fresh_protocol ?? ""}, true),
-        set_config('opengeni.filesystem_discontinuity_protocol_v4', ${prior?.explicit_protocol ?? ""}, true)`,
+        set_config('opengeni.filesystem_discontinuity_protocol_v4', ${prior?.explicit_protocol ?? ""}, true),
+        set_config('opengeni.agent_instructions_protocol_v1', ${prior?.agent_instructions_protocol ?? ""}, true)`,
     );
     if (completed) await restore;
     else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
@@ -79376,6 +79658,7 @@ export async function claimSessionWorkForAttempt(
           const attempt = await withSandboxRecoveryWarningClaimProtocol(
             tx,
             input.filesystemDiscontinuityProtocol,
+            input.agentInstructionsProtocol,
             () =>
               registerSessionTurnAttemptClaim(tx as unknown as Database, {
                 id: input.attemptId,
@@ -96630,6 +96913,7 @@ export {
 } from "./codex-token-resolver";
 
 export {
+  ConnectionNotRefreshableError,
   ConnectionRefreshHttpError,
   isPrivateAddress,
   normalizeBearerScheme,

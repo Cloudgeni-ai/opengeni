@@ -3542,6 +3542,37 @@ describe("buildTimeline", () => {
     expect(phases.find((phase) => phase.phase === "sandbox")?.outcome).toBe("created");
   });
 
+  test("a setup step keeps the name of the Sandbox Environment it sets up", () => {
+    reset();
+    const turn = { turnId: "turn-named-setup" };
+    const setup = { rigId: "rig-1", versionId: "version-1", rigName: " cloudgeni " };
+    const running = buildTimeline(englishText, [event("rig.setup.started", setup, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(running).toMatchObject({ phase: "rig", status: "running", subject: "cloudgeni" });
+
+    const settled = buildTimeline(englishText, [
+      event("rig.setup.started", setup, turn),
+      event("rig.setup.completed", setup, turn),
+    ]).find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(settled).toMatchObject({ phase: "rig", status: "complete", subject: "cloudgeni" });
+
+    const unnamed = buildTimeline(englishText, [event("rig.setup.started", {}, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(unnamed?.subject).toBeUndefined();
+
+    // A later attempt replaces the failed one's row, name included.
+    const retried = buildTimeline(englishText, [
+      event("rig.setup.started", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.failed", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.started", { attemptId: "attempt-2" }, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]).toMatchObject({ phase: "rig", status: "running" });
+    expect(retried[0]?.subject).toBeUndefined();
+  });
+
   test("warm reuse and setup failure retain their distinct outcomes", () => {
     reset();
     const warmTurn = { turnId: "turn-warm" };

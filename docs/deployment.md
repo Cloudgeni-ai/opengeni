@@ -1785,14 +1785,24 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
-The unauthenticated local development API (`OPENGENI_PRODUCT_ACCESS_MODE=local`
-with the default `OPENGENI_ENVIRONMENT=local`) uses a stricter browser boundary
-instead: no wildcard CORS, browser `Origin`s limited to its web origin, its own
-address, and `OPENGENI_LOCAL_ALLOWED_ORIGINS`, and `Host` limited to this
-computer's names and configured addresses. See
+The unauthenticated local access mode (`OPENGENI_PRODUCT_ACCESS_MODE=local`)
+never answers with wildcard CORS, whatever `OPENGENI_ENVIRONMENT` is: a request
+without credentials acts as the local user, so any site could otherwise read
+its responses. Only the `OPENGENI_WEB_BASE_URL` and `OPENGENI_PUBLIC_BASE_URL`
+origins and the exact origins listed in `OPENGENI_LOCAL_ALLOWED_ORIGINS`
+receive CORS responses; `OPENGENI_CORS_ALLOW_ORIGIN_REGEX` does not apply, and
+every other origin gets no CORS grant. The stock web app served from the same
+origin as the API (as in the Helm examples and the tailnet profile above) needs
+none of this. If a browser app calls such a deployment from another origin,
+set that origin in `OPENGENI_WEB_BASE_URL` or `OPENGENI_LOCAL_ALLOWED_ORIGINS`.
+
+The local development API (local access mode with the default
+`OPENGENI_ENVIRONMENT=local`) also checks requests at a stricter browser
+boundary: browser `Origin`s limited to its web origin (by default
+`http://127.0.0.1:3000`), its own address, and `OPENGENI_LOCAL_ALLOWED_ORIGINS`,
+and `Host` limited to this computer's names and configured addresses. See
 [local-development.md](local-development.md#start-the-full-stack). Managed and
-configured access modes, and local access mode under any other
-`OPENGENI_ENVIRONMENT` (such as the Helm examples), keep the policy above.
+configured access modes keep the policy above.
 
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request

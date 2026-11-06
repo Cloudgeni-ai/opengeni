@@ -83,6 +83,42 @@ describe("BrowserControlClient", () => {
       }
     });
   }
+  test("names the passkey owner in the query, which older controllers ignore", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const owner = randomUUID();
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        expect(url.searchParams.get("backupFlags")).toBe("1");
+        expect(url.searchParams.get("owner")).toBe(owner);
+        // The body keeps the shape a strict older controller accepts.
+        expect(await request.json()).toEqual({
+          protocolVersion: 1,
+          ...reference,
+          credentials: [],
+          acknowledgeEventIds: [],
+        });
+        return success({ ...reference, authenticators: 0, events: [], supportsOwners: true });
+      },
+    });
+    const placement = await localPlacement();
+    try {
+      const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+      const response = await client
+        .sessionClient({ reference, controlToken, viewToken })
+        .passkeySync({
+          protocolVersion: 1,
+          ...reference,
+          credentials: [],
+          acknowledgeEventIds: [],
+          owner,
+        });
+      expect(response.supportsOwners).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
   test.each([
     "exact",
     "session",

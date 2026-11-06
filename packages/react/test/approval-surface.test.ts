@@ -75,13 +75,15 @@ describe("approvalsDecidable", () => {
 });
 
 describe("ApprovalSurface", () => {
-  test.each(["saved", "legacy"] as const)(
+  test.each(["saved", "legacy", "no host review"] as const)(
     "%s reviews keep their card and focus across unrelated event projections",
     async (kind) => {
       let calls = 0;
       const loadReview = async () => {
         calls++;
         if (kind === "legacy") throw new OpenGeniApiError(404, "Review not found");
+        // A host with no review for this approval keeps the standard card.
+        if (kind === "no host review") return null;
         return savedReview();
       };
       const events = [

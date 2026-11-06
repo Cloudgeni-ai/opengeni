@@ -9,7 +9,12 @@ import {
   buildPortableSkillArtifact,
   readSkillLibraryArtifact,
 } from "./skill-library";
-import { SkillFileError, listSkillPaths, readSkillFiles } from "./skill-files";
+import {
+  SkillFileError,
+  listSkillPaths,
+  readSkillFilesReportingMissing,
+  type SkillFilesRead,
+} from "./skill-files";
 import type { SkillCatalogDescriptor } from "./skill-catalog";
 
 export type RuntimeSkillArtifactFile = Readonly<{
@@ -246,7 +251,7 @@ export function skillCatalogFromComposition(
 export function readRuntimeSkill(
   composition: RuntimeSkillComposition,
   request: RuntimeSkillReadRequest,
-): { skillId: string; files?: ReturnType<typeof readSkillFiles>["files"]; paths?: string[] } {
+): { skillId: string; paths?: string[] } & Partial<SkillFilesRead> {
   const skill = request.skill.trim();
   if (!skill)
     throw new SkillFileError("invalid_request", "skill_read requires a Skill identifier.");
@@ -275,7 +280,7 @@ export function readRuntimeSkill(
   }
   return {
     skillId: artifact.id,
-    files: readSkillFiles(artifact.files, request.paths).files,
+    ...readSkillFilesReportingMissing(artifact.files, request.paths),
   };
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -12,13 +13,15 @@ const sessionId = "00000000-0000-4000-8000-000000000103";
 const turnId = "00000000-0000-4000-8000-000000000104";
 const attemptId = "00000000-0000-4000-8000-000000000105";
 
-function protectedApp(options: { delegationSecret?: string } = {}) {
+function protectedApp(
+  options: { delegationSecret?: string; productAccessMode?: "local" | "configured" } = {},
+) {
   const app = new Hono();
   app.use(
     "*",
     requireAccessKey(
       testSettings({
-        productAccessMode: "configured",
+        productAccessMode: options.productAccessMode ?? "configured",
         authRequired: true,
         accessKey,
         delegationSecret: options.delegationSecret,
@@ -105,6 +108,35 @@ describe("configured deployment perimeter authentication", () => {
     const bearer = await attemptBearer(accessKey);
     const response = await protectedApp().request("/v1/protected", {
       headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(response.status).toBe(200);
+  });
+
+  test("a local-mode shared-key perimeter rejects bearers signed with the built-in local secret", async () => {
+    const builtInLocalSecret = resolveFirstPartyDelegationSecret(
+      testSettings({ productAccessMode: "local", authRequired: false, environment: "test" }),
+    );
+    expect(builtInLocalSecret).toBeTruthy();
+    const app = protectedApp({ productAccessMode: "local" });
+    const forged = await attemptBearer(builtInLocalSecret!);
+    const rejected = await app.request("/v1/protected", {
+      headers: { authorization: `Bearer ${forged}` },
+    });
+    expect(rejected.status).toBe(401);
+    const signedWithKey = await attemptBearer(accessKey);
+    const admitted = await app.request("/v1/protected", {
+      headers: { authorization: `Bearer ${signedWithKey}` },
+    });
+    expect(admitted.status).toBe(200);
+    const explicit = protectedApp({ productAccessMode: "local", delegationSecret });
+    for (const secret of [builtInLocalSecret!, accessKey]) {
+      const response = await explicit.request("/v1/protected", {
+        headers: { authorization: `Bearer ${await attemptBearer(secret)}` },
+      });
+      expect(response.status).toBe(401);
+    }
+    const response = await explicit.request("/v1/protected", {
+      headers: { authorization: `Bearer ${await attemptBearer(delegationSecret)}` },
     });
     expect(response.status).toBe(200);
   });

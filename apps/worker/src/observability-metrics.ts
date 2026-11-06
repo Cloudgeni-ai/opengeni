@@ -2972,6 +2972,37 @@ const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
   0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
 ];
 
+/**
+ * Exclusive, consecutive stages of one model request's pre-dispatch time. Each
+ * runs from the moment it is entered until the next stage is entered or the
+ * request is dispatched, so the stages of one request add up to its
+ * `opengeni_model_request_pre_dispatch_seconds` sample.
+ *
+ *   - `settlement_wait`: the previous response's durable settlement.
+ *   - `admission`: the per-call admission (durable history reconcile, run and
+ *     credit revalidation, Steer check).
+ *   - `request_build`: SDK request serialization and provider body policy,
+ *     up to the provider transport.
+ *   - `credential`: the provider credential for this request.
+ *   - `dispatch_checkpoint`: the durable history and route checkpoint.
+ *   - `request_audit`: the durable request audit event.
+ *   - `provider_admission`: provider-side admission, such as the durable
+ *     one-shot subscription reservation.
+ *   - `transport`: the remaining transport work: residency, wire capture and
+ *     the connection, up to the bytes leaving this process.
+ */
+export const MODEL_REQUEST_PRE_DISPATCH_STAGES = [
+  "settlement_wait",
+  "admission",
+  "request_build",
+  "credential",
+  "dispatch_checkpoint",
+  "request_audit",
+  "provider_admission",
+  "transport",
+] as const;
+export type ModelRequestPreDispatchStage = (typeof MODEL_REQUEST_PRE_DISPATCH_STAGES)[number];
+
 /** First streamed content of a provider response. `any` is the first reasoning
  *  or answer delta; `text` is the first answer-text delta. They overlap — never
  *  sum across `content`. */
@@ -2990,6 +3021,9 @@ export type ProviderFirstContent = "any" | "text";
  *     latency: SDK model entry (the first admission check) to the literal
  *     provider dispatch. Covers admission, the durable history checkpoint,
  *     credit revalidation, the durable request audit and request build.
+ *   - `opengeni_model_request_pre_dispatch_stage_seconds{provider,stage}` —
+ *     the same per-request latency split into exclusive consecutive stages
+ *     (`MODEL_REQUEST_PRE_DISPATCH_STAGES`) that add up to it.
  *   - `opengeni_model_provider_ttft_seconds{provider,content}` — the PROVIDER's
  *     latency: literal dispatch to the first streamed `any` (reasoning or text)
  *     delta and to the first answer `text` delta. Includes network, provider
@@ -3018,6 +3052,9 @@ export class StreamTimingMetrics {
   private ttftArmed = true;
   private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
   private modelEntryAt: number | null = null;
+  /** The pre-dispatch stage now running, and since when. */
+  private stage: { name: ModelRequestPreDispatchStage; since: number } | null = null;
+  private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
   /** The model call awaiting its terminal response, if one was dispatched. */
@@ -3041,7 +3078,30 @@ export class StreamTimingMetrics {
    *  providers can run those after dispatch, while the response is in flight. */
   onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
     if (point !== "model_entry") return;
-    if (this.modelEntryAt === null) this.modelEntryAt = this.now();
+    if (this.modelEntryAt !== null) return;
+    this.modelEntryAt = this.now();
+    this.stageMs.clear();
+    this.stage = { name: "settlement_wait", since: this.modelEntryAt };
+  }
+
+  /**
+   * Producer side: the model request now in preparation entered `stage`. The
+   * stage before it ends here. Ignored between a dispatch and the next model
+   * entry, so post-dispatch work (a continuation's re-admission, a transport
+   * recheck) never lands in a later request's stages.
+   */
+  enterPreDispatchStage(stage: ModelRequestPreDispatchStage): void {
+    if (this.modelEntryAt === null || this.stage === null) return;
+    if (this.stage.name === stage) return;
+    const at = this.now();
+    this.closeStage(at);
+    this.stage = { name: stage, since: at };
+  }
+
+  private closeStage(at: number): void {
+    if (!this.stage) return;
+    const elapsed = Math.max(0, at - this.stage.since);
+    this.stageMs.set(this.stage.name, (this.stageMs.get(this.stage.name) ?? 0) + elapsed);
   }
 
   /** Producer side: request bytes are about to leave this process. */
@@ -3057,6 +3117,18 @@ export class StreamTimingMetrics {
         labels: { provider: this.options.provider },
         value: preDispatchMs / 1000,
       });
+      this.closeStage(at);
+      for (const [stage, ms] of this.stageMs) {
+        this.observability.observeHistogram({
+          name: "opengeni_model_request_pre_dispatch_stage_seconds",
+          help: "Seconds of one model request's pre-dispatch time spent in each exclusive stage; a request's stages add up to its pre-dispatch time.",
+          buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+          labels: { provider: this.options.provider, stage },
+          value: ms / 1000,
+        });
+      }
+      this.stageMs.clear();
+      this.stage = null;
       this.modelEntryAt = null;
     }
     // A transport retry re-dispatches the same request; the first delta then

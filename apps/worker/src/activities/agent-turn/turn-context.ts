@@ -31,7 +31,7 @@ import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
-import type { TurnOutcome } from "../../observability-metrics";
+import type { ModelRequestPreDispatchStage, TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
@@ -204,6 +204,11 @@ export type EventingState = {
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  /**
+   * Set by the stream attempt: the model request now in preparation entered
+   * a pre-dispatch stage. Provider transports report their stages here.
+   */
+  enterModelRequestStage: ((stage: ModelRequestPreDispatchStage) => void) | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
@@ -416,6 +421,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      enterModelRequestStage: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,

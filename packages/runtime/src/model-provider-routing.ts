@@ -61,6 +61,7 @@ import {
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
+  IncompleteChatCompletionError,
   UnknownModelFinishReasonError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
@@ -274,8 +275,18 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             text: (reasoning?.text ?? "") + delta.text,
           };
       }
-      if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
-        throw new UnknownModelFinishReasonError();
+      if (event.type === "response_done") {
+        // OpenAI may swallow AbortError and let the SDK synthesize completion.
+        // Intentional cancellation retains its caller-owned reason, not a
+        // misleading provider failure (the Runner handles AbortError itself).
+        request.signal?.throwIfAborted();
+        // The SDK emits response_done even when the iterator simply ends.
+        // Require the primary choice's terminal evidence before releasing
+        // assembled tool calls or treating partial text as a complete answer.
+        if (typeof finishReason !== "string" || !finishReason.trim()) {
+          throw new IncompleteChatCompletionError();
+        }
+        if (isUnknownFinishReason(finishReason)) throw new UnknownModelFinishReasonError();
       }
       yield event.type === "response_done"
         ? {

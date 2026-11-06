@@ -4162,6 +4162,54 @@ describe("StartupPhaseRow", () => {
     await r.unmount();
   });
 
+  test("a running setup step names its environment and counts up while it runs", async () => {
+    setStartupDetails(true);
+    const startedAt = new Date(Date.now() - 41_500).toISOString();
+    const running: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rig-running",
+      turnId: "turn-setup",
+      phase: "rig",
+      status: "running",
+      subject: "cloudgeni",
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: null,
+      occurredAt: startedAt,
+    };
+    const r = await renderComponent(<ActivityRail items={[running]} />);
+    try {
+      await flush();
+      const text = () => r.container.textContent ?? "";
+      // The time runs in the title, as in the turn header; no gutter chip.
+      expect(text()).toContain("Setting up cloudgeni · 41s");
+      await flush(1_100);
+      expect(text()).toContain("Setting up cloudgeni · 42s");
+
+      // Settled, the step shows its recorded duration and the ordinary title.
+      await r.rerender(
+        <ActivityRail
+          items={[
+            {
+              ...running,
+              status: "complete",
+              completedAt: new Date().toISOString(),
+              durationMs: 66_400,
+            },
+          ]}
+        />,
+      );
+      await flush();
+      expect(text()).toContain("Sandbox Environment ready");
+      expect(text()).not.toContain("·");
+      expect(text()).toContain("1m 06s");
+    } finally {
+      await r.unmount();
+      setStartupDetails(false);
+    }
+  });
+
   beforeEach(() => setStartupDetails(true));
   afterEach(() => setStartupDetails(false));
 

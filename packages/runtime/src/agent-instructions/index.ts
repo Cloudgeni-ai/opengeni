@@ -1,6 +1,8 @@
 export {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   MODULAR_LAYER_SEPARATOR,
+  agentInstructionsLayerContent,
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
   composeOperationalContract,

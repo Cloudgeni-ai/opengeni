@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Tests state-volume, install.sh's state volume step, on real loop devices
+# with real file systems, as root on Linux (it formats and mounts them):
+#
+#   sudo compute/deploy/host/test-state-volume
+#
+# - a host whose boot disk was rebuilt (no record in /etc/compute, no mount
+#   entry) keeps the XFS state volume on its device: the same file system,
+#   its files intact, recorded again, never formatted; so does one whose
+#   volume was set up before volumes carried their own record;
+# - only a blank device is formatted, and the record is kept on the volume
+#   as well as in /etc/compute;
+# - a device holding a file system with other files, or something that is
+#   not a file system, is refused and left as it was;
+# - --reformat formats a device whatever it holds, but never one in use;
+# - a run again changes nothing, and a mounted volume other than the
+#   recorded one is refused;
+# - install.sh formats nothing itself: every format goes through here.
+set -euo pipefail
+
+[ "$(id -u)" = 0 ] || { echo "test-state-volume: run as root (it uses loop devices)" >&2; exit 1; }
+for tool in losetup mkfs.xfs mkfs.ext4 mkswap blkid findmnt mountpoint; do
+  command -v "$tool" >/dev/null || { echo "test-state-volume: $tool is missing" >&2; exit 1; }
+done
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/state-volume"
+work=$(mktemp -d)
+cleanup() {
+  local image loop
+  umount "$work/var" 2>/dev/null || true
+  for image in "$work"/disk.*; do
+    [ -e "$image" ] || continue
+    for loop in $(losetup -n -O NAME -j "$image"); do
+      umount "$loop" 2>/dev/null || true
+      losetup -d "$loop" || true
+    done
+  done
+  rm -rf "$work"
+}
+trap cleanup EXIT
+failures=0
+ok() { echo "ok: $*"; }
+bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+export COMPUTE_ETC=$work/etc COMPUTE_VAR=$work/var COMPUTE_FSTAB=$work/fstab
+mkdir -p "$work/bin"
+# systemctl: daemon-reload is all the script runs, and it only counts.
+cat >"$work/bin/systemctl" <<EOF
+#!/bin/sh
+echo "\$*" >>"$work/systemctl"
+EOF
+chmod 755 "$work/bin/systemctl"
+export PATH=$work/bin:$PATH
+
+# A new blank 512 MiB device (mkfs.xfs needs 300 MiB).
+new_device() {
+  local image
+  image=$(mktemp -p "$work" disk.XXXXXX)
+  truncate -s 512M "$image"
+  losetup -f --show "$image"
+}
+uuid_of() { blkid -p -s UUID -o value "$1"; }
+# A boot disk as a cloud rebuilds it from a newer image: no /etc/compute,
+# no mount entry, nothing mounted at the state volume's place.
+fresh_boot_disk() {
+  umount "$work/var" 2>/dev/null || true
+  rm -rf "${work:?}/etc" "${work:?}/var"
+  : >"$work/fstab"
+}
+run() { "$script" "$@" >"$work/out" 2>&1; }
+# An XFS state volume as install.sh set it up before volumes carried their
+# record: a base image and the agent's state, with a sandbox in it.
+old_volume() {
+  local dir
+  mkfs.xfs -q -m reflink=1 "$1"
+  dir=$(mktemp -d -p "$work")
+  mount "$1" "$dir"
+  mkdir -p "$dir/state/sandboxes/sbx-1"
+  echo kept >"$dir/state/sandboxes/sbx-1/disk"
+  echo base >"$dir/base.ext4"
+  umount "$dir"
+}
+fstab_ok() { # UUID TYPE
+  [ "$(grep -c " $work/var " "$work/fstab")" = 1 ] &&
+    grep -qxF "UUID=$1 $work/var $2 noatime,nofail 0 2" "$work/fstab"
+}
+recorded_ok() { # UUID
+  [ "$(cat "$work/etc/state-volume.uuid")" = "$1" ] &&
+    [ "$(cat "$work/var/.compute-state-volume")" = "$1" ] &&
+    [ "$(findmnt -no UUID "$work/var")" = "$1" ]
+}
+
+# --- A rebuilt boot disk keeps the state volume set up before records.
+dev=$(new_device)
+old_volume "$dev"
+before=$(uuid_of "$dev")
+fresh_boot_disk
+if run --device "$dev" && recorded_ok "$before" && fstab_ok "$before" xfs &&
+  [ "$(cat "$work/var/state/sandboxes/sbx-1/disk")" = kept ] && [ -f "$work/var/base.ext4" ] &&
+  [ "$(uuid_of "$dev")" = "$before" ] && [ -d "$work/var/state" ]; then
+  ok "a rebuilt boot disk keeps an existing XFS state volume (unrecorded on it) with its sandboxes, not formatting it"
+else
+  bad "the existing state volume was not kept: $(cat "$work/out")"
+fi
+
+# --- And again, now that the volume carries its record: the record on the
+# volume survives the boot disk.
+fresh_boot_disk
+if run --device "$dev" && grep -q "as recorded on it" "$work/out" && recorded_ok "$before" &&
+  [ "$(cat "$work/var/state/sandboxes/sbx-1/disk")" = kept ]; then
+  ok "the record on the volume survives a rebuilt boot disk, and the volume is kept"
+else
+  bad "the recorded volume was not kept: $(cat "$work/out")"
+fi
+
+# --- A run again, as at every boot, changes nothing.
+reloads=$(wc -l <"$work/systemctl")
+if run --device "$dev" && recorded_ok "$before" && fstab_ok "$before" xfs &&
+  [ "$(wc -l <"$work/systemctl")" = "$reloads" ]; then
+  ok "a run again keeps the volume, its record and its one mount entry"
+else
+  bad "a run again changed something: $(cat "$work/out")"
+fi
+
+# --- An attempt that mounted the volume but stopped before recording it.
+rm -rf "${work:?}/etc"
+if run --device "$dev" && recorded_ok "$before"; then
+  ok "a volume mounted by an interrupted attempt is recorded"
+else
+  bad "the interrupted attempt's volume was not recorded: $(cat "$work/out")"
+fi
+
+# --- A mounted volume other than the recorded one is refused.
+echo 00000000-0000-0000-0000-000000000000 >"$work/etc/state-volume.uuid"
+if ! run && grep -q "not the state volume 00000000" "$work/out"; then
+  ok "a mounted volume other than the recorded one is refused"
+else
+  bad "another volume was accepted: $(cat "$work/out")"
+fi
+
+# --- Reformatting is refused while the volume is mounted.
+if ! run --reformat "$dev" && grep -q "is mounted" "$work/out" && [ "$(uuid_of "$dev")" = "$before" ]; then
+  ok "--reformat refuses a device while the state volume is mounted"
+else
+  bad "--reformat formatted a mounted volume: $(cat "$work/out")"
+fi
+
+# --- A blank device is formatted.
+blank=$(new_device)
+fresh_boot_disk
+if run --device "$blank" && grep -q "which is blank" "$work/out" &&
+  [ "$(blkid -p -s TYPE -o value "$blank")" = xfs ] && recorded_ok "$(uuid_of "$blank")" &&
+  fstab_ok "$(uuid_of "$blank")" xfs && [ -d "$work/var/state" ]; then
+  ok "a blank device is formatted as XFS, mounted, entered and recorded on both disks"
+else
+  bad "the blank device was not set up: $(cat "$work/out")"
+fi
+
+# --- A file system with other files on it is refused and left as it was.
+foreign=$(new_device)
+mkfs.ext4 -q "$foreign"
+dir=$(mktemp -d -p "$work")
+mount "$foreign" "$dir" && echo theirs >"$dir/data" && umount "$dir"
+foreign_uuid=$(uuid_of "$foreign")
+fresh_boot_disk
+if ! run --device "$foreign" && grep -q "other files on it" "$work/out" &&
+  ! mountpoint -q "$work/var" && [ ! -s "$work/fstab" ] && [ ! -e "$work/etc/state-volume.uuid" ] &&
+  [ "$(uuid_of "$foreign")" = "$foreign_uuid" ] && mount "$foreign" "$dir" &&
+  [ "$(cat "$dir/data")" = theirs ] && umount "$dir"; then
+  ok "a file system with other files on it is refused, unmounted and untouched"
+else
+  bad "the foreign file system was not refused as it was: $(cat "$work/out")"
+fi
+
+# --- Something that is not a file system is refused.
+swap=$(new_device)
+mkswap -q "$swap" >/dev/null
+fresh_boot_disk
+if ! run --device "$swap" && grep -q "reformat-state-device $swap" "$work/out" &&
+  [ "$(blkid -p -s TYPE -o value "$swap")" = swap ]; then
+  ok "a device holding something other than a file system is refused, naming the option to format it"
+else
+  bad "the swap device was not refused: $(cat "$work/out")"
+fi
+
+# --- --reformat formats a device whatever it holds.
+fresh_boot_disk
+if run --reformat "$foreign" && [ "$(blkid -p -s TYPE -o value "$foreign")" = xfs ] &&
+  [ "$(uuid_of "$foreign")" != "$foreign_uuid" ] && recorded_ok "$(uuid_of "$foreign")" &&
+  fstab_ok "$(uuid_of "$foreign")" xfs && [ ! -e "$work/var/data" ]; then
+  ok "--reformat formats a device that held a file system, and records the new volume"
+else
+  bad "--reformat did not set up a new volume: $(cat "$work/out")"
+fi
+
+# --- install.sh formats nothing itself, and hands both options here.
+if ! grep -qE '^[[:space:]]*mkfs' "$here/install.sh" &&
+  grep -qF '"$here/state-volume" ${state_device:+--device "$state_device"} ${reformat_device:+--reformat "$reformat_device"}' \
+    "$here/install.sh"; then
+  ok "install.sh sets up the state volume only through state-volume"
+else
+  bad "install.sh formats or mounts the state volume itself"
+fi
+
+if [ "$failures" -gt 0 ]; then
+  echo "$failures failed" >&2
+  exit 1
+fi
+echo "all passed"

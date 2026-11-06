@@ -34,6 +34,8 @@ export function startupPhaseTitle(
   phase: StartupPhaseItem["phase"],
   status: StartupPhaseItem["status"],
   outcome: StartupPhaseItem["outcome"],
+  /** The Sandbox Environment a running setup step sets up, when known. */
+  subject?: string | null,
 ): string {
   if (status === "complete" && phase === "sandbox" && outcome && outcome !== "skipped") {
     if (outcome === "created") return t("timeline.platformActivityPresentation.sandboxCreated");
@@ -42,6 +44,11 @@ export function startupPhaseTitle(
   }
   if (status === "complete" && phase === "rig" && outcome === "skipped") {
     return t("timeline.platformActivityPresentation.sandboxEnvironmentAlreadyReady");
+  }
+  if (status === "running" && phase === "rig" && subject?.trim()) {
+    return t("timeline.platformActivityPresentation.settingUpNamedSandboxEnvironment", {
+      name: subject.trim(),
+    });
   }
   const statusIndex =
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;

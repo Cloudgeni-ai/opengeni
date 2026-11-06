@@ -700,10 +700,20 @@ export {
   ComputeControlClient,
   ComputeControlError,
   isComputeSandboxNotFound,
+  isComputeTemplateGone,
   type ComputeCreateRequest,
   type ComputeSandboxView,
+  type ComputeTemplateView,
   type ComputeWokenView,
 } from "./compute/control";
+export {
+  buildComputeEnvironmentTemplate,
+  computeEnvironmentTemplateName,
+  computeSourceImage,
+  deleteComputeTemplate,
+  resolveComputeProviderBinding,
+  type ComputeProviderBinding,
+} from "./providers/compute";
 export {
   getComputeAgentPlane,
   setComputeAgentPlane,

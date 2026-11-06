@@ -3409,6 +3409,14 @@ export async function assertGoalReactivationAllowed(
   }
 }
 
+/**
+ * `wait_for_input`'s description: the single statement of how a wait behaves.
+ * It names no tool or feature a session may lack (goals, child sessions,
+ * Steer, Codemode); the system prompt adds that guidance only where it applies.
+ */
+export const WAIT_FOR_INPUT_DESCRIPTION =
+  "End this turn and wait out of turn. If you are only waiting for the person's answer, do not call it: reply and end your turn, and their answer arrives as a new message. Use it only while something you started is still running or for an explicit timer, not for work you can still advance; for a long or uncertain wait, use it in place of sleeping or polling inside the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary. On success the runtime ends the turn after this tool batch. A new message, scheduled input, the result of work you started through your tools (outside systems such as CI only through a configured event trigger or schedule), or the deadline starts the next turn. timeoutSeconds is a safety deadline, not a blocking wait: choose it for the dependency or an explicit check or update cadence, potentially hours or days within the schema limits, not for reassurance; no short wait or status check is needed first, and the deadline never cancels a command. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep the same reason and pass the time remaining. If less than the schema minimum remains or the deadline has passed, a turn that only answered a question and consumed no other machine input may end without a new wait; otherwise register a valid wait if still needed and say how the deadline changed.";
+
 function registerGoalTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3537,7 +3545,7 @@ function registerGoalTools(
         changeKind: z4.enum(["refinement", "adaptation", "replacement"]),
         rationale: goalRationale,
         expectedObjectiveRevision: z4.number().int().positive(),
-        idempotencyKey: z4.string().uuid(),
+        idempotencyKey: z4.guid(),
       },
     },
     async ({
@@ -3591,7 +3599,7 @@ function registerGoalTools(
         "Record concrete progress toward the unchanged active goal. progressNote is a short human-readable status with useful milestones, at most 8192 UTF-8 bytes. Use normal spaces and sentences; summarize instead of compressing words. It is not the deliverable, a raw command transcript, or instructions for the next turn; the final answer still belongs in chat. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
         progressNote: progressNoteSchema,
-        idempotencyKey: z4.string().uuid(),
+        idempotencyKey: z4.guid(),
         reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
@@ -3626,14 +3634,16 @@ function registerGoalTools(
   server.registerTool(
     "wait_for_input",
     {
-      description:
-        "End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, not a blocking wait: pick it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits, not for unchanged reassurance unless an explicit update cadence requires it. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep it by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; otherwise register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read instead of ending the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary.",
+      // The one statement of how a wait behaves. The system prompt says only
+      // when to end a turn on one, and only for the features a session has,
+      // so this text names no tool or feature a session may lack.
+      description: WAIT_FOR_INPUT_DESCRIPTION,
       inputSchema: {
         reply: z4
           .string()
           .nullish()
           .describe(
-            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call. Omit it when there is nothing new to tell them.",
+            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
           ),
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user (at most 2048 UTF-8 bytes): one short, natural sentence with normal spacing saying what you are waiting for, without internal IDs, cursors, commit hashes, paths or continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -3643,7 +3653,7 @@ function registerGoalTools(
           .int()
           .min(SESSION_INPUT_WAIT_MIN_SECONDS)
           .max(SESSION_INPUT_WAIT_MAX_SECONDS),
-        idempotencyKey: z4.string().uuid().optional(),
+        idempotencyKey: z4.guid().optional(),
       },
     },
     async ({ reason, timeoutSeconds, idempotencyKey }) => {
@@ -6703,7 +6713,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(SessionMcpCredentialUpdateInput).optional(),
@@ -6817,7 +6827,7 @@ function registerWorkspaceOrchestrationTools(
           "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           reason: z4.string().min(1).max(500).optional(),
           workspaceId: workspaceIdToolInput(),
         },
@@ -6887,7 +6897,7 @@ function registerWorkspaceOrchestrationTools(
           "Resume the selected session workstream through older parent/workspace pauses. This creates no message.",
         inputSchema: {
           sessionId: z4.string().uuid(),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           reason: z4.string().min(1).max(500).optional(),
           workspaceId: workspaceIdToolInput(),
         },
@@ -6958,7 +6968,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: {
           sessionId: z4.string().uuid(),
           instruction: z4.string().min(1),
-          idempotencyKey: z4.string().uuid(),
+          idempotencyKey: z4.guid(),
           workspaceId: workspaceIdToolInput(),
         },
       },
@@ -7039,7 +7049,7 @@ function registerWorkspaceOrchestrationTools(
             sessionId: z4.string().uuid(),
             requestId: z4.string().uuid(),
             response: SubmitHumanInputResponseRequest,
-            idempotencyKey: z4.string().uuid(),
+            idempotencyKey: z4.guid(),
           },
         },
         async ({ sessionId, requestId, response, idempotencyKey }) => {
