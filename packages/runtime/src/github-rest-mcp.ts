@@ -15,6 +15,10 @@ const RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_PAGE_SIZE = 50;
 const MAX_TEXT = 64 * 1024;
+const LOG_DEFAULT_BYTES = 32 * 1024;
+const LOG_MAX_BYTES = 256 * 1024;
+/** A job log read stops here; longer logs are read with `offset`. */
+const LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024;
 const CONNECTOR_OUTCOME_META_KEY = "opengeni/connectorActionOutcome";
 
 export type GitHubRestAuthorityKind = "workspace_app" | "personal_oauth";
@@ -43,7 +47,28 @@ export type GitHubRestResolvedAuthority = Readonly<{
 export type GitHubRestMcpServerOptions = {
   serverId: string;
   authorityKind: GitHubRestAuthorityKind;
+  /** The repositories accepted for the task. May be empty with `resolveRepository`. */
   repositories: readonly GitHubRestRepository[];
+  /**
+   * All my repositories: a repository outside `repositories`, by `owner/name`,
+   * as the actor may use it now (checked with GitHub), or null when it may
+   * not be used. Without it only `repositories` can be used.
+   */
+  resolveRepository?: (fullName: string) => Promise<GitHubRestRepository | null>;
+  /**
+   * Account-level reads that name no single repository (the person's
+   * organizations and an owner's repositories). Without it those tools are
+   * not offered.
+   */
+  account?: {
+    connectionId: string;
+    resolveAuthority: (input: {
+      serverId: string;
+      toolName: string;
+      destinationUrl: string;
+      forceRefresh: boolean;
+    }) => Promise<GitHubRestResolvedAuthority>;
+  };
   resolveAuthority: (input: {
     serverId: string;
     toolName: string;
@@ -76,7 +101,26 @@ export const GITHUB_REST_READ_TOOL_NAMES = Object.freeze([
   "pull_request_reviews_list",
   "checks_summary",
   "code_search",
+  "workflow_runs_list",
+  "workflow_run_get",
+  "workflow_job_logs_get",
+  "organizations_list",
+  "owner_repositories_list",
 ] as const);
+
+/** Reads that name no repository; offered only with account authority. */
+export const GITHUB_REST_ACCOUNT_TOOL_NAMES = Object.freeze([
+  "organizations_list",
+  "owner_repositories_list",
+] as const);
+
+/** Tools that do not take one repository argument. */
+export const GITHUB_REST_REPOSITORYLESS_TOOL_NAMES = Object.freeze([
+  "repositories_list",
+  ...GITHUB_REST_ACCOUNT_TOOL_NAMES,
+] as const);
+
+const ACCOUNT_TOOLS = new Set<string>(GITHUB_REST_ACCOUNT_TOOL_NAMES);
 
 export const GITHUB_REST_WRITE_TOOL_NAMES = Object.freeze([
   "ref_create",
@@ -184,6 +228,70 @@ export const GITHUB_REST_MCP_TOOLS: GitHubTool[] = [
       page: integer(1, 10),
     },
     ["repository", "query"],
+  ),
+  tool("workflow_runs_list", "List GitHub Actions workflow runs, newest first.", {
+    ...repositoryProperties(),
+    workflow: stringProperty("Workflow file name (ci.yml) or numeric id.", 256),
+    branch: stringProperty("Head branch.", 512),
+    pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+    headSha: stringProperty("Exact head commit SHA.", 40),
+    event: stringProperty("Triggering event, such as push or pull_request.", 64),
+    status: enumProperty([
+      "queued",
+      "in_progress",
+      "completed",
+      "requested",
+      "waiting",
+      "pending",
+      "success",
+      "failure",
+      "cancelled",
+      "skipped",
+      "timed_out",
+      "action_required",
+      "neutral",
+      "stale",
+    ]),
+    limit: integer(1, MAX_PAGE_SIZE),
+    page: integer(1, 100),
+  }),
+  tool(
+    "workflow_run_get",
+    "Get one workflow run with its jobs and their steps.",
+    {
+      ...repositoryProperties(),
+      runId: integer(1, Number.MAX_SAFE_INTEGER),
+      attempt: integer(1, 1_000),
+    },
+    ["repository", "runId"],
+  ),
+  tool(
+    "workflow_job_logs_get",
+    "Read one workflow job's log. Returns the end of the log by default; pass offset to read from that byte (earlier parts: startByte minus maxBytes), and nextOffset to continue.",
+    {
+      ...repositoryProperties(),
+      jobId: integer(1, Number.MAX_SAFE_INTEGER),
+      offset: { type: "integer", minimum: 0, maximum: LOG_SCAN_MAX_BYTES },
+      maxBytes: integer(1_024, LOG_MAX_BYTES),
+    },
+    ["repository", "jobId"],
+  ),
+  tool(
+    "organizations_list",
+    "List the GitHub organizations the connected person belongs to.",
+    { limit: integer(1, 100), page: integer(1, 100) },
+    [],
+  ),
+  tool(
+    "owner_repositories_list",
+    "List repositories of one GitHub user or organization that the connected person can see, optionally filtered by name.",
+    {
+      owner: stringProperty("User or organization login.", 39),
+      filter: stringProperty("Text the repository name must contain.", 100),
+      limit: integer(1, 100),
+      page: integer(1, 100),
+    },
+    ["owner"],
   ),
   mutationTool(
     "ref_create",
@@ -313,7 +421,10 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
   private readonly repositoriesByName: ReadonlyMap<string, GitHubRestRepository>;
 
   constructor(private readonly options: GitHubRestMcpServerOptions) {
-    if (options.repositories.length === 0 || options.repositories.length > 100) {
+    if (
+      (options.repositories.length === 0 && !options.resolveRepository) ||
+      options.repositories.length > 100
+    ) {
       throw new Error("GitHub REST bridge requires 1-100 accepted repositories");
     }
     const byName = new Map<string, GitHubRestRepository>();
@@ -338,7 +449,17 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
   async invalidateToolsCache(): Promise<void> {}
 
   async listTools(): Promise<GitHubTool[]> {
-    return GITHUB_REST_MCP_TOOLS.map((entry) => ({ ...entry }));
+    return GITHUB_REST_MCP_TOOLS.filter(
+      (entry) => this.options.account || !ACCOUNT_TOOLS.has(entry.name),
+    ).map((entry) =>
+      entry.name === "repositories_list" && this.options.resolveRepository
+        ? {
+            ...entry,
+            description:
+              "List the GitHub repositories attached to this task. Any other repository the connected person can access also works by owner/name; find them with owner_repositories_list.",
+          }
+        : { ...entry },
+    );
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
@@ -406,10 +527,21 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
         }
         repositories.push(projectAcceptedRepository(repository, authority.actor));
       }
-      return { repositories };
+      return this.options.resolveRepository
+        ? { repositories, allRepositories: true }
+        : { repositories };
     }
-    const repository = this.repository(args.repository);
+    if (ACCOUNT_TOOLS.has(toolName)) {
+      return await this.executeAccount(toolName, args);
+    }
+    const repository = await this.repository(args.repository);
     switch (toolName) {
+      case "workflow_runs_list":
+        return await this.workflowRunsList(repository, args);
+      case "workflow_run_get":
+        return await this.workflowRunGet(repository, args);
+      case "workflow_job_logs_get":
+        return await this.workflowJobLogs(repository, args);
       case "repository_get":
         return await this.get(
           toolName,
@@ -627,12 +759,296 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     }
   }
 
-  private repository(value: unknown): GitHubRestRepository {
-    const fullName = requiredString(value, "repository", 256).toLowerCase();
-    const repository = this.repositoriesByName.get(fullName);
-    if (!repository)
-      throw new GitHubRestInputError("Repository is outside the accepted GitHub resource set");
-    return repository;
+  private async repository(value: unknown): Promise<GitHubRestRepository> {
+    const requested = requiredString(value, "repository", 256);
+    const repository = this.repositoriesByName.get(requested.toLowerCase());
+    if (repository) return repository;
+    if (this.options.resolveRepository && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(requested)) {
+      const resolved = await this.options.resolveRepository(requested);
+      if (resolved) {
+        assertRepository(resolved, this.options.authorityKind);
+        if (resolved.fullName.toLowerCase() !== requested.toLowerCase()) {
+          throw new GitHubRestInputError(
+            `GitHub knows this repository as ${resolved.fullName}; use that name`,
+          );
+        }
+        return Object.freeze({ ...resolved });
+      }
+      throw new GitHubRestInputError(
+        "GitHub has no repository by that name that the connected person can use",
+      );
+    }
+    throw new GitHubRestInputError("Repository is outside the accepted GitHub resource set");
+  }
+
+  private async executeAccount(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    const limit = String(optionalPositiveInteger(args.limit, "limit", 100) ?? 30);
+    const page = String(optionalPositiveInteger(args.page, "page", 100) ?? 1);
+    if (toolName === "organizations_list") {
+      const url = new URL("/user/orgs", GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("per_page", limit);
+      url.searchParams.set("page", page);
+      const result = await this.request(toolName, null, url, { method: "GET" }, true);
+      if (!Array.isArray(result.payload))
+        throw new GitHubRestProviderError("GitHub returned an invalid list response");
+      return resultEnvelope(
+        { organizations: result.payload.map(projectOrganization), page: Number(page) },
+        result,
+      );
+    }
+    const owner = requiredString(args.owner, "owner", 39);
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
+      throw new GitHubRestInputError("owner must be a GitHub user or organization login");
+    }
+    const filter = optionalString(args.filter, "filter", 100);
+    const ownerResult = await this.request(
+      toolName,
+      null,
+      `/users/${encodeURIComponent(owner)}`,
+      { method: "GET" },
+      true,
+    );
+    const ownerRow = objectRecord(ownerResult.payload);
+    const login = optionalOutputString(ownerRow.login, 39) ?? owner;
+    const organization = ownerRow.type === "Organization";
+    let url: URL;
+    if (filter) {
+      if (/[:"]/u.test(filter)) throw new GitHubRestInputError("filter must be plain text");
+      url = new URL("/search/repositories", GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("q", `${filter} in:name ${organization ? "org" : "user"}:${login}`);
+    } else if (organization) {
+      url = new URL(`/orgs/${encodeURIComponent(login)}/repos`, GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("type", "all");
+      url.searchParams.set("sort", "full_name");
+    } else if (login.toLowerCase() === ownerResult.actor.login.toLowerCase()) {
+      // The person's own repositories, private ones included.
+      url = new URL("/user/repos", GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("affiliation", "owner");
+      url.searchParams.set("sort", "full_name");
+    } else {
+      url = new URL(`/users/${encodeURIComponent(login)}/repos`, GITHUB_REST_API_ORIGIN);
+      url.searchParams.set("type", "owner");
+      url.searchParams.set("sort", "full_name");
+    }
+    url.searchParams.set("per_page", limit);
+    url.searchParams.set("page", page);
+    const result = await this.request(toolName, null, url, { method: "GET" }, true);
+    const items = filter ? objectRecord(result.payload).items : result.payload;
+    if (!Array.isArray(items))
+      throw new GitHubRestProviderError("GitHub returned an invalid list response");
+    return resultEnvelope(
+      {
+        owner: { login, type: organization ? "Organization" : "User" },
+        repositories: items.map(projectListedRepository),
+        page: Number(page),
+        hasMore: items.length === Number(limit),
+        ...(filter ? { totalCount: outputInteger(objectRecord(result.payload).total_count) } : {}),
+      },
+      result,
+    );
+  }
+
+  private async workflowRunsList(repository: GitHubRestRepository, args: Record<string, unknown>) {
+    const workflow = optionalString(args.workflow, "workflow", 256);
+    if (workflow !== undefined && !/^(?:\d+|[A-Za-z0-9_.-]+\.ya?ml)$/u.test(workflow)) {
+      throw new GitHubRestInputError("workflow must be a workflow file name or numeric id");
+    }
+    const url = new URL(
+      workflow
+        ? `/repos/${repository.fullName}/actions/workflows/${encodeURIComponent(workflow)}/runs`
+        : `/repos/${repository.fullName}/actions/runs`,
+      GITHUB_REST_API_ORIGIN,
+    );
+    url.searchParams.set(
+      "per_page",
+      String(optionalPositiveInteger(args.limit, "limit", MAX_PAGE_SIZE) ?? 20),
+    );
+    url.searchParams.set("page", String(optionalPositiveInteger(args.page, "page", 100) ?? 1));
+    const branch = optionalString(args.branch, "branch", 512);
+    const event = optionalString(args.event, "event", 64);
+    const status = optionalString(args.status, "status", 64);
+    let headSha = optionalSha(args.headSha, "headSha");
+    const pullNumber = optionalPositiveInteger(args.pullNumber, "pullNumber", Number.MAX_SAFE_INTEGER);
+    if (pullNumber !== undefined) {
+      const pull = await this.request(
+        "workflow_runs_list",
+        repository,
+        `/repos/${repository.fullName}/pulls/${pullNumber}`,
+        { method: "GET" },
+        true,
+      );
+      const sha = optionalOutputString(objectRecord(objectRecord(pull.payload).head).sha, 40);
+      if (!sha) throw new GitHubRestProviderError("GitHub returned an invalid pull request");
+      if (headSha && headSha !== sha.toLowerCase()) {
+        throw new GitHubRestInputError("headSha is not the pull request's head commit");
+      }
+      headSha = sha.toLowerCase();
+    }
+    if (branch) url.searchParams.set("branch", branch);
+    if (event) url.searchParams.set("event", event);
+    if (status) url.searchParams.set("status", status);
+    if (headSha) url.searchParams.set("head_sha", headSha);
+    const result = await this.request(
+      "workflow_runs_list",
+      repository,
+      url,
+      { method: "GET" },
+      true,
+    );
+    const payload = objectRecord(result.payload);
+    if (!Array.isArray(payload.workflow_runs))
+      throw new GitHubRestProviderError("GitHub returned an invalid list response");
+    return resultEnvelope(
+      {
+        totalCount: outputInteger(payload.total_count),
+        runs: payload.workflow_runs.map(projectWorkflowRun),
+      },
+      result,
+    );
+  }
+
+  private async workflowRunGet(repository: GitHubRestRepository, args: Record<string, unknown>) {
+    const runId = positiveInteger(args.runId, "runId");
+    const attempt = optionalPositiveInteger(args.attempt, "attempt", 1_000);
+    const run = await this.request(
+      "workflow_run_get",
+      repository,
+      attempt
+        ? `/repos/${repository.fullName}/actions/runs/${runId}/attempts/${attempt}`
+        : `/repos/${repository.fullName}/actions/runs/${runId}`,
+      { method: "GET" },
+      true,
+    );
+    const jobsUrl = new URL(
+      attempt
+        ? `/repos/${repository.fullName}/actions/runs/${runId}/attempts/${attempt}/jobs`
+        : `/repos/${repository.fullName}/actions/runs/${runId}/jobs`,
+      GITHUB_REST_API_ORIGIN,
+    );
+    jobsUrl.searchParams.set("per_page", "100");
+    if (!attempt) jobsUrl.searchParams.set("filter", "latest");
+    const jobs = await this.request(
+      "workflow_run_get",
+      repository,
+      jobsUrl,
+      { method: "GET" },
+      true,
+    );
+    const jobsPayload = objectRecord(jobs.payload);
+    const jobList = Array.isArray(jobsPayload.jobs) ? jobsPayload.jobs : [];
+    return resultEnvelope(
+      {
+        run: projectWorkflowRun(run.payload),
+        totalJobs: outputInteger(jobsPayload.total_count),
+        jobs: jobList.slice(0, 100).map(projectWorkflowJob),
+      },
+      jobs,
+    );
+  }
+
+  /**
+   * GitHub answers a job log request with a redirect to short-lived signed
+   * storage on another host. That URL is fetched without the GitHub
+   * credential, and only a bounded window of the log is kept.
+   */
+  private async workflowJobLogs(repository: GitHubRestRepository, args: Record<string, unknown>) {
+    const jobId = positiveInteger(args.jobId, "jobId");
+    const offset =
+      args.offset === undefined
+        ? undefined
+        : typeof args.offset === "number" &&
+            Number.isSafeInteger(args.offset) &&
+            args.offset >= 0 &&
+            args.offset <= LOG_SCAN_MAX_BYTES
+          ? args.offset
+          : (() => {
+              throw new GitHubRestInputError("offset is invalid");
+            })();
+    const maxBytes =
+      args.maxBytes === undefined
+        ? LOG_DEFAULT_BYTES
+        : Math.max(1_024, optionalPositiveInteger(args.maxBytes, "maxBytes", LOG_MAX_BYTES)!);
+    const url = new URL(
+      `/repos/${repository.fullName}/actions/jobs/${jobId}/logs`,
+      GITHUB_REST_API_ORIGIN,
+    );
+    const resolve = async (forceRefresh: boolean) =>
+      await this.resolve("workflow_job_logs_get", repository, url, false, forceRefresh);
+    const send = async (authority: GitHubRestResolvedAuthority): Promise<Response> => {
+      await this.authorize(repository, authority);
+      try {
+        return await this.fetchImpl(url, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            accept: "application/vnd.github+json",
+            "x-github-api-version": GITHUB_API_VERSION,
+            "user-agent": "OpenGeni-GitHub-Bridge/1",
+            ...authority.headers,
+          },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw new GitHubRestProviderError(`GitHub request failed: ${safeTransportMessage(error)}`);
+      }
+    };
+    let authority = await resolve(false);
+    let response = await send(authority);
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => undefined);
+      authority = await resolve(true);
+      response = await send(authority);
+    }
+    const meta = {
+      actor: authority.actor,
+      requestId: safeHeader(response.headers.get("x-github-request-id"), 128),
+      rateLimit: projectRateLimit(response.headers),
+    };
+    let logResponse = response;
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      const location = response.headers.get("location");
+      let target: URL;
+      try {
+        target = new URL(location ?? "", url);
+      } catch {
+        throw new GitHubRestProviderError("GitHub returned an invalid log location");
+      }
+      if (target.protocol !== "https:" || target.username || target.password) {
+        throw new GitHubRestProviderError("GitHub returned an invalid log location");
+      }
+      try {
+        // No GitHub credential and no GitHub headers on the storage host.
+        logResponse = await this.fetchImpl(target, {
+          method: "GET",
+          redirect: "follow",
+          headers: { "user-agent": "OpenGeni-GitHub-Bridge/1" },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw new GitHubRestProviderError(
+          `GitHub log download failed: ${safeTransportMessage(error)}`,
+        );
+      }
+    } else if (!response.ok) {
+      let payload: unknown = null;
+      try {
+        payload = await readResponseJsonBounded(response, 64 * 1024, "GitHub REST response");
+      } catch {
+        payload = null;
+      }
+      throw new GitHubRestProviderError(providerError(response.status, payload));
+    }
+    if (!logResponse.ok || !logResponse.body) {
+      await logResponse.body?.cancel().catch(() => undefined);
+      throw new GitHubRestProviderError(
+        logResponse.status === 410 || logResponse.status === 404
+          ? "This job's log is no longer available"
+          : `GitHub log download failed (${logResponse.status})`,
+      );
+    }
+    const window = await readLogWindow(logResponse.body, { offset, maxBytes });
+    return resultEnvelope({ jobId, ...window }, meta);
   }
 
   private async get<T>(
@@ -746,9 +1162,54 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     return resultEnvelope({ totalCount: outputInteger(payload.total_count), items }, result);
   }
 
+  private async resolve(
+    toolName: string,
+    repository: GitHubRestRepository | null,
+    url: URL,
+    write: boolean,
+    forceRefresh: boolean,
+  ): Promise<GitHubRestResolvedAuthority> {
+    assertGitHubDestination(url);
+    if (repository) {
+      return await this.options.resolveAuthority({
+        serverId: this.options.serverId,
+        toolName,
+        destinationUrl: url.toString(),
+        repository,
+        write,
+        forceRefresh,
+      });
+    }
+    if (!this.options.account) {
+      throw new GitHubRestInputError(`Unsupported GitHub tool: ${toolName}`);
+    }
+    return await this.options.account.resolveAuthority({
+      serverId: this.options.serverId,
+      toolName,
+      destinationUrl: url.toString(),
+      forceRefresh,
+    });
+  }
+
+  private async authorize(
+    repository: GitHubRestRepository | null,
+    authority: GitHubRestResolvedAuthority,
+  ): Promise<void> {
+    assertResolvedAuthority(
+      repository ?? {
+        connectionId: this.options.account!.connectionId,
+        authorityKind: this.options.authorityKind,
+      },
+      authority,
+    );
+    if (authority.authorizeProviderRequest && !(await authority.authorizeProviderRequest())) {
+      throw new GitHubRestAuthorityError("GitHub repository authority is no longer current");
+    }
+  }
+
   private async request(
     toolName: string,
-    repository: GitHubRestRepository,
+    repository: GitHubRestRepository | null,
     pathInput: string | URL,
     init: RequestInit,
     replaySafe: boolean,
@@ -756,19 +1217,9 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     const url = new URL(pathInput, GITHUB_REST_API_ORIGIN);
     assertGitHubDestination(url);
     const resolve = async (forceRefresh: boolean) =>
-      await this.options.resolveAuthority({
-        serverId: this.options.serverId,
-        toolName,
-        destinationUrl: url.toString(),
-        repository,
-        write: !replaySafe,
-        forceRefresh,
-      });
+      await this.resolve(toolName, repository, url, !replaySafe, forceRefresh);
     const send = async (authority: GitHubRestResolvedAuthority): Promise<Response> => {
-      assertResolvedAuthority(repository, authority);
-      if (authority.authorizeProviderRequest && !(await authority.authorizeProviderRequest())) {
-        throw new GitHubRestAuthorityError("GitHub repository authority is no longer current");
-      }
+      await this.authorize(repository, authority);
       try {
         return await this.fetchImpl(url, {
           ...init,
@@ -1166,7 +1617,7 @@ function projectAcceptedRepository(
 }
 
 function assertResolvedAuthority(
-  repository: GitHubRestRepository,
+  repository: Pick<GitHubRestRepository, "connectionId" | "authorityKind">,
   authority: GitHubRestResolvedAuthority,
 ): void {
   if (authority.connectionId !== repository.connectionId) {
@@ -1399,6 +1850,157 @@ function projectCodeSearch(value: unknown) {
     },
   };
 }
+function projectOrganization(value: unknown) {
+  const row = objectRecord(value);
+  return {
+    id: outputInteger(row.id),
+    login: optionalOutputString(row.login, 128),
+    description: optionalOutputString(row.description, 512),
+  };
+}
+function projectListedRepository(value: unknown) {
+  const row = objectRecord(value);
+  return {
+    ...projectRepository(value),
+    description: optionalOutputString(row.description, 512),
+    visibility: optionalOutputString(row.visibility, 32),
+    pushedAt: optionalOutputString(row.pushed_at, 64),
+  };
+}
+function projectWorkflowRun(value: unknown) {
+  const row = objectRecord(value);
+  const pullRequests = Array.isArray(row.pull_requests) ? row.pull_requests : [];
+  return {
+    id: outputInteger(row.id),
+    name: optionalOutputString(row.name, 256),
+    displayTitle: optionalOutputString(row.display_title, 512),
+    workflowId: outputInteger(row.workflow_id),
+    path: optionalOutputString(row.path, 512),
+    event: optionalOutputString(row.event, 64),
+    status: optionalOutputString(row.status, 64),
+    conclusion: optionalOutputString(row.conclusion, 64),
+    headBranch: optionalOutputString(row.head_branch, 512),
+    headSha: optionalOutputString(row.head_sha, 40),
+    runNumber: outputInteger(row.run_number),
+    runAttempt: outputInteger(row.run_attempt),
+    createdAt: optionalOutputString(row.created_at, 64),
+    updatedAt: optionalOutputString(row.updated_at, 64),
+    runStartedAt: optionalOutputString(row.run_started_at, 64),
+    htmlUrl: optionalOutputString(row.html_url, 1_024),
+    actor: projectUser(row.actor),
+    pullRequests: pullRequests
+      .slice(0, 20)
+      .map((entry) => outputInteger(objectRecord(entry).number))
+      .filter((entry): entry is number => entry !== null),
+  };
+}
+function projectWorkflowJob(value: unknown) {
+  const row = objectRecord(value);
+  const steps = Array.isArray(row.steps) ? row.steps : [];
+  return {
+    id: outputInteger(row.id),
+    name: optionalOutputString(row.name, 256),
+    status: optionalOutputString(row.status, 64),
+    conclusion: optionalOutputString(row.conclusion, 64),
+    startedAt: optionalOutputString(row.started_at, 64),
+    completedAt: optionalOutputString(row.completed_at, 64),
+    runAttempt: outputInteger(row.run_attempt),
+    runnerName: optionalOutputString(row.runner_name, 256),
+    htmlUrl: optionalOutputString(row.html_url, 1_024),
+    steps: steps.slice(0, 200).map((step) => {
+      const entry = objectRecord(step);
+      return {
+        number: outputInteger(entry.number),
+        name: optionalOutputString(entry.name, 256),
+        status: optionalOutputString(entry.status, 64),
+        conclusion: optionalOutputString(entry.conclusion, 64),
+      };
+    }),
+  };
+}
+
+/**
+ * Keep one window of a streamed log: `maxBytes` from `offset`, or the last
+ * `maxBytes` when no offset is given. Stops reading after LOG_SCAN_MAX_BYTES.
+ */
+export async function readLogWindow(
+  body: ReadableStream<Uint8Array>,
+  options: { offset?: number | undefined; maxBytes: number; scanMaxBytes?: number },
+): Promise<{
+  text: string;
+  startByte: number;
+  endByte: number;
+  /** Null when the log is longer than one read scans. */
+  totalBytes: number | null;
+  nextOffset: number | null;
+}> {
+  const scanMax = options.scanMaxBytes ?? LOG_SCAN_MAX_BYTES;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  let seen = 0;
+  let complete = false;
+  const tail = options.offset === undefined;
+  const start = options.offset ?? 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        complete = true;
+        break;
+      }
+      const chunkStart = seen;
+      seen += value.byteLength;
+      if (tail) {
+        chunks.push(value);
+        kept += value.byteLength;
+        while (chunks.length > 1 && kept - chunks[0]!.byteLength >= options.maxBytes) {
+          kept -= chunks.shift()!.byteLength;
+        }
+      } else if (seen > start && kept < options.maxBytes) {
+        const from = Math.max(0, start - chunkStart);
+        const piece = value.subarray(from, from + options.maxBytes - kept);
+        chunks.push(piece);
+        kept += piece.byteLength;
+      }
+      if (!tail && kept >= options.maxBytes) break;
+      if (seen >= scanMax) break;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const joined = new Uint8Array(kept);
+  let position = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, position);
+    position += chunk.byteLength;
+  }
+  let bytes = joined;
+  let startByte = tail ? seen - kept : Math.min(start, seen);
+  if (tail && bytes.byteLength > options.maxBytes) {
+    const cut = bytes.byteLength - options.maxBytes;
+    bytes = bytes.subarray(cut);
+    startByte += cut;
+  }
+  if (tail && startByte > 0) {
+    // Start on a whole line.
+    const newline = bytes.indexOf(10);
+    if (newline >= 0 && newline < bytes.byteLength - 1) {
+      bytes = bytes.subarray(newline + 1);
+      startByte += newline + 1;
+    }
+  }
+  const endByte = startByte + bytes.byteLength;
+  const more = !complete || endByte < seen;
+  return {
+    text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+    startByte,
+    endByte,
+    totalBytes: complete ? seen : null,
+    nextOffset: more ? endByte : null,
+  };
+}
+
 function providerError(status: number, payload: unknown): string {
   const message = optionalOutputString(objectRecord(payload).message, 512);
   return message

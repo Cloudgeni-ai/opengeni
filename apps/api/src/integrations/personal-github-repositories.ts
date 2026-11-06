@@ -47,6 +47,8 @@ type ExpectedPersonalGitHubRepositoryAuthority = {
   selectionGeneration: number;
   repositoryId: string;
   fullName: string;
+  /** Found through All my repositories: the mode must still be on. */
+  allRepositories?: boolean;
 };
 
 type PersonalGitHubProviderJsonOptions = {
@@ -188,6 +190,114 @@ export async function listLivePersonalGitHubRepositories(
   };
 }
 
+const SEARCH_PAGE_SIZE = PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX;
+const SEARCH_MAX_PAGES = 30;
+const SEARCH_CACHE_TTL_MS = 60_000;
+const SEARCH_CACHE_MAX = 50;
+type SearchCacheEntry = {
+  expiresAt: number;
+  repositories: PersonalGitHubRepositoryContract[];
+  complete: boolean;
+};
+const searchCache = new Map<string, SearchCacheEntry>();
+
+/** Tests only. */
+export function clearPersonalGitHubRepositorySearchCache(): void {
+  searchCache.clear();
+}
+
+/**
+ * Find repositories the person can read by `owner/name` substring, beyond
+ * the first page: scans their repository list (briefly cached) and, for an
+ * exact `owner/name`, also asks GitHub directly, which finds repositories the
+ * person can read but that are not in their own list (for example a public
+ * repository of another owner).
+ */
+export async function searchLivePersonalGitHubRepositories(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    accountId: string;
+    subjectId: string;
+    connectionId: string;
+    expectedConnectionAuthorityGeneration: number;
+    query: string;
+    limit: number;
+  },
+): Promise<{ repositories: PersonalGitHubRepositoryContract[] }> {
+  const connection = await requirePersonalGitHubRepositoryConnection(deps, input);
+  const needle = input.query.trim().toLowerCase();
+  const matches: PersonalGitHubRepositoryContract[] = [];
+  const seen = new Set<string>();
+  const add = (repository: PersonalGitHubRepositoryContract) => {
+    if (seen.has(repository.repositoryId) || matches.length >= input.limit) return;
+    seen.add(repository.repositoryId);
+    matches.push(repository);
+  };
+  const [owner, name, extra] = needle.split("/");
+  if (
+    owner &&
+    name &&
+    extra === undefined &&
+    /^[a-z0-9-]{1,39}$/u.test(owner) &&
+    /^[a-z0-9_.-]{1,100}$/u.test(name)
+  ) {
+    try {
+      const repository = parsePersonalGitHubRepository(
+        await personalGitHubProviderJson(
+          deps,
+          connection,
+          input.subjectId,
+          new URL(
+            `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+            PERSONAL_GITHUB_API_ORIGIN,
+          ),
+          input.expectedConnectionAuthorityGeneration,
+          { operation: "repository_verify" },
+        ),
+      );
+      if (personalGitHubRepositoryCanRead(repository.permissions)) add(repository);
+    } catch (error) {
+      // Not found is an ordinary empty answer; anything else is GitHub's.
+      if (
+        !(error instanceof PersonalGitHubRepositoryProviderError) ||
+        error.code !== "repository_not_found"
+      ) {
+        throw error;
+      }
+    }
+  }
+  const key = `${connection.id}|${input.expectedConnectionAuthorityGeneration}`;
+  const now = Date.now();
+  let cached = searchCache.get(key);
+  if (!cached || cached.expiresAt <= now) {
+    cached = { expiresAt: now + SEARCH_CACHE_TTL_MS, repositories: [], complete: false };
+    for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
+      const result = await listLivePersonalGitHubRepositories(deps, {
+        ...input,
+        page,
+        limit: SEARCH_PAGE_SIZE,
+      });
+      cached.repositories.push(...result.repositories);
+      if (result.nextPage === null) {
+        cached.complete = true;
+        break;
+      }
+    }
+    searchCache.delete(key);
+    while (searchCache.size >= SEARCH_CACHE_MAX) {
+      const oldest = searchCache.keys().next().value;
+      if (oldest === undefined) break;
+      searchCache.delete(oldest);
+    }
+    searchCache.set(key, cached);
+  }
+  for (const repository of cached.repositories) {
+    if (repository.fullName.toLowerCase().includes(needle)) add(repository);
+  }
+  return { repositories: matches };
+}
+
 export async function listLivePersonalGitHubRepositoryBranches(
   deps: ApiRouteDeps,
   input: {
@@ -207,6 +317,7 @@ export async function listLivePersonalGitHubRepositoryBranches(
     input,
     null,
     services.getSelectionState,
+    services,
   );
   const [owner, repositoryName] = current.repository.fullName.split("/");
   if (!owner || !repositoryName) {
@@ -222,6 +333,7 @@ export async function listLivePersonalGitHubRepositoryBranches(
     selectionGeneration: current.selectionGeneration,
     repositoryId: current.repository.repositoryId,
     fullName: current.repository.fullName,
+    allRepositories: current.allRepositories,
   };
   const payload = await services.providerJson({
     deps,
@@ -258,6 +370,7 @@ export async function listLivePersonalGitHubRepositoryBranches(
     input,
     expectedRepositoryAuthority,
     services.getSelectionState,
+    services,
   );
   const response = GitHubRepositoryBranchesResponse.safeParse({
     branches: branches.map((name) => ({
@@ -285,12 +398,39 @@ export async function verifyLivePersonalGitHubRepositories(
     connectionId: string;
     expectedConnectionAuthorityGeneration: number;
     repositories: PersonalGitHubRepositorySelectionInput[];
+    /**
+     * Leave out repositories GitHub no longer lets the person use instead of
+     * failing (turning on All my repositories should not fail on a stale
+     * per-repository entry kept for later).
+     */
+    skipUnavailable?: boolean;
   },
 ): Promise<Array<PersonalGitHubRepositoryContract & { selectedAccess: "read" | "write" }>> {
   const connection = await requirePersonalGitHubRepositoryConnection(deps, input);
   const verified: Array<PersonalGitHubRepositoryContract & { selectedAccess: "read" | "write" }> =
     [];
   for (const selection of input.repositories) {
+    try {
+      verified.push(await verifyOne(selection));
+    } catch (error) {
+      if (
+        input.skipUnavailable &&
+        error instanceof PersonalGitHubRepositoryProviderError &&
+        (error.code === "repository_not_found" ||
+          error.code === "repository_read_denied" ||
+          error.code === "repository_write_denied" ||
+          error.code === "repository_archived")
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return verified;
+
+  async function verifyOne(
+    selection: PersonalGitHubRepositorySelectionInput,
+  ): Promise<PersonalGitHubRepositoryContract & { selectedAccess: "read" | "write" }> {
     const [owner, repositoryName] = selection.fullName.split("/");
     if (!owner || !repositoryName) {
       throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
@@ -325,9 +465,8 @@ export async function verifyLivePersonalGitHubRepositories(
         throw new PersonalGitHubRepositoryProviderError("repository_write_denied");
       }
     }
-    verified.push({ ...repository, selectedAccess: selection.access });
+    return { ...repository, selectedAccess: selection.access };
   }
-  return verified;
 }
 
 async function requireSelectedPersonalGitHubRepository(
@@ -341,12 +480,12 @@ async function requireSelectedPersonalGitHubRepository(
   },
   expected: ExpectedPersonalGitHubRepositoryAuthority | null,
   getSelectionState: PersonalGitHubRepositoryBranchServices["getSelectionState"],
+  services: Pick<PersonalGitHubRepositoryBranchServices, "providerJson"> = personalGitHubRepositoryBranchServices,
 ): Promise<{
   connectionAuthorityGeneration: number;
   selectionGeneration: number;
-  repository: NonNullable<
-    Awaited<ReturnType<typeof getPersonalGitHubRepositorySelectionState>>
-  >["repositories"][number];
+  allRepositories: boolean;
+  repository: Pick<PersonalGitHubRepositoryContract, "repositoryId" | "fullName" | "defaultBranch">;
 }> {
   const selection = await getSelectionState(deps, {
     accountId: input.accountId,
@@ -358,6 +497,44 @@ async function requireSelectedPersonalGitHubRepository(
     throw new PersonalGitHubRepositoryProviderError(
       expected ? "repository_selection_changed" : "repository_not_selected",
     );
+  }
+  if (selection.allRepositoriesAccess) {
+    // All my repositories: GitHub says which repository this is and whether
+    // the person can read it.
+    if (expected) {
+      return {
+        connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+        selectionGeneration: selection.selectionGeneration,
+        allRepositories: true,
+        repository: { ...expected, defaultBranch: "" },
+      };
+    }
+    const repository = parsePersonalGitHubRepository(
+      await services.providerJson({
+        deps,
+        connection,
+        subjectId: input.subjectId,
+        url: new URL(`/repositories/${input.repositoryId}`, PERSONAL_GITHUB_API_ORIGIN),
+        expectedConnectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+        options: { operation: "repository_verify" },
+      }),
+    );
+    if (
+      repository.repositoryId !== input.repositoryId ||
+      repository.disabled ||
+      !personalGitHubRepositoryCanRead(repository.permissions)
+    ) {
+      throw new PersonalGitHubRepositoryProviderError("repository_read_denied");
+    }
+    return {
+      connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+      selectionGeneration: selection.selectionGeneration,
+      allRepositories: true,
+      repository,
+    };
+  }
+  if (expected?.allRepositories) {
+    throw new PersonalGitHubRepositoryProviderError("repository_selection_changed");
   }
   const repository = selection.repositories.find(
     (candidate) => candidate.repositoryId === input.repositoryId,
@@ -378,6 +555,7 @@ async function requireSelectedPersonalGitHubRepository(
   return {
     connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
     selectionGeneration: selection.selectionGeneration,
+    allRepositories: false,
     repository,
   };
 }
@@ -587,7 +765,11 @@ async function personalGitHubProviderFetch(
   ) {
     throw new PersonalGitHubRepositoryProviderError("connection_changed");
   }
-  if (expectedRepositoryAuthority) {
+  if (expectedRepositoryAuthority?.allRepositories) {
+    if (!authority.allRepositoriesAccess) {
+      throw new PersonalGitHubRepositoryProviderError("repository_selection_changed");
+    }
+  } else if (expectedRepositoryAuthority) {
     const repository = authority.repositories.find(
       (candidate) => candidate.repositoryId === expectedRepositoryAuthority.repositoryId,
     );

@@ -6389,6 +6389,13 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
           credentialBindingId: primitives.uuid,
           connectionAuthorityGeneration: primitives.positiveInteger,
           selectionGeneration: primitives.positiveInteger,
+          /**
+           * "All my repositories" was on when this work was accepted: any
+           * repository the person can access on GitHub, up to this access,
+           * rechecked live (mode and GitHub permission) on every use. The
+           * listed repositories are the ones attached to the work.
+           */
+          allRepositoriesAccess: GitRepositoryAccess.optional(),
           repositories: z
             .array(
               z
@@ -6402,7 +6409,6 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
                 })
                 .strict(),
             )
-            .min(1)
             .max(100),
         })
         .strict()
@@ -6449,6 +6455,16 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
         });
       }
       const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+      if (
+        repositories.length === 0 &&
+        delegation.personalGitHubRepositorySelection?.allRepositoriesAccess === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories"],
+          message: "personal GitHub delegation requires a repository or All my repositories",
+        });
+      }
       const repositoryIds = new Set<string>();
       const canonicalUrls = new Set<string>();
       repositories.forEach((repository, index) => {

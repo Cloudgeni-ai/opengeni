@@ -7,6 +7,7 @@ import {
   PersonalGitHubRepositorySelectionState,
   ReplacePersonalGitHubRepositorySelectionsRequest,
   VerifyPersonalGitHubRepositorySelectionsRequest,
+  personalGitHubAllRepositoriesEffectiveAccess,
 } from "@opengeni/contracts/personal-github";
 import {
   ListGitHubRepositoryBranchesQuery,
@@ -45,6 +46,7 @@ import {
   personalGitHubRepositoryProviderHttpError,
   PersonalGitHubRepositoryProviderError,
   requirePersonalGitHubRepositoryConnection,
+  searchLivePersonalGitHubRepositories,
   verifyLivePersonalGitHubRepositories,
 } from "../integrations/personal-github-repositories";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -126,26 +128,39 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       const query = parseRequestQuery(ListPersonalGitHubRepositoriesQuery, c.req.query());
       try {
         const selection = await loadRepositorySelectionState(deps, access.grant, connection);
-        const page = await listLivePersonalGitHubRepositories(deps, {
+        const listInput = {
           accountId: access.grant.accountId,
           workspaceId,
           subjectId: access.grant.subjectId,
           connectionId,
           expectedConnectionAuthorityGeneration: selection.connectionAuthorityGeneration,
-          page: query.cursor,
           limit: query.limit,
-        });
+        };
+        const page = query.query
+          ? {
+              ...(await searchLivePersonalGitHubRepositories(deps, {
+                ...listInput,
+                query: query.query,
+              })),
+              nextPage: null,
+            }
+          : await listLivePersonalGitHubRepositories(deps, { ...listInput, page: query.cursor });
         const selectedAccessById = new Map(
           selection.repositories.map((repository) => [
             repository.repositoryId,
             repository.selectedAccess,
           ]),
         );
+        const allRepositoriesAccess = selection.allRepositoriesAccess;
         return c.json(
           ListPersonalGitHubRepositoriesResponse.parse({
+            // In All my repositories every listed repository is usable, at
+            // the access it actually gets.
             repositories: page.repositories.map((repository) => ({
               ...repository,
-              selectedAccess: selectedAccessById.get(repository.repositoryId) ?? null,
+              selectedAccess: allRepositoriesAccess
+                ? personalGitHubAllRepositoriesEffectiveAccess(allRepositoriesAccess, repository)
+                : (selectedAccessById.get(repository.repositoryId) ?? null),
             })),
             nextCursor: page.nextPage,
             selection,
@@ -186,6 +201,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           connectionId,
           expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
           repositories: request.repositories,
+          skipUnavailable: Boolean(request.allRepositoriesAccess),
         });
         const lastVerifiedAt = new Date().toISOString();
         const selection = await replacePersonalGitHubRepositorySelections(deps.db, {
@@ -197,6 +213,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           expectedSelectionGeneration: request.expectedSelectionGeneration,
           idempotencyKey: request.idempotencyKey,
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
+          ...(request.allRepositoriesAccess !== undefined
+            ? { allRepositoriesAccess: request.allRepositoriesAccess }
+            : {}),
         });
         return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
       } catch (error) {

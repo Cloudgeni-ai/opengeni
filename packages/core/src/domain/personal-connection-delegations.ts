@@ -521,9 +521,12 @@ export function personalConnectionDelegationsFromParent(input: {
   const requestedGitHub = personalGitHubRepositoryResources(input.personalGitHubResources ?? []);
   const inherited = projected.flatMap((delegation) => {
     if (delegation.connectionType !== "github_personal") return [delegation];
-    if (requestedGitHub.length === 0) return [];
     const snapshot = delegation.personalGitHubRepositorySelection;
     if (!snapshot) return [];
+    const allRepositoriesAccess = snapshot.allRepositoriesAccess;
+    // All my repositories travels with child work even without attached
+    // repositories, so the child can use the github_personal tools too.
+    if (requestedGitHub.length === 0 && !allRepositoriesAccess) return [];
     const repositories = requestedGitHub.map((resource) => {
       const parent = snapshot.repositories.find(
         (candidate) =>
@@ -531,11 +534,23 @@ export function personalConnectionDelegationsFromParent(input: {
           candidate.canonicalUrl === resource.uri &&
           candidate.ref === resource.ref,
       );
-      if (
-        !parent ||
-        resource.credentialBindingId !== snapshot.credentialBindingId ||
-        (resource.access === "write" && parent.access !== "write")
-      ) {
+      if (resource.credentialBindingId !== snapshot.credentialBindingId) {
+        throw new Error("agent-created personal GitHub repository exceeds parent authority");
+      }
+      if (!parent && allRepositoriesAccess) {
+        if (resource.access === "write" && allRepositoriesAccess !== "write") {
+          throw new Error("agent-created personal GitHub repository exceeds parent authority");
+        }
+        return {
+          repositoryId: resource.repositoryId,
+          fullName: personalGitHubFullNameFromUri(resource.uri),
+          canonicalUrl: resource.uri,
+          ref: resource.ref,
+          access: resource.access,
+          selectionGeneration: snapshot.selectionGeneration,
+        };
+      }
+      if (!parent || (resource.access === "write" && parent.access !== "write")) {
         throw new Error("agent-created personal GitHub repository exceeds parent authority");
       }
       return { ...parent, access: resource.access };
@@ -556,6 +571,84 @@ export function personalConnectionDelegationsFromParent(input: {
   return inherited;
 }
 
+function personalGitHubFullNameFromUri(uri: string): string {
+  return new URL(uri).pathname.split("/").filter(Boolean).join("/");
+}
+
+function usablePersonalGitHubConnection(
+  candidate: ConnectionMetadata,
+  subjectId: string,
+): boolean {
+  return (
+    candidate.subjectId === subjectId &&
+    candidate.status === "active" &&
+    isPersonalGitHubConnection(candidate) &&
+    Boolean(candidate.authorityId) &&
+    candidate.grantedScopes.length === 1 &&
+    candidate.grantedScopes[0] === "repo" &&
+    PersonalGitHubConnectionMetadata.safeParse(candidate.metadata).success
+  );
+}
+
+/**
+ * Work with no attached personal repositories still gets Your GitHub when the
+ * person chose All my repositories, so the github_personal tools can find and
+ * read anything they can. Best effort: any problem leaves the turn without it.
+ */
+async function personalGitHubAllRepositoriesDelegation(input: {
+  db: Database;
+  accountId: string;
+  subjectId: string;
+  connections: ConnectionMetadata[];
+  authoritySelection?: McpConnectionAccountSelection;
+}): Promise<McpPersonalConnectionDelegation | null> {
+  const candidates = input.connections.filter(
+    (candidate) =>
+      (!input.authoritySelection || candidate.id === input.authoritySelection.connectionId) &&
+      usablePersonalGitHubConnection(candidate, input.subjectId),
+  );
+  const delegations: McpPersonalConnectionDelegation[] = [];
+  for (const connection of candidates) {
+    try {
+      const metadata = PersonalGitHubConnectionMetadata.parse(connection.metadata);
+      const selection = await getPersonalGitHubRepositorySelectionState(input.db, {
+        accountId: input.accountId,
+        originWorkspaceId: connection.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: connection.id,
+      });
+      if (
+        !selection?.allRepositoriesAccess ||
+        selection.selectionGeneration <= 0 ||
+        selection.credentialBindingId !== metadata.credentialBindingId ||
+        selection.providerPrincipalId !== metadata.providerPrincipalId
+      ) {
+        continue;
+      }
+      delegations.push({
+        serverId: PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+        connectionId: connection.id,
+        originWorkspaceId: connection.workspaceId,
+        ownerSubjectId: input.subjectId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+        connectionType: "github_personal",
+        personalGitHubRepositorySelection: {
+          credentialBindingId: metadata.credentialBindingId,
+          connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+          selectionGeneration: selection.selectionGeneration,
+          allRepositoriesAccess: selection.allRepositoriesAccess,
+          repositories: [],
+        },
+      });
+    } catch {
+      // A connection that cannot be read is simply not used for this turn.
+    }
+  }
+  // With several accounts and no choice, none is guessed.
+  return delegations.length === 1 ? delegations[0]! : null;
+}
+
 async function personalGitHubDelegationFromVisibleConnections(input: {
   db: Database;
   accountId: string;
@@ -566,10 +659,17 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
 }): Promise<McpPersonalConnectionDelegation | null> {
   const resources = personalGitHubRepositoryResources(input.resources);
   if (resources.length === 0) {
-    if (input.authoritySelection) {
+    const all = await personalGitHubAllRepositoriesDelegation({
+      db: input.db,
+      accountId: input.accountId,
+      subjectId: input.subjectId,
+      connections: input.connections,
+      ...(input.authoritySelection ? { authoritySelection: input.authoritySelection } : {}),
+    });
+    if (!all && input.authoritySelection) {
       throw new Error("personal GitHub connection authority requires selected repositories");
     }
-    return null;
+    return all;
   }
   const bindingIds = new Set(resources.map((resource) => resource.credentialBindingId));
   if (bindingIds.size !== 1) {
@@ -631,7 +731,28 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
   const selectedById = new Map(
     selection.repositories.map((repository) => [repository.repositoryId, repository]),
   );
+  const allRepositoriesAccess = selection.allRepositoriesAccess;
   const repositories = resources.map((resource) => {
+    if (allRepositoriesAccess) {
+      // All my repositories: GitHub decides on every use (the Git broker,
+      // credentials and tools recheck it live), so admission does not wait
+      // on GitHub here.
+      if (resource.access === "write" && allRepositoriesAccess !== "write") {
+        throw new Error("personal GitHub repository resource is outside the selected authority");
+      }
+      const selected = selectedById.get(resource.repositoryId);
+      return {
+        repositoryId: resource.repositoryId,
+        fullName:
+          selected && selected.canonicalUrl === resource.uri
+            ? selected.fullName
+            : personalGitHubFullNameFromUri(resource.uri),
+        canonicalUrl: resource.uri,
+        ref: resource.ref,
+        access: resource.access,
+        selectionGeneration: selection.selectionGeneration,
+      };
+    }
     const selected = selectedById.get(resource.repositoryId);
     if (
       !selected ||
@@ -661,6 +782,7 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
       credentialBindingId,
       connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
       selectionGeneration: selection.selectionGeneration,
+      ...(allRepositoriesAccess ? { allRepositoriesAccess } : {}),
       repositories,
     },
   };
@@ -1100,11 +1222,10 @@ export async function freezePersonalConnectionDelegations(input: {
   if (personalGitHubResources.length > 0 && input.source.kind === "none") {
     throw new Error("personal GitHub repository authority requires an authenticated causal human");
   }
-  if (
-    servers.length === 0 &&
-    !includeFirstPartyConnections &&
-    personalGitHubResources.length === 0
-  ) {
+  // All my repositories can give any of the person's chats Your GitHub.
+  const mayUsePersonalGitHub =
+    personalGitHubResources.length > 0 || input.settings.githubPersonalOauthEnabled === true;
+  if (servers.length === 0 && !includeFirstPartyConnections && !mayUsePersonalGitHub) {
     return [];
   }
   if (input.source.kind === "none") {
@@ -1162,7 +1283,7 @@ export async function freezePersonalConnectionDelegations(input: {
   // is used only by MCP and personal repositories.
   // The live membership check above remains mandatory for every personal path.
   const visibleConnections =
-    servers.length > 0 || personalGitHubResources.length > 0
+    servers.length > 0 || mayUsePersonalGitHub
       ? await listOwnConnectionMetadata(input.db, {
           accountId: input.source.accountId,
           workspaceId: input.workspaceId,
@@ -1174,7 +1295,7 @@ export async function freezePersonalConnectionDelegations(input: {
       : [];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
   const supportedSelectionIds = new Set(selectedMcpServerIds);
-  if (personalGitHubResources.length > 0) {
+  if (mayUsePersonalGitHub) {
     supportedSelectionIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
   }
   const unsupportedSelections = (input.authoritySelections ?? []).filter(
@@ -1206,7 +1327,9 @@ export async function freezePersonalConnectionDelegations(input: {
   const personalGitHubAuthoritySelection = (input.authoritySelections ?? []).find(
     (selection) => selection.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
   );
-  const personalGitHub = await personalGitHubDelegationFromVisibleConnections({
+  const personalGitHub = !mayUsePersonalGitHub
+    ? null
+    : await personalGitHubDelegationFromVisibleConnections({
     db: input.db,
     accountId: input.source.accountId,
     subjectId: ownerSubjectId,

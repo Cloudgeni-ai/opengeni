@@ -7680,6 +7680,8 @@ export type PersonalGitHubRepositorySelectionState = {
   credentialBindingId: string;
   providerPrincipalId: string;
   selectionGeneration: number;
+  /** "All my repositories": null keeps only `repositories`. */
+  allRepositoriesAccess: "read" | "write" | null;
   repositories: PersonalGitHubSelectedRepositoryRecord[];
 };
 
@@ -7697,6 +7699,8 @@ export type PersonalGitHubRepositorySelectionMutationInput = {
   expectedSelectionGeneration: number;
   idempotencyKey: string;
   repositories: PersonalGitHubVerifiedRepositoryInput[];
+  /** Set "All my repositories" with the list (null turns it off); omitted keeps the mode. */
+  allRepositoriesAccess?: "read" | "write" | null;
 };
 
 export class PersonalGitHubRepositorySelectionChangedError extends Error {
@@ -13660,6 +13664,10 @@ function personalGitHubRepositorySelectionStateFromDatabase(
     credentialBindingId: String(record.credentialBindingId),
     providerPrincipalId: String(record.providerPrincipalId),
     selectionGeneration: Number(record.selectionGeneration),
+    allRepositoriesAccess:
+      record.allRepositoriesAccess === "read" || record.allRepositoriesAccess === "write"
+        ? record.allRepositoriesAccess
+        : null,
     repositories: record.repositories.map((item) => {
       const repository = item as Record<string, unknown>;
       return {
@@ -13730,7 +13738,14 @@ async function mutatePersonalGitHubRepositorySelections(
             ${input.expectedConnectionAuthorityGeneration},
             ${input.expectedSelectionGeneration},
             ${input.idempotencyKey},
-            ${JSON.stringify(input.repositories)}::jsonb,
+            ${JSON.stringify(
+              input.allRepositoriesAccess === undefined
+                ? input.repositories
+                : {
+                    repositories: input.repositories,
+                    allRepositoriesAccess: input.allRepositoriesAccess,
+                  },
+            )}::jsonb,
             ${verifyOnly}
           ) as state
         `);

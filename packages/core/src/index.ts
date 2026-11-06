@@ -146,6 +146,7 @@ export * from "./rigs";
 export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
+export * from "./domain/personal-github-repository-access";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,

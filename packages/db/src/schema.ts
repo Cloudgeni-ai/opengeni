@@ -2130,6 +2130,8 @@ export const personalGitHubRepositorySelectionHeads = pgTable(
       mode: "number",
     }).notNull(),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    /** "All my repositories": null, or the access every repository the person can reach gets. */
+    allRepositoriesAccess: text("all_repositories_access"),
     updatedBySubjectId: text("updated_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2149,6 +2151,10 @@ export const personalGitHubRepositorySelectionHeads = pgTable(
     generationValid: check(
       "personal_github_repository_selection_heads_generation_chk",
       sql`${table.connectionAuthorityGeneration} > 0 and ${table.generation} > 0`,
+    ),
+    allAccessValid: check(
+      "personal_github_repository_selection_heads_all_access_chk",
+      sql`${table.allRepositoriesAccess} is null or ${table.allRepositoriesAccess} in ('read', 'write')`,
     ),
   }),
 );
