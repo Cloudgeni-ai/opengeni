@@ -325,6 +325,38 @@ async fn relief_removes_an_image_now_unless_in_use() {
     assert!(!cache.remove(held).await, "already gone");
 }
 
+/// An image the host built is kept without any store: moved into place,
+/// used like a fetched one, and kept by the next agent. One built again
+/// while the host has it leaves the kept file as it was.
+#[tokio::test]
+async fn a_built_image_is_kept_without_a_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let built = dir.path().join("image.ext4");
+    fs::write(&built, b"built here").unwrap();
+    let image = ImageId(*blake3::hash(b"built here").as_bytes());
+    cache.adopt(image, &built).await.unwrap();
+    assert!(!built.exists(), "moved into place");
+    assert!(cache.has(image));
+    let held = cache.get(image, &NoStore).await.unwrap();
+    assert_eq!(fs::read(&held.path).unwrap(), b"built here");
+    let before = identity(&held.path);
+    drop(held);
+
+    fs::write(&built, b"built here").unwrap();
+    cache.adopt(image, &built).await.unwrap();
+    assert!(!built.exists(), "the second build is dropped");
+    assert_eq!(
+        identity(&cache.path(image)),
+        before,
+        "the kept file untouched"
+    );
+    assert_eq!(images_in(&dir.path().join("rootfs")), 1);
+
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    assert!(reopened.get(image, &NoStore).await.is_ok());
+}
+
 /// Fetching a sandbox's disk over its image hashes the image once per
 /// version of its file's metadata: using the image must not touch it, or
 /// every create made the next fetch download the whole disk.

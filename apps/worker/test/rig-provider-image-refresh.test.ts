@@ -63,6 +63,50 @@ describe("stale sandbox environment provider image refresh", () => {
     expect(starts).toBe(0);
   });
 
+  test("a version with setup that was never built for the backend asks once for a build", async () => {
+    const starts: unknown[] = [];
+    const requested = requestStaleRigProviderImageRefresh({
+      selection: { reason: "unbuilt", contentHash: CONTENT },
+      turnUsesDeploymentBase: true,
+      workspaceId: WORKSPACE_ID,
+      versionId: VERSION_ID,
+      start: async (input) => {
+        starts.push(input);
+        return "started";
+      },
+      warn: () => {
+        throw new Error("no warning expected");
+      },
+    });
+    await settle();
+    expect(requested).toBe(true);
+    expect(starts).toEqual([
+      { workspaceId: WORKSPACE_ID, versionId: VERSION_ID, contentHash: CONTENT },
+    ]);
+  });
+
+  test("a build that stopped without finishing asks once for a new build", async () => {
+    const starts: unknown[] = [];
+    const requested = requestStaleRigProviderImageRefresh({
+      selection: { reason: "build_abandoned", contentHash: CONTENT },
+      turnUsesDeploymentBase: true,
+      workspaceId: WORKSPACE_ID,
+      versionId: VERSION_ID,
+      start: async (input) => {
+        starts.push(input);
+        return "started";
+      },
+      warn: () => {
+        throw new Error("no warning expected");
+      },
+    });
+    await settle();
+    expect(requested).toBe(true);
+    expect(starts).toEqual([
+      { workspaceId: WORKSPACE_ID, versionId: VERSION_ID, contentHash: CONTENT },
+    ]);
+  });
+
   test("a turn on a workspace-selected base never asks for a deployment-base rebuild", async () => {
     let starts = 0;
     const requested = requestStaleRigProviderImageRefresh({

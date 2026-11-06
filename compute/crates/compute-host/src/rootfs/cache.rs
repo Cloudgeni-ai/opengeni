@@ -326,6 +326,43 @@ impl Cache {
         Ok(self.used(image, path, shared).await)
     }
 
+    /// Keeps the file at `path`, whose id is `image`, as the host's copy of
+    /// that image, marked used now: synced and renamed into place (on the
+    /// same file system), or removed when the host has the image already.
+    /// An image the host built itself then serves its creates without a
+    /// fetch, and stays on its disk only as any cached image does: disk
+    /// relief and the week rule remove it once nothing holds it.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be synced or moved; it is left where it was.
+    pub async fn adopt(&self, image: ImageId, path: &Path) -> io::Result<()> {
+        let shared = self.shared(image).await;
+        let work = self.locks(image).work;
+        let _work = work.lock().await;
+        let kept = self.path(image);
+        let have = self.has(image);
+        let from = path.to_owned();
+        self.blocking({
+            let kept = kept.clone();
+            move || {
+                if have {
+                    return remove_if_present(&from);
+                }
+                fs::File::open(&from)?.sync_all()?;
+                fs::rename(&from, &kept)?;
+                sync_parent(&kept)
+            }
+        })
+        .await?;
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(image);
+        drop(self.used(image, kept, shared).await);
+        Ok(())
+    }
+
     /// The image `image` if the host has it, marked used now; never
     /// fetches.
     pub async fn hold(&self, image: ImageId) -> Option<Held> {

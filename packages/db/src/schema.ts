@@ -13905,7 +13905,9 @@ export const usageAllowanceAttributionReceipts = opengeniPrivateSchema.table(
   {
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
-    sourceKind: text("source_kind").$type<"turn" | "schedule" | "knowledge_query">().notNull(),
+    sourceKind: text("source_kind")
+      .$type<"turn" | "schedule" | "knowledge_query" | "voice_transcription" | "voice_realtime">()
+      .notNull(),
     sourceId: text("source_id").notNull(),
     sessionId: uuid("session_id"),
     attribution: jsonb("attribution")

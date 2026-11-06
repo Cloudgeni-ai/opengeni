@@ -14733,6 +14733,16 @@ describe("runtime Skill activation", () => {
         "references/runbook.md",
         "SKILL.md",
       ]);
+      // A path from another Skill does not cost the files that exist.
+      const partial = JSON.parse(
+        await skillRead!.invoke!(
+          undefined,
+          JSON.stringify({ skill: "infra-ops", paths: ["SKILL.md", "references/other.md"] }),
+        ),
+      );
+      expect(partial.files.map((file: { path: string }) => file.path)).toEqual(["SKILL.md"]);
+      expect(partial.missing).toEqual(["references/other.md"]);
+      expect(partial.availablePaths).toEqual(["SKILL.md", "references/runbook.md"]);
     },
   );
 

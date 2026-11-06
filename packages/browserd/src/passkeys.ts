@@ -137,6 +137,11 @@ export class BrowserPasskeyManager {
   private readonly timeoutMs: number;
   private readonly desired = new Map<string, DesiredCredential>();
   private readonly authenticators = new Map<string, Authenticator>();
+  /** Highest sign count seen per credential, kept across replacements so a
+   *  set loaded again never presents a lower counter than a page last saw. */
+  private readonly signCounts = new Map<string, number>();
+  /** Who the loaded set belongs to, as the last replacing sync named it. */
+  private loadedOwner: string | null = null;
   private events: BrowserPasskeyEvent[] = [];
   private queue: Promise<void> = Promise.resolve();
 
@@ -265,8 +270,11 @@ export class BrowserPasskeyManager {
   /**
    * Controller-private sync. A non-null `credentials` replaces the loaded set
    * (keeping the higher of the local and supplied sign count per credential,
-   * and in-session registrations not yet acknowledged). Acknowledged events are
-   * dropped; every still-pending event is returned, oldest first.
+   * and in-session registrations not yet acknowledged while the set keeps its
+   * owner). Acknowledged events are dropped; every still-pending event is
+   * returned, oldest first. A caller that names an owner (even null) gets each
+   * registration stamped with the owner of the set loaded when the page made
+   * it; older callers, which parse events strictly, get the previous shape.
    */
   async sync(input: BrowserPasskeySyncRequestValue): Promise<BrowserPasskeySyncResponseValue> {
     const request = BrowserPasskeySyncRequest.parse(input);
@@ -287,18 +295,29 @@ export class BrowserPasskeyManager {
         if (entry) entry.unacknowledgedRegistration = false;
       }
       this.events = this.events.filter((event) => !acknowledged.has(event.eventId));
-      if (request.credentials !== null) await this.replaceDesired(request.credentials);
+      if (request.credentials !== null) {
+        const owner = request.owner ?? null;
+        await this.replaceDesired(request.credentials, owner === this.loadedOwner);
+        this.loadedOwner = owner;
+      }
+      const ownerAware = request.owner !== undefined;
       return BrowserPasskeySyncResponse.parse({
         browserSessionId: this.browserSessionId,
         controllerGeneration: this.controllerGeneration,
         authenticators: this.authenticators.size,
-        events: this.events.slice(0, BROWSER_MAX_PASSKEY_EVENTS),
+        events: this.events.slice(0, BROWSER_MAX_PASSKEY_EVENTS).map((event) => {
+          if (ownerAware || event.type !== "registered") return event;
+          const { owner: _owner, ...unowned } = event;
+          return unowned;
+        }),
+        ...(ownerAware ? { supportsOwners: true } : {}),
       });
     });
   }
 
   private async replaceDesired(
     credentials: NonNullable<BrowserPasskeySyncRequestValue["credentials"]>,
+    sameOwner: boolean,
   ): Promise<void> {
     const next = new Map<string, DesiredCredential>();
     const changedBackupFlags = new Set<string>();
@@ -316,14 +335,22 @@ export class BrowserPasskeyManager {
       next.set(key, {
         material: {
           ...material,
-          signCount: Math.max(material.signCount, local?.material.signCount ?? 0),
+          signCount: Math.max(
+            material.signCount,
+            local?.material.signCount ?? 0,
+            this.signCounts.get(key) ?? 0,
+          ),
         },
         itemId,
         unacknowledgedRegistration: false,
       });
     }
-    for (const [key, entry] of this.desired) {
-      if (!next.has(key) && entry.unacknowledgedRegistration) next.set(key, entry);
+    // A registration not yet saved stays usable for its own owner only;
+    // its pending event is left for that owner to save or anyone to discard.
+    if (sameOwner) {
+      for (const [key, entry] of this.desired) {
+        if (!next.has(key) && entry.unacknowledgedRegistration) next.set(key, entry);
+      }
     }
     const removed = [...this.desired.keys()].filter((key) => !next.has(key));
     this.desired.clear();
@@ -362,6 +389,7 @@ export class BrowserPasskeyManager {
       credential = cdpCredential(fetched.credential) ?? credential;
     }
     source.installed.set(key, credential.signCount);
+    this.noteSignCount(key, credential.signCount);
     // Our own installs may echo as additions. Only an unknown credential is a
     // registration made by the page.
     if (this.desired.has(key)) return;
@@ -385,6 +413,7 @@ export class BrowserPasskeyManager {
       targetId: source.targetId,
       origin: await this.targetOrigin(source),
       credential: material,
+      owner: this.loadedOwner,
     });
     for (const authenticator of [...this.authenticators.values()]) {
       if (authenticator !== source) await this.install(authenticator, key, entry);
@@ -400,6 +429,7 @@ export class BrowserPasskeyManager {
     if (!credential) return;
     const key = credentialKey(credential.credentialId);
     source.installed.set(key, credential.signCount);
+    this.noteSignCount(key, credential.signCount);
     const entry = this.desired.get(key);
     if (entry) {
       entry.material = {
@@ -506,6 +536,10 @@ export class BrowserPasskeyManager {
     if (!authenticator) return;
     this.authenticators.delete(sessionId);
     for (const unsubscribe of authenticator.unsubscribe) unsubscribe();
+  }
+
+  private noteSignCount(key: string, signCount: number): void {
+    this.signCounts.set(key, Math.max(signCount, this.signCounts.get(key) ?? 0));
   }
 
   private async send<T = Record<string, unknown>>(

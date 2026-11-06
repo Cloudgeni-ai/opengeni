@@ -406,3 +406,92 @@ test("rejects a sync for another controller binding", async () => {
     }),
   ).rejects.toThrow("passkey sync targets another browser controller binding");
 });
+
+test("a set loaded for another owner never carries the previous owner's passkeys or registrations", async () => {
+  const { cdp, manager } = setup();
+  const alice = randomUUID();
+  const bob = randomUUID();
+  const sync = (
+    credentials: BrowserPasskeyCredential[] | null,
+    owner?: string | null,
+    acknowledgeEventIds: string[] = [],
+  ) =>
+    manager.sync({
+      protocolVersion: 1,
+      ...binding,
+      credentials,
+      acknowledgeEventIds,
+      ...(owner === undefined ? {} : { owner }),
+    } satisfies BrowserPasskeySyncRequest);
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential({ signCount: 4 });
+  expect(await sync([credential], alice)).toEqual({
+    ...binding,
+    authenticators: 1,
+    events: [],
+    supportsOwners: true,
+  });
+  // Alice's set asserts and registers a passkey before anyone syncs again.
+  cdp.authenticators.get("a")!.get(STANDARD_ID)!.signCount = 7;
+  cdp.emit("a", "WebAuthn.credentialAsserted", {
+    authenticatorId: "authenticator-a",
+    credential: { credentialId: STANDARD_ID, rpId: "login.example.test", signCount: 7 },
+  });
+  cdp.authenticators.get("a")!.set("bmV3LWNyZWQ=", {
+    credentialId: "bmV3LWNyZWQ=",
+    signCount: 0,
+    privateKey: "bmV3LWtleQ==",
+  });
+  cdp.emit("a", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-a",
+    credential: {
+      credentialId: "bmV3LWNyZWQ=",
+      rpId: "login.example.test",
+      privateKey: "bmV3LWtleQ==",
+      userHandle: "dXNlci0y",
+      signCount: 0,
+    },
+  });
+  // Alice's own next replacement keeps her unsaved registration.
+  const kept = await sync([credential], alice);
+  expect(kept.events.find((event) => event.type === "registered")).toMatchObject({
+    owner: alice,
+  });
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 7, "bmV3LWNyZWQ=": 0 });
+
+  // A caller acting for nobody empties the authenticators, a new tab included.
+  const cleared = await sync([]);
+  expect(cleared).not.toHaveProperty("supportsOwners");
+  expect(cleared.events.find((event) => event.type === "registered")).not.toHaveProperty("owner");
+  expect(cdp.installed("a")).toEqual({});
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  expect(cdp.installed("b")).toEqual({});
+  // A registration made meanwhile belongs to nobody.
+  cdp.authenticators.get("b")!.set("aHVtYW4=", {
+    credentialId: "aHVtYW4=",
+    signCount: 0,
+    privateKey: "aHVtYW4ta2V5",
+  });
+  cdp.emit("b", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-b",
+    credential: {
+      credentialId: "aHVtYW4=",
+      rpId: "login.example.test",
+      privateKey: "aHVtYW4ta2V5",
+      signCount: 0,
+    },
+  });
+
+  // Bob's set: none of Alice's passkeys, and every pending registration
+  // still names the set it was made under.
+  const bobs = await sync([], bob);
+  expect(cdp.installed("a")).toEqual({});
+  expect(cdp.installed("b")).toEqual({});
+  expect(
+    bobs.events.flatMap((event) => (event.type === "registered" ? [event.owner] : [])),
+  ).toEqual([alice, null]);
+
+  // Alice's set loaded again never presents a lower counter than a page saw.
+  await sync([credential], alice);
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 7 });
+});
