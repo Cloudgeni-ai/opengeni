@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
+import { ProtocolError, SdkHttpError } from "@modelcontextprotocol/client";
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
 import type { McpServerConfig, Settings } from "@opengeni/config";
-import type { McpConnectionAccountBinding } from "@opengeni/contracts";
+import { stableJson, type McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   listEnabledMcpCapabilityServers,
@@ -12,8 +14,11 @@ import { boundMcpResponseBody, MCP_MAX_RESPONSE_BYTES } from "@opengeni/runtime/
 import { settingsWithMcpCapabilityServers } from "../capabilities";
 import { mcpAccountBindingsFromVisibleConnections } from "../mcp-account-bindings";
 import {
+  openMcpStreamableHttpSession,
   withMcpStreamableHttpClient,
+  type McpStreamableHttpConnectInput,
   type McpStreamableHttpClient,
+  type McpStreamableHttpSession,
 } from "../mcp-streamable-http-client";
 import { visibleMcpAccountConnections } from "../personal-connection-delegations";
 import {
@@ -21,6 +26,7 @@ import {
   MCP_EVENTS_CLIENT_CAPABILITIES,
   withMcpEventNameHeader,
 } from "./mcp-events-protocol";
+import type { McpEventTypesMemo } from "./mcp-event-types";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
   eventSubscriptionCredentialHeaders,
@@ -69,6 +75,8 @@ export type McpEventSourceConnection = {
   server: McpServerConfig;
   /** The connection used, or null for a server that needs no sign-in. */
   connectionId: string | null;
+  /** Where a kept session remembers the event types it read; absent on a one-off connection. */
+  eventTypes?: McpEventTypesMemo;
 };
 
 type ResolvedServer = McpEventSourceConnection & {
@@ -252,12 +260,15 @@ async function resolveServer(
 /**
  * Run `use` against the source's server, connected with the events extension
  * declared. A rejected credential is refreshed and the call tried once more.
+ *
+ * With `keepSession`, the MCP session stays open for the next call instead of
+ * being closed (see {@link keptSessions}).
  */
 export async function withMcpEventSourceClient<T>(
   deps: McpEventSourceClientDeps,
   source: McpEventSourceTarget,
   use: (client: McpStreamableHttpClient, connection: McpEventSourceConnection) => Promise<T>,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; keepSession?: boolean } = {},
 ): Promise<T> {
   const resolved = await resolveServer(deps, source);
   const timeoutMs = Math.min(resolved.server.timeoutMs ?? DEFAULT_TIMEOUT_MS, 60_000);
@@ -265,18 +276,44 @@ export async function withMcpEventSourceClient<T>(
     deps.fetch ?? createPinnedIntegrationTransport({ network: deps.settings }).fetch;
   const bounded: McpEventsFetch = async (url, init) =>
     boundMcpResponseBody(await transport(url.toString(), init), MCP_MAX_RESPONSE_BYTES);
+  const connectInput = {
+    url: resolved.server.url,
+    clientName: "opengeni-events",
+    clientVersion: "0.1.0",
+    timeoutMs: options.timeoutMs ?? timeoutMs,
+    capabilities: MCP_EVENTS_CLIENT_CAPABILITIES,
+  } satisfies Partial<McpStreamableHttpConnectInput>;
+  const connection = { server: resolved.server, connectionId: resolved.connectionId };
+  if (options.keepSession && source.id) {
+    return await withKeptSession(
+      sessionKey(source.id, resolved),
+      resolved,
+      (headers) => ({
+        ...connectInput,
+        // A kept session reads the current credential on every request, so a
+        // refreshed token does not end it.
+        fetch: withMcpEventNameHeader(async (url, init) => {
+          // It only polls and subscribes: it never reads server-sent messages,
+          // so it holds no stream open for them.
+          if ((init?.method ?? "GET").toUpperCase() === "GET") {
+            return new Response(null, { status: 405 });
+          }
+          const merged = new Headers(headers());
+          new Headers(init?.headers).forEach((value, name) => merged.set(name, value));
+          return await bounded(url, { ...init, headers: merged });
+        }),
+      }),
+      (client, session) => use(client, { ...connection, eventTypes: session.eventTypes }),
+    );
+  }
   const attempt = async (forceRefresh: boolean) =>
     await withMcpStreamableHttpClient(
       {
-        url: resolved.server.url,
-        clientName: "opengeni-events",
-        clientVersion: "0.1.0",
-        timeoutMs: options.timeoutMs ?? timeoutMs,
+        ...connectInput,
         requestInit: { headers: await resolved.headers(forceRefresh) },
         fetch: withMcpEventNameHeader(bounded),
-        capabilities: MCP_EVENTS_CLIENT_CAPABILITIES,
       },
-      (client) => use(client, { server: resolved.server, connectionId: resolved.connectionId }),
+      (client) => use(client, connection),
     );
   try {
     return await attempt(false);
@@ -284,4 +321,191 @@ export async function withMcpEventSourceClient<T>(
     if (!resolved.refreshable || classifyMcpEventsError(error).kind !== "unauthorized") throw error;
   }
   return await attempt(true);
+}
+
+/**
+ * MCP sessions kept open between subscription steps, one per source: one
+ * server reached with one sign-in, shared by every subscription on it. A
+ * step that finds one sends only its own requests, where a fresh connection
+ * would first repeat the handshake (`server/discover`, `initialize`,
+ * `notifications/initialized`) and re-read the event types.
+ *
+ * A session the server has forgotten (it answers 404, or 400 for a session it
+ * doesn't know) is replaced by a new one and the step runs again on it, once.
+ * A session that fails any other way below the protocol is dropped, so the
+ * next step starts afresh. One unused for {@link KEPT_SESSION_IDLE_MS} is
+ * ended. Sessions are per process: after a restart, or on another replica,
+ * the first step opens a new one.
+ *
+ * A server found to speak only the 2025-era protocol (it refuses the
+ * `server/discover` probe) is remembered by URL, so its later sessions skip
+ * the probe and start with `initialize`.
+ */
+type KeptSession = {
+  key: string;
+  /** The map entry that holds this session. */
+  entry: Promise<KeptSession>;
+  session: McpStreamableHttpSession;
+  headers: Record<string, string>;
+  eventTypes: McpEventTypesMemo;
+  users: number;
+  lastUsedAt: number;
+  retired: boolean;
+  /** Whether closing it should also end it on the server, which may still hold it. */
+  terminate: boolean;
+};
+
+const KEPT_SESSION_IDLE_MS = 15 * 60_000;
+const keptSessions = new Map<string, Promise<KeptSession>>();
+/** Server URLs whose sessions negotiated the 2025-era protocol. */
+const legacyServerUrls = new Set<string>();
+const MAX_LEGACY_SERVER_URLS = 1_000;
+
+function sessionKey(sourceId: string, resolved: ResolvedServer): string {
+  return createHash("sha256")
+    .update(
+      stableJson([
+        sourceId,
+        resolved.server.url,
+        resolved.connectionId,
+        resolved.server.headers ?? {},
+      ]),
+    )
+    .digest("hex");
+}
+
+/** No later step gets this session; whoever uses it last closes it. */
+function retire(kept: KeptSession, options: { terminate: boolean }): void {
+  kept.retired = true;
+  kept.terminate = options.terminate;
+  if (keptSessions.get(kept.key) === kept.entry) keptSessions.delete(kept.key);
+}
+
+function closeIdleSessions(now: number): void {
+  for (const pending of keptSessions.values()) {
+    void pending.then(
+      (kept) => {
+        if (kept.retired || kept.users > 0 || now - kept.lastUsedAt < KEPT_SESSION_IDLE_MS) return;
+        retire(kept, { terminate: true });
+        void kept.session.close({ terminate: true });
+      },
+      () => undefined,
+    );
+  }
+}
+
+/** End every kept session, as a process shutting down should. */
+export async function closeKeptMcpEventSessions(): Promise<void> {
+  const pending = [...keptSessions.values()];
+  keptSessions.clear();
+  await Promise.all(
+    pending.map(async (entry) => {
+      const kept = await entry.catch(() => null);
+      if (!kept) return;
+      kept.retired = true;
+      await kept.session.close({ terminate: true });
+    }),
+  );
+}
+
+/** The server no longer has the session, or never had it. */
+function sessionLost(error: unknown): boolean {
+  if (!SdkHttpError.isInstance(error)) return false;
+  const status = (error.data as { status?: unknown } | undefined)?.status;
+  return status === 404 || status === 400;
+}
+
+function openKeptSession(
+  key: string,
+  url: string,
+  connectInput: (headers: () => Record<string, string>) => McpStreamableHttpConnectInput,
+  headers: Record<string, string>,
+): Promise<KeptSession> {
+  const holder: { kept?: KeptSession } = {};
+  const knownLegacy = legacyServerUrls.has(url);
+  const pending: Promise<KeptSession> = openMcpStreamableHttpSession({
+    ...connectInput(() => holder.kept?.headers ?? headers),
+    ...(knownLegacy ? { era: "legacy" as const } : {}),
+  }).then((session) => {
+    if (session.era() === "legacy") {
+      if (legacyServerUrls.size >= MAX_LEGACY_SERVER_URLS) legacyServerUrls.clear();
+      legacyServerUrls.add(url);
+    } else {
+      legacyServerUrls.delete(url);
+    }
+    holder.kept = {
+      key,
+      entry: pending,
+      session,
+      headers,
+      eventTypes: { read: null, generation: null },
+      users: 0,
+      lastUsedAt: Date.now(),
+      retired: false,
+      terminate: false,
+    };
+    return holder.kept;
+  });
+  keptSessions.set(key, pending);
+  pending.catch(() => {
+    if (keptSessions.get(key) === pending) keptSessions.delete(key);
+    // The server may have moved on: probe it again next time.
+    if (knownLegacy) legacyServerUrls.delete(url);
+  });
+  return pending;
+}
+
+async function withKeptSession<T>(
+  key: string,
+  resolved: ResolvedServer,
+  connectInput: (headers: () => Record<string, string>) => McpStreamableHttpConnectInput,
+  use: (client: McpStreamableHttpClient, kept: KeptSession) => Promise<T>,
+): Promise<T> {
+  closeIdleSessions(Date.now());
+  let headers = await resolved.headers(false);
+  let refreshed = false;
+  let renewed = false;
+  for (;;) {
+    const existing = keptSessions.get(key);
+    let kept: KeptSession | null = null;
+    try {
+      kept = await (existing ?? openKeptSession(key, resolved.server.url, connectInput, headers));
+      // Ended while this step waited for it (it sat idle too long): take another.
+      if (kept.retired) {
+        kept = null;
+        continue;
+      }
+      const using = kept;
+      using.headers = headers;
+      using.users += 1;
+      try {
+        return await using.session.use((client) => use(client, using));
+      } finally {
+        using.users -= 1;
+        using.lastUsedAt = Date.now();
+      }
+    } catch (error) {
+      const unauthorized =
+        resolved.refreshable && classifyMcpEventsError(error).kind === "unauthorized";
+      // A JSON-RPC error answer and Opengeni's own refusals leave the session sound.
+      const sound =
+        !unauthorized &&
+        (ProtocolError.isInstance(error) || error instanceof EventSourceBlockedError);
+      if (kept && !sound) retire(kept, { terminate: !sessionLost(error) });
+      if (unauthorized && !refreshed) {
+        refreshed = true;
+        headers = await resolved.headers(true);
+        continue;
+      }
+      if (existing && !renewed && sessionLost(error)) {
+        renewed = true;
+        continue;
+      }
+      throw error;
+    } finally {
+      if (kept?.retired && kept.users === 0) {
+        void kept.session.close({ terminate: kept.terminate });
+      }
+    }
+  }
 }
