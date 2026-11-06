@@ -50,10 +50,6 @@ realTest(
     await database!.admin.unsafe(
       `DROP TABLE IF EXISTS ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
     );
-    // The retired Knowledge-source sync tables take their wake trigger with them.
-    await database!.admin.unsafe(
-      `DROP FUNCTION "${database!.schema}".knowledge_source_index_wake() CASCADE`,
-    );
     await database!.admin.unsafe(`
     DROP FUNCTION opengeni_private.subscription_provider_cutover_committed(text) CASCADE;
     DROP FUNCTION opengeni_private.subscription_codex_cutover_v1_active() CASCADE;
