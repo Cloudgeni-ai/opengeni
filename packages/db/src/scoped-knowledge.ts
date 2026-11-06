@@ -84,18 +84,6 @@ export class ScopedKnowledgeAuthorityError extends Error {
   readonly name = "ScopedKnowledgeAuthorityError";
 }
 
-export class KnowledgeSourceSyncObservationFenceError extends Error {
-  readonly name = "KnowledgeSourceSyncObservationFenceError";
-  readonly code = "KNOWLEDGE_SOURCE_SYNC_OBSERVATION_FENCE";
-}
-
-export type KnowledgeSourceSyncVersionObservationFence = {
-  scheduledTaskRunId: string;
-  scanGeneration: number;
-  providerRevision: string | null;
-  metadataHash: string | null;
-};
-
 function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
@@ -820,186 +808,6 @@ export async function upsertKnowledgeSource(
   });
 }
 
-export async function getKnowledgeSourceForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sourceId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<{ source: KnowledgeSourceRecord; provider: KnowledgeProviderRecord } | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({ source: schema.knowledgeSources, provider: schema.knowledgeProviders })
-      .from(schema.knowledgeSources)
-      .innerJoin(
-        schema.knowledgeProviders,
-        and(
-          eq(schema.knowledgeProviders.accountId, schema.knowledgeSources.accountId),
-          eq(schema.knowledgeProviders.id, schema.knowledgeSources.providerId),
-          eq(schema.knowledgeProviders.scopeKey, schema.knowledgeSources.scopeKey),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.knowledgeSources.accountId, input.accountId),
-          eq(schema.knowledgeSources.id, input.sourceId),
-        ),
-      )
-      .limit(1);
-    return row
-      ? { source: sourceFromRow(row.source), provider: providerFromRow(row.provider) }
-      : null;
-  });
-}
-
-export async function getKnowledgeSourceByExternalIdentityForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    providerId: string;
-    externalSourceId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<KnowledgeSourceRecord | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeSources)
-      .where(
-        and(
-          eq(schema.knowledgeSources.accountId, input.accountId),
-          eq(schema.knowledgeSources.providerId, input.providerId),
-          eq(schema.knowledgeSources.externalSourceId, input.externalSourceId),
-        ),
-      )
-      .limit(1);
-    return row ? sourceFromRow(row) : null;
-  });
-}
-
-export async function getKnowledgeSourceAclForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sourceId: string;
-    generation: number;
-    initiatingSubjectId: string;
-  },
-): Promise<KnowledgeSourceAclVersionRecord | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeSourceAclVersions)
-      .where(
-        and(
-          eq(schema.knowledgeSourceAclVersions.accountId, input.accountId),
-          eq(schema.knowledgeSourceAclVersions.sourceId, input.sourceId),
-          eq(schema.knowledgeSourceAclVersions.generation, input.generation),
-        ),
-      )
-      .limit(1);
-    return row ? aclFromRow(row) : null;
-  });
-}
-
-export async function getKnowledgeSourceObjectForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sourceId: string;
-    externalObjectId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<KnowledgeSourceObjectRecord | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeSourceObjects)
-      .where(
-        and(
-          eq(schema.knowledgeSourceObjects.accountId, input.accountId),
-          eq(schema.knowledgeSourceObjects.sourceId, input.sourceId),
-          eq(schema.knowledgeSourceObjects.externalObjectId, input.externalObjectId),
-        ),
-      )
-      .limit(1);
-    return row ? objectFromRow(row) : null;
-  });
-}
-
-export async function getKnowledgeDocumentVersionForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    versionId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<KnowledgeDocumentVersionRecord | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeDocumentVersions)
-      .where(
-        and(
-          eq(schema.knowledgeDocumentVersions.accountId, input.accountId),
-          eq(schema.knowledgeDocumentVersions.id, input.versionId),
-        ),
-      )
-      .limit(1);
-    return row ? versionFromRow(row) : null;
-  });
-}
-
-export async function getKnowledgeDocumentVersionObservationForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    versionId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<{
-  version: KnowledgeDocumentVersionRecord;
-  sourceMetadata: Record<string, unknown>;
-  sourceUpdatedAt: string | null;
-  locationMetadata: Record<string, unknown>;
-  documentChunkCount: number;
-} | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeDocumentVersions)
-      .where(
-        and(
-          eq(schema.knowledgeDocumentVersions.accountId, input.accountId),
-          eq(schema.knowledgeDocumentVersions.id, input.versionId),
-        ),
-      )
-      .limit(1);
-    if (!row) return null;
-    const [document] = row.documentId
-      ? await scopedDb
-          .select({ chunkCount: schema.documents.chunkCount })
-          .from(schema.documents)
-          .where(eq(schema.documents.id, row.documentId))
-          .limit(1)
-      : [];
-    return {
-      version: versionFromRow(row),
-      sourceMetadata: row.sourceMetadata,
-      sourceUpdatedAt: optionalIso(row.sourceUpdatedAt),
-      locationMetadata: row.locationMetadata,
-      documentChunkCount: document?.chunkCount ?? 0,
-    };
-  });
-}
-
 export async function appendKnowledgeSourceAclVersion(
   db: Database,
   input: Omit<KnowledgeWriteContext, "scope"> & {
@@ -1117,115 +925,12 @@ export async function appendKnowledgeSourceAclVersion(
   });
 }
 
-/** Atomically advance the source ACL to a deny generation and revoke every
- * materialized retrieval path. Delivery pause alone is never authorization. */
-export async function deauthorizeKnowledgeSourceRetrieval(
-  db: Database,
-  input: Omit<KnowledgeWriteContext, "scope"> & {
-    sourceId: string;
-    audience: ScopedKnowledgeScope;
-    reasonCode: string;
-  },
-): Promise<KnowledgeSourceAclVersionRecord> {
-  const reasonCode = normalizedStableKey(input.reasonCode, "reasonCode", 128);
-  return await withKnowledgeWriteRls(db, { ...input, scope: input.audience }, async (scopedDb) => {
-    const [source] = await scopedDb
-      .select()
-      .from(schema.knowledgeSources)
-      .where(eq(schema.knowledgeSources.id, input.sourceId))
-      .limit(1);
-    if (!source) throw new ScopedKnowledgeNotFoundError("Knowledge source was not found");
-    if (source.lifecycleState !== "active") {
-      throw new ScopedKnowledgeInvalidOperationError(
-        "A tombstoned knowledge source cannot be deauthorized",
-      );
-    }
-    const acl = await appendKnowledgeSourceAclVersion(scopedDb, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sourceId: input.sourceId,
-      audience: input.audience,
-      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
-      expectedAclGeneration: source.currentAclGeneration ?? 0,
-      aclVersion: `opengeni-deny:${reasonCode}`,
-      agentAccess: false,
-      operationId: input.operationId,
-      reasonCode,
-      actor: input.actor,
-    });
-    const revokedAt = new Date();
-    const versions = await scopedDb
-      .select({ documentId: schema.knowledgeDocumentVersions.documentId })
-      .from(schema.knowledgeDocumentVersions)
-      .where(eq(schema.knowledgeDocumentVersions.sourceId, input.sourceId));
-    const documentIds = [
-      ...new Set(versions.flatMap((version) => (version.documentId ? [version.documentId] : []))),
-    ];
-    await scopedDb
-      .update(schema.knowledgeSourceSyncIndexObligations)
-      .set({
-        status: "invalidated",
-        aclEligibility: "denied",
-        failureCode: reasonCode,
-        updatedAt: revokedAt,
-      })
-      .where(eq(schema.knowledgeSourceSyncIndexObligations.sourceId, input.sourceId));
-    if (documentIds.length > 0) {
-      await scopedDb
-        .update(schema.documents)
-        .set({ agentAccess: false, chunkCount: 0, updatedAt: revokedAt })
-        .where(inArray(schema.documents.id, documentIds));
-      await scopedDb
-        .delete(schema.documentChunks)
-        .where(inArray(schema.documentChunks.documentId, documentIds));
-    }
-    return acl;
-  });
-}
-
 type KnowledgeDocumentObservationMetadata = {
   title: string;
   sourceUri: string;
   sourceVersion: string;
   sourceUpdatedAt: Date | null;
 };
-
-async function lockKnowledgeSourceSyncObservationFloor(
-  scopedDb: Database,
-  input: {
-    sourceId: string;
-    externalObjectId: string;
-    fence: KnowledgeSourceSyncVersionObservationFence;
-  },
-): Promise<void> {
-  const [observation] = await scopedDb
-    .select({
-      scheduledTaskRunId: schema.knowledgeSourceSyncObjectObservations.scheduledTaskRunId,
-      scanGeneration: schema.knowledgeSourceSyncObjectObservations.scanGeneration,
-      providerRevision: schema.knowledgeSourceSyncObjectObservations.providerRevision,
-      metadataHash: schema.knowledgeSourceSyncObjectObservations.metadataHash,
-    })
-    .from(schema.knowledgeSourceSyncObjectObservations)
-    .where(
-      and(
-        eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
-        eq(schema.knowledgeSourceSyncObjectObservations.externalObjectId, input.externalObjectId),
-      ),
-    )
-    .for("share")
-    .limit(1);
-  if (
-    !observation ||
-    observation.scheduledTaskRunId !== input.fence.scheduledTaskRunId ||
-    observation.scanGeneration !== input.fence.scanGeneration ||
-    observation.providerRevision !== input.fence.providerRevision ||
-    observation.metadataHash !== input.fence.metadataHash
-  ) {
-    throw new KnowledgeSourceSyncObservationFenceError(
-      "Knowledge source observation floor changed before document mutation",
-    );
-  }
-}
 
 async function lockActiveKnowledgeDocumentAuthority(
   scopedDb: Database,
@@ -1333,79 +1038,6 @@ async function convergeKnowledgeDocumentObservationMetadata(
     );
 }
 
-export async function updateKnowledgeSourceDocumentObservationMetadata(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    initiatingSubjectId: string;
-    sourceId: string;
-    expectedSourceLifecycleGeneration: number;
-    objectId: string;
-    expectedObjectLifecycleGeneration: number;
-    versionId: string;
-    documentId: string;
-    title: string;
-    sourceUri: string;
-    sourceVersion: string;
-    sourceUpdatedAt: string | null;
-    syncObservation?: KnowledgeSourceSyncVersionObservationFence;
-  },
-): Promise<void> {
-  const metadata: KnowledgeDocumentObservationMetadata = {
-    title: boundedText(input.title, "title", 1000),
-    sourceUri: boundedText(input.sourceUri, "sourceUri", 4096),
-    sourceVersion: boundedText(input.sourceVersion, "sourceVersion", 1024),
-    sourceUpdatedAt: input.sourceUpdatedAt ? new Date(input.sourceUpdatedAt) : null,
-  };
-  await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    if (input.syncObservation) {
-      const [observationObject] = await scopedDb
-        .select({
-          sourceId: schema.knowledgeSourceObjects.sourceId,
-          externalObjectId: schema.knowledgeSourceObjects.externalObjectId,
-        })
-        .from(schema.knowledgeSourceObjects)
-        .where(eq(schema.knowledgeSourceObjects.id, input.objectId))
-        .limit(1);
-      if (!observationObject || observationObject.sourceId !== input.sourceId) {
-        throw new KnowledgeSourceSyncObservationFenceError(
-          "Knowledge source observation object is no longer current",
-        );
-      }
-      await lockKnowledgeSourceSyncObservationFloor(scopedDb, {
-        sourceId: input.sourceId,
-        externalObjectId: observationObject.externalObjectId,
-        fence: input.syncObservation,
-      });
-    }
-    const object = await lockActiveKnowledgeDocumentAuthority(scopedDb, input);
-    const [version] = await scopedDb
-      .select()
-      .from(schema.knowledgeDocumentVersions)
-      .where(eq(schema.knowledgeDocumentVersions.id, input.versionId))
-      .limit(1);
-    if (
-      !object ||
-      !version ||
-      object.currentVersionId !== input.versionId ||
-      version.sourceId !== input.sourceId ||
-      version.objectId !== input.objectId ||
-      version.documentId !== input.documentId
-    ) {
-      throw new ScopedKnowledgeGenerationConflictError(
-        "Knowledge document metadata observation is no longer current",
-      );
-    }
-    await convergeKnowledgeDocumentObservationMetadata(scopedDb, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      metadata,
-    });
-  });
-}
-
 export async function beginKnowledgeSyncRun(
   db: Database,
   input: Omit<KnowledgeWriteContext, "scope"> & {
@@ -1505,32 +1137,6 @@ export async function beginKnowledgeSyncRun(
       }
     },
   );
-}
-
-export async function getKnowledgeSyncRunForSyncAuthority(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sourceId: string;
-    operationId: string;
-    initiatingSubjectId: string;
-  },
-): Promise<KnowledgeSyncRunRecord | null> {
-  return await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeSyncRuns)
-      .where(
-        and(
-          eq(schema.knowledgeSyncRuns.accountId, input.accountId),
-          eq(schema.knowledgeSyncRuns.sourceId, input.sourceId),
-          eq(schema.knowledgeSyncRuns.operationId, input.operationId),
-        ),
-      )
-      .limit(1);
-    return row ? syncFromRow(row) : null;
-  });
 }
 
 export async function completeKnowledgeSyncRun(
@@ -1779,7 +1385,6 @@ export async function appendKnowledgeDocumentVersion(
       sourceVersion: string;
       sourceUpdatedAt: string | null;
     };
-    syncObservation?: KnowledgeSourceSyncVersionObservationFence;
     reasonCode: string;
   },
 ): Promise<KnowledgeDocumentVersionRecord> {
@@ -1838,17 +1443,11 @@ export async function appendKnowledgeDocumentVersion(
           fileId: input.fileId ?? null,
           locationMetadata: input.locationMetadata ?? {},
           documentObservationMetadata,
-          syncObservation: input.syncObservation ?? null,
+          // Kept in the hash so earlier operations replay unchanged.
+          syncObservation: null,
           reasonCode,
           actor: input.actor,
         });
-        if (input.syncObservation) {
-          await lockKnowledgeSourceSyncObservationFloor(scopedDb, {
-            sourceId: object.sourceId,
-            externalObjectId: object.externalObjectId,
-            fence: input.syncObservation,
-          });
-        }
         const convergeDocumentObservation = async (version: VersionRow): Promise<void> => {
           if (!documentObservationMetadata) return;
           if (!version.documentId || version.documentId !== (input.documentId ?? null)) {
@@ -2059,20 +1658,6 @@ export async function appendKnowledgeDocumentVersion(
           if (previousVersion?.documentId) {
             const retiredAt = new Date();
             await scopedDb
-              .update(schema.knowledgeSourceSyncIndexObligations)
-              .set({
-                status: "invalidated",
-                aclEligibility: "denied",
-                failureCode: "superseded_source_version",
-                updatedAt: retiredAt,
-              })
-              .where(
-                eq(
-                  schema.knowledgeSourceSyncIndexObligations.knowledgeDocumentVersionId,
-                  object.currentVersionId,
-                ),
-              );
-            await scopedDb
               .update(schema.documents)
               .set({ agentAccess: false, updatedAt: retiredAt })
               .where(eq(schema.documents.id, previousVersion.documentId));
@@ -2178,22 +1763,6 @@ export async function recordKnowledgeLifecycleEvent(
           const documentIds = versions.flatMap((version) =>
             version.documentId ? [version.documentId] : [],
           );
-          await scopedDb
-            .update(schema.knowledgeSourceSyncIndexObligations)
-            .set({
-              status: "invalidated",
-              aclEligibility: "denied",
-              failureCode: `${input.targetKind}_${input.eventType}`,
-              updatedAt: retiredAt,
-            })
-            .where(
-              input.targetKind === "source"
-                ? eq(schema.knowledgeSourceSyncIndexObligations.sourceId, input.targetId)
-                : eq(
-                    schema.knowledgeSourceSyncIndexObligations.knowledgeSourceObjectId,
-                    input.targetId,
-                  ),
-            );
           if (documentIds.length > 0) {
             await scopedDb
               .update(schema.documents)

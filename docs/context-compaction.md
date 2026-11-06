@@ -651,6 +651,21 @@ unchanged history. A later human/API prompt, Steer, explicitly requested
 Compact, or genuinely new machine input can create newer truth and make one new
 attempt. The active history stays unchanged throughout.
 
+A standalone compaction execution (the idle checkpoint below, or an explicit
+`/compact` on an idle session) is maintenance, so any terminal failure that
+reaches the generic turn-failure settlement, for example while preparing its
+tools, settles the same way: `turn.failed` with `context_compaction_failed`,
+the session idle rather than failed, and a still-pending request consumed with
+`session.context.compaction.skipped(reason="summarization_failed")` so the
+execution is not claimed again. Every recovery path runs first. A failed read of
+the pending flag goes to post-claim database recovery instead of settling idle
+with the request still pending. The failure's classification (code, error
+class and HTTP status, never the message) goes to worker telemetry; the
+recorded reason stays short and, for an error that is not a provider, quota
+or summary failure, says the checkpoint could not run and names its class. The timeline names an automatic compaction's failure
+(labelled Auto) with "Chat history is unchanged." and keeps "Request it again
+to retry." for a requested `/compact` or an overflow.
+
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
 and `response.incomplete` events are converted to ordinary non-2xx provider
@@ -696,6 +711,36 @@ reuses the ordinary tools→instructions cache prefix, then settles without
 inference. A Steer accepted while that standalone maintenance attempt is live
 does not interrupt it; maintenance records its terminal compaction result and
 completes normally, then the already-admitted Steer is the next runnable work.
+
+That maintenance execution continues the latest started turn, so its claim
+resolves that turn's connection account intent again, like an internal update
+continuing the turn (see `docs/remote-mcp-credentials.md`). The compaction
+request therefore carries the person's current account-routed connector tools
+and delegation-based personal tools (personal GitHub, personal connectors),
+normally the same ones as the turn before it, and keeps that turn's cached
+prompt prefix. After a scheduled run, the run's intent is resolved against all
+of the session's connectors rather than the run's own connector subset, so the
+tool list can differ there; it is still the same person's accounts, checked
+live. A picked account that can no longer be used leaves its connector out and
+is recorded in `connectionAccountGaps`. An intent naming someone other than that
+turn's person, or, in a private chat, someone other than its owner, resolves
+shared accounts only. A compaction turn cannot carry an external link's
+permission ceiling or a credential restriction (such as developer setup)
+forward, so after a turn with either it gets no connection accounts and stores
+no intent. Work that later continues the compaction turn, such as a goal
+continuation or a second compaction, then resolves nothing from it. Otherwise
+the compaction turn stores the same intent, and that work resolves it again like
+any continuation. Unlike an internal update, accounts never fail the claim. The
+external-link check, the resolver and the turn's acceptance (its
+authority-capture and binding-fence triggers) each run in a savepoint. If any of
+them fails, or the resolver offers an account that person may not lend, the
+claim records `connectionAccountsUnresolved` (reason, error class and SQLSTATE,
+never the message) in the turn's internal
+metadata, the worker logs it as a warning, and the compaction runs with only the
+session's shared tools. A stored intent the current schema no longer reads is
+recorded the same way, lends nothing and is not stored on the compaction turn.
+A session with no started turn, or a turn accepted before account intent
+existed, compacts without connection accounts.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated

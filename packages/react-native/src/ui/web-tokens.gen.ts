@@ -35,7 +35,8 @@ export const webColorsLight = {
   "surface-2": "rgb(238, 238, 238)",
   "surface-3": "rgb(229, 229, 229)",
   "switch-thumb": "rgb(255, 255, 255)",
-  "switch-track": "rgb(189, 189, 189)"
+  "switch-track": "rgb(189, 189, 189)",
+  "text-selection": "rgba(56, 131, 255, 0.322)"
 } as const;
 
 export const webColorsDark = {
@@ -73,7 +74,8 @@ export const webColorsDark = {
   "surface-2": "rgb(56, 56, 56)",
   "surface-3": "rgb(64, 64, 64)",
   "switch-thumb": "rgb(163, 163, 163)",
-  "switch-track": "rgb(69, 69, 69)"
+  "switch-track": "rgb(69, 69, 69)",
+  "text-selection": "rgba(73, 139, 235, 0.439)"
 } as const;
 
 export const webLengths = {

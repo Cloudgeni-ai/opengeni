@@ -3806,6 +3806,7 @@ export type ScheduledTaskAgentConfig = {
   pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Skip an occurrence instead of running without an unusable pinned account. */
   pinnedAccountsRequired?: true | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -3850,6 +3851,7 @@ export type ScopedKnowledgeScope =
   | { kind: "workspace"; workspaceId: string; subjectId: null }
   | { kind: "personal"; workspaceId: string | null; subjectId: string };
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncLimits = {
   maxItems: number;
   maxBytes: number;
@@ -4872,6 +4874,24 @@ export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewa
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
 /**
+ * The reasoning levels a model on an OpenAI-compatible endpoint accepts as
+ * `reasoning_effort`, lowest first, and the one it uses by default.
+ */
+export type CompatibleModelReasoning = {
+  efforts: ReasoningEffort[];
+  defaultEffort: ReasoningEffort;
+};
+
+/**
+ * One model of an organization's OpenAI-compatible endpoint. `reasoning` is
+ * null when it declares no reasoning levels: chats then offer no reasoning
+ * choice and send no `reasoning_effort`.
+ */
+export type OrganizationCompatibleEndpointModel = OrganizationProviderCustomModel & {
+  reasoning: CompatibleModelReasoning | null;
+};
+
+/**
  * An organization's own OpenAI-compatible endpoint: an organization model
  * account like its OpenAI key, of which it can connect several. Its key is
  * write-only; its base URL, API format and name are non-secret.
@@ -4886,14 +4906,18 @@ export type OrganizationCompatibleEndpoint = {
   api: "chat" | "responses";
   label: string | null;
   /** The endpoint's active models. */
-  models: OrganizationProviderCustomModel[];
+  models: OrganizationCompatibleEndpointModel[];
   createdAt: string;
   updatedAt: string;
 };
 export type OrganizationCompatibleEndpointsResponse = {
   endpoints: OrganizationCompatibleEndpoint[];
 };
-/** Connect an endpoint with its first model; the API checks it with a short test request first. */
+/**
+ * Connect an endpoint with its first model; the API checks it with a short
+ * test request first. Without `reasoning`, the model's levels are read from
+ * the endpoint's model listing when it publishes them; `null` declares none.
+ */
 export type CreateOrganizationCompatibleEndpointRequest = {
   operationId: string;
   baseUrl: string;
@@ -4901,15 +4925,26 @@ export type CreateOrganizationCompatibleEndpointRequest = {
   model: string;
   api?: "chat" | "responses" | undefined;
   label?: string | undefined;
+  reasoning?: CompatibleModelReasoning | null | undefined;
 };
 export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
   operationId: string;
   expectedVersion: number;
   apiKey: string;
 };
+/** Add a model to an endpoint; `reasoning` works as when connecting the endpoint. */
 export type CreateOrganizationCompatibleEndpointModelRequest = {
   operationId: string;
   upstreamModelId: string;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+/**
+ * Set one endpoint model's reasoning levels: given levels, `null` for none,
+ * or omitted to read them again from the endpoint's model listing.
+ */
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = {
+  expectedVersion: number;
+  reasoning?: CompatibleModelReasoning | null | undefined;
 };
 
 /**
@@ -7026,6 +7061,11 @@ export type OrganizationMcpConnection = {
   expiresAt: string;
   revokedAt: null;
   /**
+   * Set when it connected automatically, through an issuer the organization
+   * trusts (auto-connect). Its access is that issuer's, changed by an admin.
+   */
+  autoConnect?: { trustedIssuerId: string; issuerName: string } | null;
+  /**
    * Listed agents: whether the caller can disconnect this one. Everyone
    * disconnects their own; owners and admins anyone's, except only an owner an
    * owner's.
@@ -8134,6 +8174,7 @@ export type ScheduledTaskAgentConfigInput = {
    * omitted runs follow the workspace's agent defaults.
    */
   agent?: AgentConfigRequest | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
@@ -8242,6 +8283,7 @@ export type CreateAgentScheduledTaskRequest = {
   creatorLocked?: boolean | undefined;
 };
 
+/** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
@@ -8313,6 +8355,7 @@ export type UpdateScheduledTaskRequest = {
 
 export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncRunSummary = {
   phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
   scanned: number;
@@ -8681,15 +8724,17 @@ export type OrganizationComputeSummary = {
 };
 
 /** GET .../organization-machines: every organization machine, wherever it
- * works, for organization owners. `complete` is false while the server can
- * only list the ones that work in the requested workspace. */
+ * works, for organization owners and admins. `complete` is always true;
+ * servers before migration 1272 could list only the ones that work in the
+ * requested workspace and sent false. */
 export type ListOrganizationMachinesResponse = {
   machines: OrganizationComputeSummary[];
   complete: boolean;
 };
 
 /** GET .../organization-rigs: every organization sandbox environment,
- * wherever it works, for organization owners. `complete` as for machines. */
+ * wherever it works, for organization owners and admins. `complete` as for
+ * machines. */
 export type ListOrganizationRigsResponse = {
   rigs: OrganizationComputeSummary[];
   complete: boolean;

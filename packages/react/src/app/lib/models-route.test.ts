@@ -52,8 +52,8 @@ describe("Models URLs", () => {
     expect(connectStepOf("connect")).toBeNull();
   });
 
-  test("Azure OpenAI is addressed for the organization only", () => {
-    // A workspace's own Azure key is a direct connection, not a Models account.
+  test("an Azure OpenAI account page is the organization's; both connect steps exist", () => {
+    // A workspace's own Azure key is a row in its list, not a Models account page.
     expect(parseModelsAccount("org:gateway:azure_openai")).toBe("org:gateway:azure_openai");
     expect(parseModelsAccount("gateway:azure_openai")).toBeUndefined();
     expect(accountKeyOf("org:gateway:azure_openai")).toEqual({
@@ -63,7 +63,12 @@ describe("Models URLs", () => {
     });
     expect(accountKeyOf("gateway:azure_openai")).toBeNull();
     expect(parseModelsView("connect-org:azure_openai")).toBe("connect-org:azure_openai");
-    expect(parseModelsView("connect:azure_openai")).toBeUndefined();
+    // Its connect step is the same page for a workspace's own key.
+    expect(parseModelsView("connect:azure_openai")).toBe("connect:azure_openai");
+    expect(connectStepOf("connect:azure_openai")).toEqual({
+      provider: "azure_openai",
+      organization: false,
+    });
     expect(connectStepOf("connect-org:azure_openai")).toEqual({
       provider: "azure_openai",
       organization: true,
@@ -81,7 +86,9 @@ describe("Models URLs", () => {
     expect(parseModelsAccount(`compatible:${id}`)).toBeUndefined();
     expect(parseModelsAccount("org:compatible:not-a-uuid")).toBeUndefined();
     expect(parseModelsView("connect-org:openai_compatible")).toBe("connect-org:openai_compatible");
-    expect(parseModelsView("connect:openai_compatible")).toBeUndefined();
+    // A workspace's admins connect one for that workspace with the same step.
+    expect(parseModelsView("connect:openai_compatible")).toBe("connect:openai_compatible");
+    expect(parseModelsView("connect:openai")).toBe("connect:openai");
     expect(connectStepOf("connect-org:openai_compatible")).toEqual({
       provider: "openai_compatible",
       organization: true,

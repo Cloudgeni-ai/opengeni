@@ -14,7 +14,6 @@ import {
   type ClaudePlaces,
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
-import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
 import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
@@ -116,8 +115,15 @@ import {
   COMPATIBLE_ENDPOINT_CHOICE,
   CompatibleEndpointConnectPage,
   CompatibleEndpointView,
+  organizationEndpointConnect,
   useOrganizationCompatibleEndpoints,
 } from "@/components/models/organization-compatible-endpoints";
+import {
+  WorkspaceModelKeyRows,
+  useWorkspaceModelKeyConnect,
+  useWorkspaceModelKeys,
+  workspaceEndpointConnect,
+} from "@/components/models/workspace-model-keys";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -430,6 +436,30 @@ export function WorkspaceModelsPageBody({
         loaded: !claude.loading,
         error: claude.loadError ? new Error(claude.loadError) : null,
       },
+    }),
+  };
+
+  // A workspace's own OpenAI, Azure OpenAI and custom endpoint keys: its
+  // admins connect them with the same steps as the organization's, and the
+  // API requires workspace administration for them.
+  const canConnectWorkspaceKeys = canManageConnections && canAdministerWorkspace;
+  const workspaceKeys = useWorkspaceModelKeys(
+    client,
+    workspaceId,
+    workspacePage || !organizationAdmin,
+  );
+  const workspaceKeyConnect = {
+    openai: useWorkspaceModelKeyConnect({
+      client,
+      workspaceId,
+      provider: "openai",
+      canManage: canConnectWorkspaceKeys,
+    }),
+    azure_openai: useWorkspaceModelKeyConnect({
+      client,
+      workspaceId,
+      provider: "azure_openai",
+      canManage: canConnectWorkspaceKeys,
     }),
   };
 
@@ -754,7 +784,10 @@ export function WorkspaceModelsPageBody({
         ? !grok.unavailable && grok.loading
         : provider === "claude_subscription"
           ? claude.loading
-          : (GATEWAYS as readonly string[]).includes(provider) &&
+          : // A workspace's own OpenAI, Azure OpenAI and endpoint keys always add one.
+            provider !== "openai" &&
+            provider !== "azure_openai" &&
+            (GATEWAYS as readonly string[]).includes(provider) &&
             !gateways[provider as GatewayId].settled;
   // Once a sign-in-again step opens it stays open, even after the account
   // turns active again while its page is still being opened.
@@ -879,19 +912,25 @@ export function WorkspaceModelsPageBody({
     // Personal workspace and serve them anywhere in the organization.
     page = (
       <ConnectPickerPage
-        target="workspace"
-        title={onlyMe ? "Connect your own subscription" : "Connect provider"}
+        title="Connect provider"
         subtitle={
           personal
             ? "It pays for models in your Personal workspace, so only you use it."
             : onlyMe
-              ? "Only you use it."
-              : `Connect a subscription or an API key for everyone in ${workspaceName}.`
+              ? "A subscription you connect here is yours: only you use it."
+              : `Connect it for everyone in ${workspaceName}.`
         }
-        codexAvailable
-        grok={grok.unavailable ? "hidden" : "available"}
-        claude={claudeEnabled ? "available" : "hidden"}
-        gateways={onlyMe ? undefined : gateways}
+        choices={connectChoices({
+          subscriptions: { grokUnavailable: grok.unavailable, claudeEnabled },
+          gateway: (id) => {
+            if (id === "openai" || id === "azure_openai")
+              return canConnectWorkspaceKeys ? "available" : API_KEYS_FOR_ADMINS;
+            if (!canManageWorkspaceKeys || !gateways[id].canManageConnection)
+              return API_KEYS_FOR_ADMINS;
+            return gateways[id].connected ? "connected" : "available";
+          },
+          compatible: canConnectWorkspaceKeys ? "available" : API_KEYS_FOR_ADMINS,
+        })}
         backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
@@ -903,14 +942,19 @@ export function WorkspaceModelsPageBody({
     // workspaces, Personal workspaces included, on the next step.
     page = (
       <ConnectPickerPage
-        target="organization"
         title="Connect provider"
         subtitle={`Connect it once for ${organizationName}, then choose who can use it.`}
-        codexAvailable
-        grok={orgGrok.unavailable ? "not_enabled" : "available"}
-        claude={claudeEnabled ? "available" : "hidden"}
-        gateways={orgGateways}
-        compatible={orgCompatible.enabled}
+        choices={connectChoices({
+          subscriptions: { grokUnavailable: orgGrok.unavailable, claudeEnabled },
+          gateway: (id) =>
+            orgGateways[id].hidden || !orgGateways[id].canManageConnection
+              ? undefined
+              : orgGateways[id].connected
+                ? "connected"
+                : "available",
+          compatible: orgCompatible.enabled ? "available" : undefined,
+        })}
+        backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect-org:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
@@ -984,7 +1028,7 @@ export function WorkspaceModelsPageBody({
     if (provider === "openai_compatible") {
       page = (
         <CompatibleEndpointConnectPage
-          endpoints={orgCompatible}
+          connect={organizationEndpointConnect(orgCompatible)}
           onClose={backToList}
           onConnected={(id) => nav.openAccount(accountKey("compatible", id, true))}
           fields={fields}
@@ -1059,7 +1103,7 @@ export function WorkspaceModelsPageBody({
         />
       ) : provider === "openai_compatible" ? (
         <CompatibleEndpointConnectPage
-          endpoints={orgCompatible}
+          connect={organizationEndpointConnect(orgCompatible)}
           onClose={back}
           onConnected={(id) => nav.openAccount(accountKey("compatible", id, true))}
         />
@@ -1092,8 +1136,39 @@ export function WorkspaceModelsPageBody({
         {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
+    // A workspace's own key is added, not replaced: it opens the list again.
+    const keyConnected = () => {
+      connectionChanged();
+      backToList();
+    };
     page =
-      provider === "codex" ? (
+      (provider === "openai" || provider === "azure_openai" || provider === "openai_compatible") &&
+      !canConnectWorkspaceKeys ? (
+        <DetailPage
+          back={{ label: listLabel, onClick: backToList }}
+          className={FLUSH_DETAIL_PAGE_CLASS}
+        >
+          <DetailPageHeader title={`Only ${workspaceName}'s admins can add API keys`} />
+          <p className="mt-2 text-sm text-fg-muted">
+            {`Ask an admin of ${workspaceName} or of ${organizationName} to connect it.`}
+          </p>
+        </DetailPage>
+      ) : provider === "openai_compatible" ? (
+        <CompatibleEndpointConnectPage
+          connect={workspaceEndpointConnect(client, workspaceId)}
+          onClose={backToList}
+          onConnected={keyConnected}
+          fields={note}
+        />
+      ) : provider === "openai" || provider === "azure_openai" ? (
+        <ProviderConnectPage
+          key={`workspace:${provider}`}
+          state={workspaceKeyConnect[provider]}
+          onClose={backToList}
+          onConnected={keyConnected}
+          fields={note}
+        />
+      ) : provider === "codex" ? (
         <CodexConnectPage
           codex={codex}
           places={codexPlaces}
@@ -1131,8 +1206,7 @@ export function WorkspaceModelsPageBody({
       ) : (
         <ProviderConnectPage
           key={provider}
-          // A compatible endpoint is the organization's only: no "connect:" step names it.
-          state={gateways[provider as GatewayId]}
+          state={gateways[provider]}
           onClose={backToList}
           onConnected={() => nav.openAccount(accountKey("gateway", provider))}
           fields={note}
@@ -1421,7 +1495,7 @@ export function WorkspaceModelsPageBody({
       codexListedCount(codex),
       superGrokListedCount(grok),
       claudeEnabled ? claudeListedCount(claude) : 0,
-      listedGateways.length,
+      listedGateways.length + workspaceKeys.keys.length,
       listedOrgGateways.length + listedOrgEndpoints.length,
       readyOrgKeys.length,
       // Your own subscriptions, kept in your Personal workspace.
@@ -1443,6 +1517,7 @@ export function WorkspaceModelsPageBody({
           (!ownGrok.unavailable && ownGrok.loading) ||
           (claudeEnabled && ownClaude.loading))) ||
       (!organizationAdmin && catalog.loading) ||
+      workspaceKeys.loading ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
     // Owners and admins add accounts for everyone; others their own (see memberConnects).
     const canConnect = organizationAdmin || memberConnects;
@@ -1566,23 +1641,18 @@ export function WorkspaceModelsPageBody({
                     onOpen={() => nav.openAccount(accountKey("gateway", id))}
                   />
                 ))}
+                <WorkspaceModelKeyRows
+                  client={client}
+                  workspaceId={workspaceId}
+                  keys={workspaceKeys.keys}
+                  scope={labels.workspace}
+                  canManage={canConnectWorkspaceKeys}
+                  onChange={connectionChanged}
+                />
               </RowList>
             }
             providerSections={
               <>
-                {workspacePage ? (
-                  <Section
-                    title="OpenAI, Azure OpenAI and compatible endpoints"
-                    description="Use this workspace’s own OpenAI or Azure OpenAI key. OpenAI-compatible endpoints are connected for the organization, from Connect provider."
-                  >
-                    <DirectModelProviderConnections
-                      key={workspaceId}
-                      workspaceId={workspaceId}
-                      canManage={canManageConnections && organizationAdmin}
-                      onConnectionChange={connectionChanged}
-                    />
-                  </Section>
-                ) : null}
                 {workspacePage ? (
                   <Section
                     title="Voice"
@@ -2026,102 +2096,121 @@ type ConnectChoice =
   | "azure_openai"
   | "openai_compatible";
 
+/** API keys at a shared workspace are a setting, so its admins add them. */
+const API_KEYS_FOR_ADMINS: ConnectChoiceState = { unavailable: "Only admins can add API keys" };
+
+/** Connect provider's choices: the same providers for every page and viewer. */
+function connectChoices({
+  subscriptions,
+  gateway,
+  compatible,
+}: {
+  subscriptions: { grokUnavailable: boolean; claudeEnabled: boolean };
+  gateway: (id: GatewayId) => ConnectChoiceState | undefined;
+  compatible: ConnectChoiceState | undefined;
+}): Partial<Record<ConnectChoice, ConnectChoiceState>> {
+  const choices: Partial<Record<ConnectChoice, ConnectChoiceState>> = {
+    codex: "available",
+    supergrok: subscriptions.grokUnavailable
+      ? { unavailable: "Not enabled on this server" }
+      : "available",
+  };
+  if (subscriptions.claudeEnabled) choices.claude_subscription = "available";
+  for (const id of GATEWAYS) {
+    const state = gateway(id);
+    if (state) choices[id] = state;
+  }
+  if (compatible) choices.openai_compatible = compatible;
+  return choices;
+}
+
+/** What a viewer can do with one provider in Connect provider. */
+export type ConnectChoiceState =
+  | "available"
+  /** Already connected: its row opens its page. */
+  | "connected"
+  /** The row stays, disabled, saying why. */
+  | { unavailable: string };
+
 /**
- * Connect account: every provider as a row (logo, name, how you pay). A row
- * opens that provider's own connect step; a provider that is already
- * connected opens its page instead. A provider this server has turned off
- * stays in the list, disabled, so people know it exists.
+ * Every provider people connect, in one order and with one wording, on the
+ * organization's Models page and on a workspace's. Subscriptions first, then
+ * the cloud and API keys, then any OpenAI-compatible endpoint.
+ */
+const CONNECT_CHOICES: readonly { id: ConnectChoice; title: string; summary: string }[] = [
+  { id: "codex", title: "Codex", summary: providerPaymentSummary("codex", "Codex") },
+  { id: "claude_subscription", title: "Claude subscription", summary: "Pay with your Claude plan" },
+  {
+    id: "supergrok",
+    title: "SuperGrok",
+    summary: providerPaymentSummary("supergrok", "SuperGrok"),
+  },
+  ...(["azure_openai", "openai", "anthropic", "openrouter", "vercel", "opper"] as const).map(
+    (id) => {
+      const title = ORGANIZATION_PROVIDER_META[ORGANIZATION_KIND[id]].title;
+      return { id, title, summary: providerPaymentSummary(id, title) };
+    },
+  ),
+  {
+    id: "openai_compatible",
+    title: COMPATIBLE_ENDPOINT_CHOICE.title,
+    summary: COMPATIBLE_ENDPOINT_CHOICE.summary,
+  },
+];
+
+/** Providers whose connected row opens their page instead of a new connect step. */
+const OPENS_WHEN_CONNECTED: ReadonlySet<ConnectChoice> = new Set([
+  "vercel",
+  "openrouter",
+  "opper",
+  "openai",
+  "azure_openai",
+  "anthropic",
+  "claude_subscription",
+]);
+
+/**
+ * Connect provider: every provider as a row (logo, name, how you pay), the
+ * same list wherever it is opened. A row opens that provider's own connect
+ * step; a provider that is already connected opens its page instead. A
+ * provider the viewer can't connect here stays in the list, disabled, with the
+ * reason, so people know it exists; one missing from `choices` isn't offered.
  */
 export function ConnectPickerPage({
   title,
   subtitle,
-  codexAvailable,
+  choices,
   codexNote,
-  grok,
-  claude = "hidden",
-  gateways,
-  compatible = false,
   backLabel = "Models",
   onClose,
   onPick,
   onOpenConnected,
 }: {
-  /** Who what's connected is for: everyone in the organization, or this workspace. */
-  target: "organization" | "workspace";
   title: string;
   subtitle: string;
-  codexAvailable: boolean;
+  /** What the viewer can do with each provider; a missing one isn't listed. */
+  choices: Partial<Record<ConnectChoice, ConnectChoiceState>>;
   /** A second fact on the Codex row: what connecting it here changes. */
   codexNote?: string | undefined;
-  /**
-   * "not_enabled": this server has SuperGrok off. "not_in_personal": a Personal
-   * workspace can't hold its own SuperGrok account (an owner or admin can
-   * connect one for Personal workspaces). "hidden": the viewer can't connect it.
-   */
-  grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
-  claude?: "available" | "hidden";
-  gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
-  /**
-   * Offer the organization's own OpenAI-compatible endpoints. It can connect
-   * several, so the row always opens a new one.
-   */
-  compatible?: boolean;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
   onOpenConnected?: ((provider: GatewayId) => void) | undefined;
 }) {
-  const choices: ProviderConnectChoice[] = [
-    ...(codexAvailable
-      ? [
-          {
-            id: "codex" as const,
-            title: "Codex",
-            summary: providerPaymentSummary("codex", "Codex"),
-            note: codexNote,
-          },
-        ]
-      : []),
-    ...(grok !== "hidden"
-      ? [
-          {
-            id: "supergrok" as const,
-            title: "SuperGrok",
-            summary: providerPaymentSummary("supergrok", "SuperGrok"),
-            unavailable:
-              grok === "not_enabled"
-                ? "Not enabled on this server"
-                : grok === "not_in_personal"
-                  ? "Only owners and admins can add it for Personal workspaces"
-                  : undefined,
-          },
-        ]
-      : []),
-    ...(claude === "available"
-      ? [
-          {
-            id: "claude_subscription" as const,
-            title: "Claude subscription",
-            summary: "Pay with your Claude plan",
-          },
-        ]
-      : []),
-    ...(gateways
-      ? GATEWAYS.filter((id) => gateways[id]?.canManageConnection && !gateways[id]?.hidden).map(
-          (id) => ({
-            id,
-            title: gateways[id]!.config.title,
-            summary:
-              id === "anthropic" || id === "claude_subscription"
-                ? gateways[id]!.config.summary
-                : providerPaymentSummary(id, gateways[id]!.config.title),
-            connected: gateways[id]!.connected,
-          }),
-        )
-      : []),
-    ...(compatible ? [{ id: "openai_compatible" as const, ...COMPATIBLE_ENDPOINT_CHOICE }] : []),
-  ];
+  const rows: ProviderConnectChoice[] = CONNECT_CHOICES.flatMap((choice) => {
+    const state = choices[choice.id];
+    if (!state) return [];
+    return [
+      {
+        ...choice,
+        ...(choice.id === "codex" && codexNote ? { note: codexNote } : {}),
+        ...(choice.id === "openai_compatible" ? { note: COMPATIBLE_ENDPOINT_CHOICE.note } : {}),
+        connected: state === "connected",
+        unavailable: typeof state === "object" ? state.unavailable : undefined,
+      },
+    ];
+  });
   return (
     <DetailPage
       back={{ label: backLabel, onClick: onClose }}
@@ -2134,7 +2223,7 @@ export function ConnectPickerPage({
         meta={<p className="m-0 text-sm text-fg-muted">{subtitle}</p>}
       />
       <div className="mt-6 min-w-0">
-        {choices.length === 0 ? (
+        {rows.length === 0 ? (
           <EmptyState
             variant="inline"
             title="Nothing to connect."
@@ -2142,17 +2231,10 @@ export function ConnectPickerPage({
           />
         ) : (
           <ProviderConnectList
-            choices={choices}
+            choices={rows}
             onOpen={(choice) =>
-              choice.connected &&
-              (choice.id === "vercel" ||
-                choice.id === "openrouter" ||
-                choice.id === "opper" ||
-                choice.id === "openai" ||
-                choice.id === "azure_openai" ||
-                choice.id === "anthropic" ||
-                choice.id === "claude_subscription")
-                ? onOpenConnected?.(choice.id)
+              choice.connected && OPENS_WHEN_CONNECTED.has(choice.id as ConnectChoice)
+                ? onOpenConnected?.(choice.id as GatewayId)
                 : onPick(choice.id as ConnectChoice)
             }
           />

@@ -361,9 +361,6 @@ export function prestartSessionRealtime(input: {
         client: input.client,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        // The adopting view's audio element does not exist yet; a detached
-        // element plays the same way.
-        ...(typeof Audio === "undefined" ? {} : { remoteAudio: new Audio() }),
         model: input.model,
         getModelContext: () => modelContext.current?.(),
         getLanguage: () => language.current(),
@@ -466,6 +463,10 @@ export function useSessionRealtime(options: {
     workspaceId: options.workspaceId,
   });
   const model = options.model ?? CODEX_LIVE_MODEL(t).id;
+  /**
+   * Kept for compatibility. Replies play through the controller's own audio
+   * element, so a mounted element is no longer used.
+   */
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
@@ -531,7 +532,6 @@ export function useSessionRealtime(options: {
             client,
             workspaceId,
             sessionId: options.sessionId,
-            ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
             model,
             getModelContext: () => modelContextProviderRef.current?.(),
             getLanguage: () => languageRef.current,
@@ -661,6 +661,7 @@ export function useSessionRealtime(options: {
     canStart,
     admissionBlocker,
     codexConnected: options.codexConnected,
+    /** @deprecated Replies play without a mounted element; rendering this ref has no effect. */
     audioRef,
     start,
     stop,

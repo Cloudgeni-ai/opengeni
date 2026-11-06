@@ -50,3 +50,23 @@ export function nativeLoadingPhrases(
   if (hostPhrases.length > 0) return hostPhrases;
   return [t("native.timeline.messages.working")];
 }
+
+/**
+ * Selection colors for a text field. Android paints `selectionColor` as the
+ * highlight itself, behind the text, so it takes the translucent
+ * `text-selection` token while the caret and handles keep the solid accent.
+ * iOS derives the caret and highlight from one tint, and a translucent tint
+ * would fade the caret, so iOS uses the app's tint (system blue by default),
+ * which is always visible.
+ */
+export function textFieldSelectionColors(
+  colors: { accent: string; "text-selection": string },
+  os: string,
+): { selectionColor?: string; cursorColor?: string; selectionHandleColor?: string } {
+  if (os !== "android") return {};
+  return {
+    selectionColor: colors["text-selection"],
+    cursorColor: colors.accent,
+    selectionHandleColor: colors.accent,
+  };
+}

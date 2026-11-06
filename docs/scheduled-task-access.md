@@ -343,7 +343,7 @@ that list. An edit that does not name a `toolPolicy` keeps the one the
 schedule has, so replacing `agentConfig` (for example with the tools a read
 returned) never turns the defaults into a fixed list. Agents cannot set
 `toolPolicy`; they omit `tools` to follow the defaults or list them to fix
-them. Knowledge syncs never follow the defaults.
+them.
 
 Migration 0754 moved schedules whose list nobody chose to follow the defaults:
 those an agent or a service created, which start their own session. Their

@@ -675,6 +675,15 @@ Ingress there. An edge outside this chart must route the same paths to the API.
 If they reach the web application instead, discovery returns HTML and MCP
 clients cannot sign in.
 
+Auto-connect (Enterprise-Managed Authorization) needs nothing more in either
+direction. Claude and identity providers redeem ID-JAGs at the same
+`/oauth/token`, and the routes answer only while the switch is on with a
+public base URL. Opengeni's own per-organization issuer, for auto-connect
+organization connectors, is served under `/v1` and signs with a key encrypted
+by the same stable `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` that protects other
+connection material. Keep the public base URL stable: it is part of each organization's issuer URL that
+outside apps trust. Migrations `1263`, `1264` and `1265` are rolling.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention
@@ -3319,6 +3328,19 @@ The runtime secret must provide values such as:
   paid plan of at least $20/month and are for app-origin work, never customer
   API-origin work. Existing internal legacy billing terms are unchanged. See
   [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
+- `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED` (default `false`): a
+  deployment-wide operator opt-in that lets API-origin work (organization
+  access keys, embedded products) use the organization's own connected
+  subscriptions. Off, API selections of a subscription fail with `403`
+  `subscription_api_unavailable` and API model lists and defaults skip them.
+  On, every path that refuses API use of a subscription (agent, goal,
+  scheduled, stateless, transcription, realtime voice, titles, model lists and
+  defaults) treats API work like app work; paid-plan requirements still apply
+  where credit billing is active. Set it on both API and worker processes. It
+  is meant for a self-hosted operator who owns the subscriptions it connects;
+  the operator is responsible for its provider's terms. Hosted multi-tenant
+  deployments should leave it off. See
+  [billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
   OpenAI hosted image generation cost credit. Billed provider search replaces
@@ -3791,13 +3813,40 @@ plane it already trusts instead of depending on public DNS. Beta is independent
 and unavailable unless `OPENGENI_AGENT_BETA_VERSION` points at an existing signed
 immutable release.
 
-Live machines follow their channel's promoted build automatically. A machine
-running an older build is asked to update from its next heartbeat; the agent
-applies the update only at an idle point, so accepted work is never interrupted.
-An older agent that postpones because it is busy is asked again every 10
-minutes, an unanswered request is re-sent under the same operation after 10
-minutes, and other retryable failures are retried hourly. A non-retryable
-failure waits for a newer promotion or an explicit "Update now". Automatic
+Live machines follow their channel's promoted build automatically. An update,
+automatic or "Update now", targets only a release whose signed manifest exists
+on the release archive: the API checks `manifest.json` on
+`OPENGENI_AGENT_RELEASES_BASE_URL` first (HEAD, or a one-byte GET when the host
+refuses HEAD). A pinned version is used as set. Unpinned, the source tree's
+agent version is raised when an agent change lands, before its release workflow
+publishes it, so until it is published updates target the newest published
+patch release below it (looking back at most 16 versions; a new minor or major
+version has none to fall back to). When the archive cannot be reached, no
+update is requested until it can, and the API logs a warning at most every 15
+minutes. `/agent/latest/<asset>`, `/agent/stable/manifest.json` and the
+Machines page name the same published release. A machine running an older
+build is asked to update from its next heartbeat; the agent applies the update
+only at an idle point, so accepted work is never interrupted. An older agent
+that postpones because it is busy is asked again every 10 minutes, and an
+unanswered request is re-sent under the same operation after 10 minutes. Other
+retryable failures, such as a failed download, back off: 10 minutes after the
+first, doubling after each further failure for the same release, up to 6
+hours. A non-retryable failure waits for a newer promotion or an explicit
+"Update now".
+
+An agent older than 0.1.58 closes its managed browsers when it updates. The
+automatic updater waits for a moment when none of those browsers belongs to a
+session with a turn underway or waiting for input within its turn (open but
+idle browsers do not hold it, and they close). Once browsers in use have held
+the update for a day, they get a closing time 30 minutes later: every browser
+observation an agent gets from that machine until then says when its browser
+will close, and the update is requested at that time. A busy agent that
+refuses it is asked again under the same announcement for 30 minutes. If the
+update has not happened by then (the agent stayed busy, or the machine was
+away), the announcement ends and the wait starts over, so agents are not told
+of a closing that does not come. A non-retryable failure or a success ends the
+wait. Only browsers opened in the machine's own workspace are counted and told.
+Newer agents keep their browsers across an update. Automatic
 updates only move machines forward: rolling the channel back to an older build
 leaves newer machines alone until someone requests the older build per machine.
 Macs that must first bootstrap through the whole-app installer are never updated

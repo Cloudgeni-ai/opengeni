@@ -1103,7 +1103,7 @@ export interface CadencePickerProps {
   variant?: CadencePickerVariant | undefined;
   /** Suggested zones, listed first. Search also covers every zone the browser knows. */
   timeZones?: readonly CadenceTimeZoneOption[] | undefined;
-  /** Limit the frequencies, for example for knowledge source sync. */
+  /** Limit the frequencies a picker offers. */
   frequencies?: readonly CadenceFrequency[] | undefined;
   /** The clock for previews. Defaults to the time of the first render. */
   now?: Date | undefined;

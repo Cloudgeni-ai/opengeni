@@ -166,10 +166,10 @@ confirmation recovery remain; conversation history and task notes are separate.
 This is a maintenance cutover: stop old API and workers, migrate and provision
 roles, and start only the matching runtime. Do not restart an old binary.
 
-Integration Knowledge sync (Drive, OneDrive, Jira/Confluence) is retired:
+Integration Knowledge sync (Drive, OneDrive, Jira/Confluence) was removed:
 integrations give agents tools, and recurring work is an ordinary agent schedule
-that uses them. Imported Documents and historical configuration remain, but
-saved source schedules cannot fetch new content (see [Knowledge](../knowledge.md)).
+that uses them. Imported Documents remain; the saved source schedules were
+deleted (see [Knowledge](../knowledge.md)).
 Legacy source schedules keep their IDs and configuration. Those with no active
 owning-human authority are preserved paused, and require a current authorized
 edit. The change does not extend the managed scheduled-authority lifecycle to

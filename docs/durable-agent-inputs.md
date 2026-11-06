@@ -554,6 +554,18 @@ does not necessarily start a new turn. Command-result summaries include the
 bounded command preview; an unavailable exit result is described as unavailable
 rather than asserting that execution failed.
 
+An automation occurrence (`scheduled_occurrence`) keeps its instructions as
+the update's summary, which only the agent reads. Its pending and delivered
+session events instead carry the automation's current name as their summary,
+and the delivered member carries `automation: {name, eventSummaries,
+eventCount}` (at most three event summaries of 200 bytes each). The chat draws
+the run as one line: the name and what the first event says. Events written
+before Opengeni recorded the name carry no `automation` and read "Automation
+run". Each new occurrence also tells the agent to answer
+exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
+omits the run's line, work and answer, unless the run asked the person
+something or holds another item that waits on them.
+
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation
 controls.

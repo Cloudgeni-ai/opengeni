@@ -16,9 +16,18 @@
 //!   holding nothing of it;
 //! - left without an owner when its owner handed it off
 //!   ([`Ownership::release`]), held nothing of it ([`Ownership::clear`]) or
-//!   was lost ([`Ownership::lose`]);
+//!   lost its copy ([`Ownership::lose`]);
 //! - reclaimed by a host that still has the newest copy because nobody
 //!   took the sandbox since that host last ran it ([`reconcile`]).
+//!
+//! A host the service gives up on keeps owning its sandboxes: it may come
+//! back with copies newer than the store's, so they wait for it, and it
+//! keeps them when it registers again. Only once its copy is known gone
+//! (it came back without it, its machine was deleted, or an operator
+//! declared it gone for good) is its sandbox lost, and taken up from the
+//! store's older copy. A host declared gone that comes back after all
+//! sets aside, rather than drops, each copy taken since
+//! ([`Verdict::SetAside`]): nothing newer is ever deleted unseen.
 //!
 //! Creating and giving are takes: they start the sandbox from somewhere
 //! other than the copy its last owner kept. A host's copy is the newest
@@ -157,8 +166,10 @@ impl Ownership {
     }
 
     /// Leaves the sandbox without an owner under a new epoch, once its
-    /// owner was lost: its stored copy is no longer known to be its latest
-    /// state, so the mark stays behind.
+    /// owner's copy is gone, or declared gone: it came back without it, its
+    /// machine was deleted, or an operator gave up waiting for it. Its
+    /// stored copy is no longer known to be its latest state, so the mark
+    /// stays behind.
     #[must_use]
     pub const fn lose(self) -> Change {
         Change {
@@ -245,18 +256,31 @@ pub enum Verdict {
     /// Drop the local copy: it belongs to someone else, or no longer
     /// exists.
     Drop,
+    /// Keep the local copy's files aside, out of the fleet's way, and
+    /// forget the sandbox: the host was declared gone while it owned it,
+    /// and the sandbox was taken up since from an older stored copy. The
+    /// local copy may be the newer one, so it is never deleted unseen.
+    SetAside,
 }
 
 /// What `host` does with a sandbox it lists under `listed`, given the
-/// store's row for it (`None` once the sandbox is deleted).
+/// store's row for it (`None` once the sandbox is deleted) and, if a host
+/// was declared gone while it owned the sandbox, the epoch the latest such
+/// declaration raised the sandbox to (`declared`).
 ///
 /// Its copy is the newest there is while no host took the sandbox after
 /// `listed`: then it keeps the sandbox if it still owns it, and gets it
 /// back if nobody does. Anything taken later started from elsewhere, and
 /// the copy is dropped, or replaced from the archive if the host owns the
-/// sandbox again.
+/// sandbox again; but a copy from before a declaration that its owner was
+/// gone may be ahead of whatever was taken up since, so it is set aside.
 #[must_use]
-pub fn reconcile(host: HostId, listed: OwnerEpoch, row: Option<Ownership>) -> Verdict {
+pub fn reconcile(
+    host: HostId,
+    listed: OwnerEpoch,
+    row: Option<Ownership>,
+    declared: Option<OwnerEpoch>,
+) -> Verdict {
     let Some(row) = row else {
         return Verdict::Drop;
     };
@@ -274,6 +298,7 @@ pub fn reconcile(host: HostId, listed: OwnerEpoch, row: Option<Ownership>) -> Ve
         None if newest => Verdict::Reclaim {
             change: row.reclaim(host),
         },
+        _ if declared.is_some_and(|declared| listed < declared) => Verdict::SetAside,
         _ => Verdict::Drop,
     }
 }
@@ -358,18 +383,18 @@ mod tests {
     fn a_host_keeps_or_gets_back_what_nobody_took_since() {
         let e = OwnerEpoch(5);
         assert_eq!(
-            reconcile(A, e, Some(row(Some(A), 5, 2))),
+            reconcile(A, e, Some(row(Some(A), 5, 2)), None),
             Verdict::Keep { epoch: e }
         );
         // Reclaimed by A, which crashed before it noted the epoch.
         assert_eq!(
-            reconcile(A, e, Some(row(Some(A), 7, 5))),
+            reconcile(A, e, Some(row(Some(A), 7, 5)), None),
             Verdict::Keep {
                 epoch: OwnerEpoch(7)
             }
         );
         // Lost, reclaimed, lost again, all before A heard of any of it.
-        let Verdict::Reclaim { change } = reconcile(A, e, Some(row(None, 9, 5))) else {
+        let Verdict::Reclaim { change } = reconcile(A, e, Some(row(None, 9, 5)), None) else {
             panic!("a lost host does not get back what nobody took");
         };
         assert_eq!(
@@ -388,20 +413,26 @@ mod tests {
     #[test]
     fn a_host_drops_what_was_taken_since() {
         let e = OwnerEpoch(5);
-        assert_eq!(reconcile(A, e, Some(row(Some(B), 7, 7))), Verdict::Drop);
-        assert_eq!(reconcile(A, e, Some(row(Some(B), 5, 5))), Verdict::Drop);
+        assert_eq!(
+            reconcile(A, e, Some(row(Some(B), 7, 7)), None),
+            Verdict::Drop
+        );
+        assert_eq!(
+            reconcile(A, e, Some(row(Some(B), 5, 5)), None),
+            Verdict::Drop
+        );
         // Adopted elsewhere, then cleared again.
-        assert_eq!(reconcile(A, e, Some(row(None, 8, 7))), Verdict::Drop);
-        assert_eq!(reconcile(A, e, Some(row(None, 4, 1))), Verdict::Drop);
-        assert_eq!(reconcile(A, e, None), Verdict::Drop);
+        assert_eq!(reconcile(A, e, Some(row(None, 8, 7)), None), Verdict::Drop);
+        assert_eq!(reconcile(A, e, Some(row(None, 4, 1)), None), Verdict::Drop);
+        assert_eq!(reconcile(A, e, None, None), Verdict::Drop);
         // Lost, then taken anew while nobody owned it: its copy stays as
         // whole as it was.
         let retaken = row(None, 6, 5).retake(true).set;
         assert_eq!(retaken, row(None, 7, 7));
-        assert_eq!(reconcile(A, e, Some(retaken)), Verdict::Drop);
+        assert_eq!(reconcile(A, e, Some(retaken), None), Verdict::Drop);
         // A owns it again, but took it from the archive after its copy.
         assert_eq!(
-            reconcile(A, e, Some(row(Some(A), 9, 9))),
+            reconcile(A, e, Some(row(Some(A), 9, 9)), None),
             Verdict::Refetch {
                 epoch: OwnerEpoch(9),
                 from_files: false,
@@ -413,11 +444,59 @@ mod tests {
             ..row(Some(A), 9, 9)
         };
         assert_eq!(
-            reconcile(A, e, Some(after_loss)),
+            reconcile(A, e, Some(after_loss), None),
             Verdict::Refetch {
                 epoch: OwnerEpoch(9),
                 from_files: true,
             }
         );
+    }
+
+    #[test]
+    fn a_host_given_up_on_keeps_what_waited_for_it() {
+        // Given up on, it still owns what it held: back, it keeps it all
+        // under the same epoch, newer writes included.
+        let e = OwnerEpoch(5);
+        assert_eq!(
+            reconcile(A, e, Some(row(Some(A), 5, 3)), None),
+            Verdict::Keep { epoch: e }
+        );
+    }
+
+    #[test]
+    fn a_host_declared_gone_sets_aside_what_was_taken_since() {
+        let e = OwnerEpoch(5);
+        // Declared gone: lost under epoch 6, adopted elsewhere under 7.
+        let declared = row(Some(A), 5, 3).lose().set;
+        assert_eq!(declared.epoch, OwnerEpoch(6));
+        let adopted = declared.give(B).set;
+        assert_eq!(
+            reconcile(A, e, Some(adopted), Some(declared.epoch)),
+            Verdict::SetAside,
+            "its copy may be ahead of the one taken up since"
+        );
+        // Adopted and handed off again since, or nobody owns it now.
+        let back = adopted.release().set;
+        assert_eq!(
+            reconcile(A, e, Some(back), Some(declared.epoch)),
+            Verdict::SetAside
+        );
+        // Nobody took it since the declaration: its copy is the newest.
+        assert!(matches!(
+            reconcile(A, e, Some(declared), Some(declared.epoch)),
+            Verdict::Reclaim { .. }
+        ));
+        // A copy it took up after the declaration is an ordinary one.
+        assert_eq!(
+            reconcile(
+                A,
+                OwnerEpoch(7),
+                Some(adopted.lose().set.give(B).set),
+                Some(OwnerEpoch(6))
+            ),
+            Verdict::Drop
+        );
+        // Deleted since: nothing to keep it for.
+        assert_eq!(reconcile(A, e, None, Some(declared.epoch)), Verdict::Drop);
     }
 }

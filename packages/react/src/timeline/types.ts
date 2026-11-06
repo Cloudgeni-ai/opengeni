@@ -596,6 +596,21 @@ export type MachineInputMember = {
   sourceId: string;
   summary: string;
   result?: MediaGenerationResult | undefined;
+  /**
+   * An automation run's plain description: the automation's name and what
+   * the events that started it say happened. Never its instructions. Absent
+   * on runs delivered before Opengeni recorded it; the chat then says only
+   * that an automation ran.
+   */
+  automation?: AutomationRunPresentation | undefined;
+};
+
+export type AutomationRunPresentation = {
+  name: string;
+  /** What the first few events that started the run say, oldest first. */
+  eventSummaries: string[];
+  /** How many events started the run; 0 for a scheduled run. */
+  eventCount: number;
 };
 
 /**

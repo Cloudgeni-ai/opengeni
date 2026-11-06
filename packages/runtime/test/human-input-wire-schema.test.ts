@@ -2,11 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import {
   allAgentCapabilities,
+  RequestHumanInputToolInput,
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildOpenGeniAgent } from "../src/index";
+import {
+  buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
+  serializeHumanInputRequests,
+} from "../src/index";
 
 type Node = {
   properties?: Record<string, Node>;
@@ -76,5 +81,56 @@ describe("request_human_input as sent", () => {
       expect(reduced.strict).toBe(full.strict);
       expect(size(reduced.schema)).toBeLessThan(size(full.schema));
     }
+  });
+
+  test("no variant carries allowOther or the $schema marker", async () => {
+    for (const agentConfig of [
+      null,
+      config({}),
+      config({ skills: "read" }),
+      config({ secrets: false, skills: false }),
+    ]) {
+      const { schema } = await wireSchema(agentConfig);
+      const question = schema.properties!.questions!.items!;
+      expect(Object.keys(schema)).not.toContain("$schema");
+      expect(Object.keys(question.properties!)).not.toContain("allowOther");
+      expect(question.required).not.toContain("allowOther");
+      // Every other question field is still sent.
+      expect(Object.keys(question.properties!).sort()).toEqual([...question.required!].sort());
+    }
+  });
+
+  test("a call without allowOther still parses, and choice requests still offer Other", async () => {
+    const call = {
+      questions: [
+        {
+          id: "pick",
+          kind: "single_select",
+          prompt: "Which one?",
+          label: null,
+          helpText: null,
+          skillReview: null,
+          secret: null,
+          options: [{ id: "a", label: "A", description: null, recommended: null, preview: null }],
+          required: true,
+          confirm: null,
+          validation: null,
+        },
+      ],
+      allowSkip: false,
+      expiresInSeconds: null,
+    };
+    expect(RequestHumanInputToolInput.parse(call).questions[0]!.allowOther).toBe(false);
+    const [serialized] = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "pick-call",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify(call),
+        },
+      },
+    ]);
+    expect(serialized!.input.questions[0]!.allowOther).toBe(true);
   });
 });

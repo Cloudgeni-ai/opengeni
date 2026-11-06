@@ -293,6 +293,20 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   }
   const turn = claim.turn;
   attempt.turnId = turn.id;
+  // A compaction runs without connection accounts when they could not be
+  // resolved; its request then carries fewer tools and misses the cache.
+  const unresolvedAccounts =
+    turn.source === "compaction" ? turn.metadata?.connectionAccountsUnresolved : undefined;
+  if (unresolvedAccounts && typeof unresolvedAccounts === "object") {
+    const { reason, errorName, sqlState } = unresolvedAccounts as Record<string, unknown>;
+    observability.warn("Compaction turn runs without connection accounts", {
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      reason: typeof reason === "string" ? reason : "unknown",
+      ...(typeof errorName === "string" ? { errorName } : {}),
+      ...(typeof sqlState === "string" ? { sqlState } : {}),
+    });
+  }
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);

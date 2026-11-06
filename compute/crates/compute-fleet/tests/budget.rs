@@ -226,7 +226,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     pass.check("recovery: one pass over all hosts");
 
     // A host coming back lists what it has: one decision per sandbox, and
-    // losing one clears every sandbox it owned.
+    // declaring one gone clears every sandbox it owned.
     let mut back = Timings::default();
     let mut lose = Timings::default();
     for id in 0..200_u64 {
@@ -242,7 +242,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
         let verdicts: Vec<Verdict> = back.time(|| {
             owned
                 .iter()
-                .map(|sandbox| reconcile(host, OwnerEpoch::FIRST, rows.get(sandbox).copied()))
+                .map(|sandbox| reconcile(host, OwnerEpoch::FIRST, rows.get(sandbox).copied(), None))
                 .collect()
         });
         // Nobody took them since: the host gets each back.

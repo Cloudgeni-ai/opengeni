@@ -103,7 +103,6 @@ describe("native connection readiness", () => {
     for (const [row, provider] of [
       ["slack", "slack-personal"],
       ["github", "github-app"],
-      ["google-drive", "google-drive-knowledge"],
       ["outlook-mail", "microsoft-outlook-mail"],
       ["outlook-calendar", "microsoft-outlook-calendar"],
       ["outlook-contacts", "microsoft-outlook-contacts"],
@@ -149,10 +148,10 @@ describe("native connection readiness", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  test("connected, attention, and historical management survive unavailable setup", () => {
+  test("connected and attention management survive unavailable setup", () => {
     const remove = mock(() => {});
     for (const label of ["Connected", "Needs attention"] as const) {
-      const connected = model("google-drive", {
+      const connected = model("onedrive", {
         chip: { label, tone: label === "Connected" ? "ok" : "warn" },
         footer: {
           kind: label === "Connected" ? "connected" : "repair",
@@ -165,12 +164,6 @@ describe("native connection readiness", () => {
       expect(guarded.footer).toBe(connected.footer);
       expect(guarded.chip).toBe(connected.chip);
     }
-    const historical = model("atlassian", {
-      chip: { label: "Retired", tone: "plain" },
-      footer: { kind: "actions", primary: { label: "Disconnect", onClick: remove } },
-    });
-    expect(nativeIntegrationVisible(historical, catalog([]), false)).toBe(true);
-    expect(nativeIntegrationModel(historical, catalog([]), false, () => {})).toBe(historical);
   });
 
   test("each GitHub section keeps only an action its own provider can start", () => {
@@ -227,43 +220,10 @@ describe("native connection readiness", () => {
     );
   });
 
-  test("Drive write setup is checked separately from its existing read connection", () => {
-    const connected = model("google-drive", {
-      chip: { label: "Connected", tone: "ok" },
-      footer: { kind: "connected", onReconnect: () => {}, onDisconnect: () => {} },
-      options: [
-        {
-          kind: "toggle",
-          id: "google-drive-publish",
-          label: "Publish",
-          checked: false,
-          onChange: () => {},
-        },
-      ],
-    });
-    expect(
-      nativeIntegrationModel(
-        connected,
-        catalog([["google-drive-knowledge", "available"]]),
-        false,
-        () => {},
-      ).options,
-    ).toEqual([]);
-    const published = {
-      ...connected,
-      options: [
-        { ...connected.options[0]!, kind: "toggle", checked: true, onChange: () => {} } as const,
-      ],
-    };
-    expect(nativeIntegrationModel(published, catalog([]), false, () => {}).options).toEqual(
-      published.options,
-    );
-  });
-
   test("new account controls use their own provider readiness without disabling existing account repair", () => {
     const add = mock(() => {});
     const change = mock(() => {});
-    const drive = model("google-drive", {
+    const drive = model("onedrive", {
       chip: { label: "Connected", tone: "ok" },
       access: {
         title: "Connected accounts",
@@ -281,14 +241,14 @@ describe("native connection readiness", () => {
       },
       footer: { kind: "connected", onReconnect: change, onDisconnect: change },
     });
-    const readOnly = catalog([["google-drive-knowledge", "available"]]);
+    const readOnly = catalog([["microsoft-outlook-mail", "available"]]);
     const guarded = nativeIntegrationModel(drive, readOnly, false, () => {});
     expect(guarded.access?.onEdit).toBeUndefined();
     expect(guarded.access?.editLabel).toBeUndefined();
     expect(guarded.access?.items).toBe(drive.access?.items);
     expect(guarded.footer).toBe(drive.footer);
     expect(
-      nativeIntegrationModel(drive, catalog([["google-drive", "available"]]), false, () => {})
+      nativeIntegrationModel(drive, catalog([["microsoft-onedrive", "available"]]), false, () => {})
         .access?.onEdit,
     ).toBe(add);
     const folders = {
@@ -298,7 +258,7 @@ describe("native connection readiness", () => {
     expect(nativeIntegrationModel(folders, catalog([]), false, () => {}).access).toBe(
       folders.access,
     );
-    for (const id of ["outlook-mail", "outlook-calendar", "outlook-contacts", "onedrive"]) {
+    for (const id of ["outlook-mail", "outlook-calendar", "outlook-contacts", "sharepoint"]) {
       expect(
         nativeIntegrationModel({ ...drive, id }, catalog([]), false, () => {}).access?.onEdit,
       ).toBeUndefined();

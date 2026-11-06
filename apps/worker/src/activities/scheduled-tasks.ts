@@ -1,8 +1,4 @@
 import {
-  isKnowledgeSourceSyncRetirementReason,
-  retiredKnowledgeSourceSyncTask,
-} from "@opengeni/contracts/knowledge-source-sync-retirement";
-import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
   canonicalSecretPermissions,
@@ -165,6 +161,8 @@ import type {
 import type { Database } from "@opengeni/db";
 import type { CreateSessionMcpServerInput } from "@opengeni/db";
 import type { ScheduledTaskAgentConfig } from "@opengeni/contracts";
+
+const KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR = "knowledge_source_sync_retired";
 
 /**
  * The unattended setting for a chat this task starts: nobody answers during a
@@ -450,20 +448,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
-        // A queued run accepted before Knowledge-source sync was retired
-        // settles failed once instead of recovering a new session.
-        const retiredSource =
-          priorRun.status === "queued"
-            ? retiredKnowledgeSourceSyncTask(acceptedExecution.task)
-            : null;
-        if (retiredSource) {
+        // A queued run accepted for a Knowledge source sync schedule (removed)
+        // settles failed once instead of recovering a session.
+        if (
+          priorRun.status === "queued" &&
+          (acceptedExecution.task.action.kind !== "agent_turn" ||
+            acceptedExecution.task.agentConfig.knowledgeSource)
+        ) {
           await markScheduledTaskRunFailedIfQueued(
             db,
             priorRun.workspaceId,
             priorRun.id,
-            retiredSource.reason,
+            KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR,
           );
-          return scheduledRunTerminalResult(retiredSource.reason);
+          return scheduledRunTerminalResult(KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR);
         }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
@@ -533,11 +531,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      // Saved Knowledge-source tasks (frozen sync actions and source-bound
-      // agent tasks) never fetch provider content again; they fail closed
-      // before run admission, model selection or session creation.
-      const retiredSource = retiredKnowledgeSourceSyncTask(task);
-      if (retiredSource) return { action: "blocked", reason: retiredSource.reason };
+      // Schedules only run agent turns. A Knowledge source sync task can only
+      // be a stray row from a release before its removal; it never runs and
+      // never starts a chat.
+      if (task.action.kind !== "agent_turn" || task.agentConfig.knowledgeSource) {
+        return { action: "blocked", reason: "scheduled_execution_unrepresentable" };
+      }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
       }
@@ -1234,16 +1233,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           false,
           "scheduled subscription pools have different causal humans",
         );
-      if (
-        task.agentConfig.knowledgeSource &&
-        causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
-      ) {
-        return await refuseAdmission(
-          "scheduled_authority_unavailable",
-          false,
-          "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
-        );
-      }
       // Workspace/organization Rigs run through ordinary
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
@@ -1708,8 +1697,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ? { instructions: resolvedAgentInstructions }
                   : {}),
                 ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
-                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
-                task.visibility === "private"
+                ...(task.visibility === "private"
                   ? {
                       visibility: "user_private" as const,
                       scheduledSourceRunId: run.id,
@@ -2510,7 +2498,6 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
-  if (isKnowledgeSourceSyncRetirementReason(error)) return { action: "blocked", reason: error };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }
@@ -2935,8 +2922,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
       ),
       ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
-      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
-      task.visibility === "private"
+      ...(task.visibility === "private"
         ? {
             visibility: "user_private" as const,
             scheduledSourceRunId: input.run.id,

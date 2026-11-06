@@ -3,7 +3,7 @@ import {
   isIntegrationDefinitionEnabled,
   validateCredentialPlacements,
 } from "@opengeni/capabilities";
-import type { Settings } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CreateOrganizationConnectorRequest,
   PreviewOrganizationApiIntegrationRequest,
@@ -55,6 +55,16 @@ import {
   type McpCapabilityProbe,
 } from "./capabilities";
 import { assertOrganizationMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
+import {
+  ensureOrganizationIdentityIssuer,
+  opengeniClientMetadataDocumentUrl,
+  organizationConnectorAutoConnectView,
+  probeMcpAutoConnectSupport,
+  storedAutoConnect,
+  tryAutoConnect,
+  type AutoConnectFetch,
+  type StoredAutoConnect,
+} from "./mcp-auto-connect";
 import { integrationSourceForOrganizationPolicy } from "./organization-integration-catalog";
 
 /**
@@ -76,6 +86,8 @@ type Administration = {
   probeMcpServer?: McpCapabilityProbe | undefined;
   /** Compiles an API integration's source; needed to preview or add one. */
   resolveApiIntegration?: ResolveOrganizationApiIntegration | undefined;
+  /** Tests only: the app's discovery and token endpoint transport for auto-connect. */
+  autoConnectFetch?: AutoConnectFetch | undefined;
 };
 
 /** An API integration compiled from its source, exactly as a workspace preview resolves it. */
@@ -106,7 +118,7 @@ export async function listOrganizationConnectorsForAdministration(
     input.authorize,
   );
   const catalog = await catalogItemsFor(input, rows);
-  return rows.map((row) => organizationConnectorView(row, catalog));
+  return rows.map((row) => organizationConnectorView(row, catalog, input.settings));
 }
 
 /**
@@ -152,14 +164,23 @@ export async function createOrganizationConnector(
           capabilityId,
           accountId: input.accountId,
           customDefinition: custom,
-          config: payload.login === "each_person" ? { connectionRef: {} } : {},
+          config:
+            payload.login === "each_person" || payload.login === "auto_connect"
+              ? { connectionRef: {} }
+              : {},
           createdAt: now,
           updatedAt: now,
         },
         null,
       )
     : await requireCatalogConnector(input, capabilityId);
-  const access = await prepareAccess(input, item, payload.login, payload.headers ?? {});
+  const access = await prepareAccess(
+    input,
+    item,
+    payload.login,
+    payload.headers ?? {},
+    payload.autoConnectClientId ?? null,
+  );
   const row = await insertOrganizationConnector(
     input.db,
     { accountId: input.accountId },
@@ -173,7 +194,7 @@ export async function createOrganizationConnector(
     },
     input.authorize,
   );
-  return organizationConnectorView(row, new Map(custom ? [] : [[item.id, item]]));
+  return organizationConnectorView(row, new Map(custom ? [] : [[item.id, item]]), input.settings);
 }
 
 export async function updateOrganizationConnectorSettings(
@@ -222,6 +243,21 @@ export async function updateOrganizationConnectorSettings(
     metadata = { ...current.metadata, ...access.metadata };
   }
   if (payload.allowedTools !== undefined) config = withAllowedTools(config, payload.allowedTools);
+  if (payload.autoConnectClientId !== undefined) {
+    const stored = storedAutoConnect(current.config);
+    if (!stored)
+      throw new HTTPException(422, {
+        message: "Only a connector that connects people automatically has a client ID",
+      });
+    const clientId =
+      payload.autoConnectClientId ?? opengeniClientMetadataDocumentUrl(input.settings);
+    if (!clientId)
+      throw new HTTPException(422, { message: "Enter the client ID the app gave you" });
+    config = {
+      ...config,
+      autoConnect: { ...stored, clientId, verifiedAt: null, lastError: null },
+    };
+  }
   const updated = await updateOrganizationConnector(
     input.db,
     scope,
@@ -240,7 +276,7 @@ export async function updateOrganizationConnectorSettings(
     input.authorize,
   );
   if (!updated) throw changedConflict();
-  return organizationConnectorView(updated, catalog);
+  return organizationConnectorView(updated, catalog, input.settings);
 }
 
 export async function removeOrganizationConnector(
@@ -315,7 +351,80 @@ async function createOrganizationApiIntegration(
     },
     input.authorize,
   );
-  return organizationConnectorView(row, new Map());
+  return organizationConnectorView(row, new Map(), input.settings);
+}
+
+/**
+ * Whether a connector can connect people automatically, before it is added:
+ * its server's authorization server must accept ID-JAGs.
+ */
+export async function checkOrganizationConnectorAutoConnect(
+  input: Administration & { capabilityId?: string; endpointUrl?: string },
+) {
+  await assertOrganizationConnectorAdministrator(
+    input.db,
+    { accountId: input.accountId },
+    input.authorize,
+  );
+  const endpointUrl = input.endpointUrl
+    ? input.endpointUrl
+    : (await requireCatalogConnector(input, input.capabilityId!)).endpointUrl;
+  if (!endpointUrl)
+    return {
+      supported: false,
+      authorizationServer: null,
+      reason: "This connector has no server address",
+      clientIdMetadataDocumentSupported: false,
+      opengeniClientId: null,
+    };
+  const { setup: _setup, ...support } = await probeMcpAutoConnectSupport({
+    settings: input.settings,
+    endpointUrl,
+    fetchImpl: input.autoConnectFetch,
+  });
+  return support;
+}
+
+/**
+ * Tries auto-connect as the admin who asks: signs an ID-JAG for them and
+ * redeems it at the app, saving nothing but the outcome on the connector.
+ */
+export async function testOrganizationConnectorAutoConnect(
+  input: Administration & { connectorId: string; subjectId: string },
+) {
+  const scope = { accountId: input.accountId, connectorId: input.connectorId };
+  const current = await getOrganizationConnector(input.db, scope, input.authorize);
+  if (!current) throw new HTTPException(404, { message: "Organization connector not found" });
+  const stored = storedAutoConnect(current.config);
+  if (!stored)
+    throw new HTTPException(422, {
+      message: "This connector doesn't connect people automatically",
+    });
+  const attempt = await tryAutoConnect({
+    db: input.db,
+    settings: input.settings,
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+    autoConnect: stored,
+    fetchImpl: input.autoConnectFetch,
+  });
+  const at = new Date().toISOString();
+  const next: StoredAutoConnect =
+    attempt.status === "connected"
+      ? { ...stored, verifiedAt: at, lastError: null }
+      : { ...stored, lastError: { message: attempt.message, at } };
+  const updated = await updateOrganizationConnector(
+    input.db,
+    scope,
+    { expectedGeneration: current.generation, config: { ...current.config, autoConnect: next } },
+    input.authorize,
+  );
+  const view = organizationConnectorAutoConnectView(input.settings, updated ?? current);
+  if (!view) throw new HTTPException(409, { message: "This connector changed; reload it" });
+  const generation = (updated ?? current).generation;
+  return attempt.status === "connected"
+    ? { status: "connected" as const, autoConnect: view, generation }
+    : { status: "refused" as const, message: attempt.message, autoConnect: view, generation };
 }
 
 /**
@@ -509,22 +618,33 @@ async function prepareAccess(
   item: CapabilityCatalogItem,
   login: OrganizationConnectorLogin,
   rawHeaders: Record<string, string>,
+  autoConnectClientId: string | null = null,
 ): Promise<{ config: Record<string, unknown>; metadata: Record<string, unknown> }> {
   if (item.kind !== "mcp" || !item.endpointUrl || !item.runtime.mcpServerId)
     throw new HTTPException(422, {
       message: "A connector needs a remote streamable HTTP endpoint",
     });
-  if (mcpEndpointRequiresPersonalConnection(item) && login !== "each_person")
+  if (
+    mcpEndpointRequiresPersonalConnection(item) &&
+    login !== "each_person" &&
+    login !== "auto_connect"
+  )
     throw new HTTPException(422, {
       message: `${item.name} works only when each person signs in with their own account`,
     });
-  if (login === "each_person") {
+  if (login === "each_person" || login === "auto_connect") {
     const connectionRef = perPersonOAuthRefForItem(item);
     if (!connectionRef)
       throw new HTTPException(422, {
         message: `${item.name} has no sign-in of its own for each person; use an organization key`,
       });
-    return { config: { connectionRef }, metadata: authDeferredMcpConnectivity() };
+    if (login === "each_person")
+      return { config: { connectionRef }, metadata: authDeferredMcpConnectivity() };
+    const autoConnect = await prepareAutoConnect(input, item, autoConnectClientId);
+    return {
+      config: { connectionRef, autoConnect },
+      metadata: authDeferredMcpConnectivity(),
+    };
   }
   const headers = login === "organization_key" ? normalizedMcpCredentialHeaders(rawHeaders) : null;
   if (login === "organization_key" && !headers)
@@ -552,6 +672,49 @@ async function prepareAccess(
     },
     metadata,
   };
+}
+
+/**
+ * Auto-connect for a connector: the app's authorization server must accept
+ * ID-JAGs. Creates the organization's signing key the first time.
+ */
+async function prepareAutoConnect(
+  input: Administration,
+  item: CapabilityCatalogItem,
+  clientId: string | null,
+): Promise<StoredAutoConnect> {
+  if (!input.settings.publicBaseUrl)
+    throw new HTTPException(422, { message: "Auto-connect needs Opengeni's public URL" });
+  if (!environmentsEncryptionKeyBytes(input.settings))
+    throw new HTTPException(422, {
+      message: "Auto-connect needs credential encryption, which this deployment doesn't have",
+    });
+  const probe = await probeMcpAutoConnectSupport({
+    settings: input.settings,
+    endpointUrl: item.endpointUrl!,
+    fetchImpl: input.autoConnectFetch,
+  });
+  if (!probe.setup)
+    throw new HTTPException(422, {
+      message: probe.reason ?? `${item.name} doesn't support auto-connect`,
+    });
+  const resolvedClientId =
+    clientId ??
+    (probe.setup.clientIdMetadataDocumentSupported
+      ? opengeniClientMetadataDocumentUrl(input.settings)
+      : null);
+  if (!resolvedClientId)
+    throw new HTTPException(422, {
+      message: `${item.name} needs a client ID for Opengeni. Enter the one the app gave you.`,
+    });
+  await ensureOrganizationIdentityIssuer({
+    db: input.db,
+    settings: input.settings,
+    accountId: input.accountId,
+    authorize: input.authorize,
+  });
+  const { clientIdMetadataDocumentSupported: _cimd, ...setup } = probe.setup;
+  return { ...setup, clientId: resolvedClientId, verifiedAt: null, lastError: null };
 }
 
 function withAllowedTools(
@@ -586,6 +749,7 @@ function connectorCatalogItem(
 function organizationConnectorView(
   row: OrganizationConnectorRow,
   catalog: ReadonlyMap<string, CapabilityCatalogItem>,
+  settings: Settings,
 ): OrganizationConnector {
   const api = organizationApiIntegrationDefinition(row);
   const item = api ? null : connectorCatalogItem(row, catalog);
@@ -632,6 +796,7 @@ function organizationConnectorView(
           })),
         }
       : null,
+    autoConnect: organizationConnectorAutoConnectView(settings, row),
     generation: row.generation,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

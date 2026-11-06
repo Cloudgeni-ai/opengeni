@@ -149,8 +149,6 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   knowledge_search: "checkNotes",
   knowledge_get: "checkNotes",
   knowledge_browse: "checkNotes",
-  knowledge_source_fetch: "checkNotes",
-  knowledge_source_read: "checkNotes",
   memory_search: "checkNotes",
   preference_registry_summary: "checkNotes",
   preference_registry_get: "checkNotes",

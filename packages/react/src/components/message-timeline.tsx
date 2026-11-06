@@ -10,6 +10,7 @@ import {
   timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
 } from "../timeline/work-presentation";
@@ -45,6 +46,7 @@ import {
   ArrowRightIcon,
   ArrowUpIcon,
   BotIcon,
+  CalendarClockIcon,
   CheckCircle2Icon,
   CheckIcon,
   ChevronDownIcon,
@@ -60,6 +62,7 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   XCircleIcon,
+  ZapIcon,
 } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -130,6 +133,7 @@ import {
 } from "./tip-follow";
 import {
   ActivityRail,
+  automationRunOutcomesOnly,
   buildTimeline,
   defaultToolRegistry,
   groupTimeline,
@@ -150,6 +154,7 @@ import {
   type RetainedScreenshotLoader,
   type VideoArtifactPlaybackLoader,
   type ToolRegistry,
+  type TurnSummaryFacetConfiguration,
   type TurnSummaryOptions,
   type TurnSummaryStatus,
   type UserMessageItem,
@@ -177,8 +182,10 @@ import {
   agentMemberSessionId,
   agentMemberText,
   agentMemberTitle,
+  automationRunLine,
   cleanMachineInputSummary,
   isAgentMember,
+  isAutomationRunBatch,
   machineInputBatchLabel,
   machineInputSummaryIsUseful,
   readableMachineInputSource,
@@ -348,6 +355,14 @@ export type MessageTimelineProps = {
   /** Customize collapsed turn facets for this timeline instance. */
   genieLoading?: GenieLoadingOptions | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
+  /**
+   * Show how the agent works on each turn row. Defaults to true. With `false`
+   * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
+   * step under it and no step facets (yours included). The steps stay behind
+   * the row for anyone who opens it. `SessionConversation` and
+   * `NativeSessionScreen` pass their own `agentSignals` here.
+   */
+  agentSignals?: boolean | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
@@ -472,6 +487,9 @@ const LIVE_NOTE_GAP_PX = 20;
 const LIVE_NOTE_RESERVE_MS = 700;
 /** Lets a live work disclosure report whether it is open (see `reportLiveFold`). */
 const LiveNoteFoldContext = createContext<((workId: string, open: boolean) => void) | null>(null);
+/** False when the host hides agent signals: turn rows then show only their status. */
+const AgentSignalsContext = createContext(true);
+const STATUS_ONLY_FACETS = { replace: [] } as const satisfies TurnSummaryFacetConfiguration;
 
 // State: 0 underfill retry, 1 prefetch pending, 2 compatibility-settled,
 // 3 explicit no-progress waiting to become an underfill retry.
@@ -682,6 +700,7 @@ export function MessageTimeline({
   computeLabel = null,
   genieLoading,
   turnSummary,
+  agentSignals = true,
   autoFollow = true,
   onAnnotate,
   questionNavMinViewportHeight = 0,
@@ -703,14 +722,17 @@ export function MessageTimeline({
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
-    const projectedItems = items ?? buildTimeline(t, events ?? []);
+    const builtItems = items ?? buildTimeline(t, events ?? []);
+    // A person who never sees the agent's work reads an automation run as
+    // its line and its answer only.
+    const projectedItems = agentSignals ? builtItems : automationRunOutcomesOnly(builtItems);
     if (!shouldRenderAuthNeeded) {
       return projectedItems;
     }
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded, t]);
+  }, [items, events, shouldRenderAuthNeeded, agentSignals, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;
@@ -3118,7 +3140,11 @@ export function MessageTimeline({
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+          <ProviderLogoProvider value={resolveProviderLogo}>
+            <AgentSignalsContext.Provider value={agentSignals}>
+              {timeline}
+            </AgentSignalsContext.Provider>
+          </ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
@@ -3522,6 +3548,9 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
+  // Without agent signals a turn row is only its status ("Working · 8s").
+  const agentSignals = useContext(AgentSignalsContext);
+  const rowFacets = agentSignals ? turnSummary?.facets : STATUS_ONLY_FACETS;
   const previousSingleActivity = useRef<ActivityItem | undefined>(undefined);
   useLayoutEffect(() => {
     const work =
@@ -3566,6 +3595,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
+        if (!agentSignals && readableWorkIsEmpty(group)) return null;
         const preparing = isPreparingWork(group, { startupDetails, startupDismissed });
         if (preparing) {
           // Preparation is primary, never hidden in an activity disclosure.
@@ -3588,13 +3618,14 @@ const TimelineGroupView = memo(function TimelineGroupView({
           workStatus.kind === "working"
             ? {
                 ...workStatus,
-                preview: readableWorkShowsPreview(group) ? (
-                  <RollingActivity
-                    items={group.items}
-                    toolRegistry={toolRegistry}
-                    showCount={false}
-                  />
-                ) : undefined,
+                preview:
+                  agentSignals && readableWorkShowsPreview(group) ? (
+                    <RollingActivity
+                      items={group.items}
+                      toolRegistry={toolRegistry}
+                      showCount={false}
+                    />
+                  ) : undefined,
               }
             : workStatus.kind === "waiting"
               ? {
@@ -3649,7 +3680,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
-              facets={turnSummary?.facets}
+              facets={rowFacets}
               renderLiveMark={turnSummary?.renderLiveMark}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
@@ -3777,7 +3808,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             bare
             defaultOpen={settleChrome ? true : undefined}
             foldKey={group.id}
-            facets={turnSummary?.facets}
+            facets={rowFacets}
             contextCompactionCount={contextCompactionCount}
           >
             <ActivityRail
@@ -3812,6 +3843,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           }
           liveHeader={
             turnSummary?.rolling &&
+            agentSignals &&
             !containsPresentedImage &&
             !group.outcome &&
             !foldLiveCluster ? (
@@ -3823,7 +3855,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             ) : undefined
           }
           foldKey={group.id}
-          facets={turnSummary?.facets}
+          facets={rowFacets}
           settleFold={settleFold}
           contextCompactionCount={contextCompactionCount}
         >
@@ -3882,7 +3914,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           foldKey={group.id}
-          facets={turnSummary?.facets}
+          facets={rowFacets}
           settleFold={settleFold}
           copyText={insideTurn ? undefined : turnCopyText}
           contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
@@ -4350,7 +4382,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
         : null;
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
@@ -5093,6 +5125,9 @@ function MachineInputBatchRow({
   const identity = useAgentIdentity();
   const label = machineInputBatchLabel(t, item.members, identity.titleFor);
   const single = item.members.length === 1 ? item.members[0]! : null;
+  if (isAutomationRunBatch(item.members)) {
+    return <AutomationRunRow item={item} />;
+  }
   if (single?.kind === "media_generation_result" && single.result) {
     return (
       <VideoGenerationResultRow
@@ -5161,6 +5196,41 @@ function MachineInputBatchRow({
           {truncate(singleSummary, 160)}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * An automation acted in this chat: one quiet line saying what happened,
+ * above the agent's answer. Its instructions are the agent's business and
+ * never shown here.
+ */
+function AutomationRunRow({ item }: { item: MachineInputBatchItem }) {
+  const t = useOpenGeniText();
+  const enter = useEntranceAnimation();
+  const line = automationRunLine(t, item.members);
+  const Icon = item.members.some((member) => (member.automation?.eventCount ?? 0) > 0)
+    ? ZapIcon
+    : CalendarClockIcon;
+  const received = t("messageTimeline.receivedClocktime", {
+    clockTime: formatClockTime(t, item.occurredAt),
+  });
+  return (
+    <div
+      className={cn(enter && "animate-og-enter", "flex justify-center px-3")}
+      data-og-automation-run=""
+    >
+      <p
+        className="inline-flex max-w-lg min-w-0 items-start gap-1.5 text-og-sm text-og-fg-muted"
+        title={`${line}\n${received}`}
+      >
+        <Icon aria-hidden className="mt-[0.2em] size-3.5 shrink-0 text-og-fg-subtle" />
+        <span className="line-clamp-2 text-center">{line}</span>
+        <span className="sr-only">
+          {" · "}
+          <time dateTime={item.occurredAt}>{received}</time>
+        </span>
+      </p>
     </div>
   );
 }
@@ -5267,15 +5337,17 @@ function MachineInputRow({
     );
   }
   const source = readableMachineInputSource(member.sourceId);
-  const summary = cleanMachineInputSummary(member.summary);
+  // An automation run says what happened; its summary may be its instructions.
+  const automation = member.kind === "scheduled_occurrence";
+  const summary = automation ? "" : cleanMachineInputSummary(member.summary);
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
         <span className="text-og-control font-medium text-og-fg-muted">
-          {MACHINE_INPUT_META(t)[member.kind]}
+          {automation ? automationRunLine(t, [member]) : MACHINE_INPUT_META(t)[member.kind]}
         </span>
-        {source && (
+        {source && !automation && (
           <span className="ml-1.5 text-og-control text-og-fg-subtle">
             {t("messageTimeline.fromSource", { source })}
           </span>

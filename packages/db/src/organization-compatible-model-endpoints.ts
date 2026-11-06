@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import type { CompatibleModelReasoning } from "@opengeni/contracts";
 import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { type Database, withRlsContext } from "./database";
@@ -43,6 +44,8 @@ export type OrganizationCompatibleEndpointModel = {
   connectionId: string;
   upstreamModelId: string;
   label: string | null;
+  /** The reasoning levels the model accepts; null when it declares none. */
+  reasoning: CompatibleModelReasoning | null;
   version: number;
   retiredAt: Date | null;
   createdAt: Date;
@@ -69,6 +72,13 @@ function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function reasoningColumns(reasoning: CompatibleModelReasoning | null) {
+  return {
+    reasoningEfforts: reasoning ? [...reasoning.efforts] : null,
+    defaultReasoningEffort: reasoning?.defaultEffort ?? null,
+  };
+}
+
 function mapEndpoint(row: ConnectionRow): OrganizationCompatibleEndpoint {
   if (row.providerKind !== KIND || !row.endpoint || !row.compatibleApi)
     throw new Error("not an OpenAI-compatible endpoint connection");
@@ -91,6 +101,10 @@ function mapModel(row: ModelRow): OrganizationCompatibleEndpointModel {
     connectionId: row.connectionId,
     upstreamModelId: row.upstreamModelId,
     label: row.label,
+    reasoning:
+      row.reasoningEfforts && row.defaultReasoningEffort
+        ? { efforts: [...row.reasoningEfforts], defaultEffort: row.defaultReasoningEffort }
+        : null,
     version: row.version,
     retiredAt: row.retiredAt,
     createdAt: row.createdAt,
@@ -201,6 +215,8 @@ export async function createOrganizationCompatibleEndpoint(
     api: OrganizationCompatibleEndpointApi;
     label?: string | null;
     upstreamModelId: string;
+    /** The first model's reasoning levels, already resolved by the caller. */
+    reasoning?: CompatibleModelReasoning | null;
     operationId: string;
   },
 ): Promise<{
@@ -277,6 +293,7 @@ export async function createOrganizationCompatibleEndpoint(
         connectionId: row.id,
         upstreamModelId: input.upstreamModelId,
         label: null,
+        ...reasoningColumns(input.reasoning ?? null),
         createOperationId: input.operationId,
         createRequestHash: requestHash,
         createdBySubjectId: input.actorSubjectId,
@@ -439,6 +456,8 @@ export async function createOrganizationCompatibleEndpointModel(
     connectionId: string;
     upstreamModelId: string;
     label?: string;
+    /** The model's reasoning levels, already resolved by the caller. */
+    reasoning?: CompatibleModelReasoning | null;
     operationId: string;
   },
 ): Promise<OrganizationCompatibleEndpointModel> {
@@ -505,12 +524,66 @@ export async function createOrganizationCompatibleEndpointModel(
         connectionId: input.connectionId,
         upstreamModelId: input.upstreamModelId,
         label: input.label ?? null,
+        ...reasoningColumns(input.reasoning ?? null),
         createOperationId: input.operationId,
         createRequestHash: requestHash,
         createdBySubjectId: input.actorSubjectId,
       })
       .returning();
     if (!row) throw new Error("organization compatible endpoint model create returned no row");
+    return mapModel(row);
+  });
+}
+
+/**
+ * Set the reasoning levels of one active endpoint model. The model's version
+ * guards concurrent edits; repeating the change that produced the current
+ * version returns the model unchanged.
+ */
+export async function setOrganizationCompatibleEndpointModelReasoning(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    connectionId: string;
+    customModelId: string;
+    expectedVersion: number;
+    reasoning: CompatibleModelReasoning | null;
+  },
+): Promise<OrganizationCompatibleEndpointModel> {
+  const columns = reasoningColumns(input.reasoning);
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    await lockModels(scopedDb, input.organizationId);
+    const [current] = await scopedDb
+      .select()
+      .from(models)
+      .where(
+        and(
+          eq(models.accountId, input.organizationId),
+          eq(models.providerKind, KIND),
+          eq(models.connectionId, input.connectionId),
+          eq(models.id, input.customModelId),
+          isNull(models.retiredAt),
+        ),
+      )
+      .limit(1);
+    if (!current) throw new OrganizationModelProviderConflictError();
+    const unchanged =
+      JSON.stringify(current.reasoningEfforts ?? null) ===
+        JSON.stringify(columns.reasoningEfforts) &&
+      (current.defaultReasoningEffort ?? null) === columns.defaultReasoningEffort;
+    if (current.version === input.expectedVersion + 1 && unchanged) return mapModel(current);
+    if (current.version !== input.expectedVersion)
+      throw new OrganizationModelProviderConflictError();
+    const endpoint = await endpointRow(scopedDb, input.organizationId, input.connectionId);
+    if (!endpoint || endpoint.status !== "active")
+      throw new OrganizationModelProviderConflictError();
+    const [row] = await scopedDb
+      .update(models)
+      .set({ ...columns, version: current.version + 1, updatedAt: new Date() })
+      .where(and(eq(models.id, current.id), eq(models.version, current.version)))
+      .returning();
+    if (!row) throw new OrganizationModelProviderConflictError();
     return mapModel(row);
   });
 }

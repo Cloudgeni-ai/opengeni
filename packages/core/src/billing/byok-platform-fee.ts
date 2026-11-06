@@ -57,6 +57,19 @@ export function ownModelFunding(
 }
 
 /**
+ * Is work of this billing origin refused connected subscriptions here? API
+ * work is, unless the operator set `apiConnectedSubscriptionsEnabled`
+ * (`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED`). Every admission, model
+ * list and default check for API use of a subscription goes through this.
+ */
+export function connectedSubscriptionsRefusedForOrigin(
+  settings: Partial<Pick<Settings, "apiConnectedSubscriptionsEnabled">>,
+  billingOrigin: BillingOrigin | null | undefined,
+): boolean {
+  return billingOrigin === "api" && settings.apiConnectedSubscriptionsEnabled !== true;
+}
+
+/**
  * Does using the person's own subscription need a paid plan on this account?
  * Only with Stripe billing and subscription plans (people can buy one), and
  * never for an account on legacy billing terms (internal accounts).

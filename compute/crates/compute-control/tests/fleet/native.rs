@@ -17,7 +17,7 @@ use ring::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-use super::support::{FakeHost, Fleet, OTHER_KEY, TEAM, given_up, id};
+use super::support::{FakeHost, Fleet, OTHER_KEY, TEAM, declare_gone, given_up, id};
 
 const GATEWAY: &str = "wss://og.example/agent-link";
 
@@ -279,8 +279,8 @@ async fn hosts_get_link_tokens_only_for_their_own_name_and_known_gateways() {
     assert_eq!(status, 403, "only gateways a team uses are signed for");
 }
 
-/// A host the service gave up on gets back, when it registers again, the
-/// agent sandbox nobody took meanwhile under a raised owner epoch, with the
+/// A host declared gone gets back, when it registers again, the agent
+/// sandbox nobody took meanwhile under a raised owner epoch, with the
 /// ticket for that epoch in the ruling; a sandbox with no agent gets none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_registering_again_is_given_its_kept_sandboxes_tickets_for_their_new_epochs() {
@@ -294,8 +294,9 @@ async fn a_host_registering_again_is_given_its_kept_sandboxes_tickets_for_their_
 
     a.renewing(false);
     given_up(&fleet, &a).await;
+    declare_gone(&fleet, &a).await;
     let Registered::Registered { rulings, .. } = a.register().await else {
-        panic!("a host given up on registers afresh");
+        panic!("a host declared gone registers afresh");
     };
     let ruled = |sandbox: &str| {
         rulings

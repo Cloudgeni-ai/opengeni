@@ -39,6 +39,8 @@ import {
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
   workspaceSlackReactionChannelAllowed,
+  isNoReplyText,
+  NO_REPLY_SENTINEL,
 } from "@opengeni/contracts";
 import {
   allowanceExhaustedMessage,
@@ -375,15 +377,13 @@ export const SLACK_SESSION_INSTRUCTIONS = [
 /**
  * The final response that ends a Slack task's turn without posting. A model
  * cannot reliably end with blank output, and blank output already means "no
- * result yet" to the delivery pump, so silence is an explicit token.
+ * result yet" to the delivery pump, so silence is an explicit token. It is the
+ * same token that keeps a quiet automation run out of a chat.
  */
-export const SLACK_NO_REPLY_SENTINEL = "NO_REPLY";
+export const SLACK_NO_REPLY_SENTINEL = NO_REPLY_SENTINEL;
 
 /** Whether model text is the no-reply token, tolerating Markdown wrapping. */
-export function isSlackNoReplyText(text: string): boolean {
-  const normalized = text.trim().replace(/^[\s`*_"'“”]+|[\s`*_"'“”.!]+$/gu, "");
-  return normalized.toUpperCase() === SLACK_NO_REPLY_SENTINEL;
-}
+export const isSlackNoReplyText = isNoReplyText;
 
 /**
  * How a person continues a task where its messages are posted. In a bot DM
