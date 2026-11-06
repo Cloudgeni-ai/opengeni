@@ -4,8 +4,7 @@ import { Link } from "@tanstack/react-router";
  * New automation, Edit automation and Duplicate: one full page with a back
  * link and a sticky footer. What (a composer-style field with chips) -> When
  * (the cadence sentence and its next runs, and the events that start a run)
- * -> an optional Name -> one closed Settings section. Knowledge source syncs
- * keep a small editor of their own.
+ * -> an optional Name -> one closed Settings section.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
@@ -87,7 +86,6 @@ import {
   draftForEventSource,
   draftFromTemplate,
   hasEventTriggers,
-  isKnowledgeSync,
   mergeSchedulePinnedAccounts,
   nextRunOf,
   newScheduleDraft,
@@ -102,7 +100,6 @@ import {
   type ScheduleDraft,
 } from "./schedule-model";
 import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
-import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
 import {
   useEventSourceLogo,
   useEventSources,
@@ -300,16 +297,6 @@ export function ScheduleFormPage({
   const template = chosen
     ? automationTemplatesFor([chosen], { eventTriggers, workspaceEvents: true })[0]
     : undefined;
-  if (mode.kind === "edit" && task && isKnowledgeSync(task)) {
-    return (
-      <KnowledgeSyncFormPage
-        workspaceId={workspaceId}
-        task={task}
-        onCancel={back.onClick}
-        onSaved={() => go.detail(task.id, { replace: true })}
-      />
-    );
-  }
   return (
     <AgentScheduleForm
       key={`${mode.kind}-${task?.id ?? "new"}-${mode.kind === "create" ? (mode.template ?? mode.sourceSessionId ?? mode.eventSourceId ?? "") : ""}`}
@@ -345,9 +332,7 @@ function scheduledLearningScope(
     form.runMode === "existing_session"
       ? sessions.find((session) => session.id === form.targetSessionId)
       : null;
-  return form.knowledgeSource?.destination.kind === "personal" ||
-    target?.tenancy?.visibility === "private" ||
-    target?.memoryScope === "user"
+  return target?.tenancy?.visibility === "private" || target?.memoryScope === "user"
     ? "personal"
     : "workspace";
 }
@@ -500,13 +485,11 @@ function AgentScheduleForm({
       };
       if (editing) return fromTask;
       // Duplicate: a new automation you own. Someone else's connected accounts
-      // don't come with it, and the Knowledge source stays with the original.
-      // One that only events start stays that way.
+      // don't come with it. One that only events start stays that way.
       const own = ownsSchedule(task, access.viewerSubjectId);
       return {
         ...fromTask,
         name: `${task.name} (copy)`.slice(0, NAME_MAX_LENGTH),
-        knowledgeSource: undefined,
         pinnedAccounts: own ? fromTask.pinnedAccounts : [],
         cadence: fromTask.cadence ?? (hasEventTriggers(task) ? null : defaultCadence()),
       };
@@ -728,15 +711,11 @@ function AgentScheduleForm({
     draft.runMode === "existing_session"
       ? sessions.find((session) => session.id === draft.targetSessionId)
       : undefined;
-  // A schedule that posts into an Only me chat, or saves to personal
-  // knowledge, is always Only me; the server enforces the same rule. One on
-  // your own machine can be shared: it runs as you either way.
+  // A schedule that posts into an Only me chat is always Only me; the server
+  // enforces the same rule. One on your own machine can be shared: it runs as
+  // you either way.
   const privateReason =
-    audienceTarget?.tenancy?.visibility === "private"
-      ? "It posts into an Only me chat."
-      : draft.knowledgeSource?.destination.kind === "personal"
-        ? "It saves to your personal knowledge."
-        : null;
+    audienceTarget?.tenancy?.visibility === "private" ? "It posts into an Only me chat." : null;
   useEffect(() => {
     if (privateReason)
       setDraft((current) =>

@@ -170,7 +170,11 @@ export function automationListensForEvents(task: AutomationState): boolean {
   return task.status === "active" && hasEventTriggers(task) && !isFinishedOnce(task);
 }
 
-/** An agent automation, as opposed to a knowledge source sync. */
+/**
+ * An agent automation. Every current schedule is one; this stays exported for
+ * the public `@opengeni/react/automations` surface and filters out the removed
+ * Knowledge source sync tasks an older server may still list.
+ */
 export function isAgentAutomation(
   task: Pick<ScheduledTask, "action"> & { agentConfig?: { knowledgeSource?: unknown } },
 ): boolean {

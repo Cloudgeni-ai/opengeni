@@ -1,4 +1,9 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+// Nothing was sent: callers render the message, which names the choices.
+export {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
@@ -158,6 +163,7 @@ import {
 import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
+  ToolGatewayToolNotFoundError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -165,6 +171,7 @@ import {
   type ToolGatewayApprovalResolver,
   type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
+  type ToolGatewayCatalogWarning,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { createSecretArgumentResolver } from "./secret-argument-resolution";
@@ -248,18 +255,22 @@ export {
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
   assertMcpServerSelectionWithinBounds,
-  assertMcpToolListWithinBounds,
   boundedParallelMap,
   cancelMcpResponseBody,
+  describeMcpToolListDrops,
+  fitMcpToolListWithinBounds,
   guardedMcpFetch,
+  isMcpPayloadTooLargeError,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
   undiciFetch,
+  type McpToolListDrop,
   type McpRequestReplayInfo,
 } from "./mcp-network";
 import {
@@ -303,6 +314,17 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+  accountChoicesFromResult,
+  fillAccountParameters,
+  mcpAccountParametersFor,
+  withAccountParameterDefaults,
+  type AccountParameterFill,
+  type McpAccountChoice,
+  type McpAccountParameter,
+} from "./mcp-account-parameters";
 import {
   MCP_INPUT_PENDING_RESULT,
   awaitingMcpInput,
@@ -3398,6 +3420,10 @@ export function mcpToolErrorOutput(error: unknown): {
   structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  // Nothing was sent: the text names the account's values to choose from.
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   // Nothing ran; the output names each failure and, for a missing secret,
@@ -4104,7 +4130,12 @@ function maybeInstallLazyToolTransport(
         if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
           continue;
         for (const name of server.modelToolNames()) {
-          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          // Server lists are disjoint by model name (the shared budget leaves a
+          // taken name out), so this is only a backstop: keep the first owner.
+          if (identities.has(name)) {
+            warnMcpModelNameCollision(name, identities.get(name)!, server.registryId);
+            continue;
+          }
           identities.set(name, server.registryId);
         }
       }
@@ -4402,6 +4433,9 @@ export function toolPreflightFailureOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4608,13 +4642,24 @@ function installMcpApprovalPolicy(
         connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
+        accountChoice: (
+          toolName: string,
+          args: unknown,
+        ) => Promise<McpAccountParameterChoiceError | undefined>;
       }
     >();
     for (const server of agent.mcpServers ?? []) {
       if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
         continue;
       for (const descriptor of await server.listTools()) {
-        if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        if (identities.has(descriptor.name)) {
+          warnMcpModelNameCollision(
+            descriptor.name,
+            identities.get(descriptor.name)!.serverId,
+            server.registryId,
+          );
+          continue;
+        }
         const display = server.toolDisplayMetadata(descriptor.name);
         const accountLabel = display?.connector
           ? display.accountLabel
@@ -4627,6 +4672,7 @@ function installMcpApprovalPolicy(
           inputSchema: descriptor.inputSchema,
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
+          accountChoice: (name, args) => server.accountParameterChoice(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -4719,6 +4765,13 @@ function installMcpApprovalPolicy(
             parsedInput: Parameters<typeof originalNeedsApproval>[1],
             callId: Parameters<typeof originalNeedsApproval>[2],
           ) => {
+            // A call the account's values must first be chosen for is never
+            // sent; containment returns the choice for this call id instead of
+            // asking anyone. Without an id the call itself returns it.
+            const choice = callId
+              ? await identity?.accountChoice(unprefixed, parsedInput)
+              : undefined;
+            if (choice) throw choice;
             if (!connectorActionPolicy) {
               return (
                 recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
@@ -6040,6 +6093,13 @@ class DeferredPreparedMcpServer implements MCPServer {
     return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
   }
 
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -6095,6 +6155,43 @@ class DeferredPreparedMcpServer implements MCPServer {
   }
 }
 
+/**
+ * More servers than one turn can connect must not fail the turn. Opengeni's
+ * own server is kept first, then required servers, then best-effort ones
+ * (optional or connection-backed), each group in selection order; the
+ * servers left out are logged and named to the model.
+ */
+function fitMcpServerSelection(
+  settings: Settings,
+  tools: ToolRef[],
+  unavailableSink: Map<string, string>,
+): ToolRef[] {
+  if (tools.length <= MCP_MAX_SELECTED_SERVERS) return tools;
+  const configs = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const rank = (tool: ToolRef): number => {
+    const config = configs.get(tool.id);
+    if (config && !config.connectionRef && isFirstPartyMcpServer(settings, config)) return 0;
+    return tool.optional === true || config?.connectionRef ? 2 : 1;
+  };
+  const ordered = [0, 1, 2].flatMap((group) => tools.filter((tool) => rank(tool) === group));
+  const kept = new Set(ordered.slice(0, MCP_MAX_SELECTED_SERVERS));
+  const left = tools.filter((tool) => !kept.has(tool));
+  console.warn("[mcp] more servers selected than one turn can connect; skipping the rest", {
+    event: "tool_catalog_degraded",
+    code: "server_selection_limit",
+    selectedCount: tools.length,
+    keptCount: kept.size,
+    skippedServerIds: left.slice(0, 32).map((tool) => tool.id.slice(0, 256)),
+  });
+  for (const tool of left) {
+    unavailableSink.set(
+      tool.id,
+      `not loaded this turn: more than ${MCP_MAX_SELECTED_SERVERS} integrations are selected, so its tools are unavailable.`,
+    );
+  }
+  return tools.filter((tool) => kept.has(tool));
+}
+
 export async function prepareAgentTools(
   settings: Settings,
   tools: ToolRef[],
@@ -6107,7 +6204,7 @@ export async function prepareAgentTools(
   const unavailableMcpServers = new Map<string, string>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
-  assertMcpServerSelectionWithinBounds(tools);
+  tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
@@ -6279,10 +6376,18 @@ export async function prepareAgentTools(
               codexConnectorNamespaces,
             )
           : mcpFetchImpl;
+        // The SDK can replace a size refusal's error (a later page, an SSE
+        // disconnect); this record lets the server still recognise it.
+        const listSizeRefusal = { refused: false };
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
+            onSizeRefusal: (rpcMethod) => {
+              if (rpcMethod === undefined || rpcMethod === "tools/list") {
+                listSizeRefusal.refused = true;
+              }
+            },
             ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
             ...(useBunNativeFetch && !isCodexAppsMcpServer(config)
               ? { usePinnedRequestTransport: true }
@@ -6471,12 +6576,14 @@ export async function prepareAgentTools(
             undefined,
             firstParty,
             eagerToolNames,
+            firstParty || bridge ? [] : mcpAccountParametersFor(config.url),
           ),
           config,
           options,
           url,
           Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
+        if (!bridge) server.listSizeRefusal = listSizeRefusal;
         return {
           server,
           bestEffort,
@@ -6505,7 +6612,9 @@ export async function prepareAgentTools(
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
   for (const entry of servers) {
-    if (entry.bestEffort && entry.server instanceof PrefixedMcpServer) {
+    // Every server reports missing tools: a best-effort server that failed to
+    // list, and any server whose list was trimmed to fit this turn.
+    if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
     }
   }
@@ -6598,23 +6707,30 @@ export async function prepareAgentTools(
     }
     return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
-  const connectedEager = await connectEntryGroups(
-    eagerRequiredEntries,
-    eagerBestEffortEntries,
-    "blocking",
-  );
-  const connectedEagerRequired = connectedEager.required;
-  const connectedEagerBestEffort = connectedEager.bestEffort;
-  warnBestEffortFailures(connectedEagerBestEffort);
-  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
-  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
+  // Built-in tools claim their model names and budget before any connector
+  // lists, so a connector's tool can never displace or impersonate one.
   let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
         attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
+        unavailableMcpServers,
       )
     : null;
+  const connectedEager = await connectEntryGroups(
+    eagerRequiredEntries,
+    eagerBestEffortEntries,
+    "blocking",
+  ).catch(async (error: unknown) => {
+    // The built-in tool server is created first; free its budget share too.
+    await localToolServer?.close().catch(() => undefined);
+    throw error;
+  });
+  const connectedEagerRequired = connectedEager.required;
+  const connectedEagerBestEffort = connectedEager.bestEffort;
+  warnBestEffortFailures(connectedEagerBestEffort);
+  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
+  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
   // Eager servers must connect before disclosure, but their complete execution
   // catalog is still independent of the first model request. The same deferred
   // lifecycle owns catalog work even when no server needs a deferred connection.
@@ -6650,6 +6766,9 @@ export async function prepareAgentTools(
         ...(connectedDeferredRequired?.active ?? []),
         ...(connectedDeferredBestEffort?.active ?? []),
       ];
+      // Eager servers come first here and in the first-request freeze below,
+      // so both fix one consistent admission order.
+      PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, activeMcpServers);
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
@@ -6660,6 +6779,7 @@ export async function prepareAgentTools(
             resolvedMcpConnectionIds,
             options,
             settings.modelToolOutputTruncationTokens,
+            unavailableMcpServers,
           ),
         execution,
       );
@@ -6778,12 +6898,15 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   try {
+    const eagerActive = [
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+    ];
+    PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, eagerActive);
     await Promise.all(
-      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-        async (server) => {
-          if (server instanceof PrefixedMcpServer) await server.freezeTools();
-        },
-      ),
+      eagerActive.map(async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      }),
     );
   } catch (error) {
     // Publication did not complete, so no caller can own these resources.
@@ -6859,7 +6982,8 @@ function localMcpServerRegistry(
   registrations: readonly LocalMcpServerRegistration[],
   settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
 ): ReadonlyMap<string, LocalMcpServerRegistration> {
-  assertMcpServerSelectionWithinBounds(registrations);
+  // No count limit here: a host registers a server for every tool it offers,
+  // and only the selection that fits the turn (fitMcpServerSelection) is built.
   const registry = new Map<string, LocalMcpServerRegistration>();
   for (const registration of registrations) {
     if (!settingsRegistry.has(registration.id)) {
@@ -6957,6 +7081,7 @@ async function prepareAttemptToolEnvironment(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
   defaultModelToolOutputTruncationTokens: number,
+  unavailableSink?: Map<string, string>,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -7052,11 +7177,49 @@ async function prepareAttemptToolEnvironment(
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
     ...(secretArguments ? { resolveArguments: secretArguments } : {}),
+    ...(unavailableSink
+      ? { onWarnings: (warnings) => noteToolCatalogOmissions(warnings, unavailableSink) }
+      : {}),
   });
   for (const { server } of prepared.servers) {
     server.bindAttemptToolEnvironment(environment, subjectId);
   }
   return environment;
+}
+
+/**
+ * Tell the model, through tool_search's unavailable sources, which servers lost
+ * tools while the catalog was built. A server that already reported its own,
+ * more specific reason keeps it.
+ */
+function noteToolCatalogOmissions(
+  warnings: readonly ToolGatewayCatalogWarning[],
+  unavailableSink: Map<string, string>,
+): void {
+  const omitted = new Map<string, { count: number; full: boolean; names: string[] }>();
+  for (const warning of warnings) {
+    if (warning.code === "path_disambiguated" || warning.code === "duplicate_identity") continue;
+    if (!warning.serverId) continue;
+    const entry = omitted.get(warning.serverId) ?? { count: 0, full: false, names: [] };
+    entry.count += 1;
+    entry.full ||= warning.code === "catalog_entry_limit" || warning.code === "catalog_byte_limit";
+    if (entry.names.length < 5 && warning.toolName) entry.names.push(warning.toolName);
+    omitted.set(warning.serverId, entry);
+  }
+  for (const [serverId, { count, full, names }] of omitted) {
+    if (unavailableSink.has(serverId)) continue;
+    unavailableSink.set(
+      serverId,
+      `connected, but ${count} of its tools are unavailable this turn (${
+        full
+          ? "this turn's tool catalog is full"
+          : "their definitions conflict with another tool or are invalid"
+      })${names.length ? `, for example ${names.join(", ")}` : ""}. Its other tools work.`.slice(
+        0,
+        1_000,
+      ),
+    );
+  }
 }
 
 function installAttemptConnectorActionGatewayLifecycle(
@@ -7391,6 +7554,11 @@ async function prepareToolGatewayDefinitionsFromServers(
     }
     return { server, config };
   });
+  // Network listings run within the concurrency bound; ordered admission
+  // happens afterwards, so a slow early server never blocks later listings.
+  await boundedParallelMap(preparedServers, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, ({ server }) =>
+    server.prefetchTools(),
+  );
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -8469,7 +8637,29 @@ type McpPublicFailureCode =
   | "mcp_close_failed"
   | "mcp_transport_failed"
   | "mcp_tools_list_failed"
-  | "mcp_tool_call_failed";
+  | "mcp_tool_call_failed"
+  | "mcp_account_parameter_lookup_failed";
+
+/** Bound for looking up a connected account's parameter values; past it the call goes on unfilled. */
+const MCP_ACCOUNT_PARAMETER_LOOKUP_MS = 10_000;
+/** After a lookup that found nothing, calls go on unfilled for this long before it is tried again. */
+const MCP_ACCOUNT_PARAMETER_RETRY_MS = 60_000;
+
+/** A shared promise, abandoned (not cancelled) when this caller's signal aborts. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
+}
 
 function safeMcpServerIdentity(serverId: string): string {
   return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
@@ -9524,13 +9714,8 @@ class AttemptDefinitionMcpServer implements MCPServer {
     definitions: readonly AttemptToolDefinition[],
     private readonly aggregateToolBudget: McpAggregateToolListBudget,
     private readonly subjectId: string,
+    unavailableSink?: Map<string, string>,
   ) {
-    for (const definition of definitions) {
-      this.catalogIdentities.set(definition.modelName, {
-        identity: definition.identity,
-        source: definition.source,
-      });
-    }
     const descriptors = definitions.map(
       (definition) =>
         ({
@@ -9543,9 +9728,29 @@ class AttemptDefinitionMcpServer implements MCPServer {
           ...(definition.icons ? { icons: definition.icons } : {}),
         }) as RuntimeMcpTool,
     );
-    this.tools = [
-      ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
-    ];
+    // These tools register before any connector lists, so a connector can
+    // never take one of their names. Limits still trim instead of failing.
+    const fitted = this.aggregateToolBudget.admit(this.name, descriptors);
+    this.tools = [...fitted.tools];
+    const listed = new Set(this.tools.map((tool) => tool.name));
+    for (const definition of definitions) {
+      if (!listed.has(definition.modelName) || this.catalogIdentities.has(definition.modelName))
+        continue;
+      this.catalogIdentities.set(definition.modelName, {
+        identity: definition.identity,
+        source: definition.source,
+      });
+    }
+    if (fitted.dropped.length > 0) {
+      console.warn("[mcp] built-in tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.name,
+        keptCount: this.tools.length,
+        droppedCount: fitted.dropped.length,
+        dropped: fitted.dropped.slice(0, 32),
+      });
+      unavailableSink?.set(this.name, describeMcpToolListDrops(fitted.dropped));
+    }
   }
 
   /** Canonical identity behind one model-visible name, for analytics only. */
@@ -9604,12 +9809,14 @@ class AttemptDefinitionMcpServer implements MCPServer {
     const sourceCallId = modelMcpSourceCallId(toolName);
     // Bind the call to the tool this server advertised: if another server's
     // tool won this model name in the catalog, the call is not found.
+    // A name this server did not list (or left out this turn) is not found.
     const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
+    if (expectedIdentity === undefined) throw new ToolGatewayToolNotFoundError();
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
-        ...(expectedIdentity === undefined ? {} : { expectedIdentity }),
+        expectedIdentity,
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9653,13 +9860,16 @@ export class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
-  /** Where a best-effort server records that its tools are unavailable this attempt. */
+  /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Set by this server's transport when a tools/list response is refused for size. */
+  listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
   private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private rawToolList: Promise<unknown[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
   /**
@@ -9670,6 +9880,13 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly displayTitles = new Map<string, string>();
   /** Unprefixed names of API integration operations; their cards read the request's fields. */
   private readonly apiOperations = new Set<string>();
+  /** Unprefixed tool name -> the account parameters its calls may have filled in. */
+  private readonly accountParameterTools = new Map<string, readonly McpAccountParameter[]>();
+  /** One shared lookup of the account's values per parameter for this attempt. */
+  private readonly accountChoiceLookups = new Map<
+    string,
+    { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number }
+  >();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9725,6 +9942,11 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    /**
+     * Parameters the connected account fixes (mcp-account-parameters.ts).
+     * Applied only by the wrapper around the physical server.
+     */
+    private readonly accountParameters: readonly McpAccountParameter[] = [],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9840,6 +10062,27 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
+  /** Fix the order in which these servers' tool lists are admitted to the shared budget. */
+  static sequenceAggregateBudget(
+    budget: McpAggregateToolListBudget,
+    servers: readonly MCPServer[],
+  ) {
+    const prefixed = servers
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .filter((server) => server.aggregateToolBudget === budget);
+    // Opengeni's own server (harness control, goals) is admitted before any
+    // connector, so a full budget never cuts its tools.
+    budget.sequence(
+      [
+        ...prefixed.filter((server) => server.firstPartyCatalog),
+        ...prefixed.filter((server) => !server.firstPartyCatalog),
+      ].map((server) => ({
+        sourceId: server.aggregateSourceId,
+        start: () => server.freezeTools(),
+      })),
+    );
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
@@ -9860,6 +10103,27 @@ export class PrefixedMcpServer implements MCPServer {
         ...(count === undefined ? {} : { count }),
       });
     }
+  }
+
+  /**
+   * Starts this server's network listing without admitting it. The catalog
+   * build prefetches inside its bounded concurrency so a server waiting for
+   * its admission turn never holds a listing slot.
+   */
+  prefetchTools(): Promise<void> {
+    if (this.frozenTools) return Promise.resolve();
+    return this.rawTools().then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  private rawTools(): Promise<unknown[]> {
+    if (!this.rawToolList) {
+      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
+      this.rawToolList = this.inner.listTools() as Promise<unknown[]>;
+    }
+    return this.rawToolList;
   }
 
   freezeTools(): Promise<RuntimeMcpTool[]> {
@@ -9943,10 +10207,30 @@ export class PrefixedMcpServer implements MCPServer {
 
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
-      const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      // De-duplicate before any size check: a paginated listing that repeats
+      // pages must not count its repeats against the limits.
+      const tools = (await this.rawTools()) as RuntimeMcpTool[];
+      // Account parameters apply once, around the physical server, and only
+      // when the server lists the tool that looks the account's values up.
+      const listedNames = new Set(tools.map((tool) => tool.name));
+      const accountParameters =
+        this.inner instanceof PrefixedMcpServer
+          ? []
+          : this.accountParameters.filter((parameter) =>
+              listedNames.has(parameter.resolver.toolName),
+            );
+      this.accountParameterTools.clear();
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // A recoverable operation is never filled, so it keeps its own schema.
+          const defaults = configuredMcpOperationRecovery(this, tool.name)
+            ? { inputSchema: tool.inputSchema, filled: [] }
+            : withAccountParameterDefaults(tool.inputSchema, accountParameters);
+          if (defaults.filled.length > 0) {
+            this.accountParameterTools.set(tool.name, defaults.filled);
+            tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
+          }
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
           if (prior !== undefined && prior !== tool.name) {
@@ -9988,8 +10272,30 @@ export class PrefixedMcpServer implements MCPServer {
           };
         })
         .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
-      const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
-        assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
+      // Over-limit lists and model names another server already lists are
+      // trimmed, never fatal: the server stays connected with the tools that
+      // fit. Harness control and eager tools are admitted first.
+      const keepFirst = (tool: RuntimeMcpTool) =>
+        isHarnessControlMcpToolName(this.registryId, tool.name) ||
+        this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? "");
+      // Servers list concurrently; the budget admits them in their configured
+      // order so the same selection keeps the same tools on every turn.
+      const fitted = this.aggregateToolBudget
+        ? await this.aggregateToolBudget.admitInOrder(this.aggregateSourceId, exposed, {
+            keepFirst,
+          })
+        : fitMcpToolListWithinBounds(exposed, { keepFirst });
+      const bounded = fitted.tools;
+      if (fitted.dropped.length > 0) {
+        const kept = new Set(bounded.map((tool) => tool.name));
+        for (const name of [...this.originalToolNames.keys()]) {
+          if (kept.has(name)) continue;
+          this.originalToolNames.delete(name);
+          this.displayMetadata.delete(name);
+          this.omittedModelNames.add(name);
+        }
+        this.reportDroppedTools(fitted.dropped, bounded.length);
+      }
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
       const alwaysVisible = bounded.filter(
         (tool) =>
@@ -10002,9 +10308,16 @@ export class PrefixedMcpServer implements MCPServer {
         alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;
     } catch (error) {
+      // A size-limit refusal is deterministic: failing the turn would fail
+      // every later turn the same way. Even a required server degrades to no
+      // tools here; it was reached, and the model is told why its tools are
+      // missing. Any other required-server failure still fails loudly.
+      const tooLarge = isMcpPayloadTooLargeError(error) || this.listSizeRefusal?.refused === true;
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
-      if (!this.bestEffort) {
+      if (!this.bestEffort && !tooLarge) {
+        // Let servers ordered after this one admit without waiting on it.
+        this.releaseAggregateBudget();
         throw mcpTransportErrorWithRetryMetadata(error, {
           recoverySafeSetup: this.recoverySafeSetup,
         });
@@ -10024,14 +10337,46 @@ export class PrefixedMcpServer implements MCPServer {
       if (!this.loggedListToolsFailure) {
         this.loggedListToolsFailure = true;
         console.warn(
-          "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+          tooLarge
+            ? "[mcp] server tools/list is over its size limit; its tools are unavailable this turn"
+            : "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
+          {
+            ...mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+            ...(tooLarge ? { event: "tool_catalog_degraded", required: !this.bestEffort } : {}),
+          },
         );
       }
-      this.unavailableSink?.set(this.registryId, mcpUnavailableReason(error, "list"));
+      this.unavailableSink?.set(
+        this.registryId,
+        tooLarge
+          ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
+          : mcpUnavailableReason(error, "list"),
+      );
       this.releaseAggregateBudget();
       return [];
     }
+  }
+
+  private loggedDroppedTools = false;
+  private readonly omittedModelNames = new Set<string>();
+
+  /** Warn once per attempt and tell the model which of this server's tools are missing. */
+  private reportDroppedTools(dropped: readonly McpToolListDrop[], keptCount: number): void {
+    if (!this.loggedDroppedTools) {
+      this.loggedDroppedTools = true;
+      const reasons: Record<string, number> = {};
+      for (const { reason } of dropped) reasons[reason] = (reasons[reason] ?? 0) + 1;
+      console.warn("[mcp] server tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.registryId.slice(0, 256),
+        required: !this.bestEffort,
+        keptCount,
+        droppedCount: dropped.length,
+        reasons,
+        dropped: dropped.slice(0, 32),
+      });
+    }
+    this.unavailableSink?.set(this.registryId, describeMcpToolListDrops(dropped));
   }
 
   /** Latest exact tools/list projection used to build the model request. */
@@ -10071,6 +10416,9 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
+    // A tool this server listed but left out of this turn (over a limit, or
+    // its name is another server's) is unavailable here, never rerouted.
+    if (this.omittedModelNames.has(toolName)) throw new ToolGatewayToolNotFoundError();
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -10196,6 +10544,14 @@ export class PrefixedMcpServer implements MCPServer {
           : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
+      const accountFill = recordsPhysicalCall
+        ? await this.fillAccountParameters(unprefixed, args ?? {}, options?.signal)
+        : undefined;
+      // Nothing was sent: the model chooses one of the account's values.
+      if (accountFill?.kind === "choose") {
+        throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
+      }
+      const providerArgs = accountFill?.arguments ?? args ?? {};
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
@@ -10231,7 +10587,7 @@ export class PrefixedMcpServer implements MCPServer {
               call: async (callArgs) =>
                 AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
             })
-          : await physicalCall(args ?? {});
+          : await physicalCall(providerArgs);
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -10282,6 +10638,8 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      // Not a provider failure: the choice text is the result, never "unavailable".
+      if (isMcpAccountParameterChoiceError(error)) throw error;
       if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
@@ -10409,6 +10767,99 @@ export class PrefixedMcpServer implements MCPServer {
       return this.inputWaitYield?.beginWait(request);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The choice the model must make before this call can run, or undefined.
+   * Approval hooks ask first, so nobody approves a call that would not be
+   * sent. Never fatal; the lookup is shared with the call itself.
+   */
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    if (this.inner instanceof PrefixedMcpServer)
+      return await this.inner.accountParameterChoice(this.inner.unprefixedToolName(toolName), args);
+    const fill = await this.fillAccountParameters(
+      toolName,
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ).catch(() => undefined);
+    return fill?.kind === "choose"
+      ? new McpAccountParameterChoiceError(fill.parameter, fill.choices)
+      : undefined;
+  }
+
+  /**
+   * Fill this tool's unset account parameters from the connected account.
+   * Any lookup failure sends the call on as the model made it; only the
+   * caller's own abort ends it. A recoverable operation dispatches exactly one
+   * physical call, so it is left as it is.
+   */
+  private async fillAccountParameters(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AccountParameterFill | undefined> {
+    const parameters = this.accountParameterTools.get(toolName);
+    if (!parameters || hasActiveRecoverableMcpOperation()) return undefined;
+    signal?.throwIfAborted();
+    try {
+      return await fillAccountParameters(parameters, args, (parameter) =>
+        abortable(this.accountChoices(parameter), signal),
+      );
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return undefined;
+    }
+  }
+
+  /**
+   * The account's values for a parameter, looked up once per attempt and
+   * shared by concurrent calls. A lookup that found nothing is retried after
+   * a short pause, so a hanging provider delays at most one call per window.
+   */
+  private accountChoices(parameter: McpAccountParameter): Promise<readonly McpAccountChoice[]> {
+    const key = JSON.stringify([parameter.resolver.toolName, parameter.name]);
+    const existing = this.accountChoiceLookups.get(key);
+    if (existing && (existing.retryAfter === undefined || Date.now() < existing.retryAfter))
+      return existing.lookup;
+    const entry: { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number } = {
+      lookup: this.lookUpAccountChoices(parameter),
+    };
+    this.accountChoiceLookups.set(key, entry);
+    void entry.lookup.then((choices) => {
+      if (choices.length === 0) entry.retryAfter = Date.now() + MCP_ACCOUNT_PARAMETER_RETRY_MS;
+    });
+    return entry.lookup;
+  }
+
+  private async lookUpAccountChoices(
+    parameter: McpAccountParameter,
+  ): Promise<readonly McpAccountChoice[]> {
+    const signal = AbortSignal.timeout(MCP_ACCOUNT_PARAMETER_LOOKUP_MS);
+    const { toolName, arguments: resolverArgs } = parameter.resolver;
+    try {
+      const call = async () =>
+        this.inner.callToolResult
+          ? await this.inner.callToolResult(toolName, { ...resolverArgs }, null, { signal })
+          : mcpContentAsResult(
+              await this.inner.callTool(toolName, { ...resolverArgs }, null, { signal }),
+            );
+      const aborted = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      aborted.catch(() => undefined);
+      const result = await Promise.race([call(), aborted]);
+      return accountChoicesFromResult(parameter, unwrapSdkMcpResultProjection(result));
+    } catch (error) {
+      console.warn(
+        "[mcp] account parameter lookup failed; the call goes on as the model made it",
+        mcpErrorFields(error, "mcp_account_parameter_lookup_failed", this.registryId),
+      );
+      return [];
     }
   }
 
@@ -11560,6 +12011,20 @@ async function resolveBareFirstPartyToolCall(
   return tool;
 }
 
+/**
+ * Two servers offering one model name must never fail the run. The first
+ * owner keeps the name; the later tool is unavailable this attempt.
+ */
+function warnMcpModelNameCollision(modelName: string, keptOwner: string, skippedOwner: string) {
+  console.warn("[mcp] two tools share one model name; keeping the first", {
+    event: "tool_catalog_degraded",
+    code: "duplicate_model_name",
+    modelName: modelName.slice(0, 256),
+    keptOwner: keptOwner.slice(0, 256),
+    skippedOwner: skippedOwner.slice(0, 256),
+  });
+}
+
 /** Old hashes are aliases only for an exact tool in the current authorized
  * catalog. Never recover tools from history, labels, URLs, or a different account. */
 function mcpToolResolverForAgent(agent: Agent<any, any>) {
@@ -11579,8 +12044,11 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
       for (const descriptor of await server.listTools()) {
         const rawName = await server.unprefixedToolName(descriptor.name);
         if (legacyMcpToolDigest(server.registryId, rawName) !== input.name) continue;
-        if (resolvedName !== undefined && resolvedName !== descriptor.name)
-          throw new Error("MCP legacy model tool identity collision");
+        if (resolvedName !== undefined && resolvedName !== descriptor.name) {
+          // Ambiguous old alias: resolve to no tool rather than guess one.
+          warnMcpModelNameCollision(input.name, resolvedName, descriptor.name);
+          return null;
+        }
         resolvedName = descriptor.name;
       }
     }

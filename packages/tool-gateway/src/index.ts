@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { bindMcpTelemetry, withMcpCallIdentity, measureMcpPhase } from "@opengeni/observability";
 import Ajv, {
@@ -12,6 +13,8 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { schemaPatternEngine } from "./schema-pattern";
 import { repairStringEncodedArguments } from "./string-encoded-arguments";
 import {
+  ATTEMPT_TOOL_CATALOG_MAX_BYTES,
+  ATTEMPT_TOOL_CATALOG_MAX_ENTRIES,
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
   ToolGatewayCatalog,
@@ -494,7 +497,9 @@ export type ToolGatewayCatalogWarning = {
     | "duplicate_model_name"
     | "path_disambiguated"
     | "path_unavailable"
-    | "invalid_definition";
+    | "invalid_definition"
+    | "catalog_entry_limit"
+    | "catalog_byte_limit";
   serverId: string;
   toolName: string;
   modelName: string;
@@ -651,6 +656,53 @@ function invalidDefinitionReason(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 256) : "invalid definition";
 }
 
+/** Room left in the catalog byte limit for its scope fields and digest. */
+const TOOL_GATEWAY_CATALOG_ENVELOPE_RESERVE_BYTES = 64 * 1024;
+
+/**
+ * Keep the catalog inside its entry and byte limits by leaving tools out
+ * instead of failing the build. Built-in tools are kept before connector
+ * (`mcp`, `codex_apps`) tools; within each group, tools are kept in order of
+ * server id and tool name. The catalog keeps its definition order.
+ */
+function fitToolGatewayCatalogLimits<T extends AdmittedDefinition & { path: string[] }>(
+  candidates: readonly T[],
+  warnings: ToolGatewayCatalogWarning[],
+  limits: { maxEntries: number; maxBytes: number } = {
+    maxEntries: ATTEMPT_TOOL_CATALOG_MAX_ENTRIES,
+    maxBytes: ATTEMPT_TOOL_CATALOG_MAX_BYTES - TOOL_GATEWAY_CATALOG_ENVELOPE_RESERVE_BYTES,
+  },
+): T[] {
+  const isConnector = (candidate: T) =>
+    candidate.entry.source === "mcp" || candidate.entry.source === "codex_apps" ? 1 : 0;
+  // Stable ids, not listing or connection order, decide what is kept, so the
+  // same tools give the same catalog on every turn and replica.
+  const order = [...candidates].sort(
+    (left, right) =>
+      isConnector(left) - isConnector(right) ||
+      compareCanonicalStrings(left.entry.identity.serverId, right.entry.identity.serverId) ||
+      compareCanonicalStrings(left.entry.identity.toolName, right.entry.identity.toolName),
+  );
+  const kept = new Set<T>();
+  let bytes = 2;
+  for (const candidate of order) {
+    const size = Buffer.byteLength(
+      JSON.stringify({ ...candidate.entry, codemodePath: candidate.path }),
+      "utf8",
+    );
+    const added = size + (kept.size > 0 ? 1 : 0);
+    if (kept.size + 1 > limits.maxEntries) {
+      warnings.push({ ...warningSubject(candidate.definition), code: "catalog_entry_limit" });
+    } else if (bytes + added > limits.maxBytes) {
+      warnings.push({ ...warningSubject(candidate.definition), code: "catalog_byte_limit" });
+    } else {
+      kept.add(candidate);
+      bytes += added;
+    }
+  }
+  return candidates.filter((candidate) => kept.has(candidate));
+}
+
 export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
   options: PrepareToolGatewayDefinitionsOptions = {},
@@ -658,10 +710,13 @@ export function prepareToolGatewayDefinitions(
   const warnings: ToolGatewayCatalogWarning[] = [];
   const admittedDefinitions = admitToolGatewayDefinitions(definitions, warnings);
   const paths = allocateToolPaths(admittedDefinitions, warnings);
-  const admitted = admittedDefinitions.flatMap((candidate, index) => {
-    const path = paths[index];
-    return path ? [{ ...candidate, path }] : [];
-  });
+  const admitted = fitToolGatewayCatalogLimits(
+    admittedDefinitions.flatMap((candidate, index) => {
+      const path = paths[index];
+      return path ? [{ ...candidate, path }] : [];
+    }),
+    warnings,
+  );
   if (warnings.length > 0) {
     (options.onWarnings ?? logToolGatewayCatalogWarnings)(warnings);
   }

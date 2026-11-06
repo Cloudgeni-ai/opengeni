@@ -86,6 +86,10 @@
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"
     },
+    "./no-reply": {
+      "types": "./src/no-reply.ts",
+      "default": "./src/no-reply.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
@@ -345,10 +349,6 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
-    },
-    "./google-drive-native-retirement": {
-      "types": "./src/google-drive-native-retirement.ts",
-      "default": "./src/google-drive-native-retirement.ts"
     }
   },
   "publishConfig": {

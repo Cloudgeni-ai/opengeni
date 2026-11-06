@@ -46,6 +46,8 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   private var incoming: [UUID: IncomingCall] = [:]
   private var pendingStart: [String: Any]?
   private var routeObserver: NSObjectProtocol?
+  /// Where a call's audio starts: every call starts on the loudspeaker, and the
+  /// person's choice during it is kept by JavaScript (see `routeChanged` reasons).
   private var speaker = true
   private(set) var voipToken: String?
 
@@ -75,8 +77,12 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     provider = created
     routeObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
-    ) { [weak self] _ in
-      self?.send(["type": "routeChanged", "route": Self.currentRoute()])
+    ) { [weak self] note in
+      let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+      let reason = raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) ?? .unknown
+      self?.send([
+        "type": "routeChanged", "route": Self.currentRoute(), "reason": Self.routeReason(reason),
+      ])
     }
   }
 
@@ -92,6 +98,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
           userInfo: [NSLocalizedDescriptionKey: "CallKit does not run in the Simulator."]))
     }
     if provider == nil { configure(includeInRecents: true) }
+    speaker = true
     let handle = CXHandle(type: .generic, value: target ?? "opengeni")
     let action = CXStartCallAction(call: id, handle: handle)
     action.contactIdentifier = title
@@ -182,6 +189,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   func reportIncoming(_ payload: [String: Any], completion: @escaping () -> Void) {
     if provider == nil { configure(includeInRecents: true) }
     guard let provider else { return completion() }
+    if activeCalls.isEmpty { speaker = true }
     let id = (payload["callId"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
     let sessionId = payload["sessionId"] as? String ?? ""
     let ringUntil = (payload["ringUntil"] as? String).flatMap(Self.parseDate)
@@ -324,7 +332,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
 
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     send(["type": "audioSessionActivated"])
-    send(["type": "routeChanged", "route": Self.currentRoute()])
+    send(["type": "routeChanged", "route": Self.currentRoute(), "reason": "activated"])
   }
 
   func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
@@ -359,6 +367,20 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
 
   private static func options(speaker: Bool) -> AVAudioSession.CategoryOptions {
     speaker ? [.allowBluetooth, .defaultToSpeaker] : [.allowBluetooth]
+  }
+
+  /// Why the route changed. "categoryChange" is the session being configured
+  /// (WebRTC applies its own voice-chat configuration when call audio starts,
+  /// which falls back to the receiver); the others are the person or a device.
+  private static func routeReason(_ reason: AVAudioSession.RouteChangeReason) -> String {
+    switch reason {
+    case .categoryChange: return "categoryChange"
+    case .override: return "override"
+    case .newDeviceAvailable: return "newDevice"
+    case .oldDeviceUnavailable: return "oldDeviceUnavailable"
+    case .routeConfigurationChange: return "configurationChange"
+    default: return "other"
+    }
   }
 
   static func currentRoute() -> String {

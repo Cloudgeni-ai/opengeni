@@ -12,6 +12,7 @@ import {
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
   ownSubscriptionPlanAllows,
   ownModelFunding,
 } from "./byok-platform-fee";
@@ -62,8 +63,12 @@ export async function agentRunAdmissionDenial(
   const billingOrigin = chargeBillingOrigin(
     typeof input.billingOrigin === "function" ? await input.billingOrigin() : input.billingOrigin,
   );
+  const subscriptionsRefused = connectedSubscriptionsRefusedForOrigin(
+    services.settings,
+    billingOrigin,
+  );
   if (
-    billingOrigin === "api" &&
+    subscriptionsRefused &&
     ownModelFunding(resolveModelProviderForTurn(services.settings, input.model)?.model) ===
       "subscription"
   ) {
@@ -91,7 +96,7 @@ export async function agentRunAdmissionDenial(
     }),
   );
   const externallyBilled = funding.fundedWithoutCredits;
-  if (funding.ownSubscription && billingOrigin === "api") return "subscription_api_unavailable";
+  if (funding.ownSubscription && subscriptionsRefused) return "subscription_api_unavailable";
   // The person's own subscription pays no fee; it needs a paid plan.
   if (
     funding.ownSubscription &&

@@ -5,11 +5,7 @@
 // through the SECURITY DEFINER routines as the application role.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SecretPrincipal } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   claimSessionWorkForAttempt,
@@ -1104,11 +1100,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       );
       expect(reachable).not.toContain(world.vaults.orgElsewhere.id);
 
-      // Withheld for one release: the caller learns it is not there yet.
-      expect(await listOrganizationVaults(world.db, asOwner, here)).toBeNull();
-
-      await grantDeferredRuntimeAccess(shared!.admin);
-      const everywhere = (await listOrganizationVaults(world.db, asOwner, here))!;
+      const everywhere = await listOrganizationVaults(world.db, asOwner, here);
       expect(everywhere.map((vault) => vault.id)).toEqual(expect.arrayContaining(fixtures));
       expect(new Set(everywhere.map((vault) => vault.ownerKind))).toEqual(
         new Set(["organization"]),
@@ -1128,7 +1120,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         world.subject(world.member.subjectId, world.member.personalWorkspaceId),
         { workspaceId: world.member.personalWorkspaceId },
       );
-      expect(fromPersonal!.map((vault) => vault.id)).toEqual(expect.arrayContaining(fixtures));
+      expect(fromPersonal.map((vault) => vault.id)).toEqual(expect.arrayContaining(fixtures));
 
       // An agent run sees only what reaches its workspace.
       const turn = await startTurn(world, {

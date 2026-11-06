@@ -79,6 +79,35 @@ export async function performCapabilityAction(
   }
 }
 
+/** The organization connector behind an item that connects people automatically. */
+export function autoConnectOrganizationConnectorId(item: CapabilityCatalogItem): string | null {
+  const connector = item.metadata.organizationConnector;
+  if (item.lifecycle.managedBy !== "organization" || !connector || typeof connector !== "object")
+    return null;
+  const { id, login } = connector as { id?: unknown; login?: unknown };
+  return login === "auto_connect" && typeof id === "string" ? id : null;
+}
+
+/** Connects the viewer without a sign-in screen; false when the app refused or it failed. */
+async function connectedAutomatically({
+  client,
+  workspaceId,
+  item,
+}: {
+  client: OpenGeniBrowserClient;
+  workspaceId: string;
+  item: CapabilityCatalogItem;
+}): Promise<boolean> {
+  const connectorId = autoConnectOrganizationConnectorId(item);
+  if (!connectorId) return false;
+  try {
+    const result = await client.connectWorkspaceOrganizationConnector(workspaceId, connectorId);
+    return result.status === "connected";
+  } catch {
+    return false;
+  }
+}
+
 /** One connection lifecycle for catalog sheets and conversation cards. The caller
  * resolves the live item and owns busy/error state; credentials never enter chat. */
 async function performCapabilityActionUntracked(
@@ -311,6 +340,19 @@ async function performCapabilityActionUntracked(
   // mints a fresh row and the return handler re-enables against it. API-key
   // reactivates the surviving row in place, or mints + re-enables if gone.
   if (action.type === "reconnect_oauth") {
+    // An organization connector that connects people automatically connects
+    // them here at once; when the app refuses, they sign in as usual.
+    if (
+      action.ownership === "personal" &&
+      !action.connectionId &&
+      (await connectedAutomatically({ client, workspaceId, item }))
+    ) {
+      await refresh();
+      onRuntimeChanged();
+      await onComplete();
+      toast.success(`Connected ${item.name}`);
+      return;
+    }
     // Trust the installation's connectionRef.kind (the sheet already chose this
     // branch from it), not the catalog plan - on drift plan.mode can read
     // "enable", so fall back to the ref's domain and the item's own MCP URL.

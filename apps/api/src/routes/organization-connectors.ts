@@ -149,6 +149,7 @@ export function registerOrganizationConnectorRoutes(app: Hono, deps: ApiRouteDep
       accountId,
       authorize: async () => actor,
       resolveApiIntegration,
+      autoConnectFetch: deps.mcpAutoConnectFetch,
     };
   };
 

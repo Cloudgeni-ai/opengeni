@@ -200,11 +200,6 @@ export function lastRunState(
   return run ? { kind: "run", run } : { kind: "never" };
 }
 
-/** Knowledge source syncs keep their own small editor and wording. */
-export function isKnowledgeSync(task: ScheduledTask): boolean {
-  return task.action?.kind === "knowledge_source_sync";
-}
-
 export function ownsSchedule(task: ScheduledTask, viewerSubjectId: string): boolean {
   return task.ownerSubjectId === null || task.ownerSubjectId === viewerSubjectId;
 }

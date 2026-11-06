@@ -475,6 +475,7 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 
 // Timeline projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
   creditRefusalFromEvents,
@@ -569,6 +570,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
@@ -786,6 +788,7 @@ export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/sess
 export {
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";

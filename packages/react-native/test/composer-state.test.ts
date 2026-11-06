@@ -4,7 +4,9 @@ import {
   composerAlternateSend,
   composerTrailingMode,
   nativeLoadingPhrases,
+  textFieldSelectionColors,
 } from "../src/timeline/composer-state";
+import { webColorsDark, webColorsLight } from "../src/ui/web-tokens.gen";
 
 const t = createOpenGeniText();
 
@@ -69,5 +71,21 @@ describe("native loading phrases", () => {
     const own = ["Looking into it…", "One moment…"];
     expect(nativeLoadingPhrases(t, own, "preparing")).toBe(own);
     expect(nativeLoadingPhrases(t, own, "waiting")).toBe(own);
+  });
+});
+
+describe("textFieldSelectionColors", () => {
+  test("Android highlights with the translucent selection token, never the opaque accent", () => {
+    for (const colors of [webColorsDark, webColorsLight]) {
+      const props = textFieldSelectionColors(colors, "android");
+      expect(props.selectionColor).toBe(colors["text-selection"]);
+      expect(props.selectionColor).toMatch(/^rgba\(.*, 0\.\d+\)$/);
+      expect(props.cursorColor).toBe(colors.accent);
+      expect(props.selectionHandleColor).toBe(colors.accent);
+    }
+  });
+
+  test("iOS keeps the system selection tint", () => {
+    expect(textFieldSelectionColors(webColorsDark, "ios")).toEqual({});
   });
 });

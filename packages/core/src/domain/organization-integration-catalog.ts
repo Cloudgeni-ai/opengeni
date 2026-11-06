@@ -78,8 +78,6 @@ export function integrationKeyForConnectProvider(providerId: string): string | n
     return providerId;
   if (dedicated.some((item) => item.key === providerId)) return providerId;
   if (providerId === "fiken-token" || providerId === "fiken-oauth") return "fiken";
-  if (providerId === "google-drive-knowledge" || providerId === "google-drive-publish")
-    return "google-drive";
   if (["mcp-oauth", "mcp-headers", "mcp-bearer", "mcp-install"].includes(providerId))
     return "custom:mcp";
   if (providerId === "openapi") return "custom:openapi";

@@ -165,9 +165,13 @@ const DEBUGGER_DOMAINS = new Set([
 // raising Chrome; without it Chrome holds every mouse event sent to a hidden
 // tab for about five seconds. Chrome clears it when the debugger detaches.
 // Inspector.enable only reports a crashed tab, so the agent stops waiting on it.
+// Emulation.clearDeviceMetricsOverride only removes an emulated size: a
+// screenshot of a tab Chrome had to be asked again to draw can leave its
+// temporary emulation behind, and clearing it lets the tab follow its window.
 // DOMSnapshot is read-only privacy discovery, including closed shadow roots.
 const DEBUGGER_METHODS = new Set([
   "Emulation.setFocusEmulationEnabled",
+  "Emulation.clearDeviceMetricsOverride",
   "Inspector.enable",
   "DOMSnapshot.captureSnapshot",
 ]);

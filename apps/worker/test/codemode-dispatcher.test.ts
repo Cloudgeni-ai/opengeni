@@ -40,6 +40,7 @@ import {
   submitCodemodeOperation,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import { McpAccountParameterChoiceError } from "@opengeni/runtime";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -1077,6 +1078,50 @@ describe("CodemodeAttemptDispatcher", () => {
       };
       expect(output.askCard.questions[0]?.kind).toBe("secret");
       expect(executions).toBe(0);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("an account value to choose settles as not executed with the choices", async () => {
+    if (!available) return;
+    const { scope, environment } = await fixture(async () => {
+      throw new McpAccountParameterChoiceError("siteId", [
+        { value: "site-1", label: "Alpha" },
+        { value: "site-2", label: "Beta" },
+      ]);
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      const operation = await waitForTerminal(scope, operationId);
+      expect(operation).toMatchObject({
+        state: "failed",
+        errorCode: "connector_action_not_executed",
+      });
+      expect(operation!.errorMessage).toContain("siteId");
+      expect(operation!.errorMessage).toContain(`"Beta" (site-2)`);
     } finally {
       await dispatcher.close();
     }

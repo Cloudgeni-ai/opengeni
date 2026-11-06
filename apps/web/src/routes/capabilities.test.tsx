@@ -3,7 +3,6 @@ import { ConnectionCatalog } from "@opengeni/react/connect";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
 import { githubChip } from "@/components/capabilities/use-github-integration";
 import {
   canInstallOpenGeniSlackBot,
@@ -123,14 +122,7 @@ describe("integration state chips", () => {
     expect(connectionAccessChip(integration.chip, false).label).toBe("Loading");
   });
 
-  test("marks historical native Atlassian accounts retired without changing GitHub states", () => {
-    expect(atlassianChip("connected", true, true).label).toBe("Retired");
-    expect(atlassianChip("paused", true, true).label).toBe("Retired");
-    expect(atlassianChip("needs_attention", true, true).label).toBe("Retired");
-    expect(atlassianChip("not_connected", true, true).label).toBe("Retired");
-    expect(atlassianChip("connected", true, false).label).toBe("Retired");
-    expect(atlassianChip("connected", false, false).label).toBe("Access restricted");
-
+  test("keeps GitHub installation states", () => {
     const bound: GitHubAppInfo = {
       configured: true,
       status: "bound",

@@ -9,6 +9,11 @@
 //! holds. A registration's rulings are carried out before the deadline it
 //! brings is written: until then the guard keeps the VMs frozen.
 //!
+//! The renewer runs on a thread of its own, with a runtime of its own:
+//! nothing else the agent does, such as a write its threads wait on while
+//! the disk or the journal stalls, holds up a renewal or the taking in of
+//! its answer.
+//!
 //! Renewals never wait on the agent: what the host can take on is read
 //! from the agent's status on a task of its own, once a second, and each
 //! renewal carries the latest reading. An agent busy for seconds, as one
@@ -147,6 +152,12 @@ struct Running {
 }
 
 impl Renewer {
+    /// Renews as [`Self::run`] does, on a thread of its own with a runtime
+    /// of its own ([`apart`]).
+    pub(crate) async fn run_apart(self) -> anyhow::Result<()> {
+        apart("lease", self.run()).await
+    }
+
     /// Renews until the agent stops; fails if the lease file cannot be
     /// written, since then the guard would act on a stale lease, and if the
     /// agent serves but is gone.
@@ -591,6 +602,37 @@ impl Running {
     }
 }
 
+/// Runs `work` to its end on a thread named `name` with a runtime of its
+/// own, so that nothing the caller's runtime runs holds it up, until it
+/// ends or the future returned is dropped, which drops `work` too.
+pub(crate) async fn apart(
+    name: &str,
+    work: impl Future<Output = anyhow::Result<()>> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (ended, end) = tokio::sync::oneshot::channel();
+    // Dropped with the future returned, which ends the work.
+    let (_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async move {
+                        tokio::select! {
+                            result = work => result,
+                            _ = stopped => Ok(()),
+                        }
+                    })
+                });
+            let _ = ended.send(result);
+        })?;
+    end.await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the {name} thread ended")))
+}
+
 /// Whole milliseconds, for logs.
 fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -675,6 +717,44 @@ mod tests {
     fn terms_survive_the_wire() {
         let terms = LeaseTerms::RECOMMENDED;
         assert_eq!(terms_of(wire_terms(terms)), terms);
+    }
+
+    /// Work run apart goes on while every thread of the caller's runtime
+    /// is held up, as an agent's are by writes to a stalled journal or
+    /// disk; on the caller's runtime it would not run at all meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn work_run_apart_goes_on_while_the_callers_runtime_is_held_up() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counting = Arc::clone(&ticks);
+        let running = tokio::spawn(apart("ticking", async move {
+            loop {
+                counting.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }));
+        // Let it start, then hold up this runtime's only thread.
+        while ticks.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let before = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(500));
+        let during = ticks.load(Ordering::SeqCst) - before;
+        assert!(during >= 10, "ticked {during} times while held up");
+        // Dropped, it ends.
+        running.abort();
+        let _ = running.await;
+        let stopped = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(ticks.load(Ordering::SeqCst) <= stopped + 1, "it ended");
+    }
+
+    /// Work run apart that fails fails the caller.
+    #[tokio::test]
+    async fn work_run_apart_says_how_it_ended() {
+        let failed = apart("failing", async { anyhow::bail!("broken") }).await;
+        assert_eq!(failed.unwrap_err().to_string(), "broken");
+        apart("ending", async { Ok(()) }).await.unwrap();
     }
 
     /// A reading whose task ends without an answer still says so, so the

@@ -48,6 +48,11 @@ export const ACTION_SECRET_FIELD_EXCEPTIONS: ReadonlyArray<{ path: RegExp; reaso
     path: /\.references\.\w+$/,
     reason: "a vault item's secret references name a field for later use, never hold its value",
   },
+  {
+    path: /\.authorizationServer$/,
+    reason:
+      "an app's public OAuth authorization server issuer URL (auto-connect), not a credential",
+  },
 ];
 
 /**

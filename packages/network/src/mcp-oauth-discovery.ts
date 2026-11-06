@@ -92,6 +92,12 @@ export type ResolveMcpOAuthDiscoveryInput = {
   }) => Promise<McpOAuthMetadataFetchResult>;
   validateEndpoint: (rawUrl: string, label: string) => string;
   canonicalizeResource: (rawResource: string) => string;
+  /**
+   * `assertion_grant`: only the token endpoint is used (an ID-JAG redeemed
+   * with the JWT bearer grant), so PKCE and an authorization endpoint are not
+   * required. Defaults to `sign_in`.
+   */
+  purpose?: "sign_in" | "assertion_grant";
 };
 
 /**
@@ -381,16 +387,21 @@ async function discoverAuthorizationServerMetadata(
     );
   }
 
-  const authorizationEndpoint = requiredString(
-    fetched.document.authorization_endpoint,
-    "authorization_endpoint",
-    "authorization_server_metadata",
-  );
-  const tokenEndpoint = requiredString(
+  const assertionGrant = input.purpose === "assertion_grant";
+  const tokenEndpointValue = requiredString(
     fetched.document.token_endpoint,
     "token_endpoint",
     "authorization_server_metadata",
   );
+  const authorizationEndpoint =
+    assertionGrant && !stringValue(fetched.document.authorization_endpoint)
+      ? tokenEndpointValue
+      : requiredString(
+          fetched.document.authorization_endpoint,
+          "authorization_endpoint",
+          "authorization_server_metadata",
+        );
+  const tokenEndpoint = tokenEndpointValue;
   const issuerValue = stringValue(fetched.document.issuer);
   if (profile === "legacy" && !issuerValue) {
     throw new McpOAuthDiscoveryError(
@@ -451,7 +462,7 @@ async function discoverAuthorizationServerMetadata(
         }
       : {}),
   };
-  if (!parsed.codeChallengeMethodsSupported.includes("S256")) {
+  if (!assertionGrant && !parsed.codeChallengeMethodsSupported.includes("S256")) {
     throw new McpOAuthDiscoveryError(
       "authorization_server_metadata",
       "oauth_discovery_broken",

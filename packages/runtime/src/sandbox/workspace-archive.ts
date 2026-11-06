@@ -14,6 +14,7 @@ import {
   type WorkspaceTreeFingerprint,
 } from "@opengeni/contracts";
 import { withSandboxProviderCapture } from "./provider-operation-gate";
+import { escapeWorkspaceGlobPattern, workspaceTarExcludeArgs } from "./workspace-tar-excludes";
 import type { VerifiedHostWorkspaceArchive } from "./archive-spool";
 import {
   captureHostWorkspaceArchive,
@@ -410,12 +411,10 @@ export function workspaceArchiveExcludedPaths(session: unknown): string[] {
   return workspaceFingerprintExcludes(session as WorkspaceSession);
 }
 
-/** A literal path as a glob pattern: `*`, `?`, `[`, `]` and `\` match only
- * themselves. The Agents SDK escapes its tar `--exclude` patterns the same
- * way, so the fingerprint leaves out exactly what the archive leaves out. */
-function escapeGlobPattern(path: string): string {
-  return path.replace(/([*?[\]\\])/gu, "\\$1");
-}
+/** A literal path as a glob pattern; the archive's tar exclusions escape
+ * paths the same way, so the fingerprint leaves out exactly what the archive
+ * leaves out. */
+const escapeGlobPattern = escapeWorkspaceGlobPattern;
 
 function findPruneExpression(excludedPaths: readonly string[]): string {
   const findExcludes = excludedPaths.flatMap((path) => [
@@ -430,9 +429,7 @@ function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
   // escaped pattern anchored at `./`. A bare `--exclude=<name>` would also
   // match the same name deeper in the tree (`docs/target` for a top-level
   // `target`), which the archive keeps, so a restore could never verify.
-  const tarExcludes = excludedPaths.map((path) =>
-    shellQuote(`--exclude=./${escapeGlobPattern(path)}`),
-  );
+  const tarExcludes = workspaceTarExcludeArgs(excludedPaths);
   const findPrefix = findPruneExpression(excludedPaths);
   const script = String.raw`set -eu
 cd /workspace
@@ -1182,16 +1179,24 @@ async function captureVerifiedWorkspaceArchiveExclusive(
         ? await Promise.race([
             capture,
             new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(
-                () =>
-                  reject(
-                    new WorkspaceArchiveIntegrityError(
-                      "workspace_capture_timeout",
-                      `a workspace capture that leaves paths out did not finish within ${boundMs} ms`,
-                    ),
+              timer = setTimeout(() => {
+                const error = new WorkspaceArchiveIntegrityError(
+                  "workspace_capture_timeout",
+                  `a workspace capture that leaves paths out did not finish within ${boundMs} ms`,
+                );
+                // The bound ends only the wait: the tar keeps reading inside
+                // the box until its command returns. The caller keeps this
+                // lease's capture slot until then, so a retry never starts a
+                // second tar next to it.
+                captureStillRunning.set(
+                  error,
+                  capture.then(
+                    () => undefined,
+                    () => undefined,
                   ),
-                boundMs,
-              );
+                );
+                reject(error);
+              }, boundMs);
             }),
           ])
         : await capture;
@@ -1207,6 +1212,17 @@ async function captureVerifiedWorkspaceArchiveExclusive(
     if (ownProperty) manifest.ephemeralPersistencePaths = configured;
     else delete manifest.ephemeralPersistencePaths;
   }
+}
+
+const captureStillRunning = new WeakMap<object, Promise<void>>();
+
+/** For a capture rejected because its bound expired: settles once the
+ * capture's own provider command has returned. Null for any other error,
+ * whose capture has already settled. */
+export function workspaceCaptureStillRunning(error: unknown): Promise<void> | null {
+  return typeof error === "object" && error !== null
+    ? (captureStillRunning.get(error) ?? null)
+    : null;
 }
 
 /** Workspace-relative, normalized, de-duplicated and sorted. A path that

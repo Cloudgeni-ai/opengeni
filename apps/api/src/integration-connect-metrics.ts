@@ -107,8 +107,6 @@ const OAUTH_CALLBACK_FLOWS = new Map<string, string>([
   ["/v1/integrations/provider-oauth/callback", "provider_oauth"],
   ["/v1/integrations/slack/callback", "slack_bot"],
   ["/v1/integrations/fiken/callback", "fiken"],
-  ["/v1/integrations/atlassian/callback", "atlassian"],
-  ["/v1/integrations/google-drive/callback", "google_drive"],
   ["/v1/integrations/github-personal/oauth/callback", "github_personal"],
   ["/v1/social/oauth/callback", "social"],
   ["/v1/github/setup", "github_app"],

@@ -89,6 +89,22 @@ test("API defaults skip connected subscriptions even on Pro, including a saved w
   expect(standing).not.toHaveBeenCalled();
 });
 
+test("with the operator opt-in, API defaults may use a connected subscription, including a saved default", async () => {
+  onPlan("pro", 20_000_000);
+  const optedIn = settings({ apiConnectedSubscriptionsEnabled: true });
+  const saved = { sessionDefaults: { model: "codex/gpt-6-luna", reasoningEffort: "medium" } };
+  expect((await defaultFor(optedIn, crypto.randomUUID(), "api", saved)).model).toBe(
+    "codex/gpt-6-luna",
+  );
+  expect((await defaultFor(optedIn, crypto.randomUUID(), "app", saved)).model).toBe(
+    "codex/gpt-6-luna",
+  );
+  // Off (the default), the same saved default is skipped for API work.
+  expect((await defaultFor(settings(), crypto.randomUUID(), "api", saved)).model).toBe(
+    DEFAULT_OPENROUTER_MODEL_ID,
+  );
+});
+
 test("without subscription plans the plan is never read and the subscription stays the default", async () => {
   const standing = onPlan("free", 0);
   expect(await defaultFor(settings({ subscriptionPlansEnabled: false }))).toMatchObject({

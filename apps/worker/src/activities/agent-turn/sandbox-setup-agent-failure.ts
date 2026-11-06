@@ -7,12 +7,15 @@ import {
   isMachineProcessStartFailureMessage,
   isModalShellStartFailureMessage,
   isProcessStartFailureMessage,
-  processStartFailureNullDeviceNote,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   sanitizeModalShellStartFailureMessage,
   sanitizeProcessStartFailureMessage,
   SelfhostedControlError,
+  type UnresponsiveAgentRecovery,
+  type UnresponsiveComputeMachine,
 } from "@opengeni/runtime";
 import { CancelledFailure } from "@temporalio/activity";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -282,9 +285,12 @@ function processStartFailedCopy(
   agentMessage: string,
 ): string {
   if (machine === "connected_machine") {
-    const nullDevice = processStartFailureNullDeviceNote(agentMessage);
-    return nullDevice
-      ? `Your connected machine can't start programs because ${nullDevice}. Restart the machine to restore it, then retry.`
+    const note = processStartFailureMachineNote(agentMessage);
+    if (note === MISSING_SHELL_NOTE) {
+      return "Your connected machine can't start programs because /bin/sh is missing. Put it back on the machine, then retry.";
+    }
+    return note
+      ? `Your connected machine can't start programs because ${note}. Restart the machine to restore it, then retry.`
       : "Your connected machine can't start programs. Restart the machine, then retry.";
   }
   if (restartedThisTurn) {
@@ -647,6 +653,56 @@ export async function recoverSandboxSetupFailure(
     .publish([{ type: "sandbox.operation.completed", payload: { name } }])
     .catch(() => undefined);
   return new SandboxMachineRestartingError(error);
+}
+
+/**
+ * A compute box whose agent left a command's start unanswered for the op
+ * stream's bound (it died and did not come back, or the box hangs): restart
+ * it, at most once per turn, counted with the process-start restarts under the
+ * same operation, so the person's next command reaches a working box. A box
+ * whose agent answers again by now (another session sharing it may have
+ * restarted it) is left alone. Never throws: the outcome goes into the
+ * command's error.
+ */
+export async function recoverUnresponsiveComputeAgent(
+  machine: UnresponsiveComputeMachine,
+  recovery: Pick<SandboxProcessStartRecovery, "restartsThisTurn" | "publish" | "operationName">,
+): Promise<UnresponsiveAgentRecovery> {
+  if (await machine.agentAnswers().catch(() => false)) return "answering";
+  let restarts: { started: number; completed: number };
+  try {
+    restarts = await recovery.restartsThisTurn();
+  } catch {
+    // Without proof that no restart happened, never risk a restart loop.
+    return "restart_unavailable";
+  }
+  // Begun this turn, whether or not it finished (the worker may have stopped
+  // during it): never a second one.
+  if (restarts.started > 0) return "already_restarted";
+  const name = recovery.operationName;
+  try {
+    // Recorded before the restart, so a crash during it still counts.
+    await recovery.publish([
+      { type: "sandbox.operation.started", payload: { name, reason: "agent_unresponsive" } },
+    ]);
+  } catch {
+    // Unrecorded, it could repeat: none is made.
+    return "restart_unavailable";
+  }
+  try {
+    await machine.restartMachine();
+  } catch (restartError) {
+    await recovery
+      .publish([
+        { type: "sandbox.operation.failed", payload: { name, error: errorText(restartError) } },
+      ])
+      .catch(() => undefined);
+    return "restart_failed";
+  }
+  await recovery
+    .publish([{ type: "sandbox.operation.completed", payload: { name } }])
+    .catch(() => undefined);
+  return "restarted";
 }
 
 /** A lost attempt (fenced, superseded) or a cancelled operation: never

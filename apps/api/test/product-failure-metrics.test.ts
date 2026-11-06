@@ -188,7 +188,7 @@ describe("connect telemetry", () => {
     ).toMatchObject({ flow: "github_app", outcome: "failure", reason: "http_4xx" });
     expect(
       classifyOAuthCallback({
-        route: "/v1/integrations/google-drive/callback",
+        route: "/v1/integrations/fiken/callback",
         status: 302,
         location: "https://app.example/connect/return",
       }),

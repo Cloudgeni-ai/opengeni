@@ -107,32 +107,25 @@ function mcpOperationAuthorityTables(includeWorkspaceMembership = false): Runtim
 }
 
 function googleDriveAuthorityTables(): RuntimeTablePosture[] {
-  return [
-    "connections",
-    "files",
-    "google_drive_object_acl_evidence",
-    "google_drive_object_acl_principals",
-    "knowledge_document_versions",
-    "knowledge_providers",
-    "knowledge_source_sync_index_obligations",
-    "knowledge_source_sync_states",
-  ].map((name) => ({
-    name,
-    owner: "opengeni_migrator",
-    rlsEnabled: false,
-    rlsForced: false,
-    rlsActive: false,
-    policyCount: 0,
-    artifactOutboxDispatcherPolicy: false,
-    artifactMaterializerPolicy: false,
-    select: false,
-    insert: false,
-    update: false,
-    delete: false,
-    truncate: false,
-    references: false,
-    trigger: false,
-  }));
+  return ["connections", "files", "knowledge_document_versions", "knowledge_providers"].map(
+    (name) => ({
+      name,
+      owner: "opengeni_migrator",
+      rlsEnabled: false,
+      rlsForced: false,
+      rlsActive: false,
+      policyCount: 0,
+      artifactOutboxDispatcherPolicy: false,
+      artifactMaterializerPolicy: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+      truncate: false,
+      references: false,
+      trigger: false,
+    }),
+  );
 }
 
 function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
@@ -582,10 +575,10 @@ function safePosture(): RuntimeDatabasePosture {
       },
       {
         // 0988 reads only session tables present in every current posture;
-        // its runtime grant stays deferred for previous-release compatibility.
+        // 0988 withheld its runtime grant and 1274 granted it.
         name: "summarize_queued_turns_by_hold()",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -2122,6 +2115,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1263 MCP auto-connect: five full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 5
+            : 0) +
           // 1241 credit alert state/receipts/deliveries: three full-DML FORCE-RLS tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -2225,6 +2224,7 @@ describe("runtime database posture evaluator", () => {
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
         2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
+        5 + // 1263 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
         4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
         3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
         1; // 1258 Teams conversation context messages: full-DML, FORCE-RLS.
@@ -4150,7 +4150,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 0946, 1103, 1060 and 1107 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218 and 1224 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1211's and 1240's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4290,22 +4290,30 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-      "summarize_queued_turns_by_hold()",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "read_external_identity_v1(uuid, text, text)",
-      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
-      "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     );
+    for (const granted of [
+      "list_organization_vaults_v1(uuid, jsonb)",
+      "list_organization_compute_v1(uuid, uuid, text)",
+    ]) {
+      expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+        `runtime role lacks EXECUTE on private routine ${granted}`,
+      );
+    }
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
     );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(

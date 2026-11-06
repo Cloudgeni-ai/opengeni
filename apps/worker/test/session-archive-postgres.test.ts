@@ -1,14 +1,19 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import {
+  SESSION_ARCHIVE_RESTORE_TABLES,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   getSession,
+  persistModelContextSnapshot,
   submitHumanPromptInTransaction,
+  unarchiveSession,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -88,6 +93,26 @@ async function idleSession(into?: { accountId: string; workspaceId: string; subj
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+  await persistModelContextSnapshot(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+    snapshot: {
+      version: 1,
+      capturedAt: new Date().toISOString(),
+      source: "model_request",
+      requestIndex: 1,
+      instructions: "Be helpful.",
+      providerRequest: { provider: "openai", body: '{"input":[]}', parts: [] },
+      layers: [],
+      tools: [],
+      skills: [],
+      tokens: { instructions: 3, tools: 0, prefix: 3 },
+    },
+  });
   await applySessionTurnSettlement(client.db, scope.workspaceId, {
     sessionId: session.id,
     turnId: claimed.turn.id,
@@ -102,6 +127,10 @@ async function idleSession(into?: { accountId: string; workspaceId: string; subj
       { type: "turn.completed", payload: { output: "Report written." } },
     ],
   });
+  await shared.admin`insert into session_history_items
+    (id, account_id, workspace_id, session_id, turn_id, position, item, created_at, active)
+    values (${crypto.randomUUID()}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+      ${claimed.turn.id}, 1, ${shared.admin.json({ type: "message", role: "assistant", content: "Report written." })}, now(), true)`;
   await shared.admin.begin(async (sql) => {
     await sql`set local session_replication_role = replica`;
     await sql`update session_turns set created_at = created_at - interval '40 days',
@@ -129,6 +158,61 @@ function lines(bytes: Uint8Array): Record<string, unknown>[] {
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** Every row a restore puts back, per table, as JSON in a stable order. */
+async function restorableRows(scope: { workspaceId: string; sessionId: string }) {
+  const tables: Record<string, unknown[]> = {};
+  for (const table of SESSION_ARCHIVE_RESTORE_TABLES) {
+    const rows = await shared.admin.unsafe(
+      `select to_jsonb(t) as row from ${table} t
+        where workspace_id = $1 and session_id = $2 order by to_jsonb(t)::text`,
+      [scope.workspaceId, scope.sessionId],
+    );
+    tables[table] = rows.map((row) => (row as unknown as { row: unknown }).row);
+  }
+  return tables;
+}
+
+/** Archive activities whose object storage is an in-memory map. */
+function inMemoryArchive(objects: Map<string, Uint8Array>) {
+  return createSessionArchiveActivities(
+    async () =>
+      ({
+        db: client.db,
+        bus: { publish: async () => undefined },
+        objectStorage: { deleteObject: async (key: string) => void objects.delete(key) } as never,
+        observability: { info: () => undefined, warn: () => undefined } as never,
+        settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+      }) as unknown as ActivityServices,
+    {
+      upload: async (_storage, key, spool) => {
+        objects.set(key, new Uint8Array(await readFile(spool.path)));
+      },
+      download: async (_storage, object) => {
+        const bytes = objects.get(object.key);
+        if (!bytes) throw new Error(`missing object ${object.key}`);
+        expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(object.sha256);
+        const dir = await mkdtemp(join(tmpdir(), "session-archive-restore-"));
+        const path = join(dir, "bundle.jsonl.zst");
+        await writeFile(path, bytes);
+        return { path, dispose: async () => await rm(dir, { recursive: true, force: true }) };
+      },
+    },
+  );
+}
+
+async function contentState(sessionId: string) {
+  const [row] = await shared.admin<
+    {
+      archived_at: Date | null;
+      content_archive_state: string | null;
+      content_archive: { objectKeys?: string[] } | null;
+      content_restore_requested_at: Date | null;
+    }[]
+  >`select archived_at, content_archive_state, content_archive, content_restore_requested_at
+    from sessions where id = ${sessionId}`;
+  return row!;
 }
 
 describe("idle-session archive worker", () => {
@@ -419,4 +503,198 @@ describe("idle-session archive worker", () => {
     const session = await getSession(client.db, child.workspaceId, child.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");
   }, 120_000);
+});
+
+describe("restoring an archived chat from long-term storage", () => {
+  test("a stored chat and its sub-chat come back with every row they had, and stay live", async () => {
+    const objects = new Map<string, Uint8Array>();
+    const activities = inMemoryArchive(objects);
+    const parent = await idleSession();
+    const child = await idleSession(parent);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set parent_session_id = ${parent.sessionId},
+          root_session_id = ${parent.sessionId}
+        where workspace_id = ${child.workspaceId} and id = ${child.sessionId}`;
+    });
+    const before = {
+      parent: await restorableRows(parent),
+      child: await restorableRows(child),
+    };
+    expect(before.parent.session_history_items!.length).toBeGreaterThan(0);
+    expect(before.parent.session_attempt_model_context_snapshots!.length).toBeGreaterThan(0);
+    // One person's Archive of the chat took the sub-chat with it.
+    await shared.admin`update sessions set archived_at = now() - interval '1 hour',
+        archive_requested_by = ${parent.subjectId}
+      where workspace_id = ${parent.workspaceId}
+        and id in (${parent.sessionId}, ${child.sessionId})`;
+    for (let pass = 0; pass < 4; pass += 1) {
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+      for (const scope of [parent, child]) {
+        if ((await contentState(scope.sessionId)).content_archive_state === null) {
+          await deliverWakes(scope);
+        }
+      }
+    }
+    for (const scope of [parent, child]) {
+      const stored = await contentState(scope.sessionId);
+      expect(stored.content_archive_state).toBe("archived");
+      expect(await restorableRows(scope)).toMatchObject({ session_history_items: [] });
+    }
+    const storedKeys = (await contentState(parent.sessionId)).content_archive!.objectKeys!;
+    expect(storedKeys.length).toBeGreaterThan(0);
+
+    const unarchived = await unarchiveSession(client.db, parent);
+    expect(unarchived?.outcome).toBe("restoring");
+    expect([...unarchived!.restoringSessionIds].sort()).toEqual(
+      [parent.sessionId, child.sessionId].sort(),
+    );
+    expect(
+      (await getSession(client.db, parent.workspaceId, parent.sessionId))?.retention?.archive,
+    ).toMatchObject({ state: "archived", restoring: true });
+
+    expect(await activities.restoreArchivedSessions(parent)).toEqual({ restored: 2 });
+    for (const [scope, rows] of [
+      [parent, before.parent],
+      [child, before.child],
+    ] as const) {
+      const state = await contentState(scope.sessionId);
+      expect(state.content_archive_state).toBeNull();
+      expect(state.archived_at).toBeNull();
+      expect(await restorableRows(scope)).toEqual(rows);
+      const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+      expect(session?.retention?.archive).toBeNull();
+    }
+    // Streamed fragments are not put back; the readable timeline never left.
+    const [events] = await shared.admin<{ deltas: number; completed: number }[]>`
+      select count(*) filter (where type = 'agent.message.delta')::int as deltas,
+        count(*) filter (where type = 'agent.message.completed')::int as completed
+      from session_events where session_id = ${parent.sessionId}`;
+    expect(events).toEqual({ deltas: 0, completed: 1 });
+    // The stored copies are no longer the chat's content; they are deleted.
+    const queued = await shared.admin<{ object_key: string }[]>`
+      select object_key from opengeni_private.session_archive_object_deletions
+      where session_id = ${parent.sessionId}`;
+    expect(queued.map((row) => row.object_key).sort()).toEqual([...storedKeys].sort());
+
+    // Restoring again does nothing, the next pass does not store it again,
+    // and it takes new messages.
+    expect(await activities.restoreArchivedSessions(parent)).toEqual({ restored: 0 });
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    expect((await contentState(parent.sessionId)).content_archive_state).toBeNull();
+    await withWorkspaceSessionActivityRls(client.db, parent.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          ...parent,
+          actor: { type: "human", subjectId: parent.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Carry on",
+          resources: [],
+          source: "user",
+          reasoningEffortFallback: "medium",
+        }),
+      ),
+    );
+  }, 180_000);
+
+  test("a chat that was busy when archived is stored, then restored ready for new messages", async () => {
+    const objects = new Map<string, Uint8Array>();
+    const activities = inMemoryArchive(objects);
+    const parent = await idleSession();
+    const child = await idleSession(parent);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set parent_session_id = ${parent.sessionId},
+          root_session_id = ${parent.sessionId}
+        where workspace_id = ${child.workspaceId} and id = ${child.sessionId}`;
+    });
+    const prompt = async (text: string) =>
+      await withWorkspaceSessionActivityRls(client.db, parent.workspaceId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            ...parent,
+            actor: { type: "human", subjectId: parent.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            source: "user",
+            reasoningEffortFallback: "medium",
+          }),
+        ),
+      );
+    // Busy with new work when someone archives it with its sub-chat.
+    await prompt("Keep going");
+    const [archived] = await shared.admin<{ archived_at: Date }[]>`
+      update sessions set archived_at = now() - interval '1 hour',
+        archive_requested_by = ${parent.subjectId}
+      where workspace_id = ${parent.workspaceId}
+        and id in (${parent.sessionId}, ${child.sessionId})
+      returning archived_at`;
+    // The undo window ends: the Archive stops that work like Cancel does.
+    expect(
+      await activities.stopArchivedSessionWork({
+        ...parent,
+        archivedAt: archived!.archived_at.toISOString(),
+      }),
+    ).toEqual({ pending: true });
+    for (const scope of [parent, child]) {
+      expect((await getSession(client.db, scope.workspaceId, scope.sessionId))?.status).toBe(
+        "cancelled",
+      );
+    }
+    for (let pass = 0; pass < 4; pass += 1) {
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+      for (const scope of [parent, child]) {
+        if ((await contentState(scope.sessionId)).content_archive_state === null) {
+          await deliverWakes(scope);
+        }
+      }
+    }
+    for (const scope of [parent, child]) {
+      expect((await contentState(scope.sessionId)).content_archive_state).toBe("archived");
+    }
+
+    expect((await unarchiveSession(client.db, parent))?.outcome).toBe("restoring");
+    expect(
+      await activities.restoreArchivedSessions({ ...parent, subjectId: parent.subjectId }),
+    ).toEqual({ restored: 2 });
+    for (const scope of [parent, child]) {
+      const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+      expect(session?.status).toBe("idle");
+      expect(session?.retention?.archive).toBeNull();
+    }
+    const [resumed] = await shared.admin<{ direct_control_state: string }[]>`
+      select direct_control_state from sessions where id = ${parent.sessionId}`;
+    expect(resumed!.direct_control_state).toBe("active");
+    // It takes a new message (a cancelled chat refuses it).
+    await prompt("Carry on");
+    const [queued] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from session_turns
+      where session_id = ${parent.sessionId} and status = 'queued'`;
+    expect(queued!.count).toBe(1);
+  }, 180_000);
+
+  test("the maintenance pass finishes a restore whose workflow never ran", async () => {
+    const objects = new Map<string, Uint8Array>();
+    const activities = inMemoryArchive(objects);
+    const scope = await idleSession();
+    const before = await restorableRows(scope);
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    expect((await contentState(scope.sessionId)).content_archive_state).toBe("archived");
+    expect((await unarchiveSession(client.db, scope))?.outcome).toBe("restoring");
+    // Not yet: its own workflow gets the first few minutes.
+    await activities.archiveIdleSessions();
+    expect((await contentState(scope.sessionId)).content_archive_state).toBe("archived");
+
+    await shared.admin`update sessions
+      set content_restore_requested_at = content_restore_requested_at - interval '10 minutes'
+      where id = ${scope.sessionId}`;
+    const pass = await activities.archiveIdleSessions();
+    expect(pass.failed).toBe(0);
+    expect(pass.restored).toBeGreaterThanOrEqual(1);
+    expect((await contentState(scope.sessionId)).content_archive_state).toBeNull();
+    expect(await restorableRows(scope)).toEqual(before);
+  }, 180_000);
 });

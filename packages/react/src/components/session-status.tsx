@@ -72,6 +72,12 @@ export const SESSION_STATUS_META = (
     badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
     pulse: SESSION_STATUS_PRESENTATION(t).cancelled.pulse,
   },
+  archived: {
+    label: SESSION_STATUS_PRESENTATION(t).archived.label,
+    dotClassName: "bg-og-status-cancelled",
+    badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
+    pulse: SESSION_STATUS_PRESENTATION(t).archived.pulse,
+  },
 });
 
 export type SessionStatusProps = {

@@ -7,6 +7,7 @@ import {
   ApiIntegrationProtocol,
   IntegrationSourceInput,
 } from "./integration-sources";
+import { OrganizationConnectorAutoConnect } from "./mcp-auto-connect";
 
 /**
  * Organization connectors (docs/design/ownership-and-reach.md, OR-11): an
@@ -23,10 +24,15 @@ import {
  *   on the organization's setup, never returned, and sent only to that server.
  *   Every turn in a reached workspace uses them. An API integration's key can
  *   also go in a query parameter or cookie, as its API defines.
+ * - `auto_connect`: each person has their own account, connected for them the
+ *   first time they use it, with no sign-in screen. The organization's
+ *   Opengeni issuer vouches for them (an ID-JAG) and the server's
+ *   authorization server, which trusts that issuer, issues their token.
+ *   Remote MCP servers that advertise the ID-JAG grant profile only.
  * - `none`: a server that needs no sign-in.
  */
 export const OrganizationConnectorLogin = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["each_person", "organization_key", "none"]),
+  z.enum(["each_person", "auto_connect", "organization_key", "none"]),
 );
 export type OrganizationConnectorLogin = z.infer<typeof OrganizationConnectorLogin>;
 
@@ -100,6 +106,8 @@ export const OrganizationConnector = /* @__PURE__ */ defineSchema(() =>
     available: primitives.boolean,
     /** `kind: "api"` only. */
     apiIntegration: OrganizationApiIntegrationSummary.nullable(),
+    /** `login: "auto_connect"` only: where members' tokens come from and how it last went. */
+    autoConnect: OrganizationConnectorAutoConnect.nullable(),
     generation: primitives.positiveInteger,
     createdAt: primitives.string,
     updatedAt: primitives.string,
@@ -189,6 +197,27 @@ export const OrganizationApiIntegrationHere = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationApiIntegrationHere = z.infer<typeof OrganizationApiIntegrationHere>;
 
+const autoConnectClientId = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.trim().min(1).max(512),
+);
+
+/** Whether a server can connect people automatically, checked before adding it. */
+export const CheckOrganizationConnectorAutoConnectRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** A catalog connector's id, or a custom server's address. Give exactly one. */
+      capabilityId: primitives.string.trim().min(1).max(300).optional(),
+      endpointUrl: primitives.string.trim().url().max(2048).optional(),
+    })
+    .strict()
+    .refine((value) => (value.capabilityId === undefined) !== (value.endpointUrl === undefined), {
+      message: "Give a capabilityId or an endpointUrl",
+    }),
+);
+export type CheckOrganizationConnectorAutoConnectRequest = z.infer<
+  typeof CheckOrganizationConnectorAutoConnectRequest
+>;
+
 export const CreateOrganizationConnectorRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -204,6 +233,11 @@ export const CreateOrganizationConnectorRequest = /* @__PURE__ */ defineSchema((
       apiKey: apiKeyPlacements.optional(),
       allowedTools: toolNames.nullable().optional(),
       availability: OrganizationConnectorAvailability,
+      /**
+       * `auto_connect` only: the client ID the app gave Opengeni, for an app
+       * that doesn't read Opengeni's Client ID Metadata Document.
+       */
+      autoConnectClientId: autoConnectClientId.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -218,6 +252,12 @@ export const CreateOrganizationConnectorRequest = /* @__PURE__ */ defineSchema((
           path: ["capabilityId"],
         });
       if (value.apiIntegration) {
+        if (value.login === "auto_connect")
+          context.addIssue({
+            code: "custom",
+            message: "Auto-connect is for MCP servers",
+            path: ["login"],
+          });
         if (value.headers !== undefined)
           context.addIssue({
             code: "custom",
@@ -243,6 +283,12 @@ export const CreateOrganizationConnectorRequest = /* @__PURE__ */ defineSchema((
           code: "custom",
           message: "apiKey is only for an API integration",
           path: ["apiKey"],
+        });
+      if (value.autoConnectClientId !== undefined && value.login !== "auto_connect")
+        context.addIssue({
+          code: "custom",
+          message: "A client ID is only for auto-connect",
+          path: ["autoConnectClientId"],
         });
       const headerCount = Object.keys(value.headers ?? {}).length;
       if (value.login === "organization_key" && headerCount === 0)
@@ -273,6 +319,8 @@ export const UpdateOrganizationConnectorRequest = /* @__PURE__ */ defineSchema((
       headers: secretValue(z.record(primitives.string, primitives.string)).optional(),
       /** API integration `organization_key` only: replaces the stored key. */
       apiKey: apiKeyPlacements.optional(),
+      /** `auto_connect` only: the client ID the app gave Opengeni; null uses Opengeni's document. */
+      autoConnectClientId: autoConnectClientId.nullable().optional(),
     })
     .strict(),
 );
