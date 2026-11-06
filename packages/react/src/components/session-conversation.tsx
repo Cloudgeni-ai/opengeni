@@ -52,6 +52,7 @@ import type {
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { AuthNeededRow } from "./auth-needed-row";
+import { capabilityReconnectConnectionId } from "../auth-needed-presentation";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import {
   inChatConnectDecision,
@@ -585,6 +586,7 @@ function ConversationView({
           capabilityId={decision.item.id}
           name={decision.item.name}
           personalOnly={decision.personalOnly}
+          reconnectConnectionId={capabilityReconnectConnectionId(item)}
           rationale={item.capability?.rationale ?? ""}
           // OAuth returns to this exact host page; the card follows the
           // attempt's durable state, so the page needs no return handler.

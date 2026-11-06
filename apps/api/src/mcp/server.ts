@@ -260,6 +260,10 @@ import {
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
   suggestCapabilityCatalogItems,
+  connectionReconnectDay,
+  connectionsNeedingReconnectFor,
+  listConnectionsNeedingReconnect,
+  type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import {
@@ -7446,6 +7450,82 @@ type CapabilitySetupProjection =
     }
   | { status: "unavailable"; action: null; detail: string };
 
+/** One account of a catalog entry that stopped working, as the agent reads it. */
+type CapabilityReconnectAccount = {
+  connectionId: string;
+  account: string;
+  ownership: "personal" | "workspace";
+  stoppedWorkingOn: string;
+  /** A card in this chat can reconnect it (it was added in this workspace). */
+  reconnectHere: boolean;
+};
+
+/**
+ * The person's own and the workspace's accounts for this entry that stopped
+ * working (the provider rejected the saved sign-in). Matched by provider and
+ * MCP endpoint. Entries this deployment cannot connect have none to offer.
+ */
+function capabilityReconnectCandidates(
+  item: CapabilityCatalogItem,
+  inventory: readonly ConnectionNeedingReconnect[],
+): ConnectionNeedingReconnect[] {
+  if (inventory.length === 0 || item.kind !== "mcp" || deploymentCannotConnect(item)) return [];
+  return connectionsNeedingReconnectFor(inventory, {
+    providerDomain: item.connectionRef?.providerDomain ?? capabilityProviderDomain(item),
+    mcpUrl: item.mcpUrl ?? item.endpointUrl,
+  });
+}
+
+function capabilityReconnectAccountLabel(
+  item: Pick<CapabilityCatalogItem, "name">,
+  candidate: ConnectionNeedingReconnect,
+): string {
+  return candidate.ownership === "personal"
+    ? `the person's ${item.name} account ${candidate.account}`
+    : `the workspace's shared ${item.name} account ${candidate.account}`;
+}
+
+/**
+ * Name the accounts that stopped working in the entry's setup, so the agent
+ * can tell the person what happened and offer the card that reconnects that
+ * same account, instead of a first-time Connect that cannot fix it.
+ */
+function withCapabilityReconnectSetup(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+  candidates: readonly ConnectionNeedingReconnect[],
+): CapabilitySetupProjection & { reconnect?: CapabilityReconnectAccount[] } {
+  if (candidates.length === 0) return setup;
+  const here = candidates.filter((candidate) => candidate.addedHere);
+  const lines = candidates.map((candidate) => {
+    const label = capabilityReconnectAccountLabel(item, candidate);
+    const stopped = `${label.charAt(0).toUpperCase()}${label.slice(1)} was connected but stopped working on ${connectionReconnectDay(candidate.since)}: its sign-in expired or was revoked, so it needs reconnecting.`;
+    return candidate.addedHere
+      ? stopped
+      : `${stopped} It was added in another workspace, so a card here can't reconnect it; the person reconnects it from Connections in the workspace where it was added.`;
+  });
+  const guidance =
+    here.length === 0
+      ? "Tell the person plainly that it stopped working and where to reconnect it."
+      : `Tell the person plainly that it was connected and stopped working. capability_authorization_request posts a card that reconnects that same account${
+          here.length > 1 ? "; pass the connectionId of the one the task needs" : ""
+        }. Once reconnected, it works from the person's next message.`;
+  const reconnectText = `${lines.join(" ")} ${guidance}`;
+  return {
+    ...setup,
+    // Once the account is known to be broken, that is the whole story unless
+    // another account is ready; then both are true.
+    detail: setup.status === "ready" ? `${setup.detail} ${reconnectText}` : reconnectText,
+    reconnect: candidates.map((candidate) => ({
+      connectionId: candidate.connectionId,
+      account: candidate.account,
+      ownership: candidate.ownership,
+      stoppedWorkingOn: connectionReconnectDay(candidate.since),
+      reconnectHere: candidate.addedHere,
+    })),
+  };
+}
+
 function registerCapabilityDiscoveryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -7476,6 +7556,29 @@ function registerCapabilityDiscoveryTools(
     });
   // Indexed marketplace plugins: a person installs one from its card.
   const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
+  // Connections that exist but stopped working: the workspace's shared ones
+  // and those of the person this agent acts for. Read only for MCP entries and
+  // never used to select credentials; a failed read just names none.
+  const reconnectInventory = async (
+    items: readonly CapabilityCatalogItem[],
+  ): Promise<ConnectionNeedingReconnect[]> => {
+    if (!items.some((item) => item.kind === "mcp")) return [];
+    try {
+      const subjectId = exactAgentAttemptClaims(grant)
+        ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+            .initiatingHumanSubjectId
+        : grant.principalKind === "service" || grant.principalKind === "api_key"
+          ? null
+          : grant.subjectId;
+      return await listConnectionsNeedingReconnect(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: subjectId ?? null,
+      });
+    } catch {
+      return [];
+    }
+  };
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -7588,7 +7691,10 @@ function registerCapabilityDiscoveryTools(
                   .map((item) => [item.id, item] as const),
               ).values(),
             ];
-      const projected = await setupProjections([...ranked.map(({ item }) => item), ...connections]);
+      const [projected, inventory] = await Promise.all([
+        setupProjections([...ranked.map(({ item }) => item), ...connections]),
+        reconnectInventory(ranked.map(({ item }) => item)),
+      ]);
       const setups = projected.slice(0, ranked.length);
       const usableConnections = connections.filter(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
@@ -7605,28 +7711,36 @@ function registerCapabilityDiscoveryTools(
             .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
         );
       }
-      const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
-        capabilityId: item.id,
-        name: item.name,
-        description: item.description,
-        kind: item.kind,
-        source: item.source,
-        category: item.category,
-        tags: item.tags.slice(0, 16),
-        providerDomain: item.providerDomain,
-        authKind: item.authKind,
-        tier: item.tier,
-        matchedOn,
-        approximate,
-        setup: {
-          ...setups[index]!,
-          requiredVariables: capabilityRequiredVariables(item),
-          nextAction:
-            setups[index]!.status === "authorization_required"
-              ? { toolName: "capability_authorization_request", capabilityId: item.id }
-              : null,
-        },
-      }));
+      const matches = ranked.map(({ item, matchedOn, approximate }, index) => {
+        const setup = withCapabilityReconnectSetup(
+          item,
+          setups[index]!,
+          capabilityReconnectCandidates(item, inventory),
+        );
+        return {
+          capabilityId: item.id,
+          name: item.name,
+          description: item.description,
+          kind: item.kind,
+          source: item.source,
+          category: item.category,
+          tags: item.tags.slice(0, 16),
+          providerDomain: item.providerDomain,
+          authKind: item.authKind,
+          tier: item.tier,
+          matchedOn,
+          approximate,
+          setup: {
+            ...setup,
+            requiredVariables: capabilityRequiredVariables(item),
+            nextAction:
+              setup.status === "authorization_required" ||
+              setup.reconnect?.some((account) => account.reconnectHere)
+                ? { toolName: "capability_authorization_request", capabilityId: item.id }
+                : null,
+          },
+        };
+      });
       // A miss must not read as "this integration does not exist" while the
       // workspace catalog has entries: return the closest names, clearly
       // labelled as suggestions rather than matches.
@@ -7671,9 +7785,16 @@ function registerCapabilityDiscoveryTools(
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
+        connectionId: z4
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
+          ),
       },
     },
-    async ({ capabilityId, rationale }) => {
+    async ({ capabilityId, rationale, connectionId }) => {
       await authorize();
       const current = await catalog();
       const item =
@@ -7683,8 +7804,35 @@ function registerCapabilityDiscoveryTools(
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
-      const [setup] = await setupProjections([item]);
+      const [[setup], inventory] = await Promise.all([
+        setupProjections([item]),
+        reconnectInventory([item]),
+      ]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
+      // An account of this entry that stopped working is reconnected in place:
+      // a first-time Connect cannot replace it. The agent names the one the
+      // task needs; without a name, the only one here is used while no
+      // account is ready for this turn.
+      const candidates = capabilityReconnectCandidates(item, inventory);
+      let reconnect: ConnectionNeedingReconnect | undefined;
+      if (connectionId !== undefined) {
+        reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
+        if (!reconnect)
+          throw new Error(
+            `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
+          );
+      } else if (setup.status !== "ready") {
+        const here = candidates.filter((candidate) => candidate.addedHere);
+        if (here.length > 1)
+          throw new Error(
+            `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
+          );
+        reconnect = here[0];
+      }
+      if (reconnect && !reconnect.addedHere)
+        throw new Error(
+          `${reconnect.account} was added in another workspace, so a card here can't reconnect it. Tell the person to reconnect it from Connections in the workspace where it was added.`,
+        );
       // GitHub is the one capability whose card stays useful once connected:
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
@@ -7695,14 +7843,14 @@ function registerCapabilityDiscoveryTools(
       // chat" and can connect another, so it is shown when machines exist too.
       const machineCardWhenReady =
         setup.status === "ready" && item.id === CONNECTED_MACHINE_CAPABILITY_ID;
-      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady) {
+      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady && !reconnect) {
         return json({
           capabilityId: item.id,
           status: "ready",
           message: setup.detail,
         });
       }
-      if (setup.status === "unavailable") {
+      if (setup.status === "unavailable" && !reconnect) {
         return json({
           capabilityId: item.id,
           status: "unavailable",
@@ -7731,9 +7879,22 @@ function registerCapabilityDiscoveryTools(
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
-        action: setup.action ?? "connect",
+        action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
+        ...(reconnect ? { reconnect } : {}),
       });
+      if (reconnect) {
+        return json({
+          capabilityId: item.id,
+          status: "authorization_requested",
+          action: "connect",
+          connectionId: reconnect.connectionId,
+          eventId,
+          message: personCannotConnect
+            ? `The card was posted, but this person can't reconnect ${item.name} from here: their access doesn't allow it, and the card tells them so. Tell them ${reconnect.account} stopped working on ${connectionReconnectDay(reconnect.since)} and that whoever manages this app has to reconnect it. Nothing is reconnected.`
+            : `The card to reconnect ${capabilityReconnectAccountLabel(item, reconnect)} was posted. It signs in again to that same account, which stopped working on ${connectionReconnectDay(reconnect.since)}; nothing is reconnected yet. Tell the person plainly that it stopped working and that the card reconnects it. It works from their next message after reconnecting.`,
+        });
+      }
       if (machineCardWhenReady) {
         return json({
           capabilityId: item.id,
@@ -8131,6 +8292,8 @@ async function appendCapabilityCardEvent(
     action: "connect" | "add_credentials" | "enable";
     rationale: string;
     toolName?: string;
+    /** The account that stopped working which this card reconnects. */
+    reconnect?: ConnectionNeedingReconnect;
   },
 ): Promise<string | null> {
   const { item } = input;
@@ -8159,13 +8322,23 @@ function capabilityCardPayload(
     action: "connect" | "add_credentials" | "enable";
     rationale: string;
     toolName?: string;
+    reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
     serverId: item.runtime.mcpServerId ?? "opengeni",
     toolName: input.toolName ?? "capability_authorization_request",
     providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
+    // A card for an account that stopped working reconnects that exact
+    // connection; every other card is a first connection.
+    ...(input.reconnect
+      ? {
+          reason: "refresh_failed",
+          connectionId: input.reconnect.connectionId,
+          connectionSubjectScope:
+            input.reconnect.ownership === "personal" ? "subject" : "workspace",
+        }
+      : { reason: "missing_connection" }),
     capability: {
       id: item.id,
       name: item.name,

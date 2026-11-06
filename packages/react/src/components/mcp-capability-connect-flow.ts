@@ -102,6 +102,12 @@ export type McpCapabilityConnectInput = {
    * someone's own account, or the person may only connect their own account.
    */
   personalOnly?: boolean | undefined;
+  /**
+   * The account the agent asked to reconnect: a connection of this person's
+   * that stopped working. When it is theirs to reconnect here, the card signs
+   * in again to that same connection instead of adding a new one.
+   */
+  reconnectConnectionId?: string | undefined;
 };
 
 /**
@@ -120,6 +126,7 @@ export function useMcpCapabilityConnect({
   dialogOnly = false,
   onClose,
   personalOnly: configuredPersonalOnly = false,
+  reconnectConnectionId,
 }: McpCapabilityConnectInput): McpCapabilityConnect {
   const t = useOpenGeniText();
   const [controller] = useState(
@@ -218,7 +225,11 @@ export function useMcpCapabilityConnect({
       if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
       const matches = matchingActiveMcpConnections(resolved, connections);
       const usableHere = matches.filter((entry) => !ownLoginOffHere(entry));
-      accountReady = usableHere.length === 1;
+      // Asked to reconnect one account: another working account does not
+      // finish that, only this one working again does.
+      accountReady = reconnectConnectionId
+        ? usableHere.some((entry) => entry.id === reconnectConnectionId)
+        : usableHere.length === 1;
       if (usableHere.length === 0) ownLoginElsewhere = matches.find(ownLoginOffHere) ?? null;
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
@@ -413,21 +424,41 @@ export function useMcpCapabilityConnect({
       try {
         const resolved = await load(active);
         if (!resolved || !active()) return;
+        const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
+        if (!mcpUrl)
+          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
+        // The agent asked to reconnect one exact account that stopped working.
+        // Only a connection this person can see here, for this same endpoint,
+        // is reconnected; anything else connects as before (a teammate viewing
+        // the card connects their own account).
+        const lapsed = reconnectConnectionId
+          ? (await client.listConnections(workspaceId)).find(
+              (entry) =>
+                entry.id === reconnectConnectionId &&
+                entry.kind === "oauth2" &&
+                entry.status !== "active" &&
+                (typeof entry.metadata.mcpUrl !== "string" || entry.metadata.mcpUrl === mcpUrl),
+            )
+          : undefined;
+        if (!active()) return;
+        const beginOwnership: ConnectOwnership = lapsed
+          ? lapsed.subjectId === null
+            ? "workspace"
+            : "personal"
+          : ownership;
+        if (beginOwnership !== ownership) setOwnership(beginOwnership);
         if (
           resolved.connectionRef &&
-          ownership !==
+          beginOwnership !==
             (resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace")
         )
           throw new ConnectCardMessage(
             t("sessionMcpCapabilityCard.theConnectionOwnershipChangedReview"),
           );
-        const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
-        if (!mcpUrl)
-          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
         // Never silently replace an already selected account. Reauthorization
         // stays on its exact native connection ID.
-        let reconnectAccountId = resolved.connectionRef?.connectionId ?? undefined;
-        if (resolved.connectionRef?.subjectScope === "subject") {
+        let reconnectAccountId = lapsed?.id ?? resolved.connectionRef?.connectionId ?? undefined;
+        if (!lapsed && resolved.connectionRef?.subjectScope === "subject") {
           const connections = (await client.listConnections(workspaceId)).filter(
             (entry) =>
               entry.subjectId !== null &&
@@ -442,7 +473,12 @@ export function useMcpCapabilityConnect({
         // A closed request can still have reached the server. Keep its key for
         // an exact replay, but never reuse it when ownership or another input
         // changes while the user reopens setup.
-        const input = JSON.stringify({ ownership, returnUrl, reconnectAccountId, mcpUrl });
+        const input = JSON.stringify({
+          ownership: beginOwnership,
+          returnUrl,
+          reconnectAccountId,
+          mcpUrl,
+        });
         if (startInput.current !== null && startInput.current !== input) {
           startKey.current = crypto.randomUUID();
           advanceKey.current = crypto.randomUUID();
@@ -450,7 +486,7 @@ export function useMcpCapabilityConnect({
         startInput.current = input;
         let attempt = await controller.begin({
           providerId: mcpUrl === GOOGLE_DRIVE_MCP_URL ? "google-drive" : "mcp-oauth",
-          ownership,
+          ownership: beginOwnership,
           returnUrl,
           // A browser popup ends on a page that closes itself instead of
           // loading this page a second time; a phone returns to the app.

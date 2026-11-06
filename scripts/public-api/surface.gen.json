@@ -40364,6 +40364,7 @@
       "authNeededPresentation": "value",
       "AuthNeededPresentation": "type",
       "canFinishPreparedMcpSetup": "value",
+      "capabilityReconnectConnectionId": "value",
       "ConnectAttempt": "type",
       "ConnectAttemptHints": "type",
       "ConnectController": "type",

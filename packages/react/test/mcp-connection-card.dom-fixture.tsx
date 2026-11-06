@@ -942,6 +942,90 @@ test("Drive card connects through its dedicated provider and enables only the co
   }
 });
 
+test("a card for an account that stopped working reconnects that exact account", async () => {
+  sessionStorage.clear();
+  const personal = {
+    ...item,
+    id: "mail-personal",
+    name: "Mail",
+    connectionRef: { providerDomain: "service.example", kind: "oauth2", subjectScope: "subject" },
+  } as CapabilityCatalogItem;
+  // The person has two accounts for it; one stopped working.
+  const lapsed = {
+    ...connection,
+    id: "lapsed-account",
+    subjectId: "user:ada",
+    status: "needs_reauth",
+  } as ConnectionMetadata;
+  const working = { ...connection, id: "working-account", subjectId: "user:ada" };
+  const begins: Array<Record<string, unknown>> = [];
+  const client = {
+    listCapabilities: async () => ({ items: [personal] }),
+    listConnections: async () => [lapsed, working],
+    listOwnConnectionAccounts: async () => [lapsed, working],
+    connectTransport: () => ({
+      begin: async (_workspaceId: string, input: Record<string, unknown>) => {
+        begins.push(input);
+        return {
+          id: "reconnect-attempt",
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "personal",
+          revision: 1,
+          state: "requires_user_action",
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "integration",
+          nextAction: { type: "none" },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={personal.id}
+      name="Mail"
+      returnUrl="https://host.example/"
+      reconnectConnectionId={lapsed.id}
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Signs in again to the same account. Its settings stay as they were.",
+    );
+    expect(document.querySelector('input[type="radio"]')).toBeNull();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Mail",
+    );
+    await actRun(() => button!.click());
+    await flush();
+    // Two personal accounts would otherwise refuse to guess; the card names one.
+    expect(begins).toEqual([
+      expect.objectContaining({
+        providerId: "mcp-oauth",
+        ownership: "personal",
+        reconnectAccountId: lapsed.id,
+      }),
+    ]);
+    expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 test("connecting your own account to a capability enabled for personal accounts changes no installation", async () => {
   sessionStorage.clear();
   let committed = false;

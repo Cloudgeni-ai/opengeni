@@ -2665,6 +2665,166 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(0);
   });
 
+  test("tells the owner hook once, only when this resolve moved the connection to needs_reauth", async () => {
+    const stale = () =>
+      brokerCredential({
+        id: authorityIds.connectionId,
+        accountId: authorityIds.organizationId,
+        workspaceId: authorityIds.originWorkspaceId,
+        subjectId: "user:owner",
+        providerDomain: "api.example.com",
+        kind: "oauth2",
+        credential: { access_token: "expired", refresh_token: "rejected" },
+        expiresAt: new Date(Date.now() - 1_000),
+        authorityGeneration: 7,
+        version: 13,
+      });
+    const authorizeAcceptedUse: ConnectionBrokerDeps["authorizeAcceptedUse"] = async () => ({
+      status: "authorized",
+      originWorkspaceId: authorityIds.originWorkspaceId,
+      connectionKind: "oauth2",
+      attribution: {
+        organizationId: authorityIds.organizationId,
+        workspaceId: authorityIds.workspaceId,
+        sessionId: authorityIds.sessionId,
+        connectionId: authorityIds.connectionId,
+        connectionGeneration: 7,
+        scope: "user",
+        ownerSubjectId: "user:owner",
+        authorityId: "00000000-0000-4000-8000-000000000108",
+        grantId: null,
+      },
+    });
+    const resolve = async (
+      overrides: Partial<ConnectionBrokerDeps>,
+      broken: Array<Record<string, unknown>>,
+      withUse = true,
+    ) =>
+      await buildConnectionTokenResolver(
+        {} as Database,
+        settings,
+        resolverDeps({ authorizeAcceptedUse, loadCredential: async () => stale(), ...overrides })
+          .deps,
+        {
+          onConnectionNeedsReauth: async (event) => {
+            broken.push(event);
+          },
+        },
+      )({
+        workspaceId: authorityIds.workspaceId,
+        serverId: "personal-mail",
+        destinationUrl: "https://api.example.com/mcp",
+        // Outside a chat turn only a shared (workspace) reference resolves.
+        connectionRef: withUse
+          ? {
+              connectionId: authorityIds.connectionId,
+              providerDomain: "api.example.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            }
+          : { providerDomain: "api.example.com", kind: "oauth2" },
+        ...(withUse ? { connectionUseContext: acceptedConnectionUseContext() } : {}),
+      });
+    const rejected = async () => {
+      throw new ConnectionRefreshHttpError(400, "invalid_grant");
+    };
+
+    // The provider rejected the grant and this resolve made the transition.
+    const transitioned: Array<Record<string, unknown>> = [];
+    expect(await resolve({ refresh: rejected }, transitioned)).toMatchObject({
+      status: "auth_needed",
+      reason: "refresh_failed",
+    });
+    const use = acceptedConnectionUseContext();
+    expect(transitioned).toEqual([
+      {
+        workspaceId: authorityIds.originWorkspaceId,
+        connectionId: authorityIds.connectionId,
+        subjectId: "user:owner",
+        providerDomain: "api.example.com",
+        httpStatus: 400,
+        use: {
+          workspaceId: use.workspaceId,
+          sessionId: use.sessionId,
+          turnId: use.turnId,
+          attemptId: use.attemptId,
+          executionGeneration: use.executionGeneration,
+        },
+      },
+    ]);
+
+    // Without an accepted chat turn the hook still hears it, with no chat.
+    const outsideTurn: Array<Record<string, unknown>> = [];
+    expect(
+      await resolve(
+        {
+          refresh: rejected,
+          loadCredential: async () => ({
+            ...stale(),
+            workspaceId: authorityIds.workspaceId,
+            subjectId: null,
+          }),
+        },
+        outsideTurn,
+        false,
+      ),
+    ).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    expect(outsideTurn).toHaveLength(1);
+    expect(outsideTurn[0]).not.toHaveProperty("use");
+
+    // Another resolve already moved it (the guarded status write lost): silent.
+    const lostRace: Array<Record<string, unknown>> = [];
+    await resolve({ refresh: rejected, setStatus: async () => false }, lostRace);
+    expect(lostRace).toEqual([]);
+
+    // A transient token-endpoint failure leaves it active: silent.
+    const transient: Array<Record<string, unknown>> = [];
+    await resolve(
+      {
+        refresh: async () => {
+          throw new ConnectionRefreshHttpError(503);
+        },
+      },
+      transient,
+    );
+    expect(transient).toEqual([]);
+
+    // An already broken connection is reported to the caller, never again to the owner.
+    const alreadyBroken: Array<Record<string, unknown>> = [];
+    expect(
+      await resolve(
+        { loadCredential: async () => ({ ...stale(), status: "needs_reauth" }) },
+        alreadyBroken,
+      ),
+    ).toMatchObject({ status: "auth_needed" });
+    expect(alreadyBroken).toEqual([]);
+
+    // A failing hook never changes the credential result.
+    const failingHook = await buildConnectionTokenResolver(
+      {} as Database,
+      settings,
+      resolverDeps({ authorizeAcceptedUse, loadCredential: async () => stale(), refresh: rejected })
+        .deps,
+      {
+        onConnectionNeedsReauth: async () => {
+          throw new Error("notice store down");
+        },
+      },
+    )({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "personal-mail",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      connectionUseContext: acceptedConnectionUseContext(),
+    });
+    expect(failingHook).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+  });
+
   test("a provider adapter owns a bounded permanent-refresh lifecycle transition", async () => {
     const stale = brokerCredential({
       id: "conn_google",
