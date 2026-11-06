@@ -396,7 +396,9 @@ async function liveStep(context: StepContext): Promise<StepOutcome> {
         subscription.id,
         failed,
       );
-      if (!current) throw new Error("The subscription was removed while it was refreshed");
+      if (!current) {
+        throw new Error("The subscription was removed while it was refreshed", { cause: error });
+      }
       return { ...(await pollStep({ ...context, subscription: current })), pollReason: failed };
     }
   }
