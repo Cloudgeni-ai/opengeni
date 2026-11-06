@@ -815,8 +815,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
   /**
    * Your GitHub holds only the repo scope, and GitHub's organization list
    * needs read:org, so organizations come from the repositories the person
-   * can reach as a member or collaborator. Public memberships /user/orgs
-   * still returns are added when it answers.
+   * can reach as a member or collaborator.
    */
   private async listOrganizations(toolName: string): Promise<unknown> {
     const organizations = new Map<string, { id: number | null; login: string }>();
@@ -841,28 +840,6 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
         complete = true;
         break;
       }
-    }
-    try {
-      const memberships = await this.request(
-        toolName,
-        null,
-        new URL("/user/orgs?per_page=100", GITHUB_REST_API_ORIGIN),
-        { method: "GET" },
-        true,
-      );
-      if (Array.isArray(memberships.payload)) {
-        for (const row of memberships.payload) {
-          const organization = projectOrganization(row);
-          if (organization.login && !organizations.has(organization.login.toLowerCase())) {
-            organizations.set(organization.login.toLowerCase(), {
-              id: organization.id,
-              login: organization.login,
-            });
-          }
-        }
-      }
-    } catch {
-      // Needs read:org for private memberships; the repository scan stands alone.
     }
     return resultEnvelope(
       {
@@ -1974,14 +1951,6 @@ function projectCodeSearch(value: unknown) {
     },
   };
 }
-function projectOrganization(value: unknown) {
-  const row = objectRecord(value);
-  return {
-    id: outputInteger(row.id),
-    login: optionalOutputString(row.login, 128),
-    description: optionalOutputString(row.description, 512),
-  };
-}
 function projectListedRepository(value: unknown) {
   const row = objectRecord(value);
   return {
@@ -2193,7 +2162,8 @@ export async function readLogWindow(
     }
   }
   const endByte = startByte + bytes.byteLength;
-  const more = !complete || endByte < seen;
+  // An offset past what one read scans cannot page forward from here.
+  const more = (!complete || endByte < seen) && (tail || endByte > start);
   return {
     text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
     startByte,

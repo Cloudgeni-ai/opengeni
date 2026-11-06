@@ -406,10 +406,6 @@ describe("GitHub read tools", () => {
           { id: 79, full_name: "friend/tool", owner: { id: 9, login: "friend", type: "User" } },
         ]);
       }
-      if (href.startsWith("https://api.github.com/user/orgs")) {
-        // Needs read:org, which Your GitHub does not hold.
-        return response({ message: "Resource not accessible" }, 403);
-      }
       if (href === "https://api.github.com/users/acme") {
         return response({ login: "acme", type: "Organization" });
       }
@@ -426,6 +422,8 @@ describe("GitHub read tools", () => {
     });
     const scan = new URL(urls[0]!);
     expect(scan.pathname).toBe("/user/repos");
+    // /user/orgs needs read:org, which Your GitHub does not hold.
+    expect(urls.some((url) => url.includes("/user/orgs"))).toBe(false);
     expect(scan.searchParams.get("affiliation")).toBe("organization_member,collaborator");
     const repos = await server.callToolResult("owner_repositories_list", {
       owner: "acme",
@@ -436,7 +434,7 @@ describe("GitHub read tools", () => {
       fullName: "acme/widgets",
       private: true,
     });
-    const search = new URL(urls[3]!);
+    const search = new URL(urls[2]!);
     expect(search.pathname).toBe("/search/repositories");
     expect(search.searchParams.get("q")).toBe("widg in:name org:acme");
   });
@@ -692,5 +690,12 @@ describe("readLogWindow", () => {
     expect(window.totalBytes).toBeNull();
     expect(window.endByte).toBe(50);
     expect(window.nextOffset).toBe(50);
+    // An offset past the scan never pages back to an earlier offset.
+    const beyond = await readLogWindow(stream("x".repeat(100), 10), {
+      offset: 80,
+      maxBytes: 20,
+      scanMaxBytes: 50,
+    });
+    expect(beyond).toMatchObject({ text: "", nextOffset: null, totalBytes: null });
   });
 });

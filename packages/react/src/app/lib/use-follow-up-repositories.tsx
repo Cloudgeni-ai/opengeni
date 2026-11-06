@@ -688,7 +688,8 @@ export function useFollowUpRepositories(
       onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
       onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
       // Only All my repositories can use a repository found past the listed ones.
-      ...(context.personalGitHubSelection?.allRepositoriesAccess
+      ...(context.personalGitHubSelection?.allRepositoriesAccess &&
+      context.personalGitHubStatus?.allRepositoriesAvailable !== false
         ? {
             onSearchPersonalGitHubRepositories: (query: string) =>
               context.searchPersonalGitHubRepositories(session.workspaceId, query),

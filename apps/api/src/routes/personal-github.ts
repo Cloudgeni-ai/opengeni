@@ -203,20 +203,23 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         connectionId,
       });
       const request = await parseRequestJson(c, ReplacePersonalGitHubRepositorySelectionsRequest);
-      if (
-        request.allRepositoriesAccess &&
-        !(
-          deps.settings.githubPersonalOauthEnabled &&
-          deps.settings.githubPersonalAllRepositoriesEnabled
-        )
-      ) {
-        throw new HTTPException(409, {
-          message:
-            "All my repositories is not available on this deployment yet. Choose repositories instead.",
-        });
-      }
       try {
         const current = await loadRepositorySelectionState(deps, access.grant, connection);
+        // Turning the mode on, or changing its access, waits for the
+        // deployment to allow it; keeping or turning off a stored one does not.
+        if (
+          request.allRepositoriesAccess &&
+          request.allRepositoriesAccess !== current.allRepositoriesAccess &&
+          !(
+            deps.settings.githubPersonalOauthEnabled &&
+            deps.settings.githubPersonalAllRepositoriesEnabled
+          )
+        ) {
+          throw new HTTPException(409, {
+            message:
+              "All my repositories is not available on this deployment yet. Choose repositories instead.",
+          });
+        }
         assertRepositoryConnectionAuthorityFence(current, request);
         const verified = await verifyLivePersonalGitHubRepositories(deps, {
           accountId: access.grant.accountId,

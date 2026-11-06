@@ -146,7 +146,11 @@ describe("personal GitHub repository capabilities", () => {
       query: { cursor: 1, limit: 30 },
     };
     await expect(
-      listLivePersonalGitHubRepositoryBranches({ db: {}, settings: {} } as never, input, services),
+      listLivePersonalGitHubRepositoryBranches(
+        { db: {}, settings: { githubPersonalAllRepositoriesEnabled: true } } as never,
+        input,
+        services,
+      ),
     ).resolves.toEqual({ branches: [{ name: "trunk", isDefault: true }], nextCursor: null });
     expect(urls).toEqual([
       "https://api.github.com/repositories/77",
@@ -162,10 +166,14 @@ describe("personal GitHub repository capabilities", () => {
     const off = { ...selection, allRepositoriesAccess: null };
     const states = [selection, off];
     await expect(
-      listLivePersonalGitHubRepositoryBranches({ db: {}, settings: {} } as never, input, {
-        ...services,
-        getSelectionState: async () => states.shift() ?? null,
-      }),
+      listLivePersonalGitHubRepositoryBranches(
+        { db: {}, settings: { githubPersonalAllRepositoriesEnabled: true } } as never,
+        input,
+        {
+          ...services,
+          getSelectionState: async () => states.shift() ?? null,
+        },
+      ),
     ).rejects.toMatchObject({ code: "repository_selection_changed" });
   });
 

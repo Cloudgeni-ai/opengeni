@@ -434,7 +434,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     : null;
   // Unknown until the selection loads: a failed read is not "0 repos".
   const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
-  const personalAllRepositories = Boolean(context.personalGitHubSelection?.allRepositoriesAccess);
+  const personalAllRepositories =
+    Boolean(context.personalGitHubSelection?.allRepositoriesAccess) &&
+    context.personalGitHubStatus?.allRepositoriesAvailable !== false;
   const startPersonalConnect = (reconnecting: boolean) => {
     // Return from GitHub straight into the repository chooser.
     markPersonalGitHubRepositoryChooser(workspaceId);

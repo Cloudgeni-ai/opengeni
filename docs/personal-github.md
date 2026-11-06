@@ -165,8 +165,8 @@ without repositories. The mode is therefore offered only when
 `OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is on (status
 `allRepositoriesAvailable`); turn it on once every API and worker runs this
 release. While it is off, the replace route refuses to turn the mode on (409),
-admission ignores a stored mode, and the catalog shows only the chosen
-repositories as usable; the person can still turn a stored mode off.
+admission, branch listing, the catalog and the pickers ignore a stored mode;
+the person can still keep or turn off a stored mode.
 
 ## Read tools
 
@@ -175,8 +175,8 @@ person, through the same REST bridge and action policy (all are reads):
 
 - `organizations_list`: the organizations whose repositories the person can
   reach. The connection has only the `repo` scope, which `/user/orgs` does not
-  accept, so the list comes from the person's repositories (and `/user/orgs`
-  when GitHub answers); `complete` is false when the scan stopped early.
+  accept, so the list comes from the person's repositories; `complete` is
+  false when the scan stopped early.
 - `owner_repositories_list`: repositories of a user or organization, with
   `filter` (name search through GitHub search) and pagination.
 - `workflow_runs_list`: Actions runs, filtered by workflow, branch, pull

@@ -524,7 +524,7 @@ async function requireSelectedPersonalGitHubRepository(
       expected ? "repository_selection_changed" : "repository_not_selected",
     );
   }
-  if (selection.allRepositoriesAccess) {
+  if (selection.allRepositoriesAccess && deps.settings.githubPersonalAllRepositoriesEnabled) {
     // All my repositories: GitHub says which repository this is and whether
     // the person can read it.
     if (expected) {
