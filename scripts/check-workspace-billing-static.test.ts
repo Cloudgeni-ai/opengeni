@@ -58,6 +58,7 @@ describe("workspace provider import guard", () => {
     "apps/api/src/routes/billing-auto-top-up.ts",
     "apps/api/test/billing-auto-top-up.test.ts",
     "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+    "apps/api/test/billing-auto-top-up-integration-postgres.test.ts",
     "apps/api/test/billing-auto-top-up.stripe-proof.ts",
     "apps/api/test/billing-subscriptions.test.ts",
     "apps/api/test/billing-subscriptions-review-postgres.test.ts",

@@ -33,6 +33,7 @@ import {
   releaseTeamsWelcome,
   pruneTeamsWelcomes,
   invalidateTeamsGroup,
+  clearTeamsContextConversation,
   teamsGroupRouteActive,
   type TeamsGroupAudience,
   getWorkspaceTeamsInstallation,
@@ -72,6 +73,7 @@ import {
   teamsTenantEnabled,
   teamsServiceUrl,
   normalizeTeamsMessage,
+  teamsThreadlessConversationId,
   normalizeTeamsFeedback,
   teamsPersonalInstall,
   teamsRouteId,
@@ -80,8 +82,15 @@ import {
   type TeamsFeedback,
   type TeamsMessage,
   type TeamsLinkProof,
+  type TeamsMessageRejection,
   type TeamsPersonalInstall,
 } from "./teams-protocol";
+import {
+  loadTeamsMentionModelContext,
+  markTeamsContextMention,
+  recordTeamsContext,
+  reviseTeamsContext,
+} from "./teams-context";
 import {
   mintTeamsAdminState,
   teamsAdminAuthorizationUrl,
@@ -854,8 +863,18 @@ export async function handleTeamsActivity(
   const change = teamsGroupMembershipChange(body, botId);
   if (change) {
     const installation = await getTeamsInstallation(deps.db, change.tenantId);
-    if (installation?.active)
+    if (installation?.active) {
       await invalidateTeamsGroup(deps.db, installation, change.conversationId);
+      // Someone added to the chat must not get answers built from
+      // messages Teams did not show them.
+      const added = (body as { membersAdded?: unknown[] } | null)?.membersAdded;
+      if (Array.isArray(added) && added.length)
+        await clearTeamsContextConversation(
+          deps.db,
+          installation,
+          teamsThreadlessConversationId(change.conversationId),
+        );
+    }
     return { status: 200 };
   }
   const install = teamsPersonalInstall(body);
@@ -874,9 +893,36 @@ export async function handleTeamsActivity(
     observed(await recordTeamsFeedback(deps, feedback));
     return { status: 200 };
   }
-  const m = normalizeTeamsMessage(body, (diagnostic) => {
+  // Edits and deletions update recorded context; they never start work.
+  try {
+    if (await reviseTeamsContext(deps, body)) {
+      observed("context_revised");
+      return { status: 200 };
+    }
+  } catch {
+    observed("context_revise_failed");
+    return { status: 200 };
+  }
+  const ignored: TeamsMessageRejection[] = [];
+  const m = normalizeTeamsMessage(body, (diagnostic) => ignored.push(diagnostic));
+  // Every human message in an approved channel or group chat is kept as
+  // bounded context for the next mention there, except commands to
+  // Opengeni such as "help". Only a mention below starts work; a failed
+  // write never blocks it.
+  let recorded = false;
+  if (!(m && teamsCommand(m.text)))
+    try {
+      recorded = await recordTeamsContext(deps, body);
+      if (recorded) observed("context_recorded");
+    } catch {
+      observed("context_record_failed");
+    }
+  for (const diagnostic of ignored) {
+    // With resource-specific consent most recorded messages carry no
+    // mention: that is expected, not worth a log line each.
+    if (recorded && diagnostic.reason === "missing_mention") continue;
     deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
-  });
+  }
   if (!m) return { status: 200 };
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
@@ -1532,6 +1578,14 @@ async function drainRoute(
     }
     const text = inbound.payload.text;
     if (typeof text !== "string") throw new Error("teams_inbox_payload_invalid");
+    // Recorded channel or group chat messages before this mention: since the
+    // previous mention when it continues the conversation's chat.
+    const modelContext = await loadTeamsMentionModelContext(
+      deps,
+      i,
+      inbound.payload,
+      r.session_bound,
+    );
     const scoped = await catalogDeps(deps, grant);
     const admissionActor = await actorGrant(deps, i, inbound.actor_id);
     if (
@@ -1561,6 +1615,7 @@ async function drainRoute(
           {
             requestedSessionId: r.session_id,
             initialMessage: text,
+            ...(modelContext ? { modelContext } : {}),
             visibility: r.personal ? "private" : "workspace",
             idempotencyKey: `teams:${r.route_id}`,
             clientEventId: inbound.event_id,
@@ -1586,6 +1641,7 @@ async function drainRoute(
           r.session_id,
           {
             text,
+            ...(modelContext ? { modelContext } : {}),
             clientEventId: inbound.event_id,
             teamsConversation: {
               routeId: r.route_id,
@@ -1605,6 +1661,16 @@ async function drainRoute(
         ]);
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
+      // The chat has now seen this mention and its context: a later mention
+      // that continues the chat reads back only to here. Refused mentions
+      // stay ordinary context.
+      const { conversationId, eventId } = inbound.payload as Record<string, unknown>;
+      if (typeof conversationId === "string" && typeof eventId === "string")
+        await markTeamsContextMention(deps, i, { conversationId, eventId }).catch(() =>
+          deps.observability?.info("Teams authenticated activity outcome", {
+            reason: "context_mention_mark_failed",
+          }),
+        );
     } catch (error) {
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =
