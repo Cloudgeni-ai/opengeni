@@ -6053,6 +6053,26 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
   if (requestedIds.length === 0) {
     return false;
   }
+  const allowed = await listAllowedGitHubRepositoryIdsForWorkspace(
+    db,
+    workspaceId,
+    installationId,
+    requestedIds,
+  );
+  return allowed.length === requestedIds.length;
+}
+
+/** Per-repository decisions under the same workspace and audited installation
+ * authority as the all-or-nothing allowlist check. Never grants installation
+ * authority merely because a repository row exists. */
+export async function listAllowedGitHubRepositoryIdsForWorkspace(
+  db: Database,
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<number[]> {
+  const requestedIds = [...new Set(repositoryIds)];
+  if (requestedIds.length === 0) return [];
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [installation] = await scopedDb
       .select()
@@ -6065,7 +6085,7 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
       )
       .limit(1);
     if (!installation) {
-      return false;
+      return [];
     }
     const allowed = await scopedDb
       .select({
@@ -6079,13 +6099,15 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
           inArray(schema.githubInstallationRepositories.repositoryId, requestedIds),
         ),
       );
-    if (allowed.length !== requestedIds.length) {
-      return false;
-    }
-    return hasAuditableGitHubInstallationAuthority({
-      ...mapGitHubInstallation(installation),
-      repositoryIds: allowed.map((row) => row.repositoryId),
-    });
+    if (
+      !hasAuditableGitHubInstallationAuthority({
+        ...mapGitHubInstallation(installation),
+        repositoryIds: allowed.map((row) => row.repositoryId),
+      })
+    )
+      return [];
+    const allowedIds = new Set(allowed.map((row) => row.repositoryId));
+    return requestedIds.filter((id) => allowedIds.has(id));
   });
 }
 
@@ -43699,9 +43721,15 @@ export async function recoverManagedSessionBackgroundCommand(
       executionGeneration: process.ownerExecutionGeneration,
       command: `Retained command ${process.providerSessionId}; execution outcome unknown after interrupted turn. Inspect the existing execution; it has not been replayed.`,
     });
-    const control = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-      lock: "none",
-    });
+    const control = await evaluateSessionWriteAdmissionControl(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      {
+        lock: "none",
+        lockedSession: session,
+      },
+    );
     const stopping = process.cancellationRequestedAt !== null || control.state !== "active";
     if (stopping)
       await tx
@@ -90651,11 +90679,11 @@ export async function markSessionWorkflowWakeDelivered(
         const session = locks.sessions[0];
         if (!session)
           return { action: "pending_admission", blocker: "session_unavailable" } as const;
-        const effectiveControl = await evaluateSessionControl(
+        const effectiveControl = await evaluateSessionWriteAdmissionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { workspaceControl: locks.control ?? undefined },
+          { workspaceControl: locks.control ?? undefined, lockedSession: session },
         );
         if (effectiveControl.state === "active" && !session.admissionBlock) {
           const [pendingAgentSteer] = await tx
