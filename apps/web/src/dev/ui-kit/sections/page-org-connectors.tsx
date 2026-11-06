@@ -24,6 +24,7 @@ const HERE = shared[0]!.id;
 
 function connector(overrides: Partial<OrganizationConnector>): OrganizationConnector {
   return {
+    autoConnect: null,
     id: "4f1d0c4a-1b2c-4d3e-8f9a-0b1c2d3e4f50",
     organizationId: organization.id,
     kind: "mcp",
@@ -109,6 +110,42 @@ const CONNECTORS: OrganizationConnector[] = [
 ];
 
 const API = CONNECTORS[4]!;
+
+const ISSUER = `https://app.opengeni.ai/v1/organizations/${organization.id}/identity`;
+const CLIENT_ID = "https://app.opengeni.ai/oauth/client-metadata.json";
+
+function autoConnector(
+  id: string,
+  name: string,
+  autoConnect: Partial<NonNullable<OrganizationConnector["autoConnect"]>>,
+): OrganizationConnector {
+  return connector({
+    id,
+    capabilityId: `registry:${name.toLowerCase()}`,
+    name,
+    endpointUrl: `https://mcp.${name.toLowerCase()}.com/mcp`,
+    login: "auto_connect",
+    autoConnect: {
+      issuer: ISSUER,
+      authorizationServer: `https://auth.${name.toLowerCase()}.com`,
+      clientId: CLIENT_ID,
+      verifiedAt: null,
+      lastError: null,
+      ...autoConnect,
+    },
+  });
+}
+
+const AUTO_WAITING = autoConnector("c1a00000-0000-4000-8000-0000000000a1", "Notion", {});
+const AUTO_WORKING = autoConnector("c1a00000-0000-4000-8000-0000000000a2", "Granola", {
+  verifiedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+});
+const AUTO_REFUSED = autoConnector("c1a00000-0000-4000-8000-0000000000a3", "Atlas", {
+  lastError: {
+    message: "Atlas doesn't trust this issuer yet. Add the Issuer URL in Atlas's admin settings.",
+    at: new Date(Date.now() - 20 * 60_000).toISOString(),
+  },
+});
 
 /** What checking a custom API finds, for the Add connector preview. */
 function previewFor(url: string): ApiIntegrationPreview {
@@ -250,6 +287,35 @@ function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
     deleteOrganizationConnector: async (_organizationId: string, id: string) => {
       rows = rows.filter((row) => row.id !== id);
     },
+    checkOrganizationConnectorAutoConnect: async (
+      _organizationId: string,
+      request: { capabilityId?: string; endpointUrl?: string },
+    ) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const supported =
+        request.capabilityId === "registry:notion" ||
+        request.capabilityId === "registry:sentry" ||
+        Boolean(request.endpointUrl?.includes("acme"));
+      return {
+        supported,
+        authorizationServer: supported ? "https://auth.example.com" : null,
+        reason: supported ? null : "This app doesn't support auto-connect yet",
+        clientIdMetadataDocumentSupported: request.capabilityId !== "registry:sentry",
+        opengeniClientId: CLIENT_ID,
+      };
+    },
+    testOrganizationConnectorAutoConnect: async (_organizationId: string, id: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const current = rows.find((row) => row.id === id)!;
+      const autoConnect = {
+        ...current.autoConnect!,
+        verifiedAt: new Date().toISOString(),
+        lastError: null,
+      };
+      const generation = current.generation + 1;
+      rows = rows.map((row) => (row.id === id ? { ...row, autoConnect, generation } : row));
+      return { status: "connected", autoConnect, generation };
+    },
     listCapabilities: async () => ({ items: CATALOG }),
     catalogAssetUrl: () => null,
     getOrganizationAdministrationOverview: async () => ({
@@ -291,8 +357,8 @@ export default function PageOrgConnectorsSection() {
         title="Connectors"
         description="Organization settings > Integrations. Each row says how people sign in and where it works; Off and Unavailable say why a workspace doesn't get it. A row opens the connector's page."
       >
-        <PagePreview label="Organization connectors" height={560}>
-          <ConnectorsPreview initial={CONNECTORS} />
+        <PagePreview label="Organization connectors" height={640}>
+          <ConnectorsPreview initial={[...CONNECTORS, AUTO_WORKING]} />
         </PagePreview>
       </KitBlock>
       <KitBlock title="Empty" description="One line on what adding a connector does.">
@@ -306,6 +372,37 @@ export default function PageOrgConnectorsSection() {
       >
         <PagePreview label="Add a connector" height={1200}>
           <ConnectorsPreview initial={CONNECTORS} start={{ kind: "new" }} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Auto-connect"
+        description="Connect everyone automatically: Opengeni vouches for each member, so the app connects them with no sign-in. The choice is offered once the app says it accepts identity assertions; otherwise it says why. Pick Notion to try it."
+      >
+        <PagePreview label="Connect everyone automatically" height={1300}>
+          <ConnectorsPreview initial={CONNECTORS} start={{ kind: "new" }} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Auto-connect: waiting, working, refused"
+        description="The connector's page says what to paste into the app and whether it worked. Test as you runs the real exchange and saves nothing."
+      >
+        <PagePreview label="Waiting for Notion" height={1100}>
+          <ConnectorsPreview
+            initial={[...CONNECTORS, AUTO_WAITING]}
+            start={{ kind: "connector", connectorId: AUTO_WAITING.id, view: "page" }}
+          />
+        </PagePreview>
+        <PagePreview label="Granola working" height={1100}>
+          <ConnectorsPreview
+            initial={[...CONNECTORS, AUTO_WORKING]}
+            start={{ kind: "connector", connectorId: AUTO_WORKING.id, view: "page" }}
+          />
+        </PagePreview>
+        <PagePreview label="Atlas refused" height={1100}>
+          <ConnectorsPreview
+            initial={[...CONNECTORS, AUTO_REFUSED]}
+            start={{ kind: "connector", connectorId: AUTO_REFUSED.id, view: "page" }}
+          />
         </PagePreview>
       </KitBlock>
       <KitBlock

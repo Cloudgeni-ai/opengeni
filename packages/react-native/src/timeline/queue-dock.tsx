@@ -1,5 +1,10 @@
-import type { ComposerDraft, SessionTurn } from "@opengeni/sdk";
-import type { useTurnQueue } from "@opengeni/react/session";
+import type { ComposerDraft, ResourceRef, SessionTurn } from "@opengeni/sdk";
+import {
+  isStoredImage,
+  useStoredFiles,
+  type StoredFileSource,
+  type useTurnQueue,
+} from "@opengeni/react/session";
 import {
   isAuthoritativeQueuedTurn,
   QUEUE_ITEM_CONTENT_UNAVAILABLE,
@@ -18,6 +23,7 @@ import { CompactSignalsContext } from "./session-signals";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import type { NativeAnnotationLike } from "./annotations";
+import { StoredFileImage } from "../stored-file-image";
 
 /* ----------------------------------------------------------------------------
    The web session-chrome queue dock above the composer: a "N queued · Steer"
@@ -44,8 +50,11 @@ export function QueueDock({
   onReviewAnnotations,
   leading,
   singleSend = false,
+  fileSource,
 }: {
   queue: TurnQueue;
+  /** Where the chat's stored files are read from, so queued images show their picture. */
+  fileSource?: StoredFileSource | undefined;
   composer?: QueueDockComposer | undefined;
   onComposerFocus?: (() => void) | undefined;
   /** Show a waiting message's quotes and notes. */
@@ -293,6 +302,9 @@ export function QueueDock({
                     onPress={() => void queue.removeTurn(turn.id)}
                   />
                 </View>
+                {fileSource && turn.resources.length > 0 ? (
+                  <QueuedTurnFiles source={fileSource} resources={turn.resources} />
+                ) : null}
                 {replaceDraftFor === turn.id ? (
                   <View
                     style={{
@@ -390,5 +402,61 @@ function RowAction(props: {
         </Text>
       ) : null}
     </Pressable>
+  );
+}
+
+/**
+ * A queued message's images as small pictures from the server. Other files
+ * are not repeated here, so a row without images keeps its height.
+ */
+function QueuedTurnFiles({
+  source,
+  resources,
+}: {
+  source: StoredFileSource;
+  resources: readonly ResourceRef[];
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const fileIds = resources.flatMap((resource) =>
+    resource.kind === "file" ? [resource.fileId] : [],
+  );
+  const { files, ready } = useStoredFiles(source, fileIds);
+  if (!ready) return null;
+  const shown = fileIds.flatMap((fileId, index) => {
+    const file = files.get(fileId);
+    return file && isStoredImage(file) ? [{ file, key: `${index}:${fileId}` }] : [];
+  });
+  if (shown.length === 0) return null;
+  return (
+    <View
+      style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, paddingLeft: 6, paddingBottom: 4 }}
+    >
+      {shown.map(({ file, key }) => (
+        <View
+          key={key}
+          accessibilityRole="image"
+          accessibilityLabel={file.filename}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: theme.radius.sm,
+            overflow: "hidden",
+            borderWidth: 1,
+            borderColor: c.border,
+            backgroundColor: c["surface-2"],
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <StoredFileImage
+            source={source}
+            file={file}
+            style={{ width: "100%", height: "100%" }}
+            fallback={<Icon name="image" size={14} color={c["fg-subtle"]} />}
+          />
+        </View>
+      ))}
+    </View>
   );
 }

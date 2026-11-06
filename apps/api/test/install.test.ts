@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
@@ -167,19 +167,60 @@ describe("get.<domain> install routes", () => {
     );
   });
 
-  test("without a configured stable version, latest and the stable channel follow this build's agent release", async () => {
+  test("without a configured stable version, latest and the stable channel follow this build's published agent release", async () => {
     const cargo = Bun.TOML.parse(
       await readFile(new URL("../../../agent/Cargo.toml", import.meta.url), "utf8"),
     ) as { workspace: { package: { version: string } } };
     const version = cargo.workspace.package.version;
-    const app = appFor(testSettings({ agentStableVersion: undefined }));
-    const latest = await app.request("/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe");
-    expect(latest.status).toBe(302);
-    expect(latest.headers.get("location")).toBe(
-      `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
-    );
-    const manifest = await app.request("/agent/stable/manifest.json");
-    expect(manifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
+    const [major, minor, patch] = version.split(".");
+    const older = `${major}.${minor}.${Number(patch) - 1}`;
+    const published = new Set<string>([older]);
+    const asked: string[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: string | URL | Request,
+    ) => {
+      const url = String(input);
+      asked.push(url);
+      const release = /agent-v([^/]+)\/manifest\.json$/u.exec(url)?.[1] ?? "";
+      return new Response(null, { status: published.has(release) ? 200 : 404 });
+    }) as typeof fetch);
+    try {
+      // Main raised the agent version before its release was published: the
+      // routes name the newest published release instead.
+      const before = appFor(testSettings({ agentStableVersion: undefined }));
+      const latestBefore = await before.request(
+        "/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe",
+      );
+      expect(latestBefore.status).toBe(302);
+      expect(latestBefore.headers.get("location")).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${older}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+      );
+      const manifestBefore = await before.request("/agent/stable/manifest.json");
+      expect(manifestBefore.headers.get("location")).toEndWith(`/agent-v${older}/manifest.json`);
+      expect(asked[0]).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/manifest.json`,
+      );
+
+      published.add(version);
+      const app = appFor(testSettings({ agentStableVersion: undefined }));
+      const latest = await app.request("/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe");
+      expect(latest.status).toBe(302);
+      expect(latest.headers.get("location")).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+      );
+      const manifest = await app.request("/agent/stable/manifest.json");
+      expect(manifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
+
+      // A release host that cannot be asked leaves this build's release named.
+      fetchSpy.mockImplementation((async () => {
+        throw new TypeError("network down");
+      }) as typeof fetch);
+      const offline = appFor(testSettings({ agentStableVersion: undefined }));
+      const offlineManifest = await offline.request("/agent/stable/manifest.json");
+      expect(offlineManifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   test("stable self-update manifest redirects to the configured immutable release", async () => {

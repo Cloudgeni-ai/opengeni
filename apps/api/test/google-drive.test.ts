@@ -15,7 +15,6 @@ import {
   listConnectionsMetadata,
   listScheduledTasks,
   migrate,
-  updateConnection,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -31,8 +30,6 @@ import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = "google-drive-delegation-secret";
 const STATE_SECRET = "google-drive-state-secret";
-const CLIENT_ID = "google-drive-client.apps.googleusercontent.com";
-const CLIENT_SECRET = "google-drive-client-secret";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -75,8 +72,6 @@ beforeAll(async () => {
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "http://127.0.0.1:8000",
     webBaseUrl: "http://127.0.0.1:3000",
-    googleDriveClientId: CLIENT_ID,
-    googleDriveClientSecret: CLIENT_SECRET,
   }) as Settings;
 }, 180_000);
 
@@ -123,7 +118,7 @@ async function bearer(
   })}`;
 }
 
-function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Settings> = {}) {
+function app(overrides: Partial<Settings> = {}) {
   return createApp({
     settings: { ...settings, ...overrides },
     db: client.db,
@@ -134,25 +129,14 @@ function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Setti
       deleteScheduledTaskSchedule: async () => {},
     } as never,
     managedAuth: null,
-    googleDriveFetch,
   } as never);
 }
 
-describe("retired native Google Drive setup", () => {
-  test("historical connection removal stays local, idempotent, and stale-replay safe", async () => {
+describe("removed native Google Drive source setup", () => {
+  test("a historical native connection is removed locally without contacting Google", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const workspace = await freshWorkspace();
-    const activeMetadata = {
-      credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
-      credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
-      googlePermissionId: "historical-google-account",
-      googleEmail: "historical@example.test",
-      googleDisplayName: "Historical owner",
-      verifiedAt: new Date().toISOString(),
-      accessMode: "readonly",
-      lifecycle: { state: "active", recoverable: true, observedAt: new Date().toISOString() },
-    };
-    // Seed a historical row directly: retired OAuth must never be needed to remove it.
+    // Seed a historical row directly: the removed OAuth is never needed to remove it.
     const connection = await createConnection(client.db, {
       ...workspace,
       subjectId: "subject-a",
@@ -161,130 +145,90 @@ describe("retired native Google Drive setup", () => {
       status: "active",
       credentialEncrypted: "historical-ciphertext-must-not-be-read",
       grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-      metadata: activeMetadata,
+      metadata: {
+        credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+        credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+        googlePermissionId: "historical-google-account",
+        accessMode: "readonly",
+        lifecycle: { state: "active", recoverable: true, observedAt: new Date().toISOString() },
+      },
       createdBySubjectId: "subject-a",
     });
+    const originalFetch = globalThis.fetch;
     let providerRequests = 0;
-    const application = app(async () => {
+    globalThis.fetch = (async () => {
       providerRequests += 1;
       throw new Error("Removing a historical connection must not contact Google");
-    });
-    const authorization = await bearer(workspace, "subject-a", [
-      "connections:read",
-      "connections:write",
-    ]);
-    const originalKey = `disconnect:${connection.id}:${connection.version}`;
-    const disconnect = (expectedVersion = connection.version, idempotencyKey = originalKey) =>
-      application.request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
-        method: "DELETE",
-        headers: {
-          authorization,
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
-        body: JSON.stringify({ expectedVersion, idempotencyKey }),
-      });
-    const [first, duplicate] = await Promise.all([disconnect(), disconnect()]);
-    expect(first.status).toBe(200);
-    expect(duplicate.status).toBe(200);
-    const firstBody = (await first.json()) as { connection: ConnectionMetadata };
-    const duplicateBody = (await duplicate.json()) as { connection: ConnectionMetadata };
-    expect(firstBody.connection).toMatchObject({
-      id: connection.id,
-      version: connection.version + 1,
-      status: "revoked",
-      metadata: { lifecycle: { state: "disconnected", recoverable: true } },
-    });
-    expect(duplicateBody.connection).toEqual(firstBody.connection);
-    expect(providerRequests).toBe(0);
-
-    // Model a later historical credential generation without reviving the retired setup API.
-    const laterGeneration = await updateConnection(client.db, {
-      workspaceId: workspace.workspaceId,
-      connectionId: connection.id,
-      visibleToSubjectId: "subject-a",
-      expectedVersion: firstBody.connection.version,
-      status: "active",
-      credentialEncrypted: "later-historical-ciphertext-must-not-be-read",
-      metadata: activeMetadata,
-      updatedBySubjectId: "subject-a",
-    });
-    expect(laterGeneration).not.toBeNull();
-    expect((await disconnect()).status).toBe(409);
-    expect((await disconnect(laterGeneration!.version, originalKey)).status).toBe(409);
-    expect(
-      await getConnectionMetadata(client.db, workspace.workspaceId, connection.id, "subject-a"),
-    ).toMatchObject({
-      id: connection.id,
-      status: "active",
-      version: laterGeneration!.version,
-      metadata: { lifecycle: { state: "active" } },
-    });
-    expect(
-      (
-        await disconnect(
-          laterGeneration!.version,
-          `disconnect:${connection.id}:${laterGeneration!.version}`,
-        )
-      ).status,
-    ).toBe(200);
-    expect(providerRequests).toBe(0);
-  });
-
-  test("refuses old source and publishing OAuth before contacting Google or writing credentials", async () => {
-    if (!available) throw new Error("PostgreSQL required");
-    const workspace = await freshWorkspace();
-    let requests = 0;
-    const provider = async () => {
-      requests++;
-      throw new Error("Unexpected provider request");
-    };
-    for (const capability of ["source_read", "publish"]) {
-      const response = await app(provider).request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/install`,
-        {
-          method: "POST",
+    }) as unknown as typeof fetch;
+    try {
+      const authorization = await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]);
+      const disconnect = () =>
+        app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+          method: "DELETE",
           headers: {
-            authorization: await bearer(workspace, "subject-a", [
-              "connections:read",
-              "connections:write",
-            ]),
+            authorization,
             "content-type": "application/json",
             [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
-          body: JSON.stringify({ capability }),
-        },
-      );
-      expect(response.status).toBe(410);
-      expect(await response.text()).toContain("retired");
+          // What the deprecated `disconnectGoogleDriveConnection` SDK method sends.
+          body: JSON.stringify({
+            expectedVersion: connection.version,
+            idempotencyKey: `disconnect:${connection.id}`,
+          }),
+        });
+      const first = await disconnect();
+      expect(first.status).toBe(200);
+      const body = (await first.json()) as { connection: ConnectionMetadata };
+      expect(body.connection).toMatchObject({ id: connection.id, status: "revoked" });
+      expect((await disconnect()).status).toBe(200);
+      expect(
+        await getConnectionMetadata(client.db, workspace.workspaceId, connection.id, "subject-a"),
+      ).toMatchObject({ status: "revoked" });
+      expect(providerRequests).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
-    expect(requests).toBe(0);
-    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-      [],
-    );
-    expect(await listScheduledTasks(client.db, workspace.workspaceId)).toEqual([]);
   });
-  test("refuses legacy source configuration without creating a replacement schedule", async () => {
+
+  test("source setup routes are gone, and the SDK lifecycle route answers 410", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const workspace = await freshWorkspace();
-    const response = await app(async () => {
-      throw new Error("Unexpected provider request");
-    }).request(
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    for (const capability of ["source_read", "publish"]) {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/install`,
+        { method: "POST", headers, body: JSON.stringify({ capability }) },
+      );
+      expect(response.status).toBe(404);
+    }
+    const source = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/11111111-1111-4111-8111-111111111111/source`,
       {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", [
-            "connections:read",
-            "connections:write",
-          ]),
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers,
         body: JSON.stringify({ sourceId: "folder", syncEnabled: true, syncCadence: "hourly" }),
       },
     );
-    expect(response.status).toBe(410);
+    expect(source.status).toBe(404);
+    const lifecycle = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/11111111-1111-4111-8111-111111111111/lifecycle`,
+      { method: "PATCH", headers, body: JSON.stringify({ action: "pause" }) },
+    );
+    expect(lifecycle.status).toBe(410);
+    expect(await lifecycle.text()).toContain("Integration Knowledge sync has been removed");
+    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
+      [],
+    );
     expect(await listScheduledTasks(client.db, workspace.workspaceId)).toEqual([]);
   });
 });

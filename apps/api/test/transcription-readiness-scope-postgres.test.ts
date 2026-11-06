@@ -62,10 +62,6 @@ async function fixture() {
 // tests never decrypt a credential, send audio or call a provider.
 async function connect(context: { accountId: string; workspaceId: string }) {
   for (const provider of ["codex", "xai"]) {
-    await shared.admin`
-      insert into subscription_provider_cutovers(account_id, provider, enabled)
-      values (${context.accountId}::uuid, ${provider}, true)
-      on conflict (account_id, provider) do update set enabled = true`;
     const [connection] = await shared.admin`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,

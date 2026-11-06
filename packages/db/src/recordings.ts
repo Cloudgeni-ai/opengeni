@@ -46,6 +46,7 @@ import {
   learnConfirmedVoices,
   rejectedVoices,
   rejectVoiceSuggestion,
+  releaseRecordingVoices,
   suggestSpeakersByVoice,
   syncSpeakerVoice,
   type RecordingSpeakerVoice,
@@ -1059,7 +1060,8 @@ export async function nameRecording(
 /**
  * Start deleting a recording: it disappears from every read at once, and the
  * deletion workflow then removes its media objects and its rows. Only the
- * person who recorded it may delete it. Repeating it is harmless.
+ * person who recorded it may delete it. Its speakers' voices leave the
+ * voiceprints they taught in the same step. Repeating it is harmless.
  */
 export async function markRecordingDeleting(
   db: Database,
@@ -1078,6 +1080,12 @@ export async function markRecordingDeleting(
       .for("update");
     if (!row) throw new RecordingNotFoundError();
     if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+    // Also on a retry: a recording marked deleting before this step existed
+    // still releases its voices.
+    await releaseRecordingVoices(tx, {
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+    });
     if (row.state === "deleting") return { ownerSubjectId: row.ownerSubjectId };
     await tx
       .update(schema.recordings)
@@ -1351,22 +1359,12 @@ export type UncompactedRecordingTrack = {
  * Finished meetings' audio tracks, across every workspace, whose kept file
  * is not yet in the kept format (its key does not end in `keptSuffix`) or
  * whose uploaded pieces are still stored beside it (migration 1240).
- * Identity only; the caller acts on each as its owner. Null while the
- * routine's runtime EXECUTE is withheld (runtime-posture
- * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
- * statement, because EXECUTE is checked when a statement starts.
+ * Identity only; the caller acts on each as its owner.
  */
 export async function listUncompactedRecordingTracks(
   db: Database,
   input: { keptSuffix: string; limit?: number },
-): Promise<UncompactedRecordingTrack[] | null> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select coalesce(has_function_privilege(
-        to_regprocedure('opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)')::oid,
-        'EXECUTE'), false) as granted`,
-  );
-  if (grant?.granted !== true) return null;
+): Promise<UncompactedRecordingTrack[]> {
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;
@@ -3643,6 +3641,41 @@ export const MEETING_SUMMARY_POLICY_ROLE = "meeting_summary";
 /** Session metadata naming the one meeting a summary chat may read and write. */
 export const MEETING_SUMMARY_RECORDING_METADATA_KEY = "meetingSummaryRecordingId";
 export const MEETING_SUMMARY_TOOLS = ["meeting_read", "meeting_notes_save"] as const;
+
+/**
+ * The built-in summary chats of a meeting that nobody has written in and that
+ * are not archived yet. A deleted meeting's summary chat has nothing left to
+ * read, so the deletion archives these; a chat someone wrote in is theirs and
+ * stays. Read as the meeting's owner, who sees its Only me summary chat.
+ */
+export async function listUntouchedMeetingSummarySessions(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await tx
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.createdByKind, "service"),
+          eq(schema.sessions.createdBySubjectId, MEETING_SUMMARY_SUBJECT_ID),
+          eq(schema.sessions.policyRole, MEETING_SUMMARY_POLICY_ROLE),
+          sql`${schema.sessions.metadata} ->> ${MEETING_SUMMARY_RECORDING_METADATA_KEY} = ${input.recordingId}`,
+          isNull(schema.sessions.parentSessionId),
+          isNull(schema.sessions.archivedAt),
+          isNull(schema.sessions.contentArchiveState),
+          sql`not exists (
+            select 1 from ${schema.sessionTurns}
+            where ${schema.sessionTurns.workspaceId} = ${schema.sessions.workspaceId}
+              and ${schema.sessionTurns.sessionId} = ${schema.sessions.id}
+              and ${schema.sessionTurns.initiatorKind} <> 'service')`,
+        ),
+      );
+    return rows.map((row) => row.id);
+  });
+}
 
 export type MeetingSummaryCandidate =
   | {

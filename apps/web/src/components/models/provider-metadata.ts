@@ -1,6 +1,15 @@
-import { AzureOpenAIEndpoint } from "@opengeni/contracts";
+import { AzureOpenAIEndpoint, DirectModelName } from "@opengeni/contracts";
 import type { OrganizationModelCatalogProviderKind as ProviderKind } from "@opengeni/sdk";
 import type { ProviderPresentation } from "@/components/ai-gateway-connection";
+import { readAzureOpenAIAddress } from "./azure-endpoint";
+
+/** An exact OpenAI model ID or Azure deployment name, as the API checks it. */
+function directModelNameProblem(value: string, noun: "model ID" | "deployment name") {
+  if (!value) return `Enter the ${noun}.`;
+  return DirectModelName.safeParse(value).success
+    ? null
+    : `Enter the exact ${noun}: letters, numbers, dots, underscores or hyphens.`;
+}
 
 // Dependency-free presentation data shared by workspace and organization connections.
 export const ORGANIZATION_PROVIDER_META: Record<
@@ -121,8 +130,16 @@ export const ORGANIZATION_PROVIDER_META: Record<
     billedTo: "The organization's OpenAI API account",
     summary:
       "Use models through the organization's OpenAI API key in shared workspaces, billed to OpenAI.",
+    connectSummary: "Use OpenAI models with your own API key. Usage is billed by OpenAI.",
     keyHelp: "Create one at platform.openai.com under API keys.",
-    keyAriaLabel: "Organization OpenAI API key",
+    keyAriaLabel: "OpenAI API key",
+    firstModelField: {
+      label: "Model",
+      hint: "The exact OpenAI model ID to use, as in the API.",
+      placeholder: "gpt-6-sol",
+      initialValue: "gpt-6-sol",
+      validate: (value) => directModelNameProblem(value, "model ID"),
+    },
     customModelsHeading: "Models",
     customModelsDescription:
       "Exact OpenAI model IDs shared workspaces can pick. Each one is checked with the organization's key before it is saved.",
@@ -143,17 +160,30 @@ export const ORGANIZATION_PROVIDER_META: Record<
     billedTo: "The organization's Azure OpenAI account",
     summary:
       "Use your Azure OpenAI deployments in shared workspaces, billed to the organization's Azure account.",
-    keyHelp: "Find it in the Azure portal under your Azure OpenAI resource, Keys and Endpoint.",
-    keyAriaLabel: "Organization Azure OpenAI API key",
+    connectSummary:
+      "Use your Azure OpenAI or Microsoft Foundry deployments. Usage is billed to your Azure subscription.",
+    keyHelp:
+      "In the Azure portal or Microsoft Foundry, it's next to the endpoint (Keys and Endpoint).",
+    keyAriaLabel: "Azure OpenAI API key",
     endpointField: {
       label: "Endpoint",
       ariaLabel: "Azure OpenAI endpoint",
       placeholder: "https://RESOURCE.openai.azure.com",
-      hint: "The Endpoint shown next to your key, such as https://RESOURCE.openai.azure.com.",
+      hint: "Paste your resource's endpoint, or a deployment's Target URI from Microsoft Foundry.",
+      read: (value) => {
+        const address = readAzureOpenAIAddress(value);
+        return address ? { endpoint: address.endpoint, model: address.deployment } : null;
+      },
       validate: (value) =>
         AzureOpenAIEndpoint.safeParse(value).success
           ? null
-          : "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+          : "Paste the endpoint of your Azure OpenAI or Foundry resource, like https://RESOURCE.openai.azure.com.",
+    },
+    firstModelField: {
+      label: "Deployment name",
+      hint: "Filled in from a Target URI. Otherwise, copy it from Deployments in Microsoft Foundry.",
+      placeholder: "gpt-6-sol",
+      validate: (value) => directModelNameProblem(value, "deployment name"),
     },
     customModelNoun: "deployment",
     customModelsHeading: "Deployments",

@@ -9,6 +9,7 @@ import * as parentWake from "../src/activities/parent-wake";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import {
   createSandboxSetupReplayGuard,
+  SandboxMachineReplacingError,
   sandboxSetupFailure,
 } from "../src/activities/agent-turn/sandbox-setup-agent-failure";
 import { createCoreSubscriptionRequests } from "../src/activities/agent-turn/subscription-core-requests";
@@ -505,5 +506,77 @@ describe("the sandbox's agent does not answer during setup", () => {
     };
     expect(settled.events[0]!.type).toBe("turn.failed");
     expect(settled.events[0]!.payload.code).not.toBe("sandbox_command_start_unavailable");
+  });
+});
+
+describe("a command waiting for a workspace machine that is being replaced", () => {
+  // Staging: a Modal box's /bin/sh was removed. The next turn's exec_command
+  // lazily set up the box, setup found it could not start programs and asked
+  // for its replacement, and the turn waits on that rotation. The command
+  // never reached the box.
+  function replacing(): Error {
+    const transition = new db.SandboxLeaseTransitionError(
+      "group-1",
+      1,
+      "rotation_in_progress",
+      "modal",
+      "sb-1",
+      "warm",
+    );
+    return new ToolCallError(
+      "Failed to run function tools: SandboxMachineReplacingError",
+      new SandboxMachineReplacingError(transition),
+    );
+  }
+  function rotatingLease() {
+    spy(db, "readLease").mockResolvedValue({
+      leaseEpoch: 1,
+      rotationRequestedAt: new Date(),
+      rotationReason: "operator",
+    } as never);
+  }
+  function withFence(input: Record<string, unknown>, settled: string[]) {
+    (input.eventing as Record<string, unknown>).toolCancellationFenceRef = {
+      current: { settleCommandCallsNotStarted: () => settled },
+    };
+    return input;
+  }
+
+  test("settles the waiting call as not started while the same turn waits", async () => {
+    coreRuntime();
+    rotatingLease();
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    const { deps: input, settle } = deps(replacing(), "Codex", await answeredLane([]));
+    expect(await settleTurnFailure(withFence(input, ["call-waiting"]) as never)).toMatchObject({
+      status: "recovering",
+    });
+    expect(settle).not.toHaveBeenCalled();
+    expect(recovery.mock.calls[0]![2]).toMatchObject({
+      reason: "sandbox_lifecycle_transition",
+      notStartedToolCallIds: ["call-waiting"],
+      sandboxLifecycleWait: {
+        sandboxGroupId: "group-1",
+        leaseEpoch: 1,
+        reason: "rotation_in_progress",
+      },
+    });
+  });
+
+  test("a command that reached the box keeps its unknown outcome", async () => {
+    coreRuntime();
+    rotatingLease();
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    const { deps: input } = deps(replacing(), "Codex", await answeredLane([]));
+    expect(await settleTurnFailure(withFence(input, []) as never)).toMatchObject({
+      status: "recovering",
+    });
+    expect(recovery.mock.calls[0]![2]).toMatchObject({ reason: "sandbox_lifecycle_transition" });
+    expect(recovery.mock.calls[0]![2]).not.toHaveProperty("notStartedToolCallIds");
   });
 });

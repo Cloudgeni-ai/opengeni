@@ -279,11 +279,13 @@ connection revocation.
 Each accepted turn also records its account intent: whose personal accounts it
 may use (the person who sent it, or nobody for work without a person behind it)
 and which accounts that person explicitly picked. Work that continues a turn,
-such as a goal continuation, a wait wake-up, a command or child result, or
-informational input delivered into it, carries the same intent and resolves it
-again when it is claimed, exactly as that person's next message with the same
-picks would be resolved now. A reconnected or newly connected account is
-therefore used, and a revoked one is not. A picked account that can no longer
+such as a goal continuation, a wait wake-up, a command or child result,
+informational input delivered into it, or a compaction-only turn that compacts
+after it, carries the same intent and resolves it again when it is claimed,
+exactly as that person's next message with the same picks would be resolved
+now (a compaction-only turn has a few exceptions of its own, described under
+manual compaction in `docs/context-compaction.md`). A reconnected or newly
+connected account is therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`
 metadata. A carried intent that names someone other than the continued turn's
@@ -306,6 +308,21 @@ unselected tools are rejected. When a pinned account can no longer be used, the
 occurrence runs without that connector and records it in `degradedAccounts`;
 it never retries another identity. With `pinnedAccountsRequired` the
 occurrence is refused with `connection_account_unavailable` instead.
+
+A connector configured for a turn that runs without its tools is never
+silently missing. The turn's own input carries one notice naming each such
+connector with a plain reason category: not in this turn's registry
+(`not_available`), no account accepted with the turn (`no_account`, for
+example a personal sign-in not yet usable in the workspace after a membership
+change), accepted accounts that no longer fit its setup
+(`account_setup_changed`), or a superseded sign-in (`unsupported_sign_in`).
+Tool search and tool listing report the same connectors in
+`unavailableSources`, beside connectors that fail to connect or list at run
+time; a setup refused a credential there says why (for example an expired
+sign-in or a personal sign-in not usable in this workspace) instead of a bare
+HTTP 401. The notice is a new item of the current turn and never changes text
+an earlier request sent. Connectors the agent configuration excludes are not
+reported.
 Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.

@@ -22,7 +22,9 @@ import {
 } from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
+import { isNoReplyText, mayBecomeNoReplyText } from "@opengeni/contracts/no-reply";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
+import { sessionStatusChangeIsArchive } from "../session-status-model";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
 import {
@@ -56,6 +58,7 @@ import type {
   GoalItem,
   HumanInputAnswerSummary,
   HumanInputItem,
+  AutomationRunPresentation,
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
@@ -392,6 +395,7 @@ export function buildTimeline(
         outcome,
         blockedReason,
         detail: undefined,
+        subject: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -615,6 +619,11 @@ export function buildTimeline(
         blockedReason,
       );
       recordStartupFailureDetail(setupPhase, payload);
+      const rigName = setupPhase === "rig" ? stringValue(payload.rigName)?.trim() : undefined;
+      if (rigName) {
+        const rigItem = startupPhases.get(`${startupTurnId}:rig`)?.[0];
+        if (rigItem) rigItem.subject = rigName;
+      }
       continue;
     }
 
@@ -1301,6 +1310,7 @@ export function buildTimeline(
           break;
         }
         const blocked = status === "requires_action" && payload.code === "admission_blocked";
+        const archived = sessionStatusChangeIsArchive(payload);
         if (!blocked && openAdmissionBlocks.length > 0) {
           for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
           openAdmissionBlocks = [];
@@ -1320,7 +1330,8 @@ export function buildTimeline(
         if (
           previous?.status === status &&
           !previous.resolvedAt &&
-          Boolean(previous.blocked) === blocked
+          Boolean(previous.blocked) === blocked &&
+          Boolean(previous.archived) === archived
         ) {
           break;
         }
@@ -1330,6 +1341,7 @@ export function buildTimeline(
           status,
           occurredAt: event.occurredAt,
           ...(blocked ? { blocked: true as const } : {}),
+          ...(archived ? { archived: true as const } : {}),
         };
         if (blocked) {
           openAdmissionBlocks.push(item);
@@ -2171,7 +2183,126 @@ export function buildTimeline(
       item.text = stripOpaqueCitationTokens(item.text);
     }
   }
-  return items;
+  return withoutQuietReplies(items);
+}
+
+/** What a quiet automation run may hold and still leave the chat. */
+const QUIET_RUN_ITEM_KINDS: ReadonlySet<TimelineItem["kind"]> = new Set([
+  "agent-message",
+  "reasoning",
+  "tool-call",
+  "worker",
+  "sandbox",
+  "startup-phase",
+  "machine-input-batch",
+  "context-compaction",
+  "memory",
+  "knowledge",
+  "turn-end",
+  "turn-steps",
+]);
+
+/**
+ * A final answer of exactly `NO_REPLY` means "nothing for the person here",
+ * so the token itself is never drawn (nor its first letters while it
+ * streams). An automation run that settles with it leaves the chat
+ * entirely: its line saying what happened, its work and its answer. A run
+ * that holds anything for the reader (a question, a connect card, a failure)
+ * stays, without the token.
+ */
+function withoutQuietReplies(items: TimelineItem[]): TimelineItem[] {
+  const answers = new Map<string, AgentMessageItem>();
+  const automationTurns = new Set<string>();
+  const loudTurns = new Set<string>();
+  for (const item of items) {
+    const turnId = "turnId" in item ? item.turnId : null;
+    if (!turnId) continue;
+    if (item.kind === "agent-message" && item.phase !== "commentary") answers.set(turnId, item);
+    if (
+      item.kind === "machine-input-batch" &&
+      item.members.length > 0 &&
+      item.members.every((member) => member.kind === "scheduled_occurrence")
+    ) {
+      automationTurns.add(turnId);
+    }
+    if (
+      !QUIET_RUN_ITEM_KINDS.has(item.kind) ||
+      (item.kind === "turn-end" && item.outcome !== "complete")
+    ) {
+      loudTurns.add(turnId);
+    }
+  }
+  const hiddenAnswers = new Set<AgentMessageItem>();
+  const quietTurns = new Set<string>();
+  for (const [turnId, answer] of answers) {
+    if (answer.streaming ? mayBecomeNoReplyText(answer.text) : isNoReplyText(answer.text)) {
+      hiddenAnswers.add(answer);
+      if (!answer.streaming && automationTurns.has(turnId) && !loudTurns.has(turnId)) {
+        quietTurns.add(turnId);
+      }
+    }
+  }
+  if (hiddenAnswers.size === 0) return items;
+  return items.filter((item) => {
+    if (item.kind === "agent-message" && hiddenAnswers.has(item)) return false;
+    const turnId = "turnId" in item ? item.turnId : null;
+    return !(turnId && quietTurns.has(turnId));
+  });
+}
+
+function automationRunTurnIds(items: readonly TimelineItem[]): Set<string> {
+  const turns = new Set<string>();
+  for (const item of items) {
+    if (
+      item.kind === "machine-input-batch" &&
+      item.turnId &&
+      item.members.length > 0 &&
+      item.members.every((member) => member.kind === "scheduled_occurrence")
+    ) {
+      turns.add(item.turnId);
+    }
+  }
+  return turns;
+}
+
+/**
+ * Automation runs as a person who never sees the agent's work reads them
+ * (`agentSignals: false`): the line saying what happened and the answer,
+ * plus anything that waits on them (a question, an approval, a connect
+ * card). Steps, narration, working rows and plain failures stay out; the
+ * line appears only once there is something under it, so a run that is
+ * still working or ends with nothing for the person never shows.
+ */
+export function automationRunOutcomesOnly(items: TimelineItem[]): TimelineItem[] {
+  const runs = automationRunTurnIds(items);
+  if (runs.size === 0) return items;
+  const runOf = (item: TimelineItem): string | null => {
+    const turnId = "turnId" in item ? item.turnId : null;
+    return turnId && runs.has(turnId) ? turnId : null;
+  };
+  const shown = (item: TimelineItem): boolean => {
+    if (item.kind === "machine-input-batch" || item.kind === "turn-end") return false;
+    if (item.kind === "agent-message") return item.phase !== "commentary";
+    return !QUIET_RUN_ITEM_KINDS.has(item.kind);
+  };
+  const runsWithOutcome = new Set<string>();
+  for (const item of items) {
+    const run = runOf(item);
+    if (run && shown(item)) runsWithOutcome.add(run);
+  }
+  return items.flatMap((item): TimelineItem[] => {
+    const run = runOf(item);
+    if (!run || shown(item)) return [item];
+    if (item.kind === "machine-input-batch") return runsWithOutcome.has(run) ? [item] : [];
+    // The run's end stays so the chat knows it finished, as a plain
+    // completion: a failure only an operator can act on draws nothing.
+    if (item.kind === "turn-end") {
+      if (item.outcome !== "failed") return [item];
+      const { failureDetail: _detail, ...end } = item;
+      return [{ ...end, outcome: "complete", failureText: null }];
+    }
+    return [];
+  });
 }
 
 /**
@@ -4101,6 +4232,10 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
                 kind === "media_generation_result"
                   ? parseMediaGenerationResult(member.result)
                   : null;
+              const automation =
+                kind === "scheduled_occurrence"
+                  ? automationRunPresentation(member.automation)
+                  : null;
               return [
                 {
                   id: member.id,
@@ -4110,12 +4245,29 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
                   sourceId: member.sourceId,
                   summary: stringValue(member.summary),
                   ...(result ? { result } : {}),
+                  ...(automation ? { automation } : {}),
                 },
               ];
             })()
           : [];
       })
     : [];
+}
+
+function automationRunPresentation(value: unknown): AutomationRunPresentation | null {
+  const record = asRecord(value);
+  const name = stringValue(record.name).trim();
+  if (!name) return null;
+  const eventSummaries = Array.isArray(record.eventSummaries)
+    ? record.eventSummaries.filter(
+        (summary): summary is string => typeof summary === "string" && summary.trim().length > 0,
+      )
+    : [];
+  const eventCount =
+    typeof record.eventCount === "number" && Number.isFinite(record.eventCount)
+      ? Math.max(eventSummaries.length, Math.floor(record.eventCount))
+      : eventSummaries.length;
+  return { name, eventSummaries, eventCount };
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = [

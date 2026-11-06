@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import {
+  closeKeptMcpEventSessions,
   eventTriggersEnabled,
   pumpDueEventSourceFeeds,
   pumpDueMcpEventSubscriptions,
@@ -218,7 +219,7 @@ export function startEventSubscriptionPump(
   deps: McpEventSubscriptionPumpDeps & EventSourceFeedPumpDeps,
   intervalMs = 5_000,
 ): () => Promise<void> {
-  return startLoop(
+  const stop = startLoop(
     async () => {
       if (!eventTriggersEnabled(deps.settings)) return;
       // Keep going while full batches come back, so a backlog drains promptly.
@@ -236,6 +237,11 @@ export function startEventSubscriptionPump(
         error: errorMessage(error),
       }),
   );
+  return async () => {
+    await stop();
+    // End the MCP sessions the subscriptions kept open between steps.
+    await closeKeptMcpEventSessions();
+  };
 }
 
 /**

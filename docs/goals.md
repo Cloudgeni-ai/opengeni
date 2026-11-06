@@ -227,6 +227,10 @@ A goal is `active`, `paused`, or `completed`.
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  A session with an agent configuration receives it once it has a goal, in
+  any state, as frozen with the turn: before that the tool could only fail, so
+  neither it nor its prompt sentence is sent. Pausing or resuming a goal never
+  changes the tool list, so the cached prompt stays the same across both.
   The agent is told to resume only when the user asks it to continue or the
   blocker it paused for has cleared. A user's question alone is not a reason:
   the agent answers it and leaves the goal paused. An active goal still

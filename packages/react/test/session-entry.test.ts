@@ -61,6 +61,11 @@ describe("session-only entry", () => {
       "@opengeni/contracts/claude-subscription-model-ids",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
+      // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/no-reply",
+      // The archive's stop reason, so an archive never reads as cancelled: a
+      // dependency-free contracts leaf shared with the server.
+      "@opengeni/contracts/session-history",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
       "@opengeni/contracts/values",
       "@opengeni/sdk",
@@ -216,7 +221,10 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(64);
+    // The one way every surface shows an attached image from its stored file
+    // (a restored draft, a queued message, another device).
+    expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
+    expect(reactSources.length).toBe(65);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

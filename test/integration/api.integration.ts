@@ -131,7 +131,11 @@ describe("API component integration", () => {
 
   test("configured browser principals pass the CORS preflight", async () => {
     const app = createApp({
-      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      // Local access mode grants CORS only to this stack's own web origin.
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        webBaseUrl: "http://127.0.0.1:24000",
+      }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
@@ -159,12 +163,24 @@ describe("API component integration", () => {
     });
     let probeStatus = 200;
     const probeUrls: string[] = [];
+    const listingUrls: string[] = [];
     const app = createApp({
       settings,
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      directModelFetch: (async (url: string) => {
+      directModelFetch: (async (url: string, init?: RequestInit) => {
+        // A compatible endpoint's reasoning levels are read from its /models entry.
+        if ((init?.method ?? "GET") === "GET") {
+          listingUrls.push(url);
+          return url === "https://models.customer.test/v1/models/customer-model"
+            ? Response.json({
+                id: "customer-model",
+                supported_reasoning_efforts: ["low", "high"],
+                reasoning_effort: "high",
+              })
+            : new Response("not found", { status: 404 });
+        }
         probeUrls.push(url);
         return Response.json(
           probeStatus === 200
@@ -242,6 +258,15 @@ describe("API component integration", () => {
         expect(created.metadata.directModelProvider.baseUrl).toBe(
           "https://models.customer.test/v1",
         );
+      if (provider === "openai_compatible")
+        expect(created.metadata.directModelProvider.reasoning).toEqual({
+          efforts: ["low", "high"],
+          defaultEffort: "high",
+        });
+      else expect(created.metadata.directModelProvider.reasoning).toBeUndefined();
+      expect(listingUrls.every((url) => url.startsWith("https://models.customer.test/"))).toBe(
+        true,
+      );
       const replay = await app.request(workspacePath(workspaceId, "/connections"), {
         method: "POST",
         headers: { "content-type": "application/json" },

@@ -9,6 +9,8 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Internal grants reuse the private ops ledger operator:
+[internal credit operations](internal-credit-operations.md).
 Organization subscription plans (runtime catalog, period credit and seats):
 [foundation contract](subscription-plans.md). No plan row preserves existing behavior.
 `apps/api/src/billing-subscriptions.ts` owns Stripe subscription synchronization;
@@ -237,7 +239,11 @@ lists. Web and desktop share the dirty-scope renderer, so unchanged roots, pins,
 expanded branches and project windows no longer poll. Missing listener support,
 transaction-only database handles, finite HTTP/1 batches and external host ACLs
 retain polling. The source is `packages/db/src/session-list-notifications.ts`; the
-authorized batch is `apps/api/src/http/session-list-hints.ts`.
+authorized batch is `apps/api/src/http/session-list-hints.ts`. Each subscriber
+keeps one authorization/write in flight and one coalesced dirty set. A timer tick
+blocked by I/O flushes when it settles; fast reads keep the normal cadence.
+More than 512 dirty IDs becomes the existing
+content-free reconcile-all hint; reconnect generations still discard stale reads.
 
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
@@ -1152,9 +1158,14 @@ readers. A major release or deprecation period never permits a break; an
 incompatible design ships as a new version beside the old one, with
 version-specific adapters over shared application logic. `bun run
 check:public-api` and the major-changeset guard enforce it in CI.
+The [published SDK integration lane](api-compatibility-testing.md) runs current
+source and pinned npm builds against the current API and worker. The static
+guard also prevents silently removing tested versions from this bounded matrix;
+the matrix is not a limit on the compatibility promise.
 
 Official builds expose `serverVersion` in health and client config; nothing
-negotiates at runtime.
+negotiates at runtime. `x-opengeni-sdk-version` is optional, content-free
+request/trace metadata, never an admission gate or metric label.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
 ([details](product-integration.md#api-contract-revision)).
@@ -1683,6 +1694,11 @@ Canonical: [`human-input.md`](human-input.md),
 Accepted turns freeze model choice, provider/deployment routing, billing,
 governance, initiating authority, and tool/connection delegations. Recovery
 reuses these snapshots, never mutable workspace defaults.
+
+Chat streaming completion is checked in `packages/runtime/src/model-provider-routing.ts`
+before the SDK can release tool calls: transport EOF alone is not completion.
+Missing primary-choice finish evidence stops without automatic replay; see
+[`model-providers.md`](model-providers.md).
 
 Built-in tool and MCP-server defaults inherit independently when their
 `settings.sessionToolDefaults` key is absent. Arrays, including empty ones,
@@ -3285,7 +3301,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
-| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
+| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `apps/api/src/integrations/teams-admin-proof.ts`, `apps/api/src/integrations/teams-onboarding-limit.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
@@ -3491,4 +3507,8 @@ against authenticated membership changes. Changes retire the old route rather
 than transferring history. Native admission rechecks all linked members, sender
 permissions and the exact group allowlist; each outbound part revalidates the
 provider roster. Personal routes and private-session authority remain separate.
+Welcome, help and unlink replies are fixed text chosen by installation and link
+state, never agent turns; agent replies carry Teams' AI label and feedback
+buttons, and feedback invokes are recorded as ordinary Opengeni feedback on the
+chat and turn.
 See [Teams release readiness](microsoft-teams-release-readiness.md).

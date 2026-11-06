@@ -52,7 +52,12 @@ Above the composer, `NativeSessionScreen` shows how the agent works: chips for
 the session goal, helper agents and running commands. For people to whom a
 paused goal or a count of helper agents means nothing, pass
 `agentSignals={false}`. Queued messages, approvals and the agent's questions
-still show.
+still show, turn rows show only their status, and an automation run shows as
+its one line and its answer.
+
+An automation run reads as one line saying what happened (the automation's
+name and what its event says), never its instructions, and a run whose answer
+is exactly `NO_REPLY` is not drawn.
 
 ```tsx
 <NativeSessionScreen controller={controller} agentSignals={false} />
@@ -71,6 +76,47 @@ screen readers. The default is no mark.
   renderLiveMark={(state) => <Mascot state={state.kind} />}
 />
 ```
+
+### Approval cards
+
+Each pending approval shows a review card above the composer. On its own the
+card can only show the tool's title and its arguments, which reads poorly for a
+tool whose arguments are only identifiers. Pass `loadReview` to
+`NativeSessionScreen` (or `ApprovalStrip`) to show a readable review instead:
+the same hook and the same `ToolActionReview` as the web `ApprovalSurface`.
+Load the server's review with `client.getToolActionReview`, or write your own:
+a plain title, its consequence, and only the fields worth reading (`fields: []`
+shows none). The raw arguments stay behind Details unless `detailsAvailable` is
+`false`.
+
+```tsx
+import { pendingApprovalReview } from "@opengeni/react/approval-review-model";
+
+<NativeSessionScreen
+  controller={controller}
+  loadReview={async (approval) => {
+    if (approval.display?.toolName !== "move_card") return null; // standard card
+    const { cardId } = approval.arguments as { cardId: string };
+    const card = await api.cards.get(cardId);
+    return {
+      ...pendingApprovalReview(approval, { formatToolName: (name) => name, approveLabel: "Move" }),
+      title: `Move “${card.title}” to Done?`,
+      consequence: "The card leaves In progress and its assignee is told it is finished.",
+      fields: [],
+      moreFields: 0,
+    };
+  }}
+/>
+```
+
+The review only changes what the card says; the approval decided is always the
+one the agent asked for, and a review whose `id` is not the approval's is
+ignored. While the review loads, the card shows the tool's title and holds
+Approve (Reject still works). Resolving `null`, or rejecting with a 404
+`OpenGeniApiError`, keeps the standard card. Any other failure shows the
+standard card, still decidable, with Try again. `availableActions` decides
+whether Approve is offered, and `approvedBy` / `accountOwnerLabel` say who may
+approve. A question from the tool's MCP server is never read as a review.
 
 ### Labels and languages
 

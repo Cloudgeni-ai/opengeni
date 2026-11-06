@@ -200,7 +200,7 @@ export function CopyField({
 
   if (variant === "field") {
     const valueClass = cn(
-      "block w-full min-w-0 rounded-md! border border-border bg-surface-2 px-3 font-mono text-xs text-fg outline-offset-2 selection:bg-brand/25 placeholder:font-sans placeholder:text-fg-subtle focus-visible:border-brand disabled:text-fg-muted",
+      "block w-full min-w-0 rounded-md! border border-border bg-surface-2 px-3 font-mono text-xs text-fg outline-offset-2 placeholder:font-sans placeholder:text-fg-subtle focus-visible:border-brand disabled:text-fg-muted",
       wrap ? "resize-none py-2 leading-5 break-all" : "h-9 text-ellipsis pointer-coarse:h-11",
     );
     const shared = {

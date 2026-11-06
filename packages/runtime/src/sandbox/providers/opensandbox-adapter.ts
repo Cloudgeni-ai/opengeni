@@ -59,6 +59,12 @@ import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import {
+  WORKSPACE_RESTORE_BACKUP_PREFIX,
+  WORKSPACE_RESTORE_SCRATCH_GLOBS,
+  WORKSPACE_RESTORE_STAGING_PREFIX,
+  workspaceTarExcludeArgs,
+} from "../workspace-tar-excludes";
+import {
   nextDurableOpId,
   notifyRemoteOperationNotDispatched,
   notifyRemoteOperationTransportSelected,
@@ -409,7 +415,7 @@ archive, root, staging, backup, max_members, max_bytes, excluded_raw = sys.argv[
 max_members = int(max_members)
 max_bytes = int(max_bytes)
 excluded = [p for p in excluded_raw.split("\n") if p]
-reserved_prefixes = (".opengeni-restore-", ".opengeni-old-")
+reserved_prefixes = (${JSON.stringify(WORKSPACE_RESTORE_STAGING_PREFIX)}, ${JSON.stringify(WORKSPACE_RESTORE_BACKUP_PREFIX)})
 
 def logical(name):
     name = name.replace("\\", "/")
@@ -480,8 +486,8 @@ with tarfile.open(archive, "r:*") as tf:
 
 if not os.path.isdir(root):
     raise ValueError("workspace root does not exist")
-staging = workspace_child(staging, ".opengeni-restore-")
-backup = workspace_child(backup, ".opengeni-old-")
+staging = workspace_child(staging, ${JSON.stringify(WORKSPACE_RESTORE_STAGING_PREFIX)})
+backup = workspace_child(backup, ${JSON.stringify(WORKSPACE_RESTORE_BACKUP_PREFIX)})
 shutil.rmtree(backup, ignore_errors=True)
 os.makedirs(backup, mode=0o700, exist_ok=False)
 moved_old = []
@@ -1513,17 +1519,22 @@ export class OpenSandboxSession {
     );
   }
 
+  /** Top-level globs this session's workspace archive leaves out beyond the
+   * manifest's ephemeral paths. The workspace fingerprint reads the same list,
+   * so what the archive skips and what verification covers never diverge. */
+  workspaceArchiveExcludedGlobs(): readonly string[] {
+    return WORKSPACE_RESTORE_SCRATCH_GLOBS;
+  }
+
   async persistWorkspaceTar(): Promise<Uint8Array> {
     const archivePath = `${PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
-    const excludes = [
-      ...this.state.manifest.ephemeralPersistencePaths(),
-      ".opengeni-old-*",
-      ".opengeni-restore-*",
-    ].sort();
-    const excludeArgs = excludes.flatMap((path) => [
-      shellQuote(`--exclude=${path}`),
-      shellQuote(`--exclude=./${path}`),
-    ]);
+    // The same anchored, escaped exclusions as the workspace fingerprint, so
+    // a restore of this tar verifies; the restore's own staging and backup
+    // folders are top-level globs.
+    const excludeArgs = workspaceTarExcludeArgs(
+      [...this.state.manifest.ephemeralPersistencePaths()],
+      this.workspaceArchiveExcludedGlobs(),
+    );
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(PRIVATE_ROOT)}
 cd ${shellQuote(WORKSPACE_ROOT)}
@@ -1577,8 +1588,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       });
     }
     const archivePath = `${PRIVATE_ROOT}/restore-${randomUUID()}.tar`;
-    const stagingPath = `${WORKSPACE_ROOT}/.opengeni-restore-${randomUUID()}`;
-    const backupPath = `${WORKSPACE_ROOT}/.opengeni-old-${randomUUID()}`;
+    const stagingPath = `${WORKSPACE_ROOT}/${WORKSPACE_RESTORE_STAGING_PREFIX}${randomUUID()}`;
+    const backupPath = `${WORKSPACE_ROOT}/${WORKSPACE_RESTORE_BACKUP_PREFIX}${randomUUID()}`;
     await this.writeFile({
       path: archivePath,
       content: bytes,

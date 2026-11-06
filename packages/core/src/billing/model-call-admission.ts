@@ -17,6 +17,7 @@ import {
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
   ownSubscriptionPlanAllows,
 } from "./byok-platform-fee";
 
@@ -72,7 +73,10 @@ export async function admitModelCall(
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
-  if (input.ownSubscription && chargeBillingOrigin(input.billingOrigin) === "api") {
+  if (
+    input.ownSubscription &&
+    connectedSubscriptionsRefusedForOrigin(settings, chargeBillingOrigin(input.billingOrigin))
+  ) {
     return {
       allowed: false,
       denial: "subscription_api_unavailable",

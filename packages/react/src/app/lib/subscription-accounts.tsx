@@ -62,6 +62,16 @@ type SubscriptionAdapter = {
   /** The plan's own name without the brand ("Ultra", "Plus"), or null when unknown. */
   planName(plan: string): string | null;
   windows: Record<string, WindowSpec>;
+  /**
+   * Windows a plan shows only while they hold the account back (reached or
+   * near their limit), on every surface: Ultra's 5h.
+   */
+  planQuiet?(plan: string): readonly string[];
+  /**
+   * Windows an account list shows only while they hold the account back
+   * (reached or near their limit): the week is the row's reading.
+   */
+  listedWhenLimited?: readonly string[];
 };
 
 /** "claude_team" → "Team", "k12" → "K12": a provider id read as words. */
@@ -91,6 +101,11 @@ const CLAUDE_PLANS: Record<string, string> = {
   claude_enterprise: "Enterprise",
 };
 
+// Ultra (formerly Max 20x) is sold without a 5-hour limit, but Claude still
+// reports one and can refuse on it, so it shows only while it holds the
+// account back. A bare `claude_max` may be either tier.
+const CLAUDE_ULTRA_PLANS = new Set(["claude_max_20x", "claude_ultra"]);
+
 // ChatGPT renamed Team to Business; the id stays `team`.
 const CHATGPT_PLANS: Record<string, string> = {
   free: "Free",
@@ -114,6 +129,8 @@ const ADAPTERS: Record<string, SubscriptionAdapter> = {
       seven_day_sonnet: { label: "Sonnet week", order: 23, scoped: true },
       seven_day_overage_included: { label: "Included extra", order: 80, extra: true },
     },
+    planQuiet: (plan) => (CLAUDE_ULTRA_PLANS.has(plan.toLowerCase()) ? ["five_hour"] : []),
+    listedWhenLimited: ["five_hour"],
   },
   codex: {
     planBrand: "ChatGPT",
@@ -230,6 +247,42 @@ export function subscriptionWindows(
 
 /** Below this share left, an included-usage window counts as near its limit. */
 export const SUBSCRIPTION_NEAR_LIMIT_LEFT = 10;
+
+/** Whether a window holds the account back: reached, or near its limit. */
+function limiting(window: SubscriptionWindow): boolean {
+  return window.limitReached || window.nearLimit;
+}
+
+/**
+ * The windows shown for an account on its plan: a window the plan keeps quiet
+ * (Ultra's 5h) appears only while it holds the account back.
+ */
+export function subscriptionPlanWindows(
+  provider: string,
+  plan: string | null | undefined,
+  windows: readonly SubscriptionWindow[],
+): SubscriptionWindow[] {
+  const id = plan?.trim();
+  const quiet = id ? (adapter(provider).planQuiet?.(id) ?? []) : [];
+  return windows.filter((window) => !quiet.includes(window.id) || limiting(window));
+}
+
+/**
+ * What an account row in a list shows: the plan's account-wide windows (the
+ * week), never a model-scoped week (Fable, Opus, Sonnet) or paid extra usage,
+ * which the account's own page still shows. A short window the list keeps
+ * quiet (Claude's 5h) appears only while it holds the account back.
+ */
+export function subscriptionListWindows(
+  provider: string,
+  plan: string | null | undefined,
+  windows: readonly SubscriptionWindow[],
+): SubscriptionWindow[] {
+  const quiet = adapter(provider).listedWhenLimited ?? [];
+  return subscriptionPlanWindows(provider, plan, windows).filter(
+    (window) => !window.scoped && !window.extra && (!quiet.includes(window.id) || limiting(window)),
+  );
+}
 
 /**
  * The account's limit state from its included-usage windows and a stored

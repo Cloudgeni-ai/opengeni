@@ -63,6 +63,8 @@ mod overrides;
 mod rpc_replay;
 mod service;
 mod shell_tools;
+#[cfg(target_os = "linux")]
+mod stop_signal;
 mod stream_digest;
 mod supervisor;
 mod uninstall;
@@ -1680,7 +1682,16 @@ fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
 
 /// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix;
 /// on Windows also a closing console and `opengeni-agent stop`'s pipe request).
+/// On Linux a stop signal one of the agent's own commands sent (`kill -1` in a
+/// command) does not count (see `stop_signal`).
 async fn wait_for_shutdown_signal() {
+    #[cfg(target_os = "linux")]
+    match stop_signal::wait().await {
+        Ok(()) => return,
+        Err(e) => {
+            warn!(error = %e, "could not tell a command's stop signal from others; any stop signal stops the agent");
+        }
+    }
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -1868,5 +1879,238 @@ mod log_persistence_tests {
             !stdout.contains("persistent log child started"),
             "a service that captures stderr itself must not store each line twice"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod stop_signal_tests {
+    use std::io::{BufRead as _, BufReader, Lines};
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::time::Duration;
+
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    /// The command the re-executed agent runs.
+    const SCRIPT: &str = "OPENGENI_TEST_STOP_SIGNAL_SCRIPT";
+    /// Set when the re-executed agent should exit once it survived.
+    const EXIT_AFTER: &str = "OPENGENI_TEST_STOP_SIGNAL_EXIT";
+    const CHILD_TEST: &str = "stop_signal_tests::agent_running_one_command";
+
+    /// Only re-executed by the tests below. Waits for a stop signal as the
+    /// agent does, runs `$OPENGENI_TEST_STOP_SIGNAL_SCRIPT` as one of its
+    /// contained commands (with `$AGENT` naming this process), and prints the
+    /// verdict `survived` when the command ended without stopping it, then
+    /// `stopped` when a stop signal from elsewhere arrives.
+    #[test]
+    #[ignore = "re-executed by the stop signal tests"]
+    fn agent_running_one_command() {
+        let Some(script) = std::env::var_os(SCRIPT) else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let mut stop = tokio::spawn(super::wait_for_shutdown_signal());
+            // Wait until it handles both stop signals, as the agent does once
+            // it started.
+            wait_until_handled(&[Signal::SIGTERM, Signal::SIGINT]).await;
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(script)
+                .env("AGENT", std::process::id().to_string());
+            let mut exec =
+                opengeni_agent_platform::spawn_contained(command, None).expect("start the command");
+            drop(exec.stdin.take());
+            tokio::time::timeout(Duration::from_secs(20), exec.wait())
+                .await
+                .expect("the command ends")
+                .expect("the command's status");
+            if tokio::time::timeout(Duration::from_millis(700), &mut stop)
+                .await
+                .is_ok()
+            {
+                println!("\nverdict: stopped by its own command");
+                std::process::exit(3);
+            }
+            println!("\nverdict: survived");
+            if std::env::var_os(EXIT_AFTER).is_some() {
+                std::process::exit(0);
+            }
+            stop.await.expect("the stop wait");
+            println!("\nverdict: stopped");
+        });
+    }
+
+    /// Waits until this process handles every one of `signals`.
+    async fn wait_until_handled(signals: &[Signal]) {
+        let wanted = signals
+            .iter()
+            .fold(0_u64, |mask, signal| mask | 1 << (*signal as i32 - 1));
+        for _ in 0..400 {
+            let caught = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("SigCgt:"))
+                        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+                })
+                .unwrap_or(0);
+            if caught & wanted == wanted {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the stop signal handlers were never installed");
+    }
+
+    /// Sends the agent `TERM` and `INT` in the ways a command does, many
+    /// times over, so a sender that exits before the agent can look it up is
+    /// covered: the shell's own `kill`, `/bin/kill` where it exists, a nested
+    /// shell, and a `kill` that ends the script.
+    const SIGNAL_THE_AGENT: &str = "i=0; while [ $i -lt 10 ]; do \
+         kill -TERM \"$AGENT\"; \
+         if [ -x /bin/kill ]; then /bin/kill -INT \"$AGENT\"; fi; \
+         sh -c 'kill -TERM \"$AGENT\"'; \
+         sh -c 'kill -INT \"$AGENT\"'; \
+         i=$((i + 1)); done; \
+         kill -TERM \"$AGENT\"";
+
+    /// `kill -1` as commands send it. The first keeps its own shell alive and
+    /// ends with a nested shell's `kill -1`, a sender often gone before the
+    /// agent can look it up. In the second, `/bin/kill -1` (where it exists)
+    /// also ends the command's shell, so the sender is often an orphaned
+    /// zombie by then.
+    const KILL_MINUS_ONE: [&str; 2] = [
+        "trap '' TERM INT; kill -TERM -1; kill -INT -1; sh -c 'kill -TERM -1; kill -INT -1'",
+        "if [ -x /bin/kill ]; then /bin/kill -TERM -- -1; else kill -TERM -1; fi; sleep 1",
+    ];
+
+    fn agent_command(script: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                CHILD_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SCRIPT, script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        command
+    }
+
+    fn next_line(lines: &mut Lines<BufReader<ChildStdout>>) -> String {
+        for line in lines.by_ref() {
+            // libtest may print the test's name on the same line.
+            if let Some(verdict) = line.expect("agent output").split("verdict: ").nth(1) {
+                return verdict.to_string();
+            }
+        }
+        "(no verdict: the agent ended)".to_string()
+    }
+
+    fn start(mut command: Command) -> (Child, Lines<BufReader<ChildStdout>>) {
+        let mut child = command.spawn().expect("start the agent");
+        let lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+        (child, lines)
+    }
+
+    /// A command that signals the agent itself, as `pkill -f opengeni` or a
+    /// group signal aimed at the wrong group does, no longer stops it; a stop
+    /// signal from anywhere else still does.
+    #[test]
+    fn a_stop_signal_from_the_agents_own_command_does_not_stop_it() {
+        let (mut agent, mut lines) = start(agent_command(SIGNAL_THE_AGENT));
+        let verdict = next_line(&mut lines);
+        if verdict != "survived" {
+            let _ = agent.kill();
+            let _ = agent.wait();
+        }
+        assert_eq!(verdict, "survived");
+        let pid = Pid::from_raw(i32::try_from(agent.id()).expect("pid"));
+        kill(pid, Signal::SIGTERM).expect("stop the agent from outside");
+        assert_eq!(next_line(&mut lines), "stopped");
+        let status = agent.wait().expect("agent status");
+        assert!(status.success(), "agent exit {status:?}");
+    }
+
+    /// The `unshare` arguments for a private PID namespace (with its own
+    /// `/proc`): as real root, or in a rootless user namespace. `None` where
+    /// neither is permitted.
+    fn private_pid_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOT: &[&str] = &["--pid", "--fork", "--mount-proc"];
+        const ROOTLESS: &[&str] = &[
+            "--user",
+            "--map-root-user",
+            "--pid",
+            "--fork",
+            "--mount-proc",
+        ];
+        let works = |args: &[&str]| {
+            Command::new("unshare")
+                .args(args)
+                .arg("true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
+            Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
+        } else {
+            None
+        }
+    }
+
+    /// Regression: `kill -1` in a command signals every process of the user,
+    /// the agent among them, and the agent went offline. Runs the real
+    /// `kill -1` in a private PID namespace, so it reaches nothing outside this
+    /// test. Skips where no such namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[test]
+    fn kill_minus_one_in_a_command_leaves_the_agent_running() {
+        let Some(namespace) = private_pid_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private PID namespace"
+            );
+            eprintln!("skipping: this machine permits no private PID namespace");
+            return;
+        };
+        for script in KILL_MINUS_ONE {
+            // The namespace's first process is immune to `kill -1`, so a shell
+            // takes that place and the agent runs as its child.
+            let inner = agent_command(script);
+            let mut command = Command::new("unshare");
+            command
+                .args(namespace)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg("\"$0\" \"$@\" & wait $!")
+                .arg(inner.get_program())
+                .args(inner.get_args())
+                .env(EXIT_AFTER, "1")
+                .env(SCRIPT, script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            let (mut agent, mut lines) = start(command);
+            let verdict = next_line(&mut lines);
+            let status = agent.wait().expect("namespace status");
+            assert_eq!(verdict, "survived", "{script}: namespace exit {status:?}");
+            assert!(status.success(), "{script}: namespace exit {status:?}");
+        }
     }
 }

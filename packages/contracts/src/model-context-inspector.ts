@@ -28,6 +28,7 @@ export const ModelContextInstructionLayerId = /* @__PURE__ */ defineSchema(() =>
     "sandbox_filesystem",
     "sent_system_instructions",
     "identity",
+    "agent_instructions",
   ]),
 );
 export type ModelContextInstructionLayerId = z.infer<typeof ModelContextInstructionLayerId>;

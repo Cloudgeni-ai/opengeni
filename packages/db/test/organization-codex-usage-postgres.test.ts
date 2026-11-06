@@ -64,9 +64,6 @@ async function fixture(mode: "core", expired = false, workspaceManaged = false) 
   );
   const expires = new Date(expired ? 0 : Date.now() + 86_400_000).toISOString();
 
-  await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
   await shared!.admin`insert into subscription_connections (
       id, account_id, provider, kind, credential_encrypted, credential_format, provider_account_id,
       plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at,

@@ -416,11 +416,15 @@ export const SESSION_STATUS_TONE: Record<SessionDisplayStatus, SessionStatusTone
   idle: "idle",
   failed: "failed",
   cancelled: "cancelled",
+  archived: "cancelled",
 };
 
 /** The status dot of a recent-session row: a background command reads as running. */
 export function recentSessionStatus(
-  session: Pick<SessionListRow, "status" | "backgroundCommandActivity" | "admissionBlock">,
+  session: Pick<
+    SessionListRow,
+    "status" | "backgroundCommandActivity" | "admissionBlock" | "archived" | "retention"
+  >,
 ): { tone: SessionStatusTone; pulse: boolean } {
   const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
   return {

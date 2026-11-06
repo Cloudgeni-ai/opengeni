@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use compute_fleet::{HostEpoch, HostId, HostState, Stamp};
-use compute_protocol::fleet::{Register, Renew, Report, Ruling};
+use compute_protocol::fleet::{Register, Renew, Report, Ruling, Verdict as Wire};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, Collector, Counted, Found, HostRow, Import, Imported, Inserted,
-    LifecycleRow, Linked, PointerRow, RequestRow, Result, SandboxRow, Store, TemplateRow, Write,
-    admits, rule,
+    Admission, Admits, Collector, Counted, Forsaken, Found, Gone, HostRow, Import, Imported,
+    Inserted, LifecycleRow, Linked, LostCopy, PointerRow, RequestRow, Result, SandboxRow, Store,
+    TemplateRow, Write, admits, rule,
 };
 
 mod pointers;
@@ -201,14 +201,39 @@ impl MemoryStore {
         let epoch = HostEpoch(inner.next_host_epoch);
         let mut rulings = Vec::with_capacity(register.held.len());
         for held in &register.held {
-            let row = inner.sandboxes.get(&held.id).map(|row| row.ownership);
-            let (ruling, change) = rule(id, *held, row);
-            if let Some(change) = change {
-                let sandbox = inner.sandboxes.get_mut(&held.id).expect("ruled on a row");
-                sandbox.ownership = change.set;
-                sandbox.version += 1;
+            let row = inner.sandboxes.get(&held.id);
+            let ruled = row.map(|row| (row.ownership, row.lost.as_ref()));
+            let (ruling, change) = rule(id, *held, ruled, register.capacity.sets_aside);
+            if let Some(sandbox) = inner.sandboxes.get_mut(&held.id) {
+                match (change, ruling.verdict) {
+                    // A reclaim: nobody took it since, so nothing was lost.
+                    (Some(change), _) => {
+                        sandbox.ownership = change.set;
+                        sandbox.lost = None;
+                        sandbox.version += 1;
+                    }
+                    (None, Wire::SetAside) => {
+                        if let Some(lost) = &mut sandbox.lost {
+                            lost.set_aside_ms.get_or_insert(crate::service::now_ms());
+                        }
+                        sandbox.version += 1;
+                    }
+                    // Kept as it waited, under the same epoch: raised all
+                    // the same, so a write read before this is refused.
+                    _ if sandbox.ownership.owner == Some(id) => sandbox.version += 1,
+                    _ => {}
+                }
             }
             rulings.push(ruling);
+        }
+        // What waited for it that it no longer has goes on from the store.
+        for sandbox in inner.sandboxes.values_mut() {
+            if sandbox.ownership.owner == Some(id)
+                && !register.held.iter().any(|held| held.id == sandbox.id)
+            {
+                sandbox.ownership = sandbox.ownership.lose().set;
+                sandbox.version += 1;
+            }
         }
         let (renewals, drained) = inner
             .hosts
@@ -326,24 +351,60 @@ impl MemoryStore {
         entry.row.changed = changed;
         entry.gone_ms = Some(at_ms);
         inner.changes = changed;
-        let mut cleared = 0;
-        for sandbox in inner.sandboxes.values_mut() {
-            if sandbox.ownership.owner == Some(host) {
-                sandbox.ownership = sandbox.ownership.lose().set;
-                sandbox.version += 1;
-                cleared += 1;
-            }
+        // Its sandboxes wait for it.
+        Some(
+            inner
+                .sandboxes
+                .values()
+                .filter(|sandbox| sandbox.ownership.owner == Some(host))
+                .count(),
+        )
+    }
+
+    fn declare_gone_now(&self, host: HostId, why: Gone, at_ms: u64) -> Option<Vec<Forsaken>> {
+        let mut inner = self.lock();
+        let entry = inner.hosts.get(&host)?;
+        if entry.row.state != HostState::Lost {
+            return None;
         }
-        Some(cleared)
+        let name = entry.row.info.name.clone();
+        let owned: Vec<Id> = inner
+            .sandboxes
+            .values()
+            .filter(|sandbox| sandbox.ownership.owner == Some(host))
+            .map(|sandbox| sandbox.id)
+            .collect();
+        let mut forsaken = Vec::with_capacity(owned.len());
+        for id in owned {
+            let saved_ms = inner.saved_ms(&id.to_string());
+            let sandbox = inner.sandboxes.get_mut(&id).expect("listed above");
+            sandbox.ownership = sandbox.ownership.lose().set;
+            sandbox.lost = Some(LostCopy {
+                host: name.clone(),
+                why,
+                at_ms,
+                epoch: sandbox.ownership.epoch.0,
+                saved_ms,
+                set_aside_ms: None,
+            });
+            sandbox.version += 1;
+            forsaken.push(Forsaken { id, saved_ms });
+        }
+        Some(forsaken)
     }
 
     fn prune_hosts_now(&self, before_ms: u64) -> u64 {
         let mut inner = self.lock();
         let inner = &mut *inner;
         let before = inner.hosts.len();
-        inner
-            .hosts
-            .retain(|_, host| host.gone_ms.is_none_or(|at| at >= before_ms));
+        let sandboxes = &inner.sandboxes;
+        // One a sandbox still waits for is kept.
+        inner.hosts.retain(|id, host| {
+            host.gone_ms.is_none_or(|at| at >= before_ms)
+                || sandboxes
+                    .values()
+                    .any(|sandbox| sandbox.ownership.owner == Some(*id))
+        });
         let hosts = &inner.hosts;
         inner.by_name.retain(|_, id| hosts.contains_key(id));
         u64::try_from(before - inner.hosts.len()).unwrap_or(u64::MAX)
@@ -409,7 +470,9 @@ impl MemoryStore {
         if stored.version != row.version {
             return Write::Conflict;
         }
+        let lost = stored.lost.take();
         *stored = row.clone();
+        stored.lost = lost;
         stored.version += 1;
         Write::Done
     }
@@ -622,6 +685,15 @@ impl Store for MemoryStore {
         at_ms: u64,
     ) -> impl Future<Output = Result<Option<usize>>> + Send {
         ready(Ok(self.give_up_now(host, renewals, at_ms)))
+    }
+
+    fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Forsaken>>>> + Send {
+        ready(Ok(self.declare_gone_now(host, why, at_ms)))
     }
 
     fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {

@@ -61,6 +61,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  IncompleteChatCompletionError,
   AnthropicRequestError,
   findAnthropicRequestSizeError,
   AnthropicSizeRecoveryExhaustedError,
@@ -107,11 +108,13 @@ import {
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
+  classifyXaiSubscriptionClientOutdatedError,
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
+  XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import type {
@@ -570,24 +573,97 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
 }
 
 /**
- * Tell the model when durable MCP policy references are unavailable for this
- * exact turn. The policy projection already bounds and validates these ids;
- * this notice prevents a graceful runtime drop from becoming a silent source-
- * of-truth substitution or a false claim that the disconnected system was read.
+ * Why a connector configured for this turn has no tools in it:
+ * - `not_available`: it is not in this turn's registry (disconnected, turned
+ *   off, removed, or not available to this turn in this workspace).
+ * - `no_account`: it needs a signed-in account and none was accepted with the
+ *   turn (not signed in, sign-in expired or removed, or the sign-in was not
+ *   usable in this workspace when the message was accepted).
+ * - `account_setup_changed`: the accepted accounts no longer fit its setup.
+ * - `unsupported_sign_in`: it uses a sign-in method that is no longer supported.
+ */
+export type UnavailableMcpConnectorReason =
+  | "not_available"
+  | "no_account"
+  | "account_setup_changed"
+  | "unsupported_sign_in";
+
+export type UnavailableMcpConnector = {
+  id: string;
+  name?: string | undefined;
+  reason: UnavailableMcpConnectorReason;
+};
+
+/** Connectors listed by name in the notice; the rest are counted. */
+const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
+const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
+
+/**
+ * The plain reason, and what the person can do. Shared by the turn notice and
+ * by tool discovery's `unavailableSources`, so both say the same thing.
+ */
+export function unavailableMcpConnectorReasonText(reason: UnavailableMcpConnectorReason): string {
+  switch (reason) {
+    case "no_account":
+      return "no signed-in account for it was available to this turn. The person may not be signed in to it here, their sign-in may have expired or been removed, or their sign-in was not usable in this workspace yet when the message was sent (this can last a few minutes after their workspace access changes). They can sign in to it again, or send the message again shortly if their access just changed.";
+    case "account_setup_changed":
+      return "its account setup changed after the message was sent, so the account accepted for it no longer fits. Sending the message again uses the current setup.";
+    case "unsupported_sign_in":
+      return "it uses a sign-in method that is no longer supported. It needs to be connected again.";
+    case "not_available":
+      return "it is disconnected, turned off, or no longer available to this chat in this workspace. Whoever manages this workspace's connectors can reconnect it or turn it back on.";
+  }
+}
+
+function displayConnector(connector: UnavailableMcpConnector): string {
+  // Workspace-configured text: one bounded line, never instructions.
+  const name = (connector.name ?? "")
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS);
+  return name && name !== connector.id
+    ? `${JSON.stringify(name)} (${connector.id})`
+    : JSON.stringify(connector.id);
+}
+
+/**
+ * Tell the model which connectors configured for this exact turn have no tools
+ * in it, and why, so a missing connector never looks like a connector that has
+ * no such tool and the model never has to guess the cause. Every path that
+ * drops a configured connector before the runtime feeds this one notice: the
+ * tool policy (not in this turn's registry) and account-route expansion (no
+ * usable accepted account). Runtime connect and list failures are reported by
+ * tool discovery as they happen. The notice is part of this turn's own input
+ * and never changes earlier text.
  */
 export function unavailableMcpOperationalContext(input: {
-  droppedIds: readonly string[];
-  droppedCount: number;
+  connectors: readonly UnavailableMcpConnector[];
+  /** Further unavailable connectors the bounded policy projection did not name. */
+  omittedCount?: number;
 }): string | undefined {
-  if (input.droppedCount <= 0) {
-    return undefined;
+  const omitted = Math.max(0, input.omittedCount ?? 0);
+  const unique = [
+    ...new Map(input.connectors.map((connector) => [connector.id, connector])).values(),
+  ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  if (unique.length === 0 && omitted === 0) return undefined;
+  const listed = unique.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = unique.length - listed.length + omitted;
+  const lines = listed.map(
+    (connector) =>
+      `- ${displayConnector(connector)}: ${unavailableMcpConnectorReasonText(connector.reason)}`,
+  );
+  if (more > 0) {
+    lines.push(
+      `- ${more} more connector${more === 1 ? " is" : "s are"} unavailable for the same kinds of reasons.`,
+    );
   }
-  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
-  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
-  const inventory = listed
-    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
-    : `${input.droppedCount} unavailable server(s)`;
-  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
+  return [
+    "Connector availability for this turn: these connectors are configured for this chat, but their tools were not loaded this turn, so tool search and tool lists do not show them.",
+    ...lines,
+    "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+  ].join("\n");
 }
 
 /**
@@ -1916,6 +1992,9 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
  */
 export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
+  // An outdated Opengeni client is a platform release fault, not the
+  // account's: it must never mark the account unauthorized or forbidden.
+  if (classifyXaiSubscriptionClientOutdatedError(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -2490,6 +2569,14 @@ function baseAgentRunFailurePayload(
       retryable: false,
     };
   }
+  const xaiClientOutdated = classifyXaiSubscriptionClientOutdatedError(error);
+  if (xaiClientOutdated) {
+    return {
+      error: xaiClientOutdated.message,
+      code: XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
+      retryable: false,
+    };
+  }
   const xaiStreamTerminal = classifyXaiSubscriptionStreamingTerminalError(error);
   if (xaiStreamTerminal) {
     return {
@@ -2651,6 +2738,11 @@ function baseAgentRunFailurePayload(
       timeoutClass: "transport",
       detail: message,
     };
+  }
+  if (error instanceof IncompleteChatCompletionError) {
+    // No terminal evidence means upstream work may already have happened.
+    // Stop without executing the partial tools or authorizing another request.
+    return { error: error.message, code: error.code, retryable: false };
   }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
     return {

@@ -203,6 +203,7 @@ impl NativePlatform {
         let missing = metadata
             .as_ref()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let mut recreate_failure = None;
         if let Some(kind) = self.recreatable_cwd(&path, identity).filter(|_| missing) {
             match recreate_directory(&path, kind) {
                 Ok(()) => tracing::warn!(
@@ -211,20 +212,29 @@ impl NativePlatform {
                 ),
                 // Another command (or setup) created it meanwhile.
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "the working directory is missing and could not be created again"
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "the working directory is missing and could not be created again"
+                    );
+                    recreate_failure = Some(error);
+                }
             }
             // Whatever happened, the directory as it is now decides.
             metadata = Self::cwd_metadata(&path, identity)?;
         }
         let metadata = metadata.map_err(|error| {
-            PlatformError::from_io(
-                &format!("{operation} working directory {}", path.display()),
-                &error,
-            )
+            // Name why the agent could not put it back, so the command's
+            // error says more than "not found".
+            let context = match &recreate_failure {
+                Some(failure) => format!(
+                    "{operation} working directory {} (it was missing and creating it again failed: {failure})",
+                    path.display()
+                ),
+                None => format!("{operation} working directory {}", path.display()),
+            };
+            PlatformError::from_io(&context, &error)
         })?;
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
@@ -303,9 +313,140 @@ fn is_placeholder_home(path: &Path) -> bool {
             .any(|placeholder| path == Path::new(placeholder))
 }
 
-/// Creates the missing working directory `path` as `kind` describes. The mode
-/// is set explicitly afterwards, so the agent's umask does not narrow it.
+/// Creates the missing working directory `path` as `kind` describes.
+///
+/// On Linux and macOS the directory is made under a private staging name in
+/// the same parent, given its owner and mode (set explicitly, so the agent's
+/// umask does not narrow it), and only then renamed into place without
+/// replacing anything. So `path` never appears half-made: a command that
+/// finds it (including one that lost a race to create it) starts in the
+/// finished directory. When the owner or mode cannot be set, the staged
+/// directory is removed and the error returned, and the command that needed
+/// it fails as not found.
 fn recreate_directory(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        recreate_directory_staged(path, kind)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        recreate_directory_in_place(path, kind)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recreate_directory_staged(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if matches!(kind, RecreatedCwd::WorkspaceRoot) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stage = create_stage(parent)?;
+    let published = prepare_stage(&stage, kind).and_then(|()| publish_stage(&stage, path));
+    if published.is_err() {
+        if let Err(error) = std::fs::remove_dir(&stage) {
+            tracing::warn!(
+                stage = %stage.display(),
+                %error,
+                "a staged working directory could not be removed"
+            );
+        }
+    }
+    published
+}
+
+/// Makes an empty staging directory in `parent`, under a short name so even
+/// a parent with a long name has room for it. A name left behind by an
+/// earlier agent process with the same process id is skipped. It starts
+/// private to the agent (0700), whatever the umask leaves, until
+/// [`prepare_stage`] sets its final mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_stage(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STAGES: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..16 {
+        let stage = parent.join(format!(
+            ".opengeni-cwd-{}-{}",
+            std::process::id(),
+            STAGES.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&stage) {
+            Ok(()) => return Ok(stage),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // Not `AlreadyExists`, which would read as "another command made it".
+    Err(std::io::Error::other(format!(
+        "no free staging name in {}",
+        parent.display()
+    )))
+}
+
+/// Gives the staging directory its owner and mode through a descriptor
+/// opened without following symlinks, so a staging name swapped for a link
+/// meanwhile changes nothing else.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn prepare_stage(stage: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    use rustix::fs::{fchmod, fchown, open, Gid, Mode, OFlags, Uid};
+
+    let directory = open(
+        stage,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if let RecreatedCwd::UserHome(identity) = kind {
+        fchown(
+            &directory,
+            Some(Uid::from_raw(identity.uid)),
+            Some(Gid::from_raw(identity.gid)),
+        )?;
+    }
+    let mode = match kind {
+        RecreatedCwd::WorkspaceRoot => 0o755,
+        RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+    };
+    fchmod(&directory, Mode::from_raw_mode(mode))?;
+    Ok(())
+}
+
+/// Renames the prepared staging directory to `path` without replacing
+/// anything. Two commands that recreate the same directory at once: one
+/// publishes it, the other gets `AlreadyExists` and finds it finished.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn publish_stage(stage: &Path, path: &Path) -> std::io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+
+    /// Serializes the fallback's check and rename among the agent's own
+    /// commands, so one never replaces a directory another just published.
+    static FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    match renameat_with(CWD, stage, CWD, path, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::EXIST) => Err(std::io::ErrorKind::AlreadyExists.into()),
+        // A kernel or filesystem without no-replace renames: publish only
+        // while nothing is there.
+        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
+            let _serialized = FALLBACK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if std::fs::symlink_metadata(path).is_ok() {
+                Err(std::io::ErrorKind::AlreadyExists.into())
+            } else {
+                std::fs::rename(stage, path)
+            }
+        }
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+/// Creates the missing working directory `path` where no staged rename is
+/// available, then sets its mode.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn recreate_directory_in_place(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(matches!(kind, RecreatedCwd::WorkspaceRoot));
     builder.create(path)?;
@@ -478,6 +619,8 @@ struct ExecProcessGroup {
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
     op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
+    /// Counts this command as running until its process tree is cleaned up.
+    running_command: Option<crate::command_activity::RunningCommand>,
 }
 
 #[cfg(unix)]
@@ -549,6 +692,7 @@ impl ExecProcessGroup {
             background_children_stopped: false,
             termination_requested: false,
             op_cgroup: None,
+            running_command: Some(crate::command_activity::RunningCommand::start()),
         };
         let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
             unreachable!("new anchor is owned");
@@ -728,6 +872,7 @@ impl Drop for ExecProcessGroup {
             background_children_stopped: self.background_children_stopped,
             termination_requested: true,
             op_cgroup: self.op_cgroup.take(),
+            running_command: self.running_command.take(),
         };
         self.running = false;
         let witness = crate::work_scope::CleanupWitness::new(
@@ -848,6 +993,7 @@ impl ExecProcessGroup {
                 background_children_stopped: handover.background_children_stopped,
                 termination_requested: handover.termination_requested,
                 op_cgroup,
+                running_command: Some(crate::command_activity::RunningCommand::start()),
             },
             (stdin, stdout, stderr),
         ))
@@ -896,15 +1042,23 @@ struct ExecProcessGroup {
     reservation: Option<crate::WorkReservation>,
     background_children_stopped: bool,
     termination_requested: bool,
+    /// Counts this command as running for as long as this owner lives.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+        /// A console of its own, without a window: a command that sends a
+        /// console control event to "every process on my console"
+        /// (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`, the Windows `kill 0`)
+        /// reaches only itself and its children, never the agent and other
+        /// commands sharing the agent's console. Nothing flashes on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
         // As before, no user code runs until the suspended child joins its job.
         let mut child = command
-            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED)
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED | CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()?;
         if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
@@ -939,6 +1093,7 @@ impl ExecProcessGroup {
             reservation: crate::current_work_reservation(),
             background_children_stopped: false,
             termination_requested: false,
+            _running_command: crate::command_activity::RunningCommand::start(),
         })
     }
 
@@ -2132,20 +2287,14 @@ mod tests {
         assert!(mounted.success(), "mount an empty /dev");
         assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
 
-        // `Command::output` opens /dev/null by path for stdin, so the agent's
-        // other program starts (self-update check, metrics, service probes,
-        // app launch) hand it the retained device instead.
+        // `Command::output` opens /dev/null by path for stdin. This changes
+        // nothing, so the exec below still meets the missing device.
         let bare = std::process::Command::new("true").output();
         assert!(
             bare.as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "{bare:?}"
         );
-        let probed = std::process::Command::new("true")
-            .stdin(crate::discarded_stdio())
-            .output()
-            .expect("a program starts with the retained null device");
-        assert!(probed.status.success());
 
         let response = platform
             .exec(&echo_request("still-starts"))
@@ -2164,6 +2313,22 @@ mod tests {
             assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
         }
         eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+
+        // The agent's other program starts (self-update check, metrics,
+        // service probes, app launch) hand `Command::output` the retained
+        // device instead. Checked after exec, so exec's own repair is what the
+        // checks above saw; in `ro` the device is still missing here.
+        let probed = std::process::Command::new("true")
+            .stdin(crate::discarded_stdio())
+            .output()
+            .expect("a program starts with the retained null device");
+        assert!(probed.status.success());
+        if mode == "ro" {
+            assert_eq!(
+                crate::null_device::inspect(Path::new("/dev/null")),
+                crate::null_device::NullDeviceState::Missing
+            );
+        }
     }
 
     /// Whether this process's root is the machine's root, not a user
@@ -2497,6 +2662,21 @@ mod tests {
             let response = response.expect("every concurrent command runs");
             assert_eq!(response.exit_code, 0);
         }
+        // The home has its mode, and nothing but the root and the home is
+        // left in their parent. (This runtime is single-threaded, so these
+        // commands do not truly race; the test below races real threads.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["agent-home", "workspace"], "{entries:?}");
 
         // A home is only created inside an existing parent.
         let nested = parent.path().join("homes").join("agent");
@@ -2520,6 +2700,183 @@ mod tests {
             "{error}"
         );
         assert!(!other.exists());
+    }
+
+    /// A home the agent cannot hand to its user is not left behind: no
+    /// command may start in an agent-owned directory with the umask's mode
+    /// where the user's own home belongs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_home_that_cannot_be_handed_to_its_user_is_not_left_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("open the parent to every user");
+        let home = parent.path().join("user-home");
+        // The home belongs to root, which this process may not hand it to:
+        // an unprivileged test runs as itself, a root one as `nobody`.
+        let target = RunAsIdentity {
+            name: "root".to_string(),
+            uid: 0,
+            gid: 0,
+            groups: vec![0],
+            home: home.clone(),
+            shell: PathBuf::from("/bin/sh"),
+        };
+        let attempt = {
+            let home = home.clone();
+            move || recreate_directory(&home, RecreatedCwd::UserHome(&target))
+        };
+        let result = if nix::unistd::geteuid().is_root() {
+            let nobody = crate::run_as::supported()
+                .then(|| crate::run_as::resolve("nobody").ok().flatten())
+                .flatten();
+            let Some(nobody) = nobody else {
+                eprintln!("skipped: a root test needs run-as and the nobody account");
+                return;
+            };
+            crate::run_as::on_identity_thread(&nobody, move || Ok(attempt()))
+                .expect("switch to nobody")
+        } else {
+            attempt()
+        };
+        let error = result.expect_err("the home cannot be handed to root");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert!(!home.exists(), "the half-made home is gone");
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
+    }
+
+    /// Commands that find the home missing at the same moment, on real
+    /// threads: exactly one makes it, the others get `AlreadyExists`, and
+    /// every one of them then finds it finished (mode 0700), never with the
+    /// umask's mode it had before its mode was set.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn racing_recreations_only_ever_find_a_finished_home() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        const RACERS: usize = 8;
+        let parent = tempfile::tempdir().expect("tempdir");
+        let home = parent.path().join("agent-home");
+        for round in 0..200 {
+            let barrier = Arc::new(Barrier::new(RACERS));
+            let racers: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let home = home.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let result = recreate_directory(&home, RecreatedCwd::AgentHome)
+                            .map_err(|error| error.kind());
+                        let mode = std::fs::metadata(&home)
+                            .map(|metadata| metadata.permissions().mode() & 0o777)
+                            .ok();
+                        (result, mode)
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = racers
+                .into_iter()
+                .map(|racer| racer.join().expect("racer"))
+                .collect();
+            let made = outcomes.iter().filter(|(result, _)| result.is_ok()).count();
+            assert_eq!(made, 1, "round {round}: {outcomes:?}");
+            for (result, mode) in &outcomes {
+                assert!(
+                    matches!(result, Ok(()) | Err(std::io::ErrorKind::AlreadyExists)),
+                    "round {round}: {outcomes:?}"
+                );
+                assert_eq!(
+                    *mode,
+                    Some(0o700),
+                    "round {round}: a command found a half-made home: {outcomes:?}"
+                );
+            }
+            std::fs::remove_dir(&home).expect("move the home away for the next round");
+        }
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
+    }
+
+    /// A missing workspace root whose parents are gone too is created with
+    /// them, and the command runs there.
+    #[tokio::test]
+    async fn exec_recreates_a_workspace_root_and_its_missing_parents() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("gone").join("too").join("workspace");
+        let platform = NativePlatform::with_root(&root);
+        let request = ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            ..Default::default()
+        };
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("a command runs in a recreated root");
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+                .expect("canonicalize the reported cwd"),
+            std::fs::canonicalize(&root).expect("root")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+        let left: Vec<_> = std::fs::read_dir(root.parent().expect("parent"))
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["workspace"], "{left:?}");
+    }
+
+    /// When the agent cannot make a missing home again, the command's
+    /// not-found error says why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_home_that_cannot_be_made_again_names_why() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root may create the home in a read-only parent");
+            return;
+        }
+        let parent = tempfile::tempdir().expect("tempdir");
+        let locked = parent.path().join("locked");
+        std::fs::create_dir(&locked).expect("parent of the home");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+            .expect("make the parent read-only");
+        let mut platform = NativePlatform::with_root(parent.path());
+        platform.home_dir = Some(locked.join("home"));
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec!["pwd".to_string()],
+                shell: true,
+                cwd: "~".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("the home cannot be made");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("let the tempdir be removed");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains("creating it again failed") && message.contains("ermission denied"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2772,6 +3129,171 @@ mod tests {
             }
         };
         assert_eq!(status.code(), Some(7));
+    }
+
+    /// A command that signals its own process group, by number (`kill -TERM
+    /// -<pgid>`) or as `kill 0`, reaches only itself: never the agent that runs
+    /// it (this test process) and never a sibling command. A shared staging
+    /// machine went offline after a test run was stopped that way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_signalling_its_own_process_group_reaches_only_itself() {
+        use nix::sys::signal::Signal;
+        use nix::unistd::{getpgrp, Pid};
+
+        let (platform, _dir) = rooted();
+        let mut sibling_command = tokio::process::Command::new("/bin/sh");
+        sibling_command.arg("-c").arg("exec sleep 60");
+        let mut sibling = spawn_contained(sibling_command, None).expect("spawn the sibling");
+        drop(sibling.stdin.take());
+        let agent_group = getpgrp();
+        for (name, script) in [
+            (
+                "kill -TERM -<own pgid>",
+                "if [ -r /proc/$$/stat ]; then read -r _ _ _ _ pgid _ < /proc/$$/stat; \
+                 else pgid=$(ps -o pgid= -p $$ | tr -d ' '); fi; \
+                 [ -n \"$pgid\" ] || exit 90; \
+                 [ \"$pgid\" != \"$OPENGENI_TEST_AGENT_PGID\" ] || exit 91; \
+                 kill -TERM \"-$pgid\"; sleep 5; exit 92",
+            ),
+            ("kill 0", "kill -TERM 0; sleep 5; exit 92"),
+        ] {
+            let req = ExecRequest {
+                command: vec![script.to_string()],
+                shell: true,
+                env: [(
+                    "OPENGENI_TEST_AGENT_PGID".to_string(),
+                    agent_group.to_string(),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let resp = tokio::time::timeout(
+                Duration::from_secs(20),
+                retry_transient_spawn(|| platform.exec(&req)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the exec must finish"))
+            .unwrap_or_else(|error| panic!("{name}: exec failed: {error}"));
+            assert!(
+                !matches!(resp.exit_code, 90..=92),
+                "{name}: the command was not stopped by its own group signal (exit {}, stderr {:?})",
+                resp.exit_code,
+                String::from_utf8_lossy(&resp.stderr)
+            );
+        }
+        // This process is the agent here: it is still running, and nothing
+        // signalled its group.
+        assert_eq!(nix::sys::signal::kill(Pid::this(), None::<Signal>), Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), sibling.wait())
+                .await
+                .is_err(),
+            "a sibling command must survive another command's group signal"
+        );
+        sibling.terminate().expect("stop the sibling");
+        let _ = sibling.wait().await;
+    }
+
+    /// Set in the helper [`a_command_does_not_share_the_agents_console`]
+    /// starts on a console of its own.
+    #[cfg(windows)]
+    const CONSOLE_HELPER: &str = "OPENGENI_TEST_CONSOLE_HELPER";
+
+    /// Only re-executed, on a new console, by
+    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent:
+    /// reports the console window of a plain child (which shares this
+    /// process's console) and of a command it runs. Processes on one console
+    /// report the same window.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
+    async fn agent_on_a_console() {
+        const CONSOLE_WINDOW: &str = "$k = Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();' -Name ConsoleWindow -Namespace OpengeniTest -PassThru\r\n\
+            'window ' + $k::GetConsoleWindow().ToInt64()\r\n";
+        if std::env::var_os(CONSOLE_HELPER).is_none() {
+            return;
+        }
+        let (platform, dir) = rooted();
+        let script = dir.path().join("console-window.ps1");
+        std::fs::write(&script, CONSOLE_WINDOW).expect("write the console probe");
+        let argv: Vec<String> = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain([script.to_string_lossy().into_owned()])
+        .collect();
+        let inherited = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the console probe");
+        let req = ExecRequest {
+            command: argv,
+            ..Default::default()
+        };
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec the console probe");
+        println!(
+            "\nverdict child: {}",
+            String::from_utf8_lossy(&inherited.stdout).trim()
+        );
+        println!(
+            "\nverdict command: {} (exit {})",
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            resp.exit_code
+        );
+    }
+
+    /// The Windows `kill 0`: a console control event sent to "every process on
+    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
+    /// process sharing the sender's console. A command therefore runs on a
+    /// console of its own, never the agent's. The agent is this test binary
+    /// again, started on a console of its own as from a terminal, since a CI
+    /// runner gives this process none.
+    #[cfg(windows)]
+    #[test]
+    fn a_command_does_not_share_the_agents_console() {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::agent_on_a_console",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_HELPER, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("start the agent on a console");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let window = |name: &str| {
+            text.lines()
+                .find_map(|line| line.split(&format!("verdict {name}: window ")).nth(1))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|window| window.parse::<i64>().ok())
+        };
+        let agents = window("child");
+        assert!(
+            agents.is_some_and(|window| window != 0),
+            "the agent must have a console, or this test proves nothing: {text} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let commands = window("command");
+        assert!(commands.is_some(), "the command's probe failed: {text}");
+        assert_ne!(
+            commands, agents,
+            "a command shares the agent's console: {text}"
+        );
     }
 
     #[tokio::test]

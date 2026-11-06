@@ -11,6 +11,7 @@ import {
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
 } from "../mcp-oauth";
+import { isOrganizationIdentityIssuerPublicPath } from "../mcp-auto-connect";
 
 // The signed-out read of a chat share link (routes/session-share-links.ts).
 const SHARED_SESSION_PUBLIC_PATH = /^\/v1\/shared-sessions\/[^/]+$/;
@@ -57,6 +58,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   const path = new URL(c.req.url).pathname;
   if (settings.mcpOauthEnabled && isMcpOAuthPublicProtocolPath(path)) {
+    return true;
+  }
+  // An organization's Opengeni issuer: its discovery document and public
+  // signing keys, which outside apps read to check auto-connect ID-JAGs.
+  if (c.req.method === "GET" && isOrganizationIdentityIssuerPublicPath(path)) {
     return true;
   }
   if (settings.mcpOauthEnabled && isMcpOAuthResourcePath(path) && mcpOAuthBearerToken(c.req.raw)) {
@@ -113,7 +119,6 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/oauth/callback" ||
     path === "/v1/integrations/provider-oauth/callback" ||
     path === "/v1/integrations/github-personal/oauth/callback" ||
-    path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     // The sign-in popup's static last page; it reads nothing.
     (c.req.method === "GET" && path === "/v1/integrations/connect/finished") ||

@@ -125,6 +125,19 @@ export function classifyCodexEncryptedArtifactRejection(
   error: unknown,
 ): CodexEncryptedArtifactRejection | null {
   if (!isCodexTransportError(error)) return null;
+  return classifyEncryptedArtifactRejection(error);
+}
+
+/**
+ * The same definitive HTTP 400 rejection of an opaque artifact from any
+ * Responses provider, such as one that cannot read ciphertext another provider
+ * issued ("Could not decrypt the provided encrypted_content"). Callers that
+ * need proof of the Codex transport use
+ * {@link classifyCodexEncryptedArtifactRejection}.
+ */
+export function classifyEncryptedArtifactRejection(
+  error: unknown,
+): CodexEncryptedArtifactRejection | null {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     const value = current as Record<string, unknown>;

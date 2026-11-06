@@ -252,8 +252,6 @@ export const FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES = [
   "skill_save",
   "skill_search",
   "operation_read",
-  "knowledge_source_fetch",
-  "knowledge_source_read",
   "files_get_download_url",
 ] as const;
 

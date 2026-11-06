@@ -13,6 +13,7 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
   readSandboxReducedSave,
   getHumanInputResumeForEvent,
@@ -89,7 +90,7 @@ import {
   settleContextCompactionInterruption,
 } from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
-import { type MintedRunGitCredentials } from "../environment";
+import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
@@ -110,6 +111,7 @@ import {
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
+  type ModelRequestPreDispatchStage,
 } from "../../observability-metrics";
 import {
   compactRetainedScreenshotHistory,
@@ -303,9 +305,11 @@ export type TurnStreamAttemptDeps = {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
+  /** Stops Codemode renewal and returns the bearer a managed setup writes next. */
+  prepareCodemodeTokenSeed: () => Promise<MintedSandboxCodemodeToken | undefined>;
   /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
@@ -658,6 +662,25 @@ export async function runTurnStreamAttempt(
       // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
       // existing history stays byte-for-byte intact, including after retries;
       // the durable receipt restores the warning after compaction as well.
+      // A verified restore's "restored from an older save" notice whose write
+      // failed after the restore is delivered now, once. Never fails a turn.
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      }).catch((error: unknown) => {
+        // Still pending: a later turn or restore delivers it. The warning
+        // itself must never fail the turn either.
+        try {
+          observability.warn?.("pending restore notice delivery failed", {
+            ...safeErrorDiagnostic(error),
+            origin: "worker",
+          });
+        } catch {
+          // Diagnostics only.
+        }
+        return false;
+      });
       const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
         db,
         input.workspaceId,
@@ -973,12 +996,15 @@ export async function runTurnStreamAttempt(
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: () => revalidateModelCallAdmission({ yieldToSteer: true }),
-      observe: (phase, durationSeconds) =>
+      observe: (phase, durationSeconds) => {
         recordModelStepPhase(observability, {
           provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
           phase,
           durationSeconds,
-        }),
+        });
+        // The settlement wait ended; this model entry's admission begins.
+        if (phase === "settlement_wait") enterModelRequestStage("admission");
+      },
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
@@ -1018,6 +1044,13 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // A title or other auxiliary request shares the transport but is never the
+    // main request's preparation.
+    const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) => {
+      if (isAuxiliaryProviderDispatch()) return;
+      streamTiming.enterPreDispatchStage(stage);
+    };
+    eventing.enterModelRequestStage = enterModelRequestStage;
     // Wire fingerprint of the latest main request. The next model entry waits
     // for the previous response's settlement, so the response being settled
     // always belongs to the latest dispatched request (as for streamTiming).
@@ -1025,14 +1058,17 @@ export async function runTurnStreamAttempt(
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+      enterModelRequestStage("dispatch_checkpoint");
       await checkpointBeforeProviderDispatch();
       if (
         providerPublishesNativeRequestEvents ||
         eventing.firstModelRequestPreparationRecorded ||
         eventing.firstModelRequestPreparationStartedAt === null
       ) {
+        enterModelRequestStage("transport");
         return;
       }
+      enterModelRequestStage("request_audit");
       sandboxState.firstProviderRequestStarted = true;
       eventing.firstModelRequestPreparationRecorded = true;
       const preparationDurationMs = Math.max(
@@ -1092,6 +1128,7 @@ export async function runTurnStreamAttempt(
         providerRecoveryCount: attempt.providerRecoveryCount,
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
+      enterModelRequestStage("transport");
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
@@ -1149,7 +1186,12 @@ export async function runTurnStreamAttempt(
           },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
-            return modelCallAdmission.beforeModelRequest(point);
+            const admitted = modelCallAdmission.beforeModelRequest(point);
+            // A transport recheck joins the call's admission; only the model
+            // entry's own admission ends before the request is built.
+            return point === "transport"
+              ? admitted
+              : admitted.then(() => enterModelRequestStage("request_build"));
           },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);

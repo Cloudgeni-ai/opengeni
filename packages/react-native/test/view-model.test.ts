@@ -7,6 +7,7 @@ import {
   inspectableValuePreview,
   nativeActivityPresentation,
   nativeSessionStatusTone,
+  nativeSessionStatusLabel,
   nativeToolDisplayName,
   timelineAccessibilityLabel,
   nativeHumanInputRequestPreview,
@@ -70,6 +71,9 @@ describe("native session view-models", () => {
     expect(nativeSessionStatusTone("failed")).toBe("failed");
     // The runtime could not start the next turn: not a request of the person.
     expect(nativeSessionStatusTone("blocked")).toBe("failed");
+    // An archived chat is settled, and says Archived, never Cancelled.
+    expect(nativeSessionStatusTone("archived")).toBe("complete");
+    expect(nativeSessionStatusLabel("archived", DEFAULT_OPENGENI_NATIVE_LABELS)).toBe("Archived");
     expect(
       timelineAccessibilityLabel(
         {
@@ -82,6 +86,18 @@ describe("native session view-models", () => {
         DEFAULT_OPENGENI_NATIVE_LABELS,
       ),
     ).toBe("Stuck");
+    expect(
+      timelineAccessibilityLabel(
+        {
+          kind: "session-status",
+          id: "archived",
+          status: "cancelled",
+          archived: true,
+          occurredAt: "2026-11-05T08:00:00.000Z",
+        },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Archived");
   });
 
   test("bounds inspectable tool payloads", () => {

@@ -69,6 +69,7 @@ export function sessionStatusTone(status: SessionDisplayStatus): StatusTone {
     case "failed":
       return "failed";
     case "cancelled":
+    case "archived":
       return "cancelled";
     default:
       return "idle";
@@ -124,8 +125,10 @@ function SubagentRow({
 }) {
   const [open, setOpen] = useState(false);
   const title = sessionDisplayTitle(node.session);
-  const paused = sessionControlPaused(node.session);
-  const tone = paused ? "waiting" : sessionStatusTone(sessionDisplayStatus(node.session));
+  const displayStatus = sessionDisplayStatus(node.session);
+  // Archiving stops (and so pauses) a chat's work; it reads as archived, not paused.
+  const paused = displayStatus !== "archived" && sessionControlPaused(node.session);
+  const tone = paused ? "waiting" : sessionStatusTone(displayStatus);
   const live = !paused && isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;
 

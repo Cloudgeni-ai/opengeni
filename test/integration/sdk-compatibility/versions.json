@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "reviewedOn": "2026-11-03",
+  "registry": "https://registry.npmjs.org",
+  "versions": [
+    { "version": "4.3.1", "reason": "Latest patch of supported stable minor 4.3" },
+    { "version": "4.4.1", "reason": "Latest patch of supported stable minor 4.4" },
+    { "version": "4.5.0", "reason": "Latest patch of supported stable minor 4.5" },
+    { "version": "4.6.1", "reason": "npm latest; latest patch of stable minor 4.6" },
+    {
+      "version": "5.5.2-canary.41014501986001",
+      "reason": "Cloudgeni-ai/cloudgeni package.json exact production integration pin"
+    }
+  ]
+}

@@ -244,6 +244,56 @@ export async function recordSourcePlacementMove(
   return reconciliation.sourcePlacementChanged;
 }
 
+/** What `reconcileListedSourcePlacementMoves` reads from a listed browser or Desktop. */
+export type ListedInteractionPlacement = {
+  lifecycle: string;
+  placement?: { kind: string; sandboxId?: string | undefined } | null | undefined;
+  associations: readonly { sessionId: string; relationship: string }[];
+};
+
+const LISTED_LIVE_LIFECYCLES = new Set(["starting", "active", "suspending"]);
+
+/**
+ * A browser or Desktop on a Connected Machine its source task has since moved
+ * away from is retired, but that is only recorded when something next uses it.
+ * Record it before an inventory is returned, so a listing never offers one as
+ * live that opening would refuse. Each moved task's leftovers are then ended on
+ * their former machines without making the listing wait. True when anything
+ * listed was retired, so the caller lists again.
+ */
+export async function reconcileListedSourcePlacementMoves(
+  services: ChannelAServices,
+  input: { grant: AccessGrant; sessions: readonly ListedInteractionPlacement[] },
+): Promise<boolean> {
+  const pairs = new Map<string, { sourceSessionId: string; connectedSandboxId: string }>();
+  for (const session of input.sessions) {
+    const placement = session.placement;
+    if (placement?.kind !== "connected_machine" || !placement.sandboxId) continue;
+    if (!LISTED_LIVE_LIFECYCLES.has(session.lifecycle)) continue;
+    const sources = session.associations.filter((entry) => entry.relationship === "created");
+    if (sources.length !== 1) continue;
+    const sourceSessionId = sources[0]!.sessionId;
+    pairs.set(`${sourceSessionId}:${placement.sandboxId}`, {
+      sourceSessionId,
+      connectedSandboxId: placement.sandboxId,
+    });
+  }
+  const moved = new Set<string>();
+  for (const pair of pairs.values()) {
+    if (await recordSourcePlacementMove(services, { grant: input.grant, ...pair })) {
+      moved.add(pair.sourceSessionId);
+    }
+  }
+  for (const sourceSessionId of moved) {
+    void retireSourceFormerPlacements(services, {
+      grant: input.grant,
+      sourceSessionId,
+      origin: null,
+    });
+  }
+  return moved.size > 0;
+}
+
 /**
  * End everything a task's move left `lost` but still running on Connected
  * Machines it no longer runs on: each machine's resources whose controller

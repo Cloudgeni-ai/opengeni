@@ -502,6 +502,15 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+A profile id is announced by the machine and stored per workspace, so the same
+id can be visible from more than one enrollment. Copies collapse into one
+profile only when their enrollments share the machine's key (one computer
+enrolled in two workspaces), and then your own Only me enrollment's copy is the
+one addressed. Copies announced by different machines are each listed; a
+device id without a pinned profile workspace resolves to the copy on your own
+Only me machine, and otherwise is not found until a session pins the copy's
+workspace.
+
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
 inventory must name the exact live port. `stateGeneration` names the
@@ -1039,7 +1048,41 @@ either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
 task's one-minute repetition starts an exited agent within a minute, with no limit;
 a process that keeps the agent's hidden console host open after the agent exits
 delays that start until it ends, because the task skips a tick while its previous
-run is still going.
+run is still going. Commands run on hidden consoles of their own, so they do not
+hold it open.
+
+A command cannot stop the agent by signalling a process group. Each command runs
+in a process group of its own (on Windows a job object and a hidden console of its
+own), so `kill 0`, `kill -TERM -<its group>` or a console control event to its own
+console reach only that command and what it started, never the agent or other
+commands. `kill -1` in a command signals every process of the user, the agent
+included. On Linux the agent therefore keeps running when one of its own
+commands sends it `SIGTERM` or `SIGINT`. It tells a command from other senders
+by the sending process: a descendant of the agent, or a process in the process
+group, session or operation cgroup of one of its commands. A short-lived sender
+(`/bin/kill`, `sh -c 'kill …'`) has often exited before the agent can look it
+up; while a command runs (an open Opengeni terminal or a background command
+counts as running), or within 5 seconds after one ended, such a sender counts as
+that command. Nothing is blocked: the command still receives every
+signal, and a stop signal from anywhere else (the service manager, the desktop
+app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
+commands) stops the agent as before. Because of that rule, a `/bin/kill` or
+`pkill` from outside, sent while a command runs, may be ignored; the ways just
+listed always work. A foreground agent's keeper also starts the agent again
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in
+an Opengeni terminal counts as a command, including a `kill` typed there by a
+person.
+
+Other signals still end the agent, and it is started again. A foreground
+agent's keeper ignores stop signals from the agent's commands, passes on one
+whose sender already exited (under that sender's name, so the agent decides),
+and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`).
+A `--system` service, the macOS LaunchAgent and a compute sandbox's guest init
+restart the agent after any signal, `SIGKILL` (`kill -9 -1`) included; a
+foreground agent's keeper dies with it then. Some cases still leave the agent
+offline after `kill -1`: under a systemd user service it also stops the user's
+own service manager, which stops its services until the user logs in again, and
+an agent hosted by the desktop app ends with the app.
 
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
@@ -1265,8 +1308,12 @@ which Opengeni reports as a machine that cannot start programs. A missing
 workspace root or home directory used as a command's working directory is
 created again and the command runs. The workspace root gets mode 0755 and stays
 owned by the agent; a home gets mode 0700 inside an existing parent and belongs
-to its user. Placeholder homes such as `/nonexistent` and `/var/empty` are never
-created, and any other missing working directory is still a not-found error.
+to its user. On Linux and macOS the folder is made under a private name in the
+same parent, given its owner and mode, and only then moved into place, so no
+command starts in a half-made folder; when a home cannot be given to its user,
+it is removed again and that command fails as not found. Placeholder homes such
+as `/nonexistent` and `/var/empty` are never created, and any other missing
+working directory is still a not-found error.
 When the agent uses a fallback shell, it passes the shell's path to commands as
 `OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
 `/bin/sh`.
@@ -2055,9 +2102,9 @@ machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
 complete }` (`id` is the enrollment), for Organization settings › Shared. It
 needs `enrollments:read` and an organization owner or admin, from a person or
 an agent acting as them; an agent acting as itself gets `403` and sees only
-what works in its workspace. Until a later release grants the
-organization-wide read (migration 1224 adds it), it answers the organization
-machines that work in this workspace with `complete: false`.
+what works in its workspace. `complete` is always `true`; servers before
+migration 1272 could list only the organization machines that work in this
+workspace and sent `false`.
 
 ### Where your own machine works
 

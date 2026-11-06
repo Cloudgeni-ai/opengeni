@@ -51,10 +51,44 @@ export const NOT_STARTED_TOOL_CALL_EVENT_TEXT =
 export const NOT_STARTED_TOOL_CALL_RESULT_TEXT =
   "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run it again.";
 
+/**
+ * Recovery reasons where the turn's workspace machine (an Opengeni-owned box
+ * behind a lease) was being saved, replaced or moved, for example after setup
+ * found it could not start programs and asked for a fresh one.
+ */
+const WORKSPACE_MACHINE_TRANSITION_REASONS: ReadonlySet<string> = new Set([
+  "sandbox_lifecycle_transition",
+  "sandbox_deadline_rotation",
+  "sandbox_lease_superseded",
+]);
+
+/** Person-facing not-started copy when the workspace machine was changing. */
+export const WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_EVENT_TEXT =
+  "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.";
+
+/** Model-visible not-started result when the workspace machine was changing. */
+export const WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_RESULT_TEXT =
+  "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run it again.";
+
+/** The person-facing and model-visible not-started copy for a recovery reason. */
+export function notStartedToolCallTexts(reason: string | undefined): {
+  event: string;
+  result: string;
+} {
+  return reason !== undefined && WORKSPACE_MACHINE_TRANSITION_REASONS.has(reason)
+    ? {
+        event: WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_EVENT_TEXT,
+        result: WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_RESULT_TEXT,
+      }
+    : { event: NOT_STARTED_TOOL_CALL_EVENT_TEXT, result: NOT_STARTED_TOOL_CALL_RESULT_TEXT };
+}
+
 /** Provider-valid result for a function call proven never started. */
 export function notStartedToolCallResult(input: {
   callId: string;
   callItem: Record<string, unknown>;
+  /** The recovery reason, which picks the copy (see notStartedToolCallTexts). */
+  reason?: string;
 }): Record<string, unknown> {
   const name = typeof input.callItem.name === "string" ? input.callItem.name : "tool";
   return {
@@ -65,7 +99,7 @@ export function notStartedToolCallResult(input: {
       : {}),
     callId: input.callId,
     status: "incomplete",
-    output: { type: "text", text: NOT_STARTED_TOOL_CALL_RESULT_TEXT },
+    output: { type: "text", text: notStartedToolCallTexts(input.reason).result },
   };
 }
 
@@ -370,7 +404,11 @@ export async function closePendingSessionToolCallsInTransaction(
     const notStarted =
       interrupted && call.callType === "function_call" && notStartedCallIds.has(call.callId);
     const interruptedResult = notStarted
-      ? notStartedToolCallResult({ callId: call.callId, callItem: call.callItem })
+      ? notStartedToolCallResult({
+          callId: call.callId,
+          callItem: call.callItem,
+          reason: input.reason,
+        })
       : interruptedToolCallResult({
           callType: call.callType,
           callId: call.callId,
@@ -460,7 +498,7 @@ export async function closePendingSessionToolCallsInTransaction(
         output: resolution.notStarted
           ? {
               isError: true,
-              content: [{ type: "text", text: NOT_STARTED_TOOL_CALL_EVENT_TEXT }],
+              content: [{ type: "text", text: notStartedToolCallTexts(input.reason).event }],
             }
           : resolution.interrupted
             ? {

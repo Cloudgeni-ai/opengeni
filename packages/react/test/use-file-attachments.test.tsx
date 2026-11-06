@@ -577,6 +577,7 @@ describe("useFileAttachments", () => {
       sizeBytes: ready.sizeBytes,
       status: "ready",
       file: ready,
+      restored: true,
     });
     expect(hook.result.current.attachments[1]?.previewUrl).toBeUndefined();
     expect(hook.result.current.uploading).toBe(true);
@@ -597,12 +598,11 @@ describe("useFileAttachments", () => {
     const requested: Array<{
       workspaceId: string;
       fileId: string;
-      signal: AbortSignal | undefined;
     }> = [];
     const client = fakeClient({
       uploadFile: async () => ready,
-      createFileDownloadUrl: async (workspaceId, fileId, options) => {
-        requested.push({ workspaceId, fileId, signal: options?.signal });
+      createFileDownloadUrl: async (workspaceId, fileId) => {
+        requested.push({ workspaceId, fileId });
         return { url: "https://files.example/restored-preview", expiresAt: "2026-09-05T01:00:00Z" };
       },
     });
@@ -620,10 +620,34 @@ describe("useFileAttachments", () => {
     const controller = new AbortController();
     const url = await hook.result.current.loadPreview?.(restored.id, controller.signal);
     expect(url).toBe("https://files.example/restored-preview");
-    expect(requested).toEqual([
-      { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
-    ]);
+    expect(requested).toEqual([{ workspaceId: WORKSPACE_ID, fileId: ready.id }]);
     expect(created).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("marks restored files as restored and looks up a file's content type on request", async () => {
+    const ready = fakeAsset({
+      id: "44444444-4444-4444-8444-444444444444",
+      filename: "restored.png",
+    });
+    const looked: Array<{ workspaceId: string; fileId: string }> = [];
+    const client = fakeClient({
+      uploadFile: async () => ready,
+      getFile: async (workspaceId, fileId) => {
+        looked.push({ workspaceId, fileId });
+        return fakeAsset({ id: fileId, contentType: "application/pdf" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    expect(hook.result.current.attachments[0]?.restored).toBe(true);
+    await flushing(() => hook.result.current.addFiles([imageFile("new.png")]));
+    expect(hook.result.current.attachments[1]?.restored).toBeUndefined();
+    expect(await hook.result.current.loadFileContentType?.("file-doc")).toBe("application/pdf");
+    expect(looked).toEqual([{ workspaceId: WORKSPACE_ID, fileId: "file-doc" }]);
     await hook.unmount();
   });
 

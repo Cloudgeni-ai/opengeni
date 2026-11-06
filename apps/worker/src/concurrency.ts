@@ -362,7 +362,7 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
     );
     set(
       "opengeni_turn_slots_reserved",
-      "Temporal turn activity slots reserved for polling or execution in this worker.",
+      "Temporal turn activity slots reserved for polling or execution in this worker. Each open activity poll holds one, so an idle worker shows its poller count here; a delivered turn runs on its poll's slot.",
       value.reservedSlots,
     );
     set(
@@ -372,7 +372,7 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
     );
     set(
       "opengeni_turn_slots_available",
-      "Memory-safe turn activity slots still available to reserve in this worker.",
+      "Memory-safe turn activity slots not yet reserved by a poll or a turn in this worker. 0 while polls hold the remaining slots is not saturation; see opengeni_turn_slot_saturation_ratio.",
       value.availableSlots,
     );
     set(

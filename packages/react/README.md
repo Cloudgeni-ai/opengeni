@@ -224,7 +224,12 @@ someone else's product with zero styling:
   to whom a paused goal or a helper-agent count means nothing, pass
   `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
   `OpenGeniChat`). Queued messages, approvals and the agent's questions still
-  show, and the goal is not read at all.
+  show, and the goal is not read at all. Turn rows then show only their status,
+  and an automation run shows as its one line and its answer.
+- **Automation runs read as what happened**: a run shows one line, the
+  automation's name and what the event that started it says, never its
+  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
+  person) is not drawn at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
@@ -1025,6 +1030,15 @@ headless controller and compound primitives as a namespace. The controller is
 the one behavior path for keyboard routing, guarded queue/steer submission,
 attachments, commands, pause/resume, focus, confirmations, and feedback.
 
+Pass `imageTags` (on `ChatComposer`, `useChatComposerController`, or
+`SessionConversation`'s `composerProps`) to keep each image next to the words
+about it. Pasting, dropping or attaching an image puts a plain-text
+`[Image N]` tag in the text where the person was writing, and the image's chip
+shows the same number. Removing an image removes its tag and renumbers the
+later ones. Image N is the Nth image the message carries, which is the order
+the agent receives them, so the message and API stay the same. It is off by
+default.
+
 ```tsx
 import * as Composer from "@opengeni/react/composer";
 
@@ -1753,7 +1767,12 @@ visible touch targets when styling actions.
 
 `ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
 load the versioned facts with `client.getToolActionReview`. It shows one selected
-action, counts and bounded fields instead of raw argument JSON. Keep
+action, counts and bounded fields instead of raw argument JSON.
+A host may also return its own `ToolActionReview` (a plain title and consequence
+for a tool whose arguments are only identifiers), or `null` to keep the standard
+card for that approval. The React Native `ApprovalStrip` and
+`NativeSessionScreen` take the same `loadReview`.
+Keep
 `selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
 detail route unmounts the surface, so returning cannot silently select a different
 action. The native `onApprove` / `onReject` identity is unchanged and duplicate

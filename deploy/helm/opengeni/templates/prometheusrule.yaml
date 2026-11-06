@@ -291,8 +291,8 @@ spec:
             headline: 'Agent turns waiting too long to start'
             value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users wait longer than usual after sending a message before the agent starts working.'
-            next_step: 'Check worker capacity and the eligible backlog in Grafana Launch; it usually clears once autoscaling adds workers.'
-            description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+            next_step: 'Compare opengeni_turns_queued_oldest_age_seconds{hold="ready"} with the eligible turn backlog in Grafana Launch: an old ready prompt with no backlog waits before dispatch (control queue), a backlog means worker capacity.'
+            description: Durable turns are waiting too long before a worker starts them. A prompt first waits for its session's control activities, then on the turn queue; only the second shows in opengeni_turn_eligible_backlog. opengeni_turns_queued_oldest_age_seconds{hold="ready"} covers both. Inspect it, the eligible backlog, worker capacity and admission saturation before attributing this to sandbox or model latency.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # OUR controllable latency, accepted turn -> first provider dispatch.
         # Provider think time is excluded by construction; the warning yields
@@ -347,7 +347,9 @@ spec:
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
         # history checkpoint, credit revalidation and the request audit are
-        # Opengeni work and should stay well under a second.
+        # Opengeni work and should stay well under a second. The exclusive
+        # stages of opengeni_model_request_pre_dispatch_stage_seconds add up
+        # to it and name the slow one.
         - alert: OpenGeniModelRequestPreDispatchP95High
           expr: |
             histogram_quantile(
@@ -365,9 +367,9 @@ spec:
             headline: 'Our overhead slowing every model request'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} per request'
             user_impact: 'Every agent step feels slower: replies and tool steps start later than they should.'
-            next_step: 'Check Postgres CPU, event-append latency and turn-worker CPU; this points at database or worker saturation, not a provider problem.'
-            description: Between tool-loop steps Opengeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - admission, durable history/audit checkpoints, credit revalidation and request build - and adds directly to every user-visible time-to-first-token.
-            action: Compare session-event append latency, Postgres CPU/active sessions and turn-worker CPU; this is a database or worker saturation signal, not a provider regression.
+            next_step: 'Find the slow stage in opengeni_model_request_pre_dispatch_stage_seconds (by stage), then follow the runbook row for that stage; this is our own database or worker time, not a provider problem.'
+            description: Between tool-loop steps Opengeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - settlement of the previous response, admission, request build, credentials, durable history/audit checkpoints, provider admission and transport preparation - and adds directly to every user-visible time-to-first-token.
+            action: Split p95 and mean by stage with opengeni_model_request_pre_dispatch_stage_seconds. Stages that wait on the database (settlement_wait, admission, credential, dispatch_checkpoint, request_audit, provider_admission) rising together mean Postgres is saturated or row locks are contended - check Postgres CPU and lock waits; request_build or transport alone point at turn-worker CPU or event-loop stalls.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupFirstByteP95High
           expr: |

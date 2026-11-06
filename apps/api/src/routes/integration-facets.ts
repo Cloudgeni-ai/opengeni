@@ -43,9 +43,8 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
   app.get(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     async (c) => {
-      // Knowledge-source facets are retired: integrations give agents tools,
-      // and recurring work is an ordinary agent schedule. The routes stay so
-      // older clients get a clear answer.
+      // Integration Knowledge sync was removed. This route and the source
+      // route stay in the public SDK until its next major and answer 410.
       await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:read");
       throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     },
@@ -119,21 +118,6 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
             IntegrationFacetMutationResult.parse(replayed),
             payload.expectedVersion === undefined ? 201 : 200,
           );
-        }
-        const instance = await listIntegrationInstanceFacets(
-          deps.db,
-          workspaceId,
-          grant.subjectId,
-          capabilityId,
-          instanceKey,
-        );
-        const definition = instance.facets.find(
-          (facet) => facet.definition.facetKey === facetKey,
-        )?.definition;
-        // Stored Knowledge-source facets stay readable, pausable and
-        // removable, but can no longer be configured.
-        if (definition?.kind === "knowledge_source") {
-          throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
         }
         return c.json(
           IntegrationFacetMutationResult.parse(

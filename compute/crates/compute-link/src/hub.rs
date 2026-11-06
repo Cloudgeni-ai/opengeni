@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use compute_protocol::link::{AgentLink, Running, encode};
+use compute_protocol::link::{AgentLink, Busy, Running, encode};
 use futures::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
@@ -225,6 +225,16 @@ impl Hub {
         let _ = self.commands.send(Command::Input(Input::Running {
             sandbox: sandbox.to_owned(),
             running,
+        }));
+    }
+
+    /// Tells the sandbox's gateway what its host is busy with that keeps
+    /// it from running for now, as a hand-off, when that changed, and every
+    /// session that opens for it later; `None` once nothing is.
+    pub fn busy(&self, sandbox: &str, busy: Option<Busy>) {
+        let _ = self.commands.send(Command::Input(Input::Busy {
+            sandbox: sandbox.to_owned(),
+            busy,
         }));
     }
 

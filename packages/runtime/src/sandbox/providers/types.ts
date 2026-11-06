@@ -31,6 +31,10 @@ export type ProviderImmutableImageBuildResult = {
   providerBindingKey: string | null;
   /** Non-secret canonical binding retained only for durable provider artifact ownership. */
   providerBinding: Record<string, unknown> | null;
+  /** False when the build found an image an earlier or concurrent build of
+   * the same name had already made, which this build must not delete.
+   * Omitted means this build made it. */
+  created?: boolean;
 };
 
 export type ProviderImmutableImageBuildInput = {
@@ -38,6 +42,8 @@ export type ProviderImmutableImageBuildInput = {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+  /** Ends a long build when its caller stops. */
+  signal?: AbortSignal;
 };
 
 export type ProviderExpirationRenewalInput = {

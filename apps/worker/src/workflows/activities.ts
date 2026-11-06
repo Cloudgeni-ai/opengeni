@@ -3,6 +3,7 @@ import {
   ActivityFailure,
   ApplicationFailure,
   proxyActivities,
+  type ActivityOptions,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
 
@@ -15,7 +16,6 @@ type WorkflowControlActivities = Pick<
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
-  | "peekSessionWork"
   | "persistSessionAttemptQuiescence"
   | "reconcileSessionAttemptQuiescence"
   | "reconcileSettledSessionAttempt"
@@ -43,6 +43,31 @@ export const activity = proxyActivities<WorkflowControlActivities>({
     maximumInterval: "30 seconds",
   },
 });
+
+/**
+ * The session peek is the advisory read every session run makes before it
+ * dispatches a turn, so a queued prompt waits on it. It normally completes in
+ * milliseconds. Temporal records an activity attempt as started when it hands
+ * the task to a poller; if that attempt is lost (or wedges without a result),
+ * only its start-to-close timeout schedules the retry. Under the two-minute
+ * control bound a single lost attempt held a fresh prompt for two minutes on
+ * the control queue, where no turn-queue backlog shows it. The peek is
+ * idempotent, so a short bound plus the same unbounded retry turns that loss
+ * into seconds. An attempt that outlives the bound is abandoned, not cancelled;
+ * its result is discarded and the retry observes current state.
+ */
+export const SESSION_PEEK_ACTIVITY_OPTIONS = {
+  startToCloseTimeout: 15_000,
+  retry: {
+    initialInterval: 1_000,
+    backoffCoefficient: 2,
+    maximumInterval: 30_000,
+  },
+} as const satisfies ActivityOptions;
+
+export const sessionPeekActivity = proxyActivities<Pick<typeof activities, "peekSessionWork">>(
+  SESSION_PEEK_ACTIVITY_OPTIONS,
+);
 
 /** One schedule occurrence is bounded. Transient control-plane failures get a
  * short retry window, but a revoked binding or other permanent task error must

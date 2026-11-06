@@ -2872,6 +2872,43 @@ describe("buildTimeline", () => {
     expect(compactionSkipSubtitle(englishText, "summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    for (const trigger of ["operator", "overflow"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Request it again to retry. Chat history is unchanged.",
+      );
+    }
+    // Nobody requested an automatic compaction, so it is not offered again.
+    for (const trigger of ["proactive", "auto"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Chat history is unchanged.",
+      );
+    }
+    // A failed idle checkpoint: the skipped event has no trigger of its own and
+    // keeps the one its request opened the landmark with.
+    reset();
+    const checkpoint = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }, { turnId: null }),
+      event("turn.started", {}, { turnId: "turn-c" }),
+      event(
+        "session.context.compaction.skipped",
+        { reason: "summarization_failed" },
+        { turnId: "turn-c" },
+      ),
+      event(
+        "turn.failed",
+        { error: "compaction summarization failed", code: "context_compaction_failed" },
+        { turnId: "turn-c" },
+      ),
+    ]);
+    const landmarks = checkpoint.filter((item) => item.kind === "context-compaction");
+    expect(landmarks).toHaveLength(1);
+    const landmark = landmarks[0]!;
+    if (landmark.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark).toMatchObject({ phase: "skipped", trigger: "proactive" });
+    expect(compactionSkipSubtitle(englishText, landmark.skipReason, null, landmark.trigger)).toBe(
+      "Chat history is unchanged.",
+    );
+    reset();
     expect(
       compactionFailureDetails(englishText, { ...projected, providerRejection: null }),
     ).toBeNull();
@@ -3503,6 +3540,37 @@ describe("buildTimeline", () => {
       "rig",
     ]);
     expect(phases.find((phase) => phase.phase === "sandbox")?.outcome).toBe("created");
+  });
+
+  test("a setup step keeps the name of the Sandbox Environment it sets up", () => {
+    reset();
+    const turn = { turnId: "turn-named-setup" };
+    const setup = { rigId: "rig-1", versionId: "version-1", rigName: " cloudgeni " };
+    const running = buildTimeline(englishText, [event("rig.setup.started", setup, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(running).toMatchObject({ phase: "rig", status: "running", subject: "cloudgeni" });
+
+    const settled = buildTimeline(englishText, [
+      event("rig.setup.started", setup, turn),
+      event("rig.setup.completed", setup, turn),
+    ]).find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(settled).toMatchObject({ phase: "rig", status: "complete", subject: "cloudgeni" });
+
+    const unnamed = buildTimeline(englishText, [event("rig.setup.started", {}, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(unnamed?.subject).toBeUndefined();
+
+    // A later attempt replaces the failed one's row, name included.
+    const retried = buildTimeline(englishText, [
+      event("rig.setup.started", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.failed", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.started", { attemptId: "attempt-2" }, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]).toMatchObject({ phase: "rig", status: "running" });
+    expect(retried[0]?.subject).toBeUndefined();
   });
 
   test("warm reuse and setup failure retain their distinct outcomes", () => {

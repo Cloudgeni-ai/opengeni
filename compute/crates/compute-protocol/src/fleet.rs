@@ -232,6 +232,12 @@ pub struct Capacity {
     /// release.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_packs: bool,
+    /// Whether it sets aside, rather than drops, a copy the service rules
+    /// [`Verdict::SetAside`]. Told here for the same reason as
+    /// [`Capacity::guest`]; `false` from a host of an earlier release,
+    /// which is told to drop such a copy instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sets_aside: bool,
     /// What the host is now, as it would register: told here for the same
     /// reason as [`Capacity::guest`], so that a host whose configuration
     /// changed under a kept registration is placed on what it is. The
@@ -304,6 +310,12 @@ pub enum Verdict {
     /// Drop the local copy: it belongs to someone else, or no longer
     /// exists.
     Drop,
+    /// Keep the local copy's files aside, out of the fleet's way, and
+    /// forget the sandbox: the host was declared gone while it owned it,
+    /// and the sandbox went on since from an older stored copy, so the
+    /// local copy may be the newer one. Sent only to a host that says it
+    /// can ([`Capacity::sets_aside`]).
+    SetAside,
 }
 
 /// The service's verdict on one listed sandbox. (Serde cannot refuse

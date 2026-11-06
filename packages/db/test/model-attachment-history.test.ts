@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   type ResourceRef,
@@ -31,6 +32,8 @@ describe("durable user attachment history", () => {
       [MODEL_ATTACHMENT_REFS_FIELD]: [resources[0]],
       // Stamped at acceptance, so later bound changes never re-render it.
       [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      // HEIC/HEIF photos on this message are shown to the model as a JPEG.
+      [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
     });
     expect(JSON.stringify(item)).not.toContain("base64");
   });

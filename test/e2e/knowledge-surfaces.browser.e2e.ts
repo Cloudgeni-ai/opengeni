@@ -116,8 +116,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    const webPort = await freePort();
+    webBaseUrl = `http://127.0.0.1:${webPort}`;
     const app = createApp({
-      settings: { ...browserTestSettings, databaseUrl: shared.appUrl },
+      // The web app calls the unauthenticated local-mode API from its own
+      // origin, which local mode grants CORS only when configured.
+      settings: { ...browserTestSettings, databaseUrl: shared.appUrl, webBaseUrl },
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient,
@@ -130,8 +134,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     });
     apiBaseUrl = `http://127.0.0.1:${api.port}`;
 
-    const webPort = await freePort();
-    webBaseUrl = `http://127.0.0.1:${webPort}`;
     web = await startProcess(
       [
         "bun",

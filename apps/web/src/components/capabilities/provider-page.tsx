@@ -48,11 +48,7 @@ export function ProviderPage({
     >
       <DetailSection
         title={`How do you want to use ${name}?`}
-        description={
-          modes.some((mode) => mode.status === "Retired")
-            ? "Connect agent tools for live access. Previous sync connections can be removed."
-            : "You can set up both. Each one is connected separately."
-        }
+        description="You can set up both. Each one is connected separately."
       >
         <RowList label={`Ways to use ${name}`} flush>
           {modes.map((mode) => (

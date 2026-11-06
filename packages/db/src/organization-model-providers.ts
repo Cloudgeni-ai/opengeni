@@ -311,18 +311,28 @@ export async function upsertOrganizationModelProviderConnection(
      * non-default method is bound into the request hash.
      */
     authMethod?: OrganizationModelProviderAuthMethod;
+    /**
+     * OpenAI and Azure OpenAI only: models (Azure deployment names) the caller
+     * already checked with this credential, saved with the connection in the
+     * same transaction. One the organization already offers is kept as it is.
+     * Bound into the request hash when present.
+     */
+    models?: readonly string[];
     operationId: string;
     expectedVersion?: number;
   },
 ): Promise<OrganizationModelProviderConnection> {
   const endpoint = input.endpoint ?? null;
   const authMethod = input.authMethod ?? "api_key";
+  const models = input.models?.length ? [...new Set(input.models)].sort() : null;
   if ((input.providerKind === "azure_openai") !== (endpoint !== null))
     throw new Error("an organization Azure OpenAI connection needs exactly its resource endpoint");
   if (authMethod !== "api_key" && input.providerKind !== "azure_openai")
     throw new Error(
       "only an organization Azure OpenAI connection signs in with Microsoft Entra ID",
     );
+  if (models && input.providerKind !== "openai" && input.providerKind !== "azure_openai")
+    throw new Error("only an organization OpenAI or Azure OpenAI connection saves its models");
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider:${input.organizationId}:${input.providerKind}`}, 0))`,
@@ -335,6 +345,8 @@ export async function upsertOrganizationModelProviderConnection(
       ...(endpoint === null ? {} : { endpoint }),
       // Present only for Entra, so every API-key connection keeps its hash.
       ...(authMethod === "api_key" ? {} : { authMethod }),
+      // Present only when models are saved with it, so other requests keep their hash.
+      ...(models === null ? {} : { models }),
     });
     const [replay] = await scopedDb
       .select()
@@ -401,8 +413,49 @@ export async function upsertOrganizationModelProviderConnection(
       requestHash,
       connection,
     });
+    for (const upstreamModelId of models ?? []) {
+      await ensureOrganizationModelProviderCustomModel(scopedDb, {
+        organizationId: input.organizationId,
+        actorSubjectId: input.actorSubjectId,
+        // Checked above: only OpenAI and Azure OpenAI save models here.
+        providerKind: input.providerKind as "openai" | "azure_openai",
+        upstreamModelId,
+        // One operation per model of this request, so the save stays replayable.
+        operationId: derivedOperationId(`${input.operationId}:model:${upstreamModelId}`),
+      });
+    }
     return connection;
   });
+}
+
+/** A stable UUID for an operation derived from another one. */
+function derivedOperationId(seed: string): string {
+  const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Offer a model unless the organization already offers it. */
+async function ensureOrganizationModelProviderCustomModel(
+  scopedDb: Database,
+  input: Parameters<typeof createOrganizationModelProviderCustomModel>[1],
+): Promise<void> {
+  const [offered] = await scopedDb
+    .select({ id: schema.organizationModelProviderCustomModels.id })
+    .from(schema.organizationModelProviderCustomModels)
+    .where(
+      and(
+        eq(schema.organizationModelProviderCustomModels.accountId, input.organizationId),
+        eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
+        eq(schema.organizationModelProviderCustomModels.upstreamModelId, input.upstreamModelId),
+        isNull(schema.organizationModelProviderCustomModels.retiredAt),
+      ),
+    )
+    .limit(1);
+  if (offered) return;
+  await createOrganizationModelProviderCustomModel(scopedDb, input);
 }
 
 export async function revokeOrganizationModelProviderConnection(

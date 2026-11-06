@@ -1,7 +1,7 @@
 import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
-import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
+import { AGENT_INSTRUCTIONS_PROTOCOL, FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import { measureClaimDatabaseScopes } from "./claim-database-timing";
 import { readSubscriptionLeaseBusyChain } from "./codex-core-claim";
 import {
@@ -275,6 +275,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       measureClaimDatabaseScopes(observability, () =>
         claimSessionWorkForAttempt(db, input.workspaceId, {
           filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+          agentInstructionsProtocol: AGENT_INSTRUCTIONS_PROTOCOL,
           sessionId: input.sessionId,
           workflowId: input.workflowId,
           workflowRunId: input.workflowRunId,
@@ -292,6 +293,20 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   }
   const turn = claim.turn;
   attempt.turnId = turn.id;
+  // A compaction runs without connection accounts when they could not be
+  // resolved; its request then carries fewer tools and misses the cache.
+  const unresolvedAccounts =
+    turn.source === "compaction" ? turn.metadata?.connectionAccountsUnresolved : undefined;
+  if (unresolvedAccounts && typeof unresolvedAccounts === "object") {
+    const { reason, errorName, sqlState } = unresolvedAccounts as Record<string, unknown>;
+    observability.warn("Compaction turn runs without connection accounts", {
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      reason: typeof reason === "string" ? reason : "unknown",
+      ...(typeof errorName === "string" ? { errorName } : {}),
+      ...(typeof sqlState === "string" ? { sqlState } : {}),
+    });
+  }
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
@@ -584,6 +599,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
     const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
       filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+      agentInstructionsProtocol: AGENT_INSTRUCTIONS_PROTOCOL,
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       workflowRunId: input.workflowRunId,

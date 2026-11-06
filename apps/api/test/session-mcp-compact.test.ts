@@ -333,6 +333,31 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
     expect(result).not.toHaveProperty("projection");
   });
 
+  test("detail says an archived chat is archived and read-only, also before it is stored", () => {
+    // Archiving a running chat cancels its work: status alone reads `cancelled`.
+    const archived = {
+      ...page().sessions[0]!,
+      status: "cancelled",
+      archived: true,
+      lastSequence: 9,
+    } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(archived, noFacts, null)).toMatchObject({
+      status: "cancelled",
+      archive: { state: "archiving", archivedAt: null, readOnly: true },
+    });
+    const stored = {
+      ...archived,
+      retention: { keepLive: false, archive: { state: "archived", archivedAt: at } },
+    } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(stored, noFacts, null).archive).toEqual({
+      state: "archived",
+      archivedAt: at,
+      readOnly: true,
+    });
+    const live = { ...page().sessions[0]!, lastSequence: 9 } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(live, noFacts, null)).not.toHaveProperty("archive");
+  });
+
   test("detail preserves encoded-prefix loss without inventing an original character count", () => {
     const session = { ...page().sessions[0]!, lastSequence: 7 } as unknown as Session;
     const result = boundSessionCompactDetailMcp(

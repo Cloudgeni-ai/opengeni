@@ -82,7 +82,7 @@ The source side records:
 - `knowledge_lifecycle_events`: append-only delete, revoke, restore, ACL, sync,
   and version-pointer evidence.
 
-Integration Knowledge sync is retired (see [Knowledge](knowledge.md)), so no
+Integration Knowledge sync was removed (see [Knowledge](knowledge.md)), so no
 provider writes new source or sync rows. The ledgers stay so imported
 documents keep their provenance, ACL evidence and lifecycle history.
 

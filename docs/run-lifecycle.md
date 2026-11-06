@@ -211,64 +211,80 @@ the admission `rejected` as for every other drained writer, on every backend.
 Any other in-flight mutation, a setup whose outcome is unknown, and a release
 without that drain keep the admission fenced.
 
-**Setup a worker left behind after its shutdown closure is settled once that
-worker has provably exited.** A turn worker that is shutting down cancels its
-turn with WORKER_SHUTDOWN, closes the attempt `interrupted_recoverable`
-through its own `worker_shutdown` recovery request, and then drains its
-writers. If the process dies before that drain (for example a crash in its
-shutdown path), the attempt's setup admission stays open with no provider
-outcome. The reaper removes a closed attempt's holder and no retained process
-adopted it, but the crashed-worker rule above counts only
-`lease_lost_recoverable` and `failed` owners, and even those are rejected only
-in the cold commit after the box stops. A compute box is never drained for
-being idle, so on a warm box nothing ever settled the admission:
-`writer_pending` stayed true, `reconcileSessionAttemptQuiescence` returned
-`pending` on every wake, and the session never claimed another turn, Steer or
-message.
+**Any request a turn worker left behind is settled once that worker has
+provably exited.** A turn worker that is shutting down cancels its turn with
+WORKER_SHUTDOWN, closes the attempt `interrupted_recoverable` through its own
+`worker_shutdown` recovery request, and then drains its writers. If the
+process dies before that drain (for example a restart that cuts off a file
+write), the request it had in flight stays open with no provider outcome. A
+worker that dies outright leaves the same open request behind when the
+workflow closes its attempt after the heartbeat timeout. The reaper removes a
+closed attempt's holder and no retained process adopted it, but the
+crashed-worker rule above rejects such requests only in the cold commit after
+the box stops. A compute box is never drained for being idle, so on a warm box
+nothing ever settled the admission: `writer_pending` stayed true,
+`reconcileSessionAttemptQuiescence` returned `pending` on every wake (the
+session was in the recovery path the whole time; only this gate held it), and
+the session never resumed its turn or claimed another turn, Steer or message.
+Any kind of request does this: an editor or file write, a command, stdin,
+owned-box setup.
 
 Neither a settled Temporal activity nor a missing holder proves the worker
 exited. The holder of a closed attempt is removed at once, and Temporal reports
 a cancelled activity settled while its code may still be running, which is the
-live-worker case the drain above protects. Time does: the closure follows the
-worker's shutdown signal, and a standalone worker process exits within its
-process-exit deadline of that signal (`processExitDeadlineMs`, the force time
-plus a margin, about two minutes by default) whatever its drain does. So
+live-worker case the drain above protects. Time does. A worker-shutdown
+closure follows the worker's shutdown signal, and a standalone worker process
+exits within its process-exit deadline of that signal (`processExitDeadlineMs`,
+the force time plus a margin, about two minutes by default) whatever its drain
+does. A worker-death closure (`lease_lost_recoverable`, or `failed` with
+`worker_death_redispatch_exhausted`) is recorded only after Temporal's
+heartbeat timeout, so the worker had already stopped heartbeating for that
+long. A closed attempt admits nothing new, and every request a worker sends
+to a provider ends with its own request timeout well inside that window. So
 `reconcileSessionAttemptQuiescence`, before it evaluates the attempt, settles
-the attempt's owned-box setup admission (`lazyOwnedSandboxSetup` or
-`eagerOwnedSandboxSetup`) `rejected` only when all of these hold:
+every one of the attempt's own requests `rejected`
+(`settleExitedWorkerAdmissions`) only when all of these hold:
 
 - the caller proved through Temporal that the attempt's exact activity is
   settled;
 - the attempt closed `interrupted_recoverable` through its own
-  `worker_shutdown` recovery request, with no Pause/Steer interruption row, at
-  least the turn worker's process-exit deadline ago (the control worker passes
-  `workerProcessExitDeadlineMs` from the turn shutdown timing; without it
-  nothing is settled);
+  `worker_shutdown` recovery request, or by worker death, with no Pause/Steer
+  interruption row, at least the turn worker's process-exit deadline ago (the
+  control worker passes `workerProcessExitDeadlineMs` from the turn shutdown
+  timing; without it nothing is settled);
 - the admission is unsettled with no provider outcome, its holder is gone, no
-  retained process adopted it, and its turn has no `sandboxSetupOutcomeUnknown`
+  retained process adopted it (a retained command settles by its own exit or
+  loss proof), and, for owned-box setup (`lazyOwnedSandboxSetup`,
+  `eagerOwnedSandboxSetup`), its turn has no `sandboxSetupOutcomeUnknown`
   marker (that turn deliberately waits for the box to be gone).
 
-Setup writes only through its attempt's command fence, which ended with the
-process, and the replacement attempt runs the same setup again on the box
-before any model work. The attempt then quiesces through the ordinary receipt
-transaction in the same call. A wake reaches it: queued input wakes the
-session, and the quiescence-receipt wake repair wakes a recovering session
-whose attempt closed more than two minutes ago and that had no wake for ten
-minutes.
+The request is rejected, never replayed: no provider outcome was observed. A
+command it started may have finished or, on a provider that keeps a
+disconnected command running, may still run untracked, like any process the
+agent started in the background; the replacement attempt is told its previous
+execution stopped before it finished and reads the workspace as it is. Setup
+runs again on the box before any model work. A worker-shutdown attempt then
+quiesces through the ordinary receipt transaction in the same call; a
+worker-death attempt needs no receipt, so that call reports `stale`. Either
+way the settlement enqueues a session workflow wake
+(`exited_worker_admissions_settled`), so the workflow run that is about to
+close comes back, resumes the interrupted turn or claims the next queued
+input. Before the settlement runs at all, queued input wakes the session, and
+the quiescence-receipt wake repair wakes a recovering session whose attempt
+closed more than two minutes ago and that had no wake for ten minutes.
 
 Everything else keeps today's gate: Pause and Steer closures and cancellation,
-whose replacement attempt resumes the same box; a worker-shutdown closure still
-inside the deadline; other recovery reasons (deadline rotation, route
-transition, failover) and `failed`, which a live worker can record; and every
-non-setup request, such as a model's command, which may still be running and
-whose effects the model must observe. An embedded host that runs the worker
-without the standalone process-exit deadline relies on the same bound: its
+whose replacement attempt resumes the same box; a closure still inside the
+deadline; other recovery reasons (deadline rotation, route transition,
+failover) and any other `failed`, which a live worker records; and requests
+that a retained process adopted. An embedded host that runs the worker without
+the standalone process-exit deadline relies on the same bound: its
 shutting-down worker must stop running turn code within that deadline.
 
 Drains, command containment and the deadline backstop keep
 `crashedWorkerOrphanAdmissionSql` unchanged. They cannot see Temporal, and they
 consider only unsettled admissions, so once the reconciliation settled the
-setup it no longer pins the box for any of them.
+request it no longer pins the box for any of them.
 
 **Requests left on a retired box are settled once the box is proven gone.**
 A stopped box's cold commit settles every open request, PTY and process it
@@ -547,6 +563,15 @@ sends unchanged. The browser transport only speaks the two wire dialects; it
 holds no provider-specific configuration. A new OpenAI-compatible provider is
 one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
 aliases of the same handler for older clients.
+
+These providers delegate through one `delegate_to_session` function tool. The
+browser answers that call at once with a fixed "running, answer not known yet"
+output and later sends the agent's answer as its own `<execution_result>` user
+item plus a response request; progress is held as `<execution_progress>`. A
+delegation is never left as an open tool call while the agent works: Eleven
+Realtime waits only about 20 seconds for a tool result before letting the model
+continue without one (which then invented answers) and drops a later result
+for that call. Canonical: `packages/sdk/src/realtime-websocket-transport.ts`.
 
 Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
 and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
@@ -1054,6 +1079,68 @@ exact chronological user message. Standard timeline rendering omits it, while
 full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, no governance item is written.
+
+### Agent instructions
+
+A chat started for an agent ([`agents.md`](agents.md)) may be bound to one of its
+revisions: `sessions.agent_prompt_revision` names the `agent_revisions` row
+whose Instructions are in the chat's system prompt. NULL is every other chat,
+including chats whose agent text is already in `sessions.instructions`; they
+get no agent layer and no agent history items, and their prompt bytes are
+unchanged.
+
+- **Layer.** The worker reads the bound revision once per attempt, in the
+  session's workspace. The turn's first attempt records it in the turn's
+  metadata (`opengeniAgentPromptRevision`) and later attempts reuse it, so
+  every attempt of a turn builds the same system prompt even after an
+  earlier attempt's compaction folded a newer revision. The agent and its
+  revisions are read as the system, not as the turn's person: binding the
+  chat to the agent is the authorization, so an Only me agent keeps its layer
+  in turns that act for nobody or for another person. It is composed as the
+  `agent_instructions` layer under a short preamble: the agent's editors
+  wrote these instructions, they refine default behavior, and they grant no
+  additional authority. With an agent configuration it follows the Codemode
+  and code-search directives and precedes Git bindings, Skills, governance,
+  memory and session instructions.
+  The legacy composer places it after those directives, or right after the
+  persona when governance is rendered in the prompt. The layer ends the
+  stable system-prompt prefix when only the shared persona and directives
+  precede it, so with `experimentSystemPromptCacheSplit` on and the
+  deployment persona every chat of one agent shares a cached prefix.
+- **Edits.** Before building the agent, the worker compares the agent's
+  current revision with what the model already reads: the newest
+  `<opengeni_agent_instructions>` developer item, or without one the system
+  prompt. A different text is written once as a developer item before the
+  turn's first input, and the turn's metadata
+  (`opengeniAgentInstructionsHistoryId`) freezes it, so retries replay the
+  same bytes and a turn that saw no item keeps seeing none. Unchanged
+  Instructions, or a revision that changed only other fields such as the
+  first message, write nothing, and neither does an agent whose current
+  revision row cannot be read.
+- **Compaction.** Agent items are never retained. The newest revision the
+  summarized history showed (developer items only) is folded into
+  `sessions.agent_prompt_revision` in the compaction's own fenced
+  transaction, only forward and only to a revision of the chat's own agent.
+  A turn that continues after compaction re-adds the newest item when its
+  system prompt shows a different revision. Standalone compaction requests
+  use the same layer as the turn.
+- **Deleted agent or missing revision.** The chat continues as a plain chat
+  without the layer. If the agent row is gone and an earlier edit item
+  exists, one item withdraws it. The turn never fails for this.
+- **Claim gate (migration 1276).** A BEFORE INSERT trigger on
+  `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
+  with a non-NULL `agent_prompt_revision` unless the claim set
+  `opengeni.agent_instructions_protocol_v1 = '1'`. The worker sets it
+  transaction-locally around its own attempt registration only, like the
+  filesystem discontinuity protocol. A worker build without this code
+  therefore never runs an agent chat without its instructions. Its refused
+  claim is not a failed chat: like other rejected claims (below), the accepted
+  work is parked in `sessions.admission_block` with `requires_action` and
+  `retryPolicy = explicit_recheck`, keeping queued turns and history, and a
+  Resume or a new Send/Steer claims it again on a current worker. It is not
+  retried automatically. Nothing sets `agent_prompt_revision` before this
+  worker is deployed, so rolling deploys meet the gate only if an old worker
+  is still serving when the first agent chat is created.
 
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
@@ -3869,6 +3956,17 @@ blocker and preventing idle drain and capture until the provider deadline.
 The durable record keeps at most 16 MiB per stream plus the stream's final
 page, with explicit markers where output was skipped; later bytes are still
 read, and live output returned to the agent is not capped.
+A turn reads a foreground command in short slices (250 ms), but the router can
+deliver the last bytes and EOF later than that, for example on a busy box
+shared by several sessions. Once the exit poll reports an exit, a read keeps
+reading the remaining output for up to four seconds past its slice, within one
+page, so the command returns at its exit with its output instead of reporting
+"running" until the reaper's slower reads settle it. A command whose pipe stays
+open after exit (a background child still writing to it) pays this wait at
+most once every 15 seconds; reads in between return at their slice. When a
+read needs this tail, the worker logs a warning (at most once a minute per
+sandbox session) with how long the tail took, so a slow router shows up in
+operator logs instead of only as slow commands.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 

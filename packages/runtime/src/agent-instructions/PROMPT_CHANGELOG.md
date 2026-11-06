@@ -1,5 +1,180 @@
 # Modular prompt changelog
 
+Each waiting rule is stated once. How a wait behaves is the `wait_for_input`
+description's job: when not to call it, `reply`, the deadline, the minimum, and
+what starts the next turn. The system prompt keeps only when to end a turn on a
+wait. About 150 tokens of prompt sentences repeated the tool description
+(deadline persistence, the minimum timeout, no preliminary wait, timeout
+cadence, Codemode's live attempt), and the description named goals, child
+sessions, Steer, Codemode and `session_*` tools that many sessions lack. Agents
+also called `wait_for_input` when they were only waiting for the person's
+answer, which a plain reply already handles, so the description now opens with
+that case. The most common refused wait was a missing `reply` (70 of 164
+refusals on staging over 30 days), and the `reply` field itself said to omit it
+"when there is nothing new to tell them", which agents read as permission to
+leave it out after only starting work. That sentence is cut, and the field
+adds no rule of its own: the description already says when `reply` is needed.
+A field reading "Required when this turn answers a person's message" was tried
+and dropped: with it, agents again called `wait_for_input` to deliver answers
+while only waiting for the person. Legacy and modular compositions change the
+same way (the sentence diff is unchanged); their locks are updated.
+
+```text
+- If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.   (New messages)
+- If an existing wait's remaining time is below the tool's minimum or its deadline has passed, do not send an invalid timeout or round up and silently extend it. A question-only human/API turn that has not consumed immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Otherwise, do not assume the old wait remains armed: register a valid wait if still needed and make any unavoidable deadline adjustment explicit.   (Waiting)
+- Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.   (Waiting)
+- Avoid holding execution open with long sleeps or repeated blocking waits when an out-of-turn wait is available. Respect each tool's actual execution-wait limits; those limits do not cap `wait_for_input`, which may span hours or days within its own limits.   (Waiting; legacy: Rules for getting work done)
+- No short execution wait or preliminary status recheck is required before `wait_for_input`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate.   (Waiting)
+- This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.   (Waiting)
+- When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call.   (Progress updates)
+```
+
+Each cut rule is in the tool description, or stays elsewhere in the prompt:
+the reply contract in the final-answer rule ("its `reply` carries any
+answer"), Codemode's live attempt in Background commands (with compute), the
+child wake in `subagents`, waiting rather than a goal pause in `goals`, and
+human-only approvals in Autonomy. The remaining Waiting text is unchanged; its
+monitoring sentence ("When monitoring requires timed checks …") now renders
+only with schedules or subagents, as it already did without `wait_for_input`,
+because it names automations and session waits.
+
+```text
+- End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, … Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: …
+```
+
+The new description (`WAIT_FOR_INPUT_DESCRIPTION`) names no tool or feature a
+session may lack, so it stays static and cache-stable. Wake behaviour, the
+reply guard and the arguments are unchanged.
+
+```text
+- reply: … do not also write it before this call. Omit it when there is nothing new to tell them.
++ reply: … do not also write it before this call.
+```
+
+Idempotency keys the model makes up (`wait_for_input`, `goal_update`,
+`goal_progress`, `session_send_message`, `session_pause`, `session_resume`,
+`session_steer`, `session_human_input_respond`) now accept any 8-4-4-4-12 hex
+UUID (`z.guid()`), which is what `format: "uuid"` tells the model; they are
+stored as opaque operation keys. Previously Zod also required RFC version and
+variant digits, so a made-up key such as `12345678-1234-1234-1234-123456789abc`
+was refused (16 of 164 refused waits on staging were invalid UUIDs). The
+pattern Zod emits for such a field only repeats the format, so Opengeni's own
+tools no longer show it (`withoutRedundantUuidPatterns`, first-party servers
+only). A stricter pattern, such as the RFC check on ids and on
+`session_set_model`'s key (validated again by its public contract), is kept.
+
+o200k_base tokens, before → after (main 11550b6c):
+
+| Configuration | System prompt | Waiting section |
+| --- | --- | --- |
+| Legacy, no compute | 6,856 → 6,549 | — |
+| Legacy, sandbox | 7,374 → 7,067 | — |
+| All, no compute | 6,423 → 6,117 | 378 → 133 |
+| All, sandbox | 7,875 → 7,569 | 378 → 133 |
+| All without subagents, sandbox | 6,625 → 6,319 | 378 → 133 |
+| None plus sandbox | 4,580 → 4,248 | 378 → 107 |
+| None plus goals, no compute | 3,404 → 3,072 | 378 → 107 |
+| None, no compute (no wait tool) | 2,398 → 2,398 | — |
+
+`wait_for_input` itself: description 341 → 305, parameters 291 → 183
+(`idempotencyKey` 105 → 9; `reply` −12), whole definition 650 → 506.
+
+Three pieces of text now follow state the session actually has. Compositions
+with the state keep their bytes (`modular-parity-lock.test.ts`; its
+"none-with-features" cases now include workspace connectors, a setup-card
+source, which adds no other text). Nothing was reworded.
+
+- `goal_resume` and the goals sentence that names it are sent to a configured
+  agent once the session has a goal, in any state, as frozen with the turn.
+  Before a goal exists the tool can only fail ("this session has no goal").
+  The tool stays for paused, active and completed goals, so pausing or
+  resuming never changes the tool list or the prompt. Legacy (unconfigured)
+  sessions are unchanged.
+- The "# Images and video" section is left out when the media capability is on
+  but the built agent attaches no image or video tool (no provider adapter,
+  runnable hosted image tool or video boundary). Prompt inspection without a
+  tool surface keeps it.
+- The blocked-tool sentence names a setup card only when the agent has a
+  capability whose tools show one (workspace admin, workspace connectors,
+  browser, or secrets with the question tool). A card a refused tool posts by itself carries its own
+  instructions in that tool's result.
+
+```text
+- Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.   (configured session with no goal)
+- # Images and video …   (media on, no media tool attached)
+- … offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
+```
+
+The `skill_save`, `skill_install` and `skill_publish` tool descriptions and the
+bundled `skill-management` Skill now say that a Skill or change pending
+approval has no effect until someone who can manage it approves it, in
+Knowledge > Review or from its card in the chat where one is shown (an edited
+Skill keeps its current version until then), and that the agent's reply should
+say so.
+Before, they only named where a pending revision waits, so agents reported
+"waiting for your approval" without saying the Skill was inactive until then,
+and people didn't realise approval was needed for it to work. They also named
+the review tab "Needs review"; the app labels it "Review", and `skill_remove`
+now says so too. No system prompt text changes.
+
+`request_human_input` says the same in fewer words, for every session. The
+system prompt is unchanged. In the embedding profile the tool falls from 588
+to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
+(legacy, top-level) from 1,179 to 1,070.
+
+- Description: the purpose sentence is shorter; "Supports free text,
+  single-select, multi-select, multiple questions, explicit skip policy, and
+  an optional expiry." is cut because the schema states each of these
+  (`kind`, `questions`, `allowSkip`, `expiresInSeconds`); the recommended,
+  preview, confirm and Other rules keep their meaning in fewer words; the
+  "Let the agent decide" sentence is cut because the tool result carries
+  `HUMAN_INPUT_AGENT_DECIDES_NOTE` exactly when it applies.
+- Parent-agent sentences (child sessions): "In a sub-session," is cut when
+  the caller says the session has a parent (`subSession: true`, which the
+  worker always sets from the frozen nested depth). A direct runtime caller
+  that leaves `subSession` out keeps the conditioned wording.
+- The secret sentences are unchanged.
+- Schema: `allowOther` is no longer sent (new choice questions are always
+  normalized to offer Other, and a text question that set it was rejected),
+  nor the `$schema` marker. The zod contract that validates calls is unchanged.
+- A session that started unattended still gets no tool and no question clause
+  (unchanged); the docs now point backends nobody answers at `unattended: true`.
+
+```text
+- Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.
++ Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.
+- In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
++ Your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
+```
+
+A tool result too large to show names only the tools the session has. The
+spilled-result notice names `files__files_get_download_url` and the shell only
+when the turn has compute and the Files server's download tool. Without both
+(and no placed copy), it says the result was saved, which reader is missing,
+and to call the tool again with narrower arguments if it can. Sessions with
+both readers get the same text as before.
+
+```text
++ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no download tool)
++ … but this session has no shell to read it with. …   (download tool, no shell)
+- If the file is not there, call files__files_get_download_url with fileId <fileId> and download it with the shell.   (placed copy, no download tool)
+```
+
+The search rule no longer assumes `rg` exists. Many user, task and Connected
+Machine images ship without ripgrep, and "`rg` … first" made the agent spend
+its first search on `rg: not found`. Nothing in a turn's prompt inputs says
+which search tools a machine has (the prompt can be composed before a lazy
+sandbox exists, and a machine's PATH can change), so the sentence names both
+paths in fixed text instead of detecting one: it is byte-identical on every
+backend and attachment. Legacy and modular compositions change the same way;
+their locks are updated.
+
+```text
+- Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.
++ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find` (`Select-String` in PowerShell). Until you know `rg` exists, choose in the same command, for example `if command -v rg >/dev/null; then rg -n PATTERN; else grep -rn PATTERN .; fi`.
+```
+
 A configured agent with nothing to wait for or run code in no longer carries
 that guidance, and two answer rules follow the features they describe. As
 before, only text for an absent feature is omitted: compositions with the

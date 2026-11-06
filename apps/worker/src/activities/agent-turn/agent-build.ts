@@ -5,8 +5,10 @@ import {
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
+  ensureSessionAgentInstructions,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
+  type SessionAgentPrompt,
   SUBSCRIPTION_CORE_XAI,
   turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
@@ -42,7 +44,7 @@ import {
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
 import { createVideoGenerationToolAdapter } from "../video-generation-availability";
-import { rigProviderImageSourceImage } from "@opengeni/core";
+import { rigProviderImageContentSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -138,6 +140,8 @@ export type BuildTurnAgentDeps = {
   leases: ReturnType<typeof createTurnCredentialLeases>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  /** The agent revision in the system prompt; null for chats without one. */
+  agentPrompt: SessionAgentPrompt | null;
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
@@ -192,6 +196,8 @@ export type BuildTurnAgentDeps = {
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
+  /** The repository skill index would prepare the workspace before the model. */
+  deferRepositorySkillIndex: boolean;
   postToolPreparationStartedAt: number;
   codexContext: CodexRequestContext | null;
 };
@@ -214,6 +220,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     leases,
     turn,
     session,
+    agentPrompt,
     fileAuthoritySubjectId,
     capabilitySettings,
     humanInputResume,
@@ -720,6 +727,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
   });
+  // An agent edit made since this chat's system prompt was built reaches the
+  // model the same way, so the cached prompt stays intact until compaction
+  // folds it in. A deleted agent continues as a plain chat.
+  if (agentPrompt) {
+    await ensureSessionAgentInstructions(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      prompt: agentPrompt,
+    });
+  }
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(
     modelVisibleSkillCatalogText,
     deps.skillCatalog,
@@ -865,6 +886,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
             }
           : {}),
+        ...(agentPrompt?.instructions ? { agentInstructions: agentPrompt.instructions } : {}),
         ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability
           ? { agentPromptToolAvailability: promptToolAvailability }
@@ -907,6 +929,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        ...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
         // W1: `{{secret:…}}` references resolve at the exec boundary, and the
         // session's credential profile adds its variables to every command
         // through the same resolver.
@@ -1120,7 +1143,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                       timeoutMs: runSettings.rigSetupTimeoutMs,
                       contentHash: rigProviderImageContentHash({
                         backend: turn.sandboxBackend,
-                        sourceImage: rigProviderImageSourceImage(
+                        sourceImage: rigProviderImageContentSourceImage(
                           logicalSandboxSettings,
                           turn.sandboxBackend,
                         ),

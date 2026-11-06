@@ -946,7 +946,12 @@ describe("update messages with PostgreSQL", () => {
     const newcomer = await f.person("newcomer");
     // Any time, not only at 10:00: they are in Slack right now. A fixed
     // afternoon keeps the daily 10:00 update for others out of this count.
+    // The next weekday afternoon can be days away (from Friday evening it is
+    // Monday), so they link just before it, within the welcome window.
     const now = weekdayAt(15);
+    await shared!.admin`
+      update slack_bot_user_links set created_at = ${new Date(now.getTime() - 60_000)}
+      where connection_id = ${f.connectionId} and slack_user_id = ${newcomer.slackUserId}`;
     expect((await f.sweep(now)).sent).toBe(1);
     expect(f.slack.posts).toHaveLength(1);
     expect(f.slack.posts[0]!.channel).toBe(newcomer.channel);

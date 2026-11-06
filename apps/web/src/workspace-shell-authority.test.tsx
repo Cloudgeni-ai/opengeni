@@ -268,6 +268,8 @@ describe("workspace shell authority", () => {
       completedAt: null,
       createdAt: "2026-08-20T08:00:00.000Z",
       updatedAt: "2026-08-20T08:00:00.000Z",
+      slackAccountLabel: "@ada in Acme Slack",
+      canLink: true,
       organizationMemberLink: { slackAccountLabel: "@ada in Acme Slack" },
     };
     const { context } = testContext({
@@ -284,6 +286,7 @@ describe("workspace shell authority", () => {
           status: "completed",
           version: 2,
           completedAt: "2026-08-20T08:01:00.000Z",
+          canLink: false,
           organizationMemberLink: null,
         };
       },

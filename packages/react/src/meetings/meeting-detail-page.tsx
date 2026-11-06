@@ -66,6 +66,7 @@ import {
   type MeetingHereStatus,
   type RecordingsClientOverride,
 } from "../recordings";
+import { isKeepingRecordingAudio } from "../hooks/use-recordings";
 
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
@@ -153,11 +154,12 @@ function useTrackSources(
   const playable = useMemo(() => {
     const tracks = recording?.tracks ?? [];
     const partial =
-      state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable);
+      (state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable)) ||
+      isKeepingRecordingAudio(recording);
     return partial
       ? []
       : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
-  }, [recording?.tracks, state]);
+  }, [recording, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;

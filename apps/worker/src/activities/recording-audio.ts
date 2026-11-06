@@ -2,6 +2,7 @@ import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
+import { pcmWavPiece, readPcmWav } from "./dictation-pieces";
 import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
@@ -14,6 +15,26 @@ export { recordingAudioContainer, type RecordingAudioContainer };
  * player. This fills each hole with silence instead, from time zero.
  */
 export const RECORDING_TIMELINE_FILTER = "aresample=async=1:first_pts=0";
+
+/**
+ * The longest hole in a run's timestamps the timeline filter is trusted to
+ * fill, counting from time zero to the run's first packet. The filter fills
+ * a hole in one go and holds that stretch of silence in memory, so a hole
+ * is bounded by this fixed limit rather than by durations the uploader
+ * declared. A capture's own holes are far shorter.
+ */
+export const RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS = 60_000;
+
+/**
+ * The longest audio accepted for a declared duration. Chunk durations are
+ * measured on the recording device's clock and container timestamps on the
+ * audio clock, so a long capture can drift a little past what it declared;
+ * five seconds and 1% leave room for that.
+ */
+export function recordingDurationLimitMilliseconds(declaredMilliseconds: number): number {
+  const declared = Math.max(0, declaredMilliseconds);
+  return Math.ceil(declared + 5_000 + declared / 100);
+}
 
 /**
  * Turning a track's uploaded chunks into one seekable audio file.
@@ -144,6 +165,20 @@ export const ARCHIVAL_AUDIO_FORMAT: PreparedAudioFormat = {
 };
 
 /**
+ * The audio a transcript is made from: 16 kHz mono 16-bit PCM, what speech
+ * models and our speaker models run at. Decoding a track to it takes
+ * seconds even for an hour, where encoding the compact kept copy takes most
+ * of a minute, and its pieces are cut from the samples themselves.
+ */
+export const SPEECH_PCM_FORMAT: PreparedAudioFormat = {
+  extension: "wav",
+  mimeType: "audio/wav",
+  muxer: "wav",
+  codec: "pcm_s16le",
+  encoderArgs: ["-ar", "16000", "-ac", "1"],
+};
+
+/**
  * The prepared file's format for a source container when it is only used
  * once and not kept (a dictation): the source's own codec, so the models
  * that take it as it is still can.
@@ -185,10 +220,12 @@ async function runFfmpeg(
   args: string[],
   signal?: AbortSignal,
   stderrBytes = 16_384,
+  /** Reads ffmpeg's output as it is written; throwing stops ffmpeg with that error. */
+  readStdout?: (stdout: ReadableStream<Uint8Array>) => Promise<void>,
 ): Promise<{ stderr: string }> {
   const child = Bun.spawn([ffmpegPath, ...args], {
     stdin: "ignore",
-    stdout: "ignore",
+    stdout: readStdout ? "pipe" : "ignore",
     stderr: "pipe",
   });
   trackRecordingProcesses([child]);
@@ -200,7 +237,14 @@ async function runFfmpeg(
     abort();
   }, FFMPEG_TIMEOUT_MS);
   try {
-    const [code, stderr] = await Promise.all([child.exited, readTail(child.stderr, stderrBytes)]);
+    const [code, stderr] = await Promise.all([
+      child.exited,
+      readTail(child.stderr, stderrBytes),
+      readStdout?.(child.stdout as ReadableStream<Uint8Array>).catch((error: unknown) => {
+        abort();
+        throw error;
+      }),
+    ]);
     if (code === 0) return { stderr };
     const detail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`;
     if (hung) {
@@ -222,6 +266,83 @@ export function ffmpegReportedMilliseconds(stderr: string): number | null {
   const last = matches.at(-1);
   if (!last) return null;
   return Math.round((Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3])) * 1_000);
+}
+
+/**
+ * Read a run's packet timestamps without decoding it, and refuse the run
+ * before the timeline filter sees it when a hole (from time zero to the
+ * first packet, or between packets) is longer than
+ * `RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS`, or when its timeline runs past
+ * the length its chunks declared. Packets are read as ffmpeg writes them,
+ * and the first one out of bounds stops it.
+ */
+async function assertRunTimeline(
+  ffmpegPath: string,
+  path: string,
+  declaredMilliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const limit = recordingDurationLimitMilliseconds(declaredMilliseconds);
+  let millisecondsPerTick: number | null = null;
+  let end = 0;
+  const packet = (line: string) => {
+    const timebase = /^#tb 0: (\d+)\/(\d+)$/u.exec(line);
+    if (timebase) {
+      millisecondsPerTick = (Number(timebase[1]) * 1_000) / Number(timebase[2]);
+      return;
+    }
+    if (line === "" || line.startsWith("#")) return;
+    // framecrc: stream index, dts, pts, duration, size, checksum.
+    const [, , pts, duration] = line.split(",").map((field) => Number(field.trim()));
+    if (millisecondsPerTick === null || !Number.isFinite(millisecondsPerTick)) {
+      throw new RecordingAudioError("ffmpeg did not report the audio's time base", "ffmpeg_failed");
+    }
+    if (pts === undefined || !Number.isFinite(pts)) return;
+    const start = pts * millisecondsPerTick;
+    if (start - end > RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS) {
+      throw new RecordingAudioError(
+        "The audio has a gap too long to be a recording",
+        "invalid_audio",
+      );
+    }
+    const length = duration !== undefined && duration > 0 ? duration * millisecondsPerTick : 0;
+    end = Math.max(end, start + length);
+    if (end > limit) {
+      throw new RecordingAudioError("The audio runs past its declared length", "invalid_audio");
+    }
+  };
+  await runFfmpeg(
+    ffmpegPath,
+    [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      // The container's own timestamps, not shifted to start at zero.
+      "-copyts",
+      "-i",
+      path,
+      "-map",
+      "0:a:0",
+      "-c",
+      "copy",
+      "-f",
+      "framecrc",
+      "-",
+    ],
+    signal,
+    16_384,
+    async (stdout) => {
+      const decoder = new TextDecoder();
+      let rest = "";
+      for await (const bytes of stdout) {
+        const lines = (rest + decoder.decode(bytes, { stream: true })).split("\n");
+        rest = lines.pop() ?? "";
+        for (const line of lines) packet(line.trim());
+      }
+      packet((rest + decoder.decode()).trim());
+    },
+  );
 }
 
 export type PreparedRecordingAudio = {
@@ -290,7 +411,15 @@ export async function prepareRecordingTrackAudio(input: {
     throw new RecordingAudioError("The track has no audio", "invalid_audio");
   const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-"));
   try {
-    const runs: Array<{ startMilliseconds: number; path: string }> = [];
+    /** Each run's place on the timeline, from the starts and durations its chunks declared. */
+    const runs: Array<{ startMilliseconds: number; endMilliseconds: number; path: string }> = [];
+    const extendRun = (through: RecordingAudioChunk) => {
+      const run = runs.at(-1)!;
+      run.endMilliseconds = Math.max(
+        run.endMilliseconds,
+        through.startMilliseconds + through.durationMilliseconds,
+      );
+    };
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     let previous: RecordingAudioChunk | null = null;
     // Short bytes held until the chunks after them show whether a header starts there.
@@ -327,9 +456,15 @@ export async function prepareRecordingTrackAudio(input: {
           await handle?.close();
           const path = join(directory, `run-${runs.length}.${container}`);
           handle = await open(path, "wx", 0o600);
-          runs.push({ startMilliseconds: first.startMilliseconds, path });
+          runs.push({
+            startMilliseconds: first.startMilliseconds,
+            endMilliseconds: first.startMilliseconds,
+            path,
+          });
         }
         await handle.write(bytes);
+        extendRun(first);
+        extendRun(chunk);
         previous = chunk;
         input.onProgress?.();
       }
@@ -342,10 +477,25 @@ export async function prepareRecordingTrackAudio(input: {
           );
         }
         await handle.write(held.bytes);
+        extendRun(held.chunk);
+        if (previous) extendRun(previous);
       }
     } finally {
       await handle?.close();
     }
+    // Every run's timestamps are checked before the timeline filter fills their holes.
+    for (const run of runs) {
+      await assertRunTimeline(
+        input.ffmpegPath,
+        run.path,
+        run.endMilliseconds - run.startMilliseconds,
+        input.signal,
+      );
+    }
+    const trackStart = runs[0]!.startMilliseconds;
+    // The whole track as declared: from its first run's start to the latest declared end.
+    const declared =
+      runs.reduce((end, run) => Math.max(end, run.endMilliseconds), trackStart) - trackStart;
     const output = join(directory, `prepared.${format.extension}`);
     const base = [
       "-nostdin",
@@ -385,10 +535,9 @@ export async function prepareRecordingTrackAudio(input: {
       );
     } else {
       const inputs = runs.flatMap((run) => ["-i", run.path]);
-      const first = runs[0]!.startMilliseconds;
       const delayed = runs
         .map((run, index) => {
-          const delay = Math.max(0, run.startMilliseconds - first);
+          const delay = Math.max(0, run.startMilliseconds - trackStart);
           return `[${index}:a:0]${RECORDING_TIMELINE_FILTER},aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
         })
         .join(";");
@@ -418,15 +567,17 @@ export async function prepareRecordingTrackAudio(input: {
     const size = (await stat(output)).size;
     if (size === 0) throw new RecordingAudioError("The prepared audio is empty", "invalid_audio");
     const reported = ffmpegReportedMilliseconds(result.stderr);
-    const lastChunk = ordered.at(-1)!;
-    const declared =
-      lastChunk.startMilliseconds + lastChunk.durationMilliseconds - runs[0]!.startMilliseconds;
+    // Audio that came out materially longer than its chunks declared is not kept
+    // (the second allows for frame rounding).
+    if (reported !== null && reported > recordingDurationLimitMilliseconds(declared) + 1_000) {
+      throw new RecordingAudioError("The audio runs past its declared length", "invalid_audio");
+    }
     return {
       bytes: new Uint8Array(await readFile(output)),
       mimeType: format.mimeType,
       extension: format.extension,
       durationMilliseconds: reported ?? Math.max(0, declared),
-      offsetMilliseconds: runs[0]!.startMilliseconds,
+      offsetMilliseconds: trackStart,
     };
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -702,6 +853,40 @@ export async function renderRecordingAudioPiece(input: {
   tempRoot?: string | undefined;
   signal?: AbortSignal | undefined;
 }): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
+  const output = PIECE_OUTPUT[input.format];
+  // A piece of speech PCM is cut from its samples: no decode, and the whole
+  // track is never written out again for each of its pieces.
+  const pcm = input.audio.extension === "wav" ? readPcmWav(input.audio.bytes) : null;
+  if (pcm && pcm.sampleRate === 16_000) {
+    const samples = pcm.data.byteLength / 2;
+    const startSample = input.whole
+      ? 0
+      : Math.min(samples, Math.max(0, Math.round((input.startMilliseconds * 16_000) / 1_000)));
+    const endSample = input.whole
+      ? samples
+      : Math.min(
+          samples,
+          Math.max(startSample, Math.round((input.endMilliseconds * 16_000) / 1_000)),
+        );
+    if (endSample <= startSample) {
+      throw new RecordingAudioError("The audio piece is empty", "invalid_audio");
+    }
+    const piece = pcmWavPiece(pcm, startSample, endSample);
+    if (input.format === "wav") {
+      return { bytes: piece, mimeType: output.mimeType, extension: output.extension };
+    }
+    return await convertRecordingAudioPiece({
+      ...input,
+      audio: { bytes: piece, extension: "wav" },
+      whole: true,
+    });
+  }
+  return await convertRecordingAudioPiece(input);
+}
+
+async function convertRecordingAudioPiece(
+  input: Parameters<typeof renderRecordingAudioPiece>[0],
+): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
   const output = PIECE_OUTPUT[input.format];
   const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-piece-"));
   try {

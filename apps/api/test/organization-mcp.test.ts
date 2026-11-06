@@ -152,7 +152,6 @@ describe("organization MCP action catalog", () => {
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
       "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
-      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
     // An agent with the person's full access approves sign-ins and manages
@@ -266,6 +265,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         // Teams setup and account linking require the person's verified browser.
         "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
         "POST /v1/workspaces/:workspaceId/integrations/teams/link",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",

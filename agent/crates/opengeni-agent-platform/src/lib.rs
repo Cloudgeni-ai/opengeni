@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+pub mod command_activity;
 mod continuous_clock;
 mod desktop;
 mod error;
@@ -45,6 +46,8 @@ mod pty;
 pub mod run_as;
 pub mod service;
 mod shell_tools;
+#[cfg(target_os = "linux")]
+pub mod signal_sender;
 #[cfg(unix)]
 mod system_shell;
 pub mod transactional_write;
@@ -819,9 +822,9 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
         let installed = *DEVELOPER_TOOLS.get_or_init(|| {
             std::process::Command::new("xcode-select")
                 .arg("-p")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdin(discarded_stdio())
+                .stdout(discarded_stdio())
+                .stderr(discarded_stdio())
                 .status()
                 .is_ok_and(|status| status.success())
         });

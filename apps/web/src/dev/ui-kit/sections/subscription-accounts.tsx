@@ -17,6 +17,7 @@ import {
 } from "@opengeni/react/app/lib/subscription-accounts";
 import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
 import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
+import { claudeUsageCell } from "@/components/models/claude-subscription-models";
 
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 
@@ -24,8 +25,10 @@ import { KitBlock, KitCanvas, KitSection } from "../kit";
    Subscription accounts: the production session-header account control and
    the Models settings rows, fed by the production adapters
    (lib/subscription-accounts). Only the data is a fixture: Claude accounts on
-   Pro, Max and verified Ultra (no 5h window), ChatGPT Plus, Pro (no 5h
-   window) and Free, and SuperGrok. Open each control to see its menu.
+   Pro, Max, Ultra and an unknown Max tier ("Max or Ultra"), including the
+   reported mix of spent weeks, a 5h refusal on Ultra and Fable weeks; ChatGPT
+   Plus, Pro (no 5h window) and Free; and SuperGrok. Open each control to see
+   its menu. The Claude settings rows render the production usage cell.
    -------------------------------------------------------------------------- */
 
 const HOUR = 3_600_000;
@@ -40,21 +43,41 @@ type Fixture = {
 
 const CLAUDE: Fixture[] = [
   {
-    id: "c1",
-    email: "alex.morgan@example.test",
-    plan: "claude_pro",
-    windows: [
-      ["five_hour", 36, 2.4],
-      ["seven_day", 62, 70],
-    ],
-  },
-  {
     id: "c2",
     email: "sam.longername.lindqvist@example.test",
     plan: "claude_max_20x",
     windows: [
-      ["seven_day", 24, 101],
-      ["seven_day_fable", 41, 101],
+      ["seven_day", 100, 40.6],
+      ["seven_day_fable", 0, 40.6],
+    ],
+  },
+  {
+    id: "c6",
+    email: "ultra.second@example.test",
+    plan: "claude_max_20x",
+    windows: [
+      ["five_hour", 100, 2.9],
+      ["seven_day", 71, 105.6],
+      ["seven_day_fable", 0, 105.6],
+    ],
+  },
+  {
+    id: "c7",
+    email: "max.or.ultra@example.test",
+    plan: "claude_max",
+    windows: [
+      ["seven_day", 100, 73.6],
+      ["seven_day_fable", 0, 73.6],
+    ],
+  },
+  {
+    id: "c8",
+    email: "max.or.ultra.two@example.test",
+    plan: "claude_max",
+    windows: [
+      ["five_hour", 0, 4.6],
+      ["seven_day", 100, 90.6],
+      ["seven_day_fable", 0, 90.6],
     ],
   },
   {
@@ -62,18 +85,18 @@ const CLAUDE: Fixture[] = [
     email: "research.lab@example.test",
     plan: "claude_max_5x",
     windows: [
-      ["five_hour", 100, 1.2],
+      ["five_hour", 95, 1.2],
       ["seven_day", 72, 30],
       ["seven_day_fable", 18, 30],
     ],
   },
   {
-    id: "c4",
-    email: "kim@example.test",
-    plan: "claude_max",
+    id: "c1",
+    email: "alex.morgan@example.test",
+    plan: "claude_pro",
     windows: [
-      ["five_hour", 3, 4.6],
-      ["seven_day", 54, 52],
+      ["five_hour", 36, 2.4],
+      ["seven_day", 62, 70],
     ],
   },
   {
@@ -231,6 +254,43 @@ function rowWindows(provider: string, fixture: Fixture, now: number) {
   return subscriptionWindows(provider, inputs, now);
 }
 
+/** A Claude row's production usage cell, from the account its listing carries. */
+function claudeCell(fixture: Fixture, now: number) {
+  const observedAt = new Date(now - 4 * 60_000).toISOString();
+  return claudeUsageCell({
+    id: `00000000-0000-4000-8000-${fixture.id.padStart(12, "0")}`,
+    scope: "organization",
+    subject: fixture.id,
+    email: fixture.email,
+    label: null,
+    plan: fixture.plan,
+    status: "active",
+    active: true,
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastError: null,
+    allocatorEnabled: true,
+    allocatorVersion: 1,
+    allocatorUpdatedAt: null,
+    version: 1,
+    usage: {
+      connected: true,
+      credentialVersion: 1,
+      observedAt,
+      source: "response_headers",
+      refreshStatus: "available",
+      refreshCheckedAt: observedAt,
+      windows: fixture.windows.map(([id, used, hours]) => ({
+        id: id as "seven_day",
+        usedPercent: used,
+        resetsAt: iso(now, hours),
+        status: used >= 100 ? ("rejected" as const) : null,
+        observedAt,
+      })),
+    },
+  });
+}
+
 function SettingsRows({
   provider,
   tile,
@@ -252,7 +312,9 @@ function SettingsRows({
           email={fixture.email}
           meta={["Everyone in Cloudgeni", subscriptionPlanLabel(provider, fixture.plan)]}
           cells={{
-            usage: fixture.status ? null : (
+            usage: fixture.status ? null : provider === "claude" ? (
+              claudeCell(fixture, now)
+            ) : (
               <SubscriptionUsageCell windows={rowWindows(provider, fixture, now)} now={now} />
             ),
           }}

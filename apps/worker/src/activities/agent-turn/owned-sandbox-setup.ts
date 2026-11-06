@@ -2,6 +2,7 @@ import {
   discardHeldSoftSetupFailureNotices,
   runOwnedSandboxSetup,
   withRunCredentialsSession,
+  type CodemodeTokenWriterSession,
   type GitCredentialTokenWriterSession,
   type PreparedAgentInput,
   type RunCredentialCommandSession,
@@ -36,6 +37,8 @@ export type EagerOwnedSandboxSetupDeps = Pick<
   | "leases"
   | "runWorkspaceMutationForSandbox"
   | "attachGitCredentialRenewal"
+  | "prepareCodemodeTokenSeed"
+  | "attachCodemodeTokenRenewal"
   | "attachRunCredentialRenewal"
   | "activeSandboxBackend"
   | "groupBoxBackend"
@@ -109,6 +112,11 @@ export async function runEagerOwnedSandboxSetup(
     const eagerCredentialSetupSession = deps.initialRunCredentialMaterial
       ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
       : eagerSetupSession;
+    // Each model stream of the attempt runs this setup again, which rewrites
+    // the Codemode token file. Write the attempt's newest bearer (never the one
+    // captured when the agent was built, which expires an hour after the
+    // attempt started) and keep renewing exactly that bearer afterwards.
+    const codemodeTokenSeed = await deps.prepareCodemodeTokenSeed();
     // Every setup write runs as a command through this fence, which lets the
     // attempt writer drain settle the setup admission even when the setup
     // itself never returns (an unanswered agent).
@@ -125,6 +133,7 @@ export async function runEagerOwnedSandboxSetup(
             settings: deps.runSettings,
             environment: deps.sandboxEnvironment,
             measureSetup: measure,
+            ...(codemodeTokenSeed ? { codemodeTokenSeedOverride: codemodeTokenSeed.token } : {}),
             ...(runCredentialSoftFailure
               ? { priorSoftSetupFailures: [runCredentialSoftFailure] }
               : {}),
@@ -167,6 +176,13 @@ export async function runEagerOwnedSandboxSetup(
       undefined,
       setupCommandFence ? { commandFence: setupCommandFence } : {},
     );
+    if (codemodeTokenSeed) {
+      await deps.attachCodemodeTokenRenewal(
+        eagerSetupSession as CodemodeTokenWriterSession,
+        codemodeTokenSeed,
+        eagerResolvedSandbox,
+      );
+    }
     await deps.attachGitCredentialRenewal(
       eagerSetupSession as GitCredentialTokenWriterSession,
       deps.initialGitCredentials,

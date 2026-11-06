@@ -9,6 +9,8 @@ export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
+export * from "./no-reply";
+import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
   ApiIntegrationAuthPreview,
@@ -28,6 +30,8 @@ import {
   CompatibleModelApi,
   CompatibleModelBaseUrl,
   CompatibleModelName,
+  DirectModelName,
+  CompatibleModelReasoning,
 } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import {
@@ -49,6 +53,8 @@ export {
   ClaudeSubscriptionAccountsResponse,
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
+export * from "./reasoning-effort";
+import { ReasoningEffort } from "./reasoning-effort";
 export * from "./artifact-catalog";
 export * from "./file-access";
 import { FileAccess } from "./file-access";
@@ -147,6 +153,7 @@ import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
 export * from "./organization-access";
+export * from "./api-key-delegation";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -185,6 +192,7 @@ export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./interaction-action-deadline";
@@ -893,10 +901,6 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
-);
-
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
   z.enum(["standard", "priority", "fast", "ultrafast"]),
@@ -911,7 +915,6 @@ export type LatencyMode = z.infer<typeof LatencyMode>;
 export function modelServiceTierCatalogEntry(slug: string, tierId: string): string {
   return `${slug}@${tierId}`;
 }
-export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -3959,6 +3962,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
        * its `/openai/v1` URL). Arbitrary proxy endpoints are refused.
        */
       endpoint: AzureOpenAIEndpoint.optional(),
+      /**
+       * OpenAI and Azure OpenAI only: models (Azure deployment names) to offer
+       * with the connection. Each is checked with a short request using this
+       * key (or sign-in) before anything is saved, then saved with the
+       * connection in one step. Models it already offers are kept as they are.
+       */
+      models: z.array(DirectModelName).min(1).max(16).optional(),
       claudeIdentity: z
         .object({
           accountUuid: primitives.uuid,
@@ -3984,6 +3994,18 @@ export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
 >;
 
 /**
+ * One model of an organization's OpenAI-compatible endpoint, with the
+ * reasoning levels it accepts (null when it declares none, so chats get no
+ * reasoning choice for it).
+ */
+export const OrganizationCompatibleEndpointModel = /* @__PURE__ */ defineSchema(() =>
+  OrganizationProviderCustomModel.extend({ reasoning: CompatibleModelReasoning.nullable() }),
+);
+export type OrganizationCompatibleEndpointModel = z.infer<
+  typeof OrganizationCompatibleEndpointModel
+>;
+
+/**
  * An organization's own OpenAI-compatible endpoint: an organization model
  * account like its OpenAI key, of which it can connect several. Its key is
  * write-only; its base URL, API format and name are non-secret.
@@ -3998,7 +4020,7 @@ export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
     api: CompatibleModelApi,
     label: primitives.nullableString,
     /** The endpoint's active models. */
-    models: z.array(OrganizationProviderCustomModel),
+    models: z.array(OrganizationCompatibleEndpointModel),
     createdAt: primitives.dateTime,
     updatedAt: primitives.dateTime,
   }),
@@ -4012,7 +4034,9 @@ export type OrganizationCompatibleEndpointsResponse = z.infer<
 >;
 /**
  * Connect an OpenAI-compatible endpoint with its first model. The API checks
- * the model with a short test request to the endpoint before saving.
+ * the model with a short test request to the endpoint before saving. Without
+ * `reasoning`, the model's reasoning levels are read from the endpoint's
+ * model listing when it publishes them; `null` declares none.
  */
 export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -4028,6 +4052,7 @@ export const CreateOrganizationCompatibleEndpointRequest = /* @__PURE__ */ defin
         .max(60)
         .regex(/^[^\r\n|]+$/)
         .optional(),
+      reasoning: CompatibleModelReasoning.nullable().optional(),
     })
     .strict(),
 );
@@ -4047,12 +4072,37 @@ export const ReplaceOrganizationCompatibleEndpointKeyRequest = /* @__PURE__ */ d
 export type ReplaceOrganizationCompatibleEndpointKeyRequest = z.infer<
   typeof ReplaceOrganizationCompatibleEndpointKeyRequest
 >;
-/** Add a model to an endpoint; the API checks it with the endpoint's key first. */
+/**
+ * Add a model to an endpoint; the API checks it with the endpoint's key
+ * first. `reasoning` works as when connecting the endpoint.
+ */
 export const CreateOrganizationCompatibleEndpointModelRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ operationId: primitives.uuid, upstreamModelId: CompatibleModelName }).strict(),
+  z
+    .object({
+      operationId: primitives.uuid,
+      upstreamModelId: CompatibleModelName,
+      reasoning: CompatibleModelReasoning.nullable().optional(),
+    })
+    .strict(),
 );
-export type CreateOrganizationCompatibleEndpointModelRequest = z.infer<
+export type CreateOrganizationCompatibleEndpointModelRequest = z.input<
   typeof CreateOrganizationCompatibleEndpointModelRequest
+>;
+/**
+ * Set the reasoning levels of one endpoint model: given levels, `null` for
+ * none, or omitted to read them again from the endpoint's model listing.
+ */
+export const SetOrganizationCompatibleEndpointModelReasoningRequest =
+  /* @__PURE__ */ defineSchema(() =>
+    z
+      .object({
+        expectedVersion: primitives.positiveInteger,
+        reasoning: CompatibleModelReasoning.nullable().optional(),
+      })
+      .strict(),
+  );
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = z.input<
+  typeof SetOrganizationCompatibleEndpointModelReasoningRequest
 >;
 
 const turnInitiatorIdentityFields = {
@@ -5349,10 +5399,23 @@ export const SlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
     createdAt: primitives.string.datetime({ offset: true }),
     updatedAt: primitives.string.datetime({ offset: true }),
     /**
-     * Shown to the person linking when they may link this Slack account as a
-     * member of the organization, without workspace access, once they confirm
-     * it (`POST …/user-link-intents/:requestId/link`). The label names the
-     * Slack account when Slack says who it is.
+     * The Slack account this request links, shown to the person linking while
+     * it is prepared so they see whose account it is. Names it by display
+     * name, real name and unique Slack username plus the Slack workspace, when
+     * Slack says who it is.
+     */
+    slackAccountLabel: z.string().min(1).max(256).nullable().optional(),
+    /**
+     * Whether the person linking may link this Slack account now by confirming
+     * it (`POST …/user-link-intents/:requestId/link` with this request's
+     * `version`). Preparing a request never links it, so a link someone else
+     * sent can't attach the sender's Slack account to whoever opens it.
+     */
+    canLink: z.boolean().optional(),
+    /**
+     * @deprecated Use `canLink` and `slackAccountLabel`. Set when `canLink` is
+     * true because the person is a member of the organization without access
+     * to the workspace.
      */
     organizationMemberLink: z
       .object({ slackAccountLabel: z.string().min(1).max(256).nullable() })
@@ -7286,6 +7349,18 @@ export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
   "opengeni_attachment_image_max_dimension" as const;
 /** Bound stamped on newly accepted user messages with attachments. */
 export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
+/**
+ * Private durable field on user history items: image formats that model
+ * providers cannot read but whose attachments this message shows the model as
+ * a converted JPEG ("heif": HEIC/HEIF photos). Stamped when the message is
+ * accepted, so supporting a format later never adds an image to a message an
+ * earlier request already sent. Items without it show such files by reference
+ * only.
+ */
+export const MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD =
+  "opengeni_attachment_converted_image_formats" as const;
+/** Converted formats stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS: readonly string[] = ["heif"];
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
@@ -9238,15 +9313,25 @@ export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentio
 
 /**
  * Archive a root chat and its sub-chats for everyone (`archived: true`), or
- * undo that (`archived: false`) within the few seconds after archiving. Once
- * that window ends the chat's remaining work is stopped and its content moves
- * to long-term storage; it stays readable and searchable but can no longer be
- * restored or continued. Needs session control.
+ * bring it back (`archived: false`). A few seconds after archiving, the chat's
+ * remaining work is stopped and its content moves to long-term storage; it
+ * stays readable and searchable. Bringing it back within those seconds undoes
+ * the Archive exactly; later, the chat and the sub-chats archived with it
+ * become live again and stored content is restored in the background
+ * (`retention.archive.restoring` until done). Archive is refused (409
+ * `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless every such sub-chat is listed in
+ * `confirmActiveSubChats`. Needs session control.
  */
 export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
+      /**
+       * Ids of sub-chats still in use that should be archived (and stopped)
+       * too. Only after a refusal named them; ignored when unarchiving.
+       */
+      confirmActiveSubChats: z.array(primitives.uuid).max(1000).optional(),
       /** Ignored; repeating an Archive changes nothing. Kept for older clients. */
       clientEventId: z.string().min(1).max(200).optional(),
       /** Ignored; there is one kind of archive. Kept for older clients. */
@@ -9274,6 +9359,8 @@ export const SessionRetention = /* @__PURE__ */ defineSchema(() =>
         .object({
           state: z.enum(["archiving", "archived"]),
           archivedAt: primitives.nullableString,
+          /** Someone restored the chat; its stored content is being put back. */
+          restoring: z.literal(true).optional(),
         })
         .strict()
         .nullable(),
@@ -11734,6 +11821,14 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurre
 export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
   "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
 
+/**
+ * An automation acts in a person's chat; a run with nothing for them should
+ * not interrupt it. The chat leaves out a run whose whole final response is
+ * the no-reply token (see `isNoReplyText`). Rendered only into new
+ * occurrences; delivered ones keep their text.
+ */
+export const SCHEDULED_OCCURRENCE_QUIET_GUIDANCE = `The person in this chat sees your final response. When this occurrence leaves nothing for them to see or do (nothing new happened, or nothing needed doing), make your entire final response exactly ${NO_REPLY_SENTINEL} and the run stays out of their chat. Never answer ${NO_REPLY_SENTINEL} for a blocker, a failure, a question for them, or something you did that they would want to know about.`;
+
 /** The model-facing name of the tool that reads stored events in full. */
 export const EVENTS_GET_MODEL_TOOL_NAME = "opengeni__events_get" as const;
 
@@ -11823,6 +11918,7 @@ function renderScheduledOccurrenceTaskBatch(
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
     SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
+    SCHEDULED_OCCURRENCE_QUIET_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [
@@ -12356,9 +12452,9 @@ export type OrganizationComputeSummary = z.infer<typeof OrganizationComputeSumma
 
 /**
  * GET /v1/workspaces/:workspaceId/organization-machines: every organization
- * machine, wherever it works, for organization owners. `complete` is false
- * while the server can only list the ones that work in the requested
- * workspace.
+ * machine, wherever it works, for organization owners and admins. `complete`
+ * is always true; servers before migration 1272 could list only the ones that
+ * work in the requested workspace and sent false.
  */
 export const ListOrganizationMachinesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ machines: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
@@ -12367,7 +12463,7 @@ export type ListOrganizationMachinesResponse = z.infer<typeof ListOrganizationMa
 
 /**
  * GET /v1/workspaces/:workspaceId/organization-rigs: every organization
- * sandbox environment, wherever it works, for organization owners.
+ * sandbox environment, wherever it works, for organization owners and admins.
  * `complete` as for machines.
  */
 export const ListOrganizationRigsResponse = /* @__PURE__ */ defineSchema(() =>
@@ -12704,6 +12800,10 @@ export type KnowledgeSourceSyncConnectionAuthority = z.infer<
   typeof KnowledgeSourceSyncConnectionAuthority
 >;
 
+/**
+ * @deprecated Integration Knowledge sync was removed. The shape stays in the
+ * public schema until the next SDK major; requests carrying it return 410.
+ */
 export const KnowledgeSourceSyncAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -12723,16 +12823,6 @@ export const KnowledgeSourceSyncAction = /* @__PURE__ */ /* @__PURE__ */ defineS
     .strict(),
 );
 export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
-
-export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      sourceEnabled: KnowledgeSourceSyncEnabled,
-      connectionPaused: KnowledgeSourceSyncDisabled,
-    })
-    .strict(),
-);
-export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
 
 export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -13058,8 +13148,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     .strict();
   return {
     bundledSkillIds: BundledSkillSelection.optional(),
-    // Frozen with the ordinary scheduled run. This selects a connector source;
-    // fetching happens only through that run's live agent tool.
+    /** @deprecated Integration Knowledge sync was removed; a request carrying it returns 410. */
     knowledgeSource: KnowledgeSourceSyncAction.optional(),
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
@@ -13249,39 +13338,6 @@ export const ScheduledTaskAgentConfig = /* @__PURE__ */ /* @__PURE__ */ defineSc
     .superRefine(refineScheduledTaskAgentConfig),
 );
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
-
-/** Legacy actions are readable for migration/cleanup, never new dispatch. */
-export function scheduledTaskKnowledgeSource(task: {
-  action: ScheduledTaskAction;
-  agentConfig: { knowledgeSource?: KnowledgeSourceSyncAction | undefined };
-}): KnowledgeSourceSyncAction | null {
-  return task.action.kind === "knowledge_source_sync"
-    ? task.action
-    : (task.agentConfig.knowledgeSource ?? null);
-}
-
-export function requireScheduledTaskKnowledgeSource(
-  task: Parameters<typeof scheduledTaskKnowledgeSource>[0],
-): KnowledgeSourceSyncAction {
-  const source = scheduledTaskKnowledgeSource(task);
-  if (!source) throw new Error("Scheduled task has no selected Knowledge source");
-  return source;
-}
-
-export function knowledgeSourceAgentConfig(
-  source: KnowledgeSourceSyncAction,
-  existing?: ScheduledTaskAgentConfig,
-): ScheduledTaskAgentConfig {
-  return {
-    prompt:
-      "Fetch the selected source with knowledge_source_fetch. Read the retained source content and save useful facts, decisions, requirements or incidents with knowledge_save, linking evidence and relevant groups. Correct existing knowledge when the source changes. Continue fetching when the tool reports more content. Follow this task's Agent learning settings and summarize what changed.",
-    resources: [],
-    tools: [],
-    metadata: {},
-    ...existing,
-    knowledgeSource: source,
-  };
-}
 
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
@@ -14237,7 +14293,14 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ /* @__PURE
         action: { kind: "agent_turn" as const },
         runMode: "new_session_per_run" as const,
         targetSessionId: null,
-        agentConfig: knowledgeSourceAgentConfig(value.action),
+        // Integration Knowledge sync was removed; core refuses this shape with 410.
+        agentConfig: {
+          prompt: "Integration Knowledge sync was removed.",
+          resources: [],
+          tools: [],
+          metadata: {},
+          knowledgeSource: value.action,
+        } satisfies ScheduledTaskAgentConfig as ScheduledTaskAgentConfig,
         rigId: null,
       })),
 );
@@ -15147,7 +15210,13 @@ export const IntegrationClientMetadata = /* @__PURE__ */ defineSchema(() =>
     client_name: z.enum(["Opengeni", "OpenGeni"]),
     redirect_uris: z.array(z.string().url()),
     token_endpoint_auth_method: z.literal("none"),
-    grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
+    grant_types: z.array(
+      z.enum([
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      ]),
+    ),
     response_types: z.array(z.literal("code")),
   }),
 );
@@ -20973,9 +21042,11 @@ export function canonicalSkillReviewQuestion(
   )
     return null;
   const canonical = skillReviewHumanInput(question.skillReview!).questions[0]!;
-  const { confirm: _confirm, ...withoutConfirm } = question;
+  // Strict tool schemas send an absent `confirm` as false and `secret` as null.
+  const { confirm: _confirm, secret: _secret, ...withoutConfirm } = question;
   const normalized = {
-    ...(question.confirm ? question : withoutConfirm),
+    ...(question.confirm ? { ...withoutConfirm, confirm: question.confirm } : withoutConfirm),
+    ...(question.secret != null ? { secret: question.secret } : {}),
     allowOther: false,
     options: question.options.map((option) => {
       // Strict tool schemas send absent optional fields as null (or false).
@@ -21019,10 +21090,11 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
 /**
- * The model-facing `request_human_input` parameters for the enabled features.
- * With every feature it is exactly `RequestHumanInputToolInput`; without one,
- * that field (and for secrets the `secret` kind) is left out of the schema the
- * model sees. Calls are still validated against the full contract.
+ * The `request_human_input` parameters for the enabled features. With every
+ * feature it is exactly `RequestHumanInputToolInput`; without one, that field
+ * (and for secrets the `secret` kind) is left out. Calls are still validated
+ * against the full contract. The wire schema the model sees is derived from
+ * these parameters and also always leaves out `allowOther` and `$schema`.
  */
 export function requestHumanInputToolParameters(features: HumanInputQuestionFeatures) {
   if (features.secrets && features.skillReview) return RequestHumanInputToolInput;
@@ -23696,6 +23768,7 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
+export * from "./agent-instructions-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

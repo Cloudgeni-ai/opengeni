@@ -65,7 +65,7 @@ ${sentences(
   monitoring &&
     "Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it.",
   waitForInput
-    ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input`: its reason is the status. When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call."
+    ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input`: its reason is the status."
     : (skillsReadable(context) || hasSandbox(context)) && "Do not narrate Skill reads or waits.",
 )}
 
@@ -116,11 +116,23 @@ function autonomy(context: AgentPromptContext): string {
     : "First check whether an available tool already provides the capability natively.";
   // A setting the person could change in the app is changed here through an
   // app action (confirmed in the chat) whenever the app-action tools may exist.
+  // Only a tool shows a setup card: integration setup (workspaceAdmin), or a
+  // connector, browser or secret question the session can use (a secret
+  // question needs the question tool). A card that a refused tool posts by
+  // itself brings its own instructions in the result.
+  const { capabilities } = context;
+  const setupCards =
+    capabilities.workspaceAdmin ||
+    capabilities.workspaceConnectors ||
+    capabilities.browser ||
+    (capabilities.secrets && capabilities.humanInput);
   const blockedFix =
     context.capabilities.workspaceAdmin &&
     toolsAvailable(context, ["admin_actions_search", "admin_action_call"])
       ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed."
-      : "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.";
+      : setupCards
+        ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed."
+        : "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply with the exact next step, and continue once it is fixed.";
   // Learning policy governs only an agent that can save Knowledge or Skills.
   const learning = canLearn(context)
     ? " Useful learning follows its accepted policy; it grants no external-action or settings permission."

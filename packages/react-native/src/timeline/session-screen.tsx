@@ -11,6 +11,7 @@ import {
   type PendingPrompt,
   type AgentMessageItem,
   type AuthNeededItem,
+  type StoredFileSource,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
@@ -25,15 +26,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  Pressable,
-  Text,
-  View,
-  type TextInput,
-} from "react-native";
+import { ActivityIndicator, Alert, Pressable, Text, View, type TextInput } from "react-native";
 import { annotationHasNote } from "@opengeni/react/timeline-model";
 import {
   defaultChatComposerMessages,
@@ -43,6 +36,11 @@ import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import type { NativeFileAttachmentsResult } from "../attachments";
+import {
+  StoredFileImage,
+  useNativeComposerAttachments,
+  type NativeComposerAttachment,
+} from "../stored-file-image";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { Button } from "./controls";
@@ -61,7 +59,13 @@ import {
   type NativeAnnotationLike,
 } from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  OpenGeniClient,
+  ResourceRef,
+  Session,
+  SessionBackgroundCommand,
+} from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -115,6 +119,13 @@ export interface NativeSessionScreenProps extends Omit<
   humanInputMessages?: HumanInputCardProps["messages"];
   /** Translations for the approval strip. */
   approvalMessages?: ApprovalStripProps["messages"];
+  /**
+   * The review each pending approval shows, as the web `ApprovalSurface`'s
+   * `loadReview`: the server's (`client.getToolActionReview`) or the host's
+   * own plain title and consequence instead of the tool's raw arguments.
+   * See `ApprovalStrip`'s `loadReview`.
+   */
+  loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
   client?: OpenGeniClient | undefined;
   /**
@@ -128,10 +139,12 @@ export interface NativeSessionScreenProps extends Omit<
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
   /**
-   * Show how the agent works behind the scenes above the composer: the goal,
-   * agents and commands chips. Defaults to true. Set `false` for end users to
-   * whom a paused goal, a count of helper agents or a running command means
-   * nothing; queued messages, approvals and the agent's questions still show.
+   * Show how the agent works behind the scenes: above the composer, the goal,
+   * agents and commands chips; on each turn row, the live step and step
+   * facets. Defaults to true. Set `false` for end users to whom a paused
+   * goal, a count of helper agents, a running command or a tool step means
+   * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+   * Queued messages, approvals and the agent's questions still show.
    */
   agentSignals?: boolean | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
@@ -161,6 +174,7 @@ export function NativeSessionScreen({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
@@ -181,8 +195,8 @@ export function NativeSessionScreen({
         send={controller.composer.send}
         scope={controller.sessionId}
         store={answerStore}
-        // Like the web: only a cancelled session can't take another message.
-        readOnly={status === "cancelled"}
+        // Like the web: a cancelled or archived chat can't take another message.
+        readOnly={status === "cancelled" || controller.archived}
       >
         <NativeTimelineMessagesProvider messages={timelineMessages}>
           <SessionScreenBoundary sessionId={controller.sessionId}>
@@ -196,6 +210,7 @@ export function NativeSessionScreen({
               feedback={feedback}
               humanInputMessages={humanInputMessages}
               approvalMessages={approvalMessages}
+              loadReview={loadReview}
               client={client}
               inChatConnect={inChatConnect}
               models={models}
@@ -264,6 +279,7 @@ function SessionScreenBody({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
@@ -365,6 +381,7 @@ function SessionScreenBody({
         annotationRevealRef={annotationReveal}
         followLatestSignal={followLatestSignal}
         {...timelineProps}
+        agentSignals={agentSignals}
         hasOlder={controller.hasOlder}
         loadingOlder={controller.loadingOlder}
         onLoadOlder={controller.loadOlder}
@@ -491,7 +508,12 @@ function SessionScreenBody({
         header: (
           <>
             {composerSlots?.header}
-            <AttachmentChips attachments={attachments} />
+            <AttachmentChips
+              attachments={attachments}
+              restoredResources={composer.restoredResources}
+              onRemoveRestoredResource={composer.removeRestoredResource}
+              fileSource={composer.fileSource}
+            />
             {draftAnnotations.length > 0 && composer.removeAnnotation ? (
               <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
                 <AnnotationsChip
@@ -538,6 +560,7 @@ function SessionScreenBody({
               queue={queue}
               composer={composer}
               singleSend={composer.singleSend === true}
+              fileSource={composer.fileSource ?? attachments.fileSource}
               onComposerFocus={() => composerInput.current?.focus()}
               onReviewAnnotations={setQueuedReview}
               leading={
@@ -550,7 +573,7 @@ function SessionScreenBody({
                     }
                     onOpenSession={timelineProps.onOpenSession}
                     models={models}
-                    readOnly={status === "failed" || status === "cancelled"}
+                    readOnly={status === "failed" || status === "cancelled" || controller.archived}
                     renderCommands={() =>
                       client ? (
                         <NativeSessionCommands
@@ -569,6 +592,7 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
+                loadReview={loadReview}
                 onDecide={(id, decision, answer) =>
                   (decision === "approve"
                     ? control.approve(id, undefined, answer)
@@ -869,12 +893,38 @@ function StuckCard({
   );
 }
 
-/** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
-export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+/**
+ * Composer attachment chips: name, upload state, tap to retry a failure,
+ * remove. Images show as pictures, loaded from the server when there is no
+ * local photo (a restored draft, another device). `restoredResources` are
+ * files restored into the composer from a saved draft.
+ */
+export function AttachmentChips({
+  attachments,
+  restoredResources,
+  onRemoveRestoredResource,
+  fileSource,
+}: {
+  attachments: NativeFileAttachmentsResult;
+  restoredResources?: readonly ResourceRef[] | undefined;
+  onRemoveRestoredResource?: ((index: number) => void) | undefined;
+  /** Where stored files are read from; defaults to the attachments' own chat. */
+  fileSource?: StoredFileSource | undefined;
+}) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  if (attachments.attachments.length === 0) return null;
+  const source = fileSource ?? attachments.fileSource;
+  const items = useNativeComposerAttachments(
+    source,
+    attachments.attachments,
+    onRemoveRestoredResource ? restoredResources : undefined,
+  );
+  const remove = (item: NativeComposerAttachment) =>
+    item.restoredIndex === undefined
+      ? attachments.remove(item.id)
+      : onRemoveRestoredResource?.(item.restoredIndex);
+  if (items.length === 0) return null;
   return (
     <View
       style={{
@@ -885,10 +935,10 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
         paddingTop: 10,
       }}
     >
-      {attachments.attachments.map((item) => {
+      {items.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
-        if (item.kind === "image" && item.previewUri) {
+        if (item.kind === "image" && (item.previewUri || item.file)) {
           // Photos show as photos, as on the web: a thumbnail with its state on top.
           return (
             <View key={item.id} style={{ width: 56, height: 56 }}>
@@ -911,10 +961,22 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                   backgroundColor: c["surface-2"],
                 }}
               >
-                <Image
-                  source={{ uri: item.previewUri }}
+                <StoredFileImage
+                  source={source}
+                  file={item.file}
+                  localUri={item.previewUri}
                   style={{ width: "100%", height: "100%" }}
-                  resizeMode="cover"
+                  fallback={
+                    <View
+                      style={{
+                        flex: 1,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Icon name="image" size={18} color={c["fg-subtle"]} />
+                    </View>
+                  }
                 />
                 {busy || failed ? (
                   <View
@@ -944,7 +1006,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                 accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                   name: item.name,
                 })}
-                onPress={() => attachments.remove(item.id)}
+                onPress={() => remove(item)}
                 hitSlop={8}
                 style={{
                   position: "absolute",
@@ -1008,7 +1070,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
               accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                 name: item.name,
               })}
-              onPress={() => attachments.remove(item.id)}
+              onPress={() => remove(item)}
               hitSlop={6}
               style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
             >

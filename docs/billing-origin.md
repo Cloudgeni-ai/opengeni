@@ -372,6 +372,8 @@ Stripe billing and subscription plans enabled
 (`OPENGENI_BILLING_MODE=stripe`, `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=true`),
 for app-origin work, and skips accounts on legacy billing terms.
 
+### Connected subscriptions and API work
+
 API-origin work cannot use connected subscriptions, on any plan. Explicit
 subscription selections fail with HTTP 403 and `subscription_api_unavailable`:
 "Connected subscriptions are only available in the Opengeni apps. Choose a
@@ -384,6 +386,19 @@ turn's origin. Published Sites remain app work; outside viewers already fall
 back to credit-billed models, while eligible workspace members may use a
 subscription. Internal legacy accounts retain their explicitly documented app
 funding treatment above; this change does not revoke that exception.
+
+A self-hosted operator that owns the subscriptions it connects can opt out of
+this refusal for its whole deployment with
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` (`apiConnectedSubscriptionsEnabled`,
+default `false`). It is operator configuration on the API and worker processes,
+never a request or tenant setting. With it on, API-origin work may select a
+connected subscription and omitted API models may resolve to one, on every
+path above and in transcription, realtime voice and titles; the origin still
+decides which credits pay for credit-billed work, and paid-plan requirements
+still apply where credit billing is active. The operator is responsible for
+its provider's terms. One predicate,
+`connectedSubscriptionsRefusedForOrigin` in `@opengeni/core`, makes the
+decision for every path.
 
 Transcription follows the same policy. An omitted recording model skips an
 ineligible saved subscription default. Explicit selections preserve the API

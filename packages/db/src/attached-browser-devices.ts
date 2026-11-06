@@ -92,6 +92,15 @@ type EnrollmentVisibility = {
    *  profiles are stored. An organization or personal machine can be
    *  enrolled in another workspace than the viewer's. */
   workspaces: Map<string, string>;
+  /** Which computer each visible enrollment is: one computer keeps its key in
+   *  every workspace it is enrolled in. */
+  machineKeys: Map<string, string>;
+  /** The viewer's own personal (Only me) enrollments; a personal machine is
+   *  listed only to its owner. */
+  own: Set<string>;
+  /** Each visible enrollment's audience, broadest authority last: the
+   *  viewer's own personal machine, an organization machine, a workspace one. */
+  audienceRank: Map<string, number>;
 };
 
 /** The machines this viewer may see here, through the same owner-aware
@@ -110,17 +119,20 @@ async function visibleEnrollments(
       sandboxId: string | null;
       sandboxName: string | null;
       os: string;
+      scope: string;
+      pubkey: string | null;
     }>(
       scopedDb,
       sql`select value->>'id' as id, value->>'workspaceId' as "workspaceId",
           value->>'status' as status, value->>'revokedAt' as "revokedAt",
           value->>'sandboxId' as "sandboxId", value->>'sandboxName' as "sandboxName",
-          value->>'os' as os
+          value->>'os' as os, value->>'scope' as scope, value->>'pubkey' as pubkey
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'active') value
         union all
         select value->>'id', value->>'workspaceId', value->>'status', value->>'revokedAt',
-          value->>'sandboxId', value->>'sandboxName', value->>'os'
+          value->>'sandboxId', value->>'sandboxName', value->>'os', value->>'scope',
+          value->>'pubkey'
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value`,
     );
@@ -129,6 +141,9 @@ async function visibleEnrollments(
       revoked: new Map(),
       machines: new Map(),
       workspaces: new Map(),
+      machineKeys: new Map(),
+      own: new Set(),
+      audienceRank: new Map(),
     };
     for (const row of rows) {
       if (row.status === "active") visibility.active.add(row.id);
@@ -139,6 +154,12 @@ async function visibleEnrollments(
         sandboxId: row.sandboxId,
         machineName: row.sandboxName ?? `${row.os} machine`,
       });
+      visibility.machineKeys.set(row.id, row.pubkey ? `key:${row.pubkey}` : `enrollment:${row.id}`);
+      if (row.scope === "user") visibility.own.add(row.id);
+      visibility.audienceRank.set(
+        row.id,
+        row.scope === "user" ? 0 : row.scope === "organization" ? 1 : 2,
+      );
     }
     return visibility;
   });
@@ -195,21 +216,53 @@ function compareDeviceRows(left: DeviceRow, right: DeviceRow): number {
   return left.workspaceId < right.workspaceId ? -1 : left.workspaceId > right.workspaceId ? 1 : 0;
 }
 
-/** One Chrome profile id can be stored twice when the same computer is
- *  enrolled in two workspaces. Address the connected one, preferring the
- *  viewer's own workspace, then the most recent. */
+/** Among copies of one Chrome profile from the same computer (enrolled in
+ *  two workspaces), address the one through the viewer's own personal
+ *  enrollment, then an organization one, then a workspace one; then the
+ *  connected one, preferring the viewer's own workspace, then the most
+ *  recent. Enrolling does not prove the key, and a workspace enrollment is
+ *  the only one a member can make claiming another machine's key, so such a
+ *  claim never stands in for the machine. */
 function preferredDevice(
   devices: readonly AttachedBrowserDeviceValue[],
+  visibility: EnrollmentVisibility,
   viewerWorkspaceId: string,
 ): AttachedBrowserDeviceValue | null {
   const ranked = [...devices].sort(
     (left, right) =>
+      (visibility.audienceRank.get(left.enrollmentId) ?? 2) -
+        (visibility.audienceRank.get(right.enrollmentId) ?? 2) ||
       Number(left.state !== "connected") - Number(right.state !== "connected") ||
       Number(left.workspaceId !== viewerWorkspaceId) -
         Number(right.workspaceId !== viewerWorkspaceId) ||
       Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
   );
   return ranked[0] ?? null;
+}
+
+/** The copies of one Chrome profile id this viewer can see. A profile id is
+ *  announced by the machine, so copies only collapse when they come from the
+ *  same computer; a copy from another machine never shadows one from the
+ *  viewer's own. `listed` keeps one copy per machine. `addressed` is the copy
+ *  an unpinned id means: the only machine's, else the viewer's own machine's,
+ *  else none, since the id is ambiguous. */
+function profileCopies(
+  devices: readonly AttachedBrowserDeviceValue[],
+  visibility: EnrollmentVisibility,
+  viewerWorkspaceId: string,
+): { listed: AttachedBrowserDeviceValue[]; addressed: AttachedBrowserDeviceValue | null } {
+  const byMachine = new Map<string, AttachedBrowserDeviceValue[]>();
+  for (const device of devices) {
+    const machine =
+      visibility.machineKeys.get(device.enrollmentId) ?? `enrollment:${device.enrollmentId}`;
+    byMachine.set(machine, [...(byMachine.get(machine) ?? []), device]);
+  }
+  const listed = [...byMachine.values()].map(
+    (copies) => preferredDevice(copies, visibility, viewerWorkspaceId)!,
+  );
+  if (listed.length <= 1) return { listed, addressed: listed[0] ?? null };
+  const own = listed.filter((device) => visibility.own.has(device.enrollmentId));
+  return { listed, addressed: own.length === 1 ? own[0]! : null };
 }
 
 /** A device as this viewer may see it: null when its machine is hidden from
@@ -988,17 +1041,18 @@ export async function listAttachedBrowserDevices(
           (device): device is AttachedBrowserDeviceValue =>
             device !== null && (input.includeDisconnected === true || device.state === "connected"),
         );
-      // A profile id stored in two workspaces is listed once, as the copy
-      // getAttachedBrowserDevice addresses.
-      const preferred = new Map<string, AttachedBrowserDeviceValue>();
+      // A profile id stored in two workspaces by the same computer is listed
+      // once; copies announced by different machines are each listed.
+      const copiesById = new Map<string, AttachedBrowserDeviceValue[]>();
       for (const device of visibleDevices) {
-        const current = preferred.get(device.id);
-        preferred.set(
-          device.id,
-          current ? (preferredDevice([current, device], input.workspaceId) ?? device) : device,
-        );
+        copiesById.set(device.id, [...(copiesById.get(device.id) ?? []), device]);
       }
-      const devices = visibleDevices.filter((device) => preferred.get(device.id) === device);
+      const listed = new Set(
+        [...copiesById.values()].flatMap(
+          (copies) => profileCopies(copies, visibility, input.workspaceId).listed,
+        ),
+      );
+      const devices = visibleDevices.filter((device) => listed.has(device));
       const connectedProfilesByEnrollment = new Map<string, number>();
       for (const device of devices) {
         if (device.state !== "connected") continue;
@@ -1040,7 +1094,8 @@ export async function listAttachedBrowserDevices(
 
 /** One Chrome profile this viewer can use. `deviceWorkspaceId` pins the
  *  copy an existing session was placed on; without it, the copy a new
- *  session would use. */
+ *  session would use, which is not found when the id is announced by
+ *  different machines and none of them is the viewer's own. */
 export async function getAttachedBrowserDevice(
   db: Database,
   input: AttachedBrowserViewer & { deviceId: string; deviceWorkspaceId?: string | null },
@@ -1084,12 +1139,13 @@ export async function getAttachedBrowserDevice(
             .limit(1),
         input.deviceWorkspaceId,
       );
-      const device = preferredDevice(
+      const device = profileCopies(
         rows
           .map((row) => visibleDevice(row.device, visibility, row.observedAt))
           .filter((value): value is AttachedBrowserDeviceValue => value !== null),
+        visibility,
         input.workspaceId,
-      );
+      ).addressed;
       if (!device) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
       return device;
     },

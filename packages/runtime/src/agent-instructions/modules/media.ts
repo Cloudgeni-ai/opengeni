@@ -1,9 +1,13 @@
 import { blocks, sentences, toolSearchAvailable, type AgentPromptModule } from "../types";
 
-/** Media authorization is separate from provider attachment and tool disclosure. */
+/**
+ * Media authorization is separate from provider attachment and tool
+ * disclosure, so the guidance stays while a media tool may be attached; an
+ * attempt that proved it attaches none leaves it out.
+ */
 export const mediaModule: AgentPromptModule = {
   id: "media",
-  applies: (context) => context.capabilities.media,
+  applies: (context) => context.capabilities.media && context.resources.mediaTools !== false,
   render: (context) =>
     blocks(
       "# Images and video",

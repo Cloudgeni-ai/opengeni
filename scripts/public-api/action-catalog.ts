@@ -42,6 +42,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
+    pattern: /^\/v1\/organizations\/:organizationId\/identity\//,
+    reason: "an organization's public auto-connect issuer documents, read by outside apps",
+  },
+  {
     pattern:
       /\/callback$|^\/v1\/integrations\/connect\/finished$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni, and the page it ends on",
@@ -88,7 +92,7 @@ export function isActionCatalogExempt(path: string): boolean {
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern:
-      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^POST \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot\/microsoft-sign-in$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
     reason:
       "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
   },

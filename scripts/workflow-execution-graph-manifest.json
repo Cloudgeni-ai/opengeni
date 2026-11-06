@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "2bf9bd2fd7a954c3a7f66eba5e4aca5351c7aeada957b003b3eb758b81df0f61"
+      "sha256": "bba061f8884f35364bda444edc55e2d39305ef4e8b21654549fcb970d4a7e002"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "a32fdc7fcf7442eb5a8861bfdb4eba084d698685ee0fa0ed271cba07ccbe48dd"
+      "sha256": "91fb0610858f1d26d3865915ce01739a825b82e91ac68b17031b5e7024389e93"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -167,6 +167,10 @@
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
       "sha256": "d741d74897672d7c6e6a50bfbb772c9679cc98d997a915cc2814045e10dfbde8"
+    },
+    {
+      "path": ".github/workflows/xai-client-version-pin.yml",
+      "sha256": "63aa1b9a3c40fa23aede34d1a21e3959c98e40001c1fa32bf9adf62e9c079303"
     }
   ],
   "actions": [
@@ -1075,13 +1079,19 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "shellcheck",
-      "sha256": "1d4576b9c1c37f34795ddec128e287c4b7fbb9aaf7a493857f7ee0576a244473"
+      "sha256": "59b9b9ce327e3d853d81444df0c14b73ce68067fb4a41a8f224f8b99156d0392"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "Terraform (GCP host fleet)",
       "sha256": "cff12b37177650c612d1bf7fabe8b3fac4c08b8e709521a41c94ba709b93e36a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "the state volume (a host keeps a file system it finds, on loop devices)",
+      "sha256": "663bd53603dfb2e7ea207289762bfb914637b829e1708531baf0051f84b37ed8"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -2282,6 +2292,18 @@
       "job": "verify",
       "step": "Verify anonymous image discovery",
       "sha256": "91371275f8173d2dcd42929125baa49f2cb97286071cec04bb509a26f6e3c5d1"
+    },
+    {
+      "workflow": ".github/workflows/xai-client-version-pin.yml",
+      "job": "update",
+      "step": "Open or update the pull request",
+      "sha256": "d59097bce2fd938d54a69f7b48632da3aa75419236ea372ac06f5b84285f230b"
+    },
+    {
+      "workflow": ".github/workflows/xai-client-version-pin.yml",
+      "job": "update",
+      "step": "Resolve and rewrite the pin",
+      "sha256": "31a09ce2a153dd175da499047cb249f3de5b61b4607833ba415cc7562a5efadb"
     }
   ]
 }
