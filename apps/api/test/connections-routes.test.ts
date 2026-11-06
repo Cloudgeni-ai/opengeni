@@ -5117,6 +5117,133 @@ describe("connections routes", () => {
     }
   });
 
+  test("operator clients are selected only by the authorization server whose metadata was fetched", async () => {
+    if (!available) return;
+    const operatorIssuer = "https://login.operator.example.test";
+    const operatorClient = {
+      clientId: "operator-client",
+      clientSecret: "operator-secret-fixture",
+      tokenEndpointAuthMethod: "client_secret_basic",
+    };
+    const start = async (
+      workspace: { accountId: string; workspaceId: string },
+      as: FakeAuthorizationServer,
+      mcp: { url: string },
+      overrides: Partial<Settings>,
+    ) => {
+      const response = await app(overrides).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "operator-binding.example.com",
+            mcpUrl: mcp.url,
+            requestedScopes: ["documents:read"],
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      return (await response.json()) as { state: string; authorizationUrl: string };
+    };
+
+    // Metadata served by another server that merely claims the operator issuer.
+    {
+      const workspace = await freshWorkspace();
+      const overrides = {
+        integrationsOauthClientsJson: JSON.stringify({ [operatorIssuer]: operatorClient }),
+      };
+      const as = startFakeAuthorizationServer({
+        issuer: operatorIssuer,
+        tokenEndpointAuthMethodsSupported: ["client_secret_basic", "none"],
+      });
+      const mcp = startTestMcpServer({
+        requiredAuthorization: "Bearer mcp-access-token",
+        unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+      });
+      try {
+        const body = await start(workspace, as, mcp, overrides);
+        const authorizationUrl = new URL(body.authorizationUrl);
+        expect(authorizationUrl.origin).toBe(as.url);
+        expect(authorizationUrl.searchParams.get("client_id")).not.toBe(operatorClient.clientId);
+        await publicApp(client.db, overrides).request(
+          `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+        );
+        for (const [index, request] of as.tokenRequests.entries()) {
+          expect(request.get("client_id")).not.toBe(operatorClient.clientId);
+          expect(request.get("client_secret")).toBeNull();
+          expect(as.tokenRequestAuthHeaders[index]).toBeNull();
+        }
+
+        // A callback state naming the operator issuer for this server is refused too.
+        const tokenRequestsBefore = as.tokenRequests.length;
+        const state = createSignedState(STATE_SECRET, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "subject-a",
+          ownership: "personal",
+          personalOwnerVerified: true,
+          providerDomain: "operator-binding.example.com",
+          resource: mcp.url,
+          requestedScopes: [],
+          authorizeScopes: ["documents:read"],
+          encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "verifier-operator-binding"),
+          clientId: operatorClient.clientId,
+          tokenEndpoint: `${as.url}/token`,
+          authorizationServer: as.url,
+          issuer: operatorIssuer,
+          clientRegistrationMethod: "operator",
+          tokenEndpointAuthMethod: operatorClient.tokenEndpointAuthMethod,
+          returnPath: "/integrations",
+        });
+        const refused = await publicApp(client.db, overrides).request(
+          `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+        );
+        expect(refused.headers.get("location") ?? "").not.toContain("integration_oauth=success");
+        expect(as.tokenRequests).toHaveLength(tokenRequestsBefore);
+      } finally {
+        mcp.close();
+        as.close();
+      }
+    }
+
+    // The genuine authorization server still selects its operator client.
+    {
+      const workspace = await freshWorkspace();
+      const as = startFakeAuthorizationServer({
+        tokenEndpointAuthMethodsSupported: ["client_secret_basic", "none"],
+      });
+      const overrides = {
+        integrationsOauthClientsJson: JSON.stringify({ [as.url]: operatorClient }),
+      };
+      const mcp = startTestMcpServer({
+        requiredAuthorization: "Bearer mcp-access-token",
+        unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+      });
+      try {
+        const body = await start(workspace, as, mcp, overrides);
+        expect(new URL(body.authorizationUrl).searchParams.get("client_id")).toBe(
+          operatorClient.clientId,
+        );
+        const callback = await publicApp(client.db, overrides).request(
+          `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+        );
+        expect(callback.status).toBe(302);
+        expect(callback.headers.get("location")).toContain("integration_oauth=success");
+        expect(as.tokenRequestAuthHeaders.at(-1)).toBe(
+          `Basic ${Buffer.from(`${operatorClient.clientId}:${operatorClient.clientSecret}`).toString("base64")}`,
+        );
+      } finally {
+        mcp.close();
+        as.close();
+      }
+    }
+  });
+
   test("oauth start rejects invalid resource URLs without a server error", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
