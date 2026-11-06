@@ -400,11 +400,18 @@ export class WorkspaceSkillsCapability extends Capability {
    * used) also yields an empty index with a short notice, on every backend.
    * Box, route, fence, transport and cancellation failures still propagate to
    * the turn's recovery path.
+   *
+   * A propagated failure is not remembered, so the next read discovers again.
+   * With a deferred index the reader is often the first workspace operation,
+   * where a transient box or route failure is likely; for the same reason a
+   * deferred index does not keep an unreachable result either (no prompt text
+   * depends on it).
    */
   private discover(): Promise<WorkspaceSkillDiscovery> {
+    if (this.discovery) return this.discovery;
     const session = requireWorkspaceSkillSession(this._session);
     const warnings: WorkspaceSkillWarning[] = [];
-    return (this.discovery ??= discoverWorkspaceSkills(
+    const discovery = discoverWorkspaceSkills(
       session,
       this.searchPaths,
       this.reservedNames,
@@ -420,7 +427,15 @@ export class WorkspaceSkillsCapability extends Capability {
           return { skills: [], warnings, unavailable: false, degraded: failure.errorClass };
         throw error;
       },
-    ));
+    );
+    this.discovery = discovery;
+    const forget = () => {
+      if (this.discovery === discovery) delete this.discovery;
+    };
+    discovery.then((result) => {
+      if (result.unavailable && this.options.deferred) forget();
+    }, forget);
+    return discovery;
   }
 
   override tools(): Tool<unknown>[] {
@@ -447,7 +462,7 @@ export class WorkspaceSkillsCapability extends Capability {
           if (!skill)
             throw new SkillFileError(
               "missing_file",
-              repositorySkillMissMessage((await this.discover()).skills),
+              repositorySkillMissMessage(await this.discover(), this.options.deferred === true),
             );
           const session = requireWorkspaceSkillSession(this._session);
           const root = skill.path.slice(0, -SKILL_FILE.length - 1);
@@ -539,34 +554,53 @@ function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSear
   const example = searchPaths[0]?.path ?? ".agents/skills";
   return `## Repository skills
 
-Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. Its identifier is repository: followed by the SKILL.md path, such as repository:${example}/<skill>/SKILL.md.`;
+Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. Its identifier is repository: followed by the SKILL.md path, such as repository:${example}/<folder>/SKILL.md.`;
 }
 
 const MISS_LISTED_SKILLS = 20;
+const MISS_LISTED_WARNINGS = 5;
 
-/** A miss names the identifiers that do exist, so the next call can use one. */
-function repositorySkillMissMessage(skills: readonly WorkspaceSkill[]): string {
-  if (!skills.length)
-    return "Repository Skill is not in this index: no repository skills were found.";
+/** A miss says why: the identifiers that do exist, the folders that were
+ * skipped and their reason, or that the skill folders could not be read. */
+function repositorySkillMissMessage(discovery: WorkspaceSkillDiscovery, deferred: boolean): string {
+  const { skills, warnings, unavailable, degraded } = discovery;
+  const skipped = warnings.length
+    ? ` Skipped: ${warnings
+        .slice(0, MISS_LISTED_WARNINGS)
+        .map((warning) => `${warning.paths.join(", ")} (${warning.reason ?? warning.code})`)
+        .join("; ")}${warnings.length > MISS_LISTED_WARNINGS ? `; and ${warnings.length - MISS_LISTED_WARNINGS} more` : ""}.`
+    : "";
+  if (unavailable)
+    return `Repository skills could not be read: the workspace is unreachable. Try again once workspace tools respond.${skipped}`;
+  if (degraded)
+    return `Repository skills could not be read (${degradedRepositorySkillsCause(degraded)}). Read the skill's SKILL.md with file tools instead.${skipped}`;
+  const missing = deferred
+    ? "No repository skill has this identifier."
+    : "Repository Skill is not in this index.";
+  if (!skills.length) return `${missing} No repository skills were found.${skipped}`;
   const listed = skills.slice(0, MISS_LISTED_SKILLS).map(repositorySkillId).join(", ");
   const more =
     skills.length > MISS_LISTED_SKILLS ? `, and ${skills.length - MISS_LISTED_SKILLS} more` : "";
-  return `Repository Skill is not in this index. Use one of these exact identifiers: ${listed}${more}.`;
+  return `${missing} Use one of these exact identifiers: ${listed}${more}.${skipped}`;
 }
 
-/** Short, class-specific model notice for an index that could not be built. */
-function degradedRepositorySkillsNotice(errorClass: RepositorySkillDiscoveryErrorClass): string {
-  if (errorClass === "unsupported")
-    return "Repository skills are not indexed for this run (this workspace cannot list files).";
-  const cause =
-    errorClass === "limit_exceeded"
+function degradedRepositorySkillsCause(errorClass: RepositorySkillDiscoveryErrorClass): string {
+  return errorClass === "unsupported"
+    ? "this workspace cannot list files"
+    : errorClass === "limit_exceeded"
       ? "too many skill folders or files"
       : errorClass === "permission_denied"
         ? "permission denied"
         : errorClass === "machine_refused"
           ? "the machine refused the request"
           : "the skill folders could not be read";
-  return `Repository skills are not indexed for this run (${cause}). If a repository skill matters, try reading its SKILL.md directly.`;
+}
+
+/** Short, class-specific model notice for an index that could not be built. */
+function degradedRepositorySkillsNotice(errorClass: RepositorySkillDiscoveryErrorClass): string {
+  if (errorClass === "unsupported")
+    return "Repository skills are not indexed for this run (this workspace cannot list files).";
+  return `Repository skills are not indexed for this run (${degradedRepositorySkillsCause(errorClass)}). If a repository skill matters, try reading its SKILL.md directly.`;
 }
 
 export function workspaceSkills(

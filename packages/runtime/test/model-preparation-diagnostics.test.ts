@@ -198,6 +198,19 @@ describe("model preparation diagnostics", () => {
     ]);
   });
 
+  test("a box first used by a tool after the first model request adds no startup gap", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        markModelPreparationTransportStarted();
+        await Bun.sleep(5);
+        markModelPreparationFirstSandboxOperation(0.001);
+      },
+    );
+    expect(measurements).toEqual([]);
+  });
+
   test("repository discovery that began before the first model request is still startup", async () => {
     const measurements: ModelPreparationMeasurement[] = [];
     await withModelPreparationObserver(
