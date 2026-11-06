@@ -63,6 +63,7 @@ import {
 } from "@opengeni/db";
 import { parseRequestJson } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { teamsConnectionRefused, teamsLinkConflict } from "./teams-setup-refusals";
 import {
   teamsBotConfigured,
   teamsTenantEnabled,
@@ -947,20 +948,24 @@ async function status(deps: ApiRouteDeps, workspaceId: string, subjectId: string
     linked: Boolean(i?.active && (await getOwnTeamsLink(deps.db, i, subjectId))),
   };
 }
-function notApprovedInstaller(): HTTPException {
-  return new HTTPException(403, {
-    message: "This Teams identity is not approved to install the bot.",
-  });
+/** Neither an operator-approved installer nor a tenant that may set itself up. */
+function setupUnavailable(tenantId: string) {
+  return teamsConnectionRefused(
+    teamsSelfServeTenantAllowed(tenantId) ? "setup_unavailable" : "consumer_tenant",
+  );
 }
 function setupProof(deps: ApiRouteDeps, token: string): TeamsLinkProof {
-  const p = proof(deps, token);
-  if (
-    p.purpose !== "setup" ||
-    p.workspaceId !== null ||
-    p.generation !== null ||
-    !teamsTenantEnabled(deps.settings, p.tenantId)
-  )
-    throw notApprovedInstaller();
+  let p: TeamsLinkProof;
+  try {
+    p = proof(deps, token);
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 400)
+      throw teamsConnectionRefused("setup_link_invalid");
+    throw error;
+  }
+  if (p.purpose !== "setup" || p.workspaceId !== null || p.generation !== null)
+    throw teamsConnectionRefused("setup_link_invalid");
+  if (!teamsTenantEnabled(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
   return p;
 }
 function operatorApprovedInstaller(deps: ApiRouteDeps, p: TeamsLinkProof): boolean {
@@ -972,13 +977,10 @@ async function requireSetupWorkspace(
   tenantId: string,
 ): Promise<void> {
   const workspace = await getWorkspace(deps.db, workspaceId);
-  if (workspace?.kind !== "shared")
-    throw new HTTPException(422, { message: "Install the Teams bot in a shared workspace." });
+  if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
   const existing = await getWorkspaceTeamsInstallation(deps.db, workspaceId);
   if (existing && existing.tenant_id !== tenantId)
-    throw new HTTPException(409, {
-      message: "This workspace is linked to another Teams organization.",
-    });
+    throw teamsConnectionRefused("workspace_linked_elsewhere");
 }
 function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
   return {
@@ -988,35 +990,6 @@ function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
     redirectUri: new URL("/teams/connect", configuredBase(deps)).toString(),
   };
 }
-const ADMIN_PROOF_REFUSALS: Record<TeamsAdminProofError["code"], [400 | 403, string]> = {
-  state_invalid: [400, "This Microsoft sign-in expired. Start again from the setup link in Teams."],
-  state_expired: [400, "This Microsoft sign-in expired. Start again from the setup link in Teams."],
-  state_mismatch: [
-    400,
-    "This Microsoft sign-in belongs to another setup. Start again from the setup link in Teams.",
-  ],
-  consumer_tenant: [
-    403,
-    "Only a work or school Microsoft 365 organization can connect Opengeni for Teams.",
-  ],
-  token_exchange_failed: [
-    400,
-    "Microsoft sign-in couldn't be verified. Start again from the setup link in Teams.",
-  ],
-  id_token_invalid: [
-    400,
-    "Microsoft sign-in couldn't be verified. Start again from the setup link in Teams.",
-  ],
-  tenant_mismatch: [
-    403,
-    "Sign in to Microsoft with your account in the Teams organization you're connecting.",
-  ],
-  user_mismatch: [403, "Sign in to Microsoft with the same account you use in Teams."],
-  not_tenant_admin: [
-    403,
-    "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.",
-  ],
-};
 /**
  * The Microsoft sign-in must belong to this exact setup (proof nonce, tenant,
  * Teams user, Opengeni person and workspace) and prove a tenant administrator.
@@ -1042,8 +1015,7 @@ async function requireTenantAdministrator(
   } catch (error) {
     if (!(error instanceof TeamsAdminProofError)) throw error;
     deps.observability?.info("Teams self-serve setup refused", { reason: error.code });
-    const [statusCode, message] = ADMIN_PROOF_REFUSALS[error.code];
-    throw new HTTPException(statusCode, { message });
+    throw teamsConnectionRefused(error.code);
   }
 }
 /**
@@ -1060,7 +1032,7 @@ export async function startTeamsSetupSignIn(
   await requireSetupWorkspace(deps, grant.workspaceId, p.tenantId);
   // An operator-approved installer connects without a Microsoft sign-in.
   if (operatorApprovedInstaller(deps, p)) return { authorizationUrl: null };
-  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw notApprovedInstaller();
+  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
   const config = teamsAdminSignInConfig(deps);
   const { token, state } = mintTeamsAdminState(config.stateSecret, {
     proofNonce: p.nonce,
@@ -1090,47 +1062,35 @@ export async function completeTeamsSetup(
   const approved = operatorApprovedInstaller(deps, p);
   let admin: TeamsAdminIdentity | null = null;
   if (!approved) {
-    if (!microsoft || !teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
-      throw notApprovedInstaller();
+    if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
+      throw setupUnavailable(p.tenantId);
+    if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
     // Prove the tenant administrator before revealing anything about the
     // tenant's existing binding.
     admin = await requireTenantAdministrator(deps, p, grant, microsoft);
   }
   const workspace = await getWorkspace(deps.db, grant.workspaceId);
-  if (workspace?.kind !== "shared")
-    throw new HTTPException(422, { message: "Install the Teams bot in a shared workspace." });
+  if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
   const existingTenant = await getTeamsInstallation(deps.db, p.tenantId);
   // A Global Administrator may move a disconnected binding to this workspace,
   // so a binding left behind by someone else never locks the organization out.
   // An active binding is never moved or replaced through self-serve setup.
   let release: TeamsInstallation | null = null;
   if (existingTenant && existingTenant.workspace_id !== grant.workspaceId) {
-    if (existingTenant.active || !admin)
-      throw new HTTPException(409, {
-        message: existingTenant.active
-          ? "Opengeni is already connected for this Teams organization in another workspace. An admin of that workspace can disconnect it first."
-          : "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
-      });
+    if (existingTenant.active) throw teamsConnectionRefused("connected_elsewhere");
+    if (!admin) throw teamsConnectionRefused("linked_elsewhere");
     if (
       !admin.roles.some((role) => role.toLowerCase() === TEAMS_ADMIN_ROLE_IDS.globalAdministrator)
     )
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization was connected to another workspace and is disconnected. Reconnect it in that workspace, or ask a Microsoft 365 Global Administrator to connect it here.",
-      });
+      throw teamsConnectionRefused("move_requires_global_admin");
     release = existingTenant;
   }
   // Self-serve setup connects a new organization or reconnects a paused
   // binding in its own workspace. It never replaces an active installation.
-  if (!approved && existingTenant?.active)
-    throw new HTTPException(409, {
-      message: "Opengeni is already connected for this Teams organization.",
-    });
+  if (!approved && existingTenant?.active) throw teamsConnectionRefused("already_connected");
   const existingWorkspace = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
   if (existingWorkspace && existingWorkspace.tenant_id !== p.tenantId)
-    throw new HTTPException(409, {
-      message: "This workspace is linked to another Teams organization.",
-    });
+    throw teamsConnectionRefused("workspace_linked_elsewhere");
   // The old workspace's audit names the Microsoft administrator whose
   // authority moved the binding, not an Opengeni identity from elsewhere.
   const replaceInactive =
@@ -1157,41 +1117,32 @@ export async function completeTeamsSetup(
     });
   } catch (error) {
     const cause = error as {
-      code?: string;
       constraint_name?: string;
-      cause?: { code?: string; constraint_name?: string };
+      cause?: { constraint_name?: string };
       message?: string;
     };
     if (cause.message === "teams_tenant_already_bound")
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization is linked to another workspace. Reconnect it in that workspace.",
-      });
+      throw teamsConnectionRefused("linked_elsewhere");
     if (cause.message === "teams_installation_changed")
-      throw new HTTPException(409, {
-        message:
-          "This Teams organization's connection changed while you were connecting it. Start again from the setup link in Teams.",
-      });
+      throw teamsConnectionRefused("connection_changed");
     if (cause.message === "teams_installation_already_active")
-      throw new HTTPException(409, {
-        message: "Opengeni is already connected for this Teams organization.",
-      });
+      throw teamsConnectionRefused("already_connected");
     if (
       (cause.constraint_name ?? cause.cause?.constraint_name) ===
       "teams_bot_installations_workspace_id_key"
     )
-      throw new HTTPException(409, {
-        message: "This workspace is linked to another Teams organization.",
-      });
-    if (
-      cause.message === "teams_identity_already_linked" ||
-      cause.code === "23505" ||
-      cause.cause?.code === "23505"
-    )
-      throw new HTTPException(409, {
-        message:
-          "This Teams link was already used or the account is already connected. Send the bot a new direct message to continue.",
-      });
+      throw teamsConnectionRefused("workspace_linked_elsewhere");
+    // One link per person on each side: the installer is told which side is
+    // already linked, never to whom. The page offers to unlink their own.
+    const conflict = teamsLinkConflict(error);
+    if (conflict)
+      throw teamsConnectionRefused(
+        conflict === "proof_used"
+          ? "setup_link_used"
+          : conflict === "other"
+            ? "connection_changed"
+            : conflict,
+      );
     throw error;
   }
   deps.observability?.info("Teams organization connected", {
@@ -1302,11 +1253,22 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "This Teams link does not match the current workspace installation.",
       });
-    await linkTeamsActor(deps.db, i, {
-      actorId: p.actorId,
-      subjectId: grant.subjectId,
-      nonce: p.nonce,
-    });
+    try {
+      await linkTeamsActor(deps.db, i, {
+        actorId: p.actorId,
+        subjectId: grant.subjectId,
+        nonce: p.nonce,
+      });
+    } catch (error) {
+      const conflict =
+        (error as { message?: unknown } | null)?.message === "teams_installation_changed"
+          ? "other"
+          : teamsLinkConflict(error);
+      if (!conflict) throw error;
+      throw teamsConnectionRefused(
+        conflict === "proof_used" ? "link_used" : conflict === "other" ? "link_changed" : conflict,
+      );
+    }
     return c.json({ ok: true });
   });
   app.delete(`${ROOT}/link`, async (c) => {

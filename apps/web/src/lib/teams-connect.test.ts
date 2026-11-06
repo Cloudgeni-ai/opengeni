@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   readPendingTeamsSetup,
   savePendingTeamsSetup,
   teamsAuthReturnPath,
+  teamsErrorText,
+  teamsOwnAccountLinkedElsewhere,
   teamsFragmentToken,
   teamsMicrosoftFailureText,
   teamsMicrosoftReturn,
@@ -140,5 +143,46 @@ describe("Teams setup against an older API", () => {
     expect(teamsRouteMissing(refusal(403, "forbidden", "Resource not found."))).toBe(false);
     expect(teamsRouteMissing({ status: 404, code: "not_found", body: "Not Found" })).toBe(false);
     expect(teamsRouteMissing(null)).toBe(false);
+  });
+});
+
+describe("Teams setup refusals", () => {
+  const refusal = (status: number, reason: string, message: string) =>
+    new OpenGeniApiError(
+      status,
+      JSON.stringify({
+        error: {
+          message,
+          code: "forbidden",
+          details: { code: "teams_connection_refused", reason },
+        },
+      }),
+      { mutation: true },
+    );
+  test("show the API's own sentence; other errors keep the generic advice", () => {
+    const userMismatch = "Sign in to Microsoft with the same account you use in Teams.";
+    expect(teamsErrorText(refusal(403, "user_mismatch", userMismatch), "fallback")).toBe(
+      userMismatch,
+    );
+    const unmarked = new OpenGeniApiError(
+      403,
+      JSON.stringify({ error: { message: "missing permission: workspace:admin" } }),
+      { mutation: true },
+    );
+    expect(teamsErrorText(unmarked, "fallback")).toBe(
+      "You don't have permission to do this. Ask an admin for access.",
+    );
+    expect(teamsErrorText(new Error("Choose a workspace you administer."), "fallback")).toBe(
+      "Choose a workspace you administer.",
+    );
+  });
+  test("only the installer's own existing link offers to unlink it", () => {
+    expect(teamsOwnAccountLinkedElsewhere(refusal(409, "opengeni_account_linked", "x y."))).toBe(
+      true,
+    );
+    expect(teamsOwnAccountLinkedElsewhere(refusal(409, "teams_account_linked", "x y."))).toBe(
+      false,
+    );
+    expect(teamsOwnAccountLinkedElsewhere(new Error("opengeni_account_linked"))).toBe(false);
   });
 });

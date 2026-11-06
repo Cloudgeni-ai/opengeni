@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 const ws = "33333333-3333-4333-8333-333333333333";
@@ -23,6 +23,7 @@ mock.module("@opengeni/react/ui/dialog", () => ({
 const { useMicrosoftTeamsIntegration } = await import("./use-microsoft-teams-integration");
 const { useTeamsBotIntegration } = await import("./use-teams-bot-integration");
 const { TeamsConnectRoute } = await import("../../routes/teams-connect");
+const { savePendingTeamsSetup } = await import("@/lib/teams-connect");
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: "https://app.example.test/teams/connect" });
@@ -217,6 +218,109 @@ test("self-serve setup signs in with Microsoft, then finishes on return with the
   }
 });
 
+/** A Teams setup refusal as the API sends it. */
+function setupRefusal(status: number, reason: string, message: string) {
+  return new OpenGeniApiError(
+    status,
+    JSON.stringify({
+      error: {
+        status,
+        code: status === 403 ? "forbidden" : "conflict",
+        message,
+        retryable: false,
+        requestId: "e0848c37-0000-4000-8000-000000000000",
+        details: { code: "teams_connection_refused", reason },
+      },
+    }),
+    { mutation: true },
+  );
+}
+async function submit(view: { container: HTMLElement }) {
+  await act(async () => {
+    view.container
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("setup shows the API's own refusal, not generic permission or conflict text", async () => {
+  const notAdmin =
+    "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.";
+  const moveRefused =
+    "This Teams organization was connected to another workspace and is disconnected. Reconnect it in that workspace, or ask a Microsoft 365 Global Administrator to connect it here.";
+  let refusal = setupRefusal(403, "not_tenant_admin", notAdmin);
+  prepare(async (...args) => {
+    if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl: "https://x" };
+    throw refusal;
+  });
+  for (const [error, text] of [
+    [setupRefusal(403, "not_tenant_admin", notAdmin), notAdmin],
+    [setupRefusal(409, "move_requires_global_admin", moveRefused), moveRefused],
+  ] as const) {
+    refusal = error;
+    // Back from Microsoft with the pending setup of this tab.
+    savePendingTeamsSetup({ setupToken: "setup-proof", workspaceId: ws });
+    window.history.replaceState(null, "", "/teams/connect?code=microsoft-code&state=signed-state");
+    const view = await render(<TeamsConnectRoute />);
+    try {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(view.container.querySelector('[role="alert"]')?.textContent).toBe(text);
+      expect(view.container.textContent).not.toContain("You don't have permission");
+      expect(view.container.textContent).not.toContain("It changed since this page loaded");
+      // Nothing else to undo: the only action starts setup again.
+      expect(view.container.querySelector('button[type="submit"]')?.textContent).toContain(
+        "Connect workspace",
+      );
+    } finally {
+      await view.cleanup();
+    }
+  }
+  window.history.replaceState(null, "", "/teams/connect");
+});
+
+test("an account already linked to another Teams account can unlink it and connect", async () => {
+  window.history.replaceState(null, "", "/teams/connect#teams_setup=setup-proof");
+  const linked =
+    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.";
+  const requests: any[][] = [];
+  let unlinked = false;
+  prepare(async (...args) => {
+    requests.push(args.slice(0, 3));
+    if (String(args[1]).endsWith("/microsoft-sign-in")) return { authorizationUrl: null };
+    if (args[0] === "DELETE") {
+      unlinked = true;
+      return { ok: true };
+    }
+    if (!unlinked) throw setupRefusal(409, "opengeni_account_linked", linked);
+    return {};
+  });
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    // The test DOM reports the fragment set above as a late hashchange.
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    await submit(view);
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toBe(linked);
+    const button = view.container.querySelector('button[type="submit"]')!;
+    expect(button.textContent).toContain("Unlink and connect");
+    expect(requests).toHaveLength(2);
+    await submit(view);
+    expect(requests.slice(2)).toEqual([
+      ["DELETE", `/v1/workspaces/${ws}/integrations/teams/link`],
+      [
+        "POST",
+        `/v1/workspaces/${ws}/integrations/teams/bot/microsoft-sign-in`,
+        { setupToken: "setup-proof" },
+      ],
+      ["PUT", `/v1/workspaces/${ws}/integrations/teams/bot`, { setupToken: "setup-proof" }],
+    ]);
+    expect(view.container.textContent).toContain("Teams is connected");
+  } finally {
+    await view.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
+  }
+});
+
 test("bot link requires confirmation and default-off unconfigured bot stays hidden", async () => {
   window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
   const requests: any[][] = [];
@@ -258,6 +362,44 @@ test("bot link requires confirmation and default-off unconfigured bot stays hidd
     expect(visible).toBe(false);
   } finally {
     await view.cleanup();
+  }
+});
+
+test("a refused account link says which account is already linked and what to do", async () => {
+  window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
+  const linked =
+    "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.";
+  prepare(async (...args) => {
+    if (args[0] === "POST") throw setupRefusal(409, "opengeni_account_linked", linked);
+    return {
+      enabled: true,
+      configured: true,
+      setupAvailable: true,
+      installation: { active: true, workspaceId: ws, tenantId: "tenant" },
+      linked: true,
+    };
+  });
+  function Harness() {
+    return useTeamsBotIntegration({ workspaceId: ws }).dialogs;
+  }
+  const view = await render(<Harness />);
+  try {
+    await act(async () => {
+      window.history.replaceState(null, "", `/workspaces/${ws}/plugins#teams_link=link-proof`);
+      window.dispatchEvent(new Event("hashchange"));
+      // The test DOM also reports the fragment as a late hashchange.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((b) => b.textContent === "Link my account")!
+        .click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toBe(linked);
+  } finally {
+    await view.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
   }
 });
 

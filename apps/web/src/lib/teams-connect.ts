@@ -1,3 +1,5 @@
+import { apiErrorDetailCode, serverRefusalText, userErrorText } from "@opengeni/react/ui/api-error";
+
 /** Fragment tokens stay out of route searches and are removed only after a confirmed action. */
 export function teamsFragmentToken(
   hash: string,
@@ -134,4 +136,28 @@ export function teamsRouteMissing(error: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * `details.code` the API sets on a Teams setup or account-link refusal. Its
+ * message says what happened and what to do next, so the page shows it as is.
+ */
+export const TEAMS_CONNECTION_REFUSED_CODE = "teams_connection_refused";
+
+/** A failed Teams setup or link: the API's own refusal, or `userErrorText`. */
+export function teamsErrorText(error: unknown, fallback: string): string {
+  return (
+    serverRefusalText(error, [TEAMS_CONNECTION_REFUSED_CODE]) ?? userErrorText(error, fallback)
+  );
+}
+
+/**
+ * True when setup was refused because the signed-in Opengeni account is
+ * already linked to a different Teams account in the chosen workspace. Its
+ * owner can unlink it and connect again.
+ */
+export function teamsOwnAccountLinkedElsewhere(error: unknown): boolean {
+  if (apiErrorDetailCode(error) !== TEAMS_CONNECTION_REFUSED_CODE) return false;
+  const details = (error as { details?: { reason?: unknown } }).details;
+  return details?.reason === "opengeni_account_linked";
 }

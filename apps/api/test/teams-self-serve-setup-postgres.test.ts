@@ -11,12 +11,16 @@ import {
   getTeamsActor,
   getTeamsInstallation,
   installTeamsBot,
+  linkTeamsActor,
+  removeTeamsLink,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { completeTeamsSetup, startTeamsSetupSignIn } from "../src/integrations/teams-bot";
 import { mintTeamsProof } from "../src/integrations/teams-protocol";
 import { TEAMS_ADMIN_ROLE_IDS } from "../src/integrations/teams-admin-proof";
+import { ApiHttpError } from "../src/http/api-error";
+import { teamsLinkConflict } from "../src/integrations/teams-setup-refusals";
 
 const STATE_SECRET = "teams-self-serve-state";
 const CLIENT_ID = "d3f8842e-a4b7-483d-a9a9-551c547911aa";
@@ -118,10 +122,17 @@ function setupProof(tenantId: string, actorId: string) {
   });
 }
 
-async function refusal(promise: Promise<unknown>): Promise<{ status: number; message: string }> {
+async function refusal(
+  promise: Promise<unknown>,
+): Promise<{ status: number; message: string; reason?: unknown }> {
   try {
     await promise;
   } catch (error) {
+    if (error instanceof ApiHttpError) {
+      // Every setup refusal is marked as a sentence the setup page shows as is.
+      expect(error.details?.code).toBe("teams_connection_refused");
+      return { status: error.status, message: error.message, reason: error.details?.reason };
+    }
     if (error instanceof HTTPException) return { status: error.status, message: error.message };
     throw error;
   }
@@ -194,7 +205,7 @@ describe("Teams self-serve setup", () => {
         }),
       }),
     );
-    expect(takeover.status).toBe(409);
+    expect(takeover).toMatchObject({ status: 409, reason: "connected_elsewhere" });
     expect((await getTeamsInstallation(client.db, tenantId))?.workspace_id).toBe(
       admin.grant.workspaceId,
     );
@@ -207,39 +218,50 @@ describe("Teams self-serve setup", () => {
     const tenantId = crypto.randomUUID();
     const actorId = crypto.randomUUID();
     const setupToken = setupProof(tenantId, actorId);
-    const cases: Array<[Parameters<typeof adminSignIn>[4], string | null, number, string]> = [
+    const cases: Array<[Parameters<typeof adminSignIn>[4], string | null, number, string, string]> =
       [
-        { oid: actorId, wids: ["b79fbf4d-3ef9-4689-8143-76b194e85509"] },
-        null,
-        403,
-        "Global Administrator or Teams Administrator",
-      ],
-      [{ oid: actorId }, null, 403, "Global Administrator or Teams Administrator"],
-      [
-        { oid: crypto.randomUUID(), wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator] },
-        null,
-        403,
-        "same account you use in Teams",
-      ],
-      [
-        {
-          oid: actorId,
-          wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
-          tid: crypto.randomUUID(),
-        },
-        null,
-        403,
-        "Teams organization you're connecting",
-      ],
-      // An administrator of a different tenant, issued by that tenant.
-      [
-        { oid: actorId, wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator] },
-        crypto.randomUUID(),
-        400,
-        "couldn't be verified",
-      ],
-    ];
-    for (const [claims, issuer, status, message] of cases) {
+        [
+          { oid: actorId, wids: ["b79fbf4d-3ef9-4689-8143-76b194e85509"] },
+          null,
+          403,
+          "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.",
+          "not_tenant_admin",
+        ],
+        [
+          { oid: actorId },
+          null,
+          403,
+          "Global Administrator or Teams Administrator",
+          "not_tenant_admin",
+        ],
+        [
+          { oid: crypto.randomUUID(), wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator] },
+          null,
+          403,
+          "same account you use in Teams",
+          "user_mismatch",
+        ],
+        [
+          {
+            oid: actorId,
+            wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
+            tid: crypto.randomUUID(),
+          },
+          null,
+          403,
+          "Teams organization you're connecting",
+          "tenant_mismatch",
+        ],
+        // An administrator of a different tenant, issued by that tenant.
+        [
+          { oid: actorId, wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator] },
+          crypto.randomUUID(),
+          400,
+          "couldn't be verified",
+          "id_token_invalid",
+        ],
+      ];
+    for (const [claims, issuer, status, message, reason] of cases) {
       const result = await refusal(
         completeTeamsSetup(d, admin.grant, {
           setupToken,
@@ -248,6 +270,7 @@ describe("Teams self-serve setup", () => {
       );
       expect(result.status).toBe(status);
       expect(result.message).toContain(message);
+      expect(result.reason).toBe(reason);
     }
     expect(await getTeamsInstallation(client.db, tenantId)).toBeNull();
   }, 60_000);
@@ -266,7 +289,7 @@ describe("Teams self-serve setup", () => {
     const crossPerson = await refusal(
       completeTeamsSetup(d, other.grant, { setupToken, microsoft: started }),
     );
-    expect(crossPerson).toMatchObject({ status: 400 });
+    expect(crossPerson).toMatchObject({ status: 400, reason: "state_mismatch" });
     expect(crossPerson.message).toContain("another setup");
     // The same person, but with a different setup proof for the same tenant and actor.
     const freshToken = setupProof(tenantId, actorId);
@@ -289,7 +312,10 @@ describe("Teams self-serve setup", () => {
       ).status,
     ).toBe(400);
     // Without a Microsoft sign-in, a non-approved person can't connect.
-    expect((await refusal(completeTeamsSetup(d, admin.grant, { setupToken }))).status).toBe(403);
+    expect(await refusal(completeTeamsSetup(d, admin.grant, { setupToken }))).toMatchObject({
+      status: 400,
+      reason: "microsoft_sign_in_required",
+    });
     expect(await getTeamsInstallation(client.db, tenantId)).toBeNull();
     expect(provider.tokenRequests).toHaveLength(0);
   }, 60_000);
@@ -335,8 +361,12 @@ describe("Teams self-serve setup", () => {
         }),
       }),
     );
-    expect(refused.status).toBe(409);
-    expect(refused.message).toContain("Global Administrator");
+    expect(refused).toMatchObject({
+      status: 409,
+      reason: "move_requires_global_admin",
+      message:
+        "This Teams organization was connected to another workspace and is disconnected. Reconnect it in that workspace, or ask a Microsoft 365 Global Administrator to connect it here.",
+    });
     expect(await getTeamsInstallation(client.db, tenantId)).toMatchObject({
       workspace_id: admin.grant.workspaceId,
       active: false,
@@ -391,7 +421,7 @@ describe("Teams self-serve setup", () => {
         }),
       }),
     );
-    expect(active.status).toBe(409);
+    expect(active).toMatchObject({ status: 409, reason: "connected_elsewhere" });
     expect(active.message).toContain("disconnect it first");
     expect((await getTeamsInstallation(client.db, tenantId))?.workspace_id).toBe(
       elsewhere.grant.workspaceId,
@@ -409,7 +439,12 @@ describe("Teams self-serve setup", () => {
         }),
       }),
     );
-    expect(reused.status).toBe(409);
+    expect(reused).toMatchObject({
+      status: 409,
+      reason: "setup_link_used",
+      message:
+        "This setup link was already used. Message Opengeni in Teams to get a new setup link.",
+    });
     expect(await getTeamsInstallation(client.db, tenantId)).toMatchObject({
       workspace_id: elsewhere.grant.workspaceId,
       active: false,
@@ -521,7 +556,7 @@ describe("Teams self-serve setup", () => {
     const second = await refusal(
       startTeamsSetupSignIn(d, admin.grant, setupProof(crypto.randomUUID(), actorId)),
     );
-    expect(second).toMatchObject({ status: 409 });
+    expect(second).toMatchObject({ status: 409, reason: "workspace_linked_elsewhere" });
   }, 60_000);
 
   test("self-serve stays off by default and outside admitted tenants; operator approval still works", async () => {
@@ -531,7 +566,10 @@ describe("Teams self-serve setup", () => {
     const actorId = crypto.randomUUID();
     const token = setupProof(tenantId, actorId);
     const off = deps(provider, { teamsBotSelfServeSetupEnabled: false });
-    expect((await refusal(startTeamsSetupSignIn(off, admin.grant, token))).status).toBe(403);
+    expect(await refusal(startTeamsSetupSignIn(off, admin.grant, token))).toMatchObject({
+      status: 403,
+      reason: "setup_unavailable",
+    });
     const notAdmitted = deps(provider, {
       teamsBotEnabled: false,
       teamsBotAllowedTenantIds: [crypto.randomUUID()],
@@ -541,8 +579,20 @@ describe("Teams self-serve setup", () => {
     );
     const consumer = setupProof("9188040d-6c67-4c5b-b112-36a304b66dad", actorId);
     expect(
-      (await refusal(startTeamsSetupSignIn(deps(provider), admin.grant, consumer))).status,
-    ).toBe(403);
+      await refusal(startTeamsSetupSignIn(deps(provider), admin.grant, consumer)),
+    ).toMatchObject({ status: 403, reason: "consumer_tenant" });
+    // A link that isn't a setup link, or isn't one at all.
+    const accountLink = mintTeamsProof(STATE_SECRET, {
+      purpose: "link",
+      tenantId,
+      actorId,
+      workspaceId: admin.grant.workspaceId,
+      generation: crypto.randomUUID(),
+    });
+    for (const invalid of [accountLink, "not-a-proof"])
+      expect(
+        await refusal(startTeamsSetupSignIn(deps(provider), admin.grant, invalid)),
+      ).toMatchObject({ status: 400, reason: "setup_link_invalid" });
 
     const approved = deps(provider, {
       teamsBotSelfServeSetupEnabled: false,
@@ -554,5 +604,157 @@ describe("Teams self-serve setup", () => {
     const status = await completeTeamsSetup(approved, admin.grant, { setupToken: token });
     expect(status.installation).toMatchObject({ tenantId, active: true });
     expect(provider.tokenRequests).toHaveLength(0);
+  }, 60_000);
+
+  test("an installer whose Opengeni account is linked to another Teams account is told so and can unlink it", async () => {
+    const provider = microsoft();
+    const d = deps(provider);
+    const admin = await person();
+    const tenantId = crypto.randomUUID();
+    const firstActor = crypto.randomUUID();
+    const first = setupProof(tenantId, firstActor);
+    await completeTeamsSetup(d, admin.grant, {
+      setupToken: first,
+      microsoft: await adminSignIn(provider, d, admin, first, {
+        oid: firstActor,
+        wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+      }),
+    });
+    // Links survive a disconnect.
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, tenantId))!);
+    const left = (await getTeamsInstallation(client.db, tenantId))!;
+
+    // Another tenant administrator reconnects while signed in to the same Opengeni account.
+    const otherAdmin = crypto.randomUUID();
+    const setupToken = setupProof(tenantId, otherAdmin);
+    const signIn = () =>
+      adminSignIn(provider, d, admin, setupToken, {
+        oid: otherAdmin,
+        wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+      });
+    const linked = await refusal(
+      completeTeamsSetup(d, admin.grant, { setupToken, microsoft: await signIn() }),
+    );
+    expect(linked).toEqual({
+      status: 409,
+      reason: "opengeni_account_linked",
+      message:
+        "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it and connect again, or sign in to Opengeni with another account.",
+    });
+    // Nothing changed, and the setup link wasn't used up.
+    expect(await getTeamsInstallation(client.db, tenantId)).toEqual(left);
+    expect(await getTeamsActor(client.db, left, firstActor)).toBe(admin.subject);
+    expect(await getTeamsActor(client.db, left, otherAdmin)).toBeNull();
+
+    // The way forward: the person unlinks their own account, then connects again.
+    await removeTeamsLink(client.db, left, admin.subject);
+    const status = await completeTeamsSetup(d, admin.grant, {
+      setupToken,
+      microsoft: await signIn(),
+    });
+    expect(status).toMatchObject({ installation: { tenantId, active: true }, linked: true });
+    const current = (await getTeamsInstallation(client.db, tenantId))!;
+    expect(await getTeamsActor(client.db, current, otherAdmin)).toBe(admin.subject);
+    expect(await getTeamsActor(client.db, current, firstActor)).toBeNull();
+  }, 60_000);
+
+  test("an installer whose Teams account is linked to another Opengeni account is told so", async () => {
+    const provider = microsoft();
+    const d = deps(provider);
+    const owner = await person();
+    const tenantId = crypto.randomUUID();
+    const ownerActor = crypto.randomUUID();
+    const first = setupProof(tenantId, ownerActor);
+    await completeTeamsSetup(d, owner.grant, {
+      setupToken: first,
+      microsoft: await adminSignIn(provider, d, owner, first, {
+        oid: ownerActor,
+        wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+      }),
+    });
+    // A colleague in the same workspace links their own Teams account.
+    const colleague = `user:teams-setup:${crypto.randomUUID()}`;
+    const colleagueActor = crypto.randomUUID();
+    const installed = (await getTeamsInstallation(client.db, tenantId))!;
+    await linkTeamsActor(client.db, installed, {
+      actorId: colleagueActor,
+      subjectId: colleague,
+      nonce: crypto.randomUUID(),
+    });
+    await disconnectTeamsBot(client.db, installed);
+    // The colleague's Teams account sets up while signed in to the owner's
+    // Opengeni account, which has no link of its own.
+    await removeTeamsLink(client.db, installed, owner.subject);
+    const left = (await getTeamsInstallation(client.db, tenantId))!;
+    const setupToken = setupProof(tenantId, colleagueActor);
+    const refused = await refusal(
+      completeTeamsSetup(d, owner.grant, {
+        setupToken,
+        microsoft: await adminSignIn(provider, d, owner, setupToken, {
+          oid: colleagueActor,
+          wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator],
+        }),
+      }),
+    );
+    expect(refused).toEqual({
+      status: 409,
+      reason: "teams_account_linked",
+      message:
+        "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
+    });
+    expect(await getTeamsInstallation(client.db, tenantId)).toEqual(left);
+    expect(await getTeamsActor(client.db, left, colleagueActor)).toBe(colleague);
+  }, 60_000);
+
+  test("account-link conflicts from the database map to the rule they broke", async () => {
+    const owner = await person();
+    const tenantId = crypto.randomUUID();
+    const ownerActor = crypto.randomUUID();
+    const installation = await installTeamsBot(client.db, {
+      accountId: owner.grant.accountId,
+      workspaceId: owner.grant.workspaceId,
+      tenantId,
+      actorId: ownerActor,
+      subjectId: owner.subject,
+      nonce: crypto.randomUUID(),
+    });
+    const conflict = async (input: { actorId: string; subjectId: string; nonce: string }) => {
+      try {
+        await linkTeamsActor(client.db, installation, input);
+      } catch (error) {
+        return teamsLinkConflict(error);
+      }
+      throw new Error("expected a conflict");
+    };
+    // The owner's Opengeni account already has a Teams account.
+    expect(
+      await conflict({
+        actorId: crypto.randomUUID(),
+        subjectId: owner.subject,
+        nonce: crypto.randomUUID(),
+      }),
+    ).toBe("opengeni_account_linked");
+    // The owner's Teams account already has an Opengeni account.
+    expect(
+      await conflict({
+        actorId: ownerActor,
+        subjectId: `user:teams-setup:${crypto.randomUUID()}`,
+        nonce: crypto.randomUUID(),
+      }),
+    ).toBe("teams_account_linked");
+    // A proof is single-use.
+    const nonce = crypto.randomUUID();
+    await linkTeamsActor(client.db, installation, {
+      actorId: crypto.randomUUID(),
+      subjectId: `user:teams-setup:${crypto.randomUUID()}`,
+      nonce,
+    });
+    expect(
+      await conflict({
+        actorId: crypto.randomUUID(),
+        subjectId: `user:teams-setup:${crypto.randomUUID()}`,
+        nonce,
+      }),
+    ).toBe("proof_used");
   }, 60_000);
 });

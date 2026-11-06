@@ -9,7 +9,6 @@ import { Select } from "@opengeni/react/ui/select";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { userErrorText } from "@opengeni/react/ui/api-error";
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
 import {
   teamsFragmentToken,
@@ -19,7 +18,9 @@ import {
   readPendingTeamsSetup,
   savePendingTeamsSetup,
   teamsMicrosoftFailureText,
+  teamsErrorText,
   teamsMicrosoftReturn,
+  teamsOwnAccountLinkedElsewhere,
   teamsRouteMissing,
   type TeamsMicrosoftReturn,
   type TeamsPendingSetup,
@@ -61,6 +62,9 @@ export function TeamsConnectRoute() {
         ? "This setup expired. Message Opengeni in Teams to get a new setup link."
         : null,
   );
+  // The workspace where the signed-in account is linked to another Teams
+  // account; connecting there again unlinks it first.
+  const [unlinkIn, setUnlinkIn] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [finishing, setFinishing] = useState(
     arrival.microsoft?.kind === "signed_in" && Boolean(arrival.pending),
@@ -83,9 +87,10 @@ export function TeamsConnectRoute() {
         setToken(null);
         setConnected(true);
       })
-      .catch((caught) =>
-        setError(userErrorText(caught, "Microsoft sign-in couldn't be verified. Try again.")),
-      )
+      .catch((caught) => {
+        setError(teamsErrorText(caught, "Microsoft sign-in couldn't be verified. Try again."));
+        setUnlinkIn(teamsOwnAccountLinkedElsewhere(caught) ? chosen : null);
+      })
       .finally(() => setFinishing(false));
   }, [arrival, client]);
 
@@ -97,6 +102,7 @@ export function TeamsConnectRoute() {
       setToken(next);
       setConnected(false);
       setError(null);
+      setUnlinkIn(null);
     };
     window.addEventListener("hashchange", captureSetup);
     return () => window.removeEventListener("hashchange", captureSetup);
@@ -162,7 +168,7 @@ export function TeamsConnectRoute() {
         leading={<LogoTile icon={<BotIcon />} />}
         title="Connect Teams to Opengeni"
         description="Choose where Opengeni will work on requests from Teams."
-        submitLabel="Connect workspace"
+        submitLabel={unlinkIn === workspaceId ? "Unlink and connect" : "Connect workspace"}
         submitDisabled={!choices.some((workspace) => workspace.id === workspaceId)}
         pendingLabel="Connecting…"
         cancelLabel={null}
@@ -172,8 +178,13 @@ export function TeamsConnectRoute() {
             return false;
           }
           setError(null);
+          let unlink = unlinkIn === workspaceId;
           try {
             const api = teamsApi(client, workspaceId);
+            // Removes only the signed-in person's own link in this workspace.
+            if (unlink) await api.unlinkAccount();
+            unlink = false;
+            setUnlinkIn(null);
             const { authorizationUrl } = await api.startMicrosoftSignIn(token).catch((caught) => {
               // An API without self-serve setup keeps the operator-approved flow.
               if (teamsRouteMissing(caught)) return { authorizationUrl: null };
@@ -189,11 +200,13 @@ export function TeamsConnectRoute() {
             setConnected(true);
           } catch (caught) {
             setError(
-              userErrorText(
+              teamsErrorText(
                 caught,
                 "This setup link may have expired. Request a new link in Teams.",
               ),
             );
+            // A failed unlink can be tried again.
+            setUnlinkIn(unlink || teamsOwnAccountLinkedElsewhere(caught) ? workspaceId : null);
           }
           return false;
         }}
@@ -207,6 +220,7 @@ export function TeamsConnectRoute() {
                 onChange={(event) => {
                   setWorkspaceId(event.target.value);
                   setError(null);
+                  setUnlinkIn(null);
                 }}
               >
                 <option value="">Choose a workspace</option>
