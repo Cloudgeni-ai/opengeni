@@ -1096,6 +1096,61 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.workspaceStatus).toBe("ready");
   }, 60_000);
 
+  test("a warm compute home whose host is handing it off is recovering, not ready, until that ends", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    const ready = {
+      opengeniRecovery: {
+        provider: {
+          status: "exists",
+          instanceId: "compute-home",
+          observedAt: "2026-11-06T01:00:00.000Z",
+        },
+        archive: { status: "none", current: null, previous: null },
+        restore: {
+          status: "not_required",
+          rematerializationId: null,
+          selectedRevision: null,
+          startedAt: null,
+          completedAt: null,
+        },
+        workspace: {
+          status: "ready",
+          verifiedRevision: "compute-home-ready",
+          verifiedAt: "2026-11-06T01:00:00.000Z",
+        },
+      },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, instance_id, backend,
+        lease_epoch, workspace_generation, archive_generation, resume_state, expires_at,
+        compute_asleep_since, compute_handing_off_since
+      ) values (
+        ${accountId}, ${workspaceId}, ${ctx.sessionGroupId}, 'warm', 'compute-home', 'compute',
+        3, 5, 5, ${admin.json(ready)}::jsonb, now() + interval '15 minutes',
+        now(), now()
+      )
+    `;
+    const group = async () =>
+      (await listFleet(services, ctx)).sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    const busy = await group();
+    expect(busy.operationAvailability).toBe("recovering");
+    expect(busy.liveness).toBe("reconnecting");
+    expect(busy.attachable).toBe(false);
+    expect(busy.hostBusy).toBe("handing_off");
+    expect(busy.leaseLiveness).toBe("warm");
+
+    // A report older than a hand-off may refuse wakes counts for nothing.
+    await admin`
+      update sandbox_leases set compute_handing_off_since = now() - interval '10 minutes'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${ctx.sessionGroupId}`;
+    const settled = await group();
+    expect(settled.operationAvailability).toBe("ready");
+    expect(settled.liveness).toBe("online");
+    expect(settled.hostBusy).toBeUndefined();
+  }, 60_000);
+
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {
     if (!available) return;
     const { ctx, services, sandbox } = await seedFleet();

@@ -870,6 +870,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
         disk_reading: None,
         stream_idle: Duration::from_secs(args.stream_idle_secs),
+        hand_off_unwakeable: HostConfig::HAND_OFF_UNWAKEABLE,
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         guest_checks: GuestChecks::DEFAULT,

@@ -16,6 +16,9 @@ pub(super) struct Pointers {
     /// The last version given.
     version: i64,
     imported: Option<Imported>,
+    /// When each last pointed at a new copy, in milliseconds since the
+    /// Unix epoch.
+    saved: BTreeMap<String, u64>,
 }
 
 impl Pointers {
@@ -44,9 +47,14 @@ impl Inner {
         pointer: &[u8],
         on: Option<i64>,
     ) -> Option<i64> {
-        let kept = self.pointers.rows.get(name).map(|row| row.version);
-        if kept != on {
+        let kept = self.pointers.rows.get(name);
+        if kept.map(|row| row.version) != on {
             return None;
+        }
+        if !pointer.is_empty() && kept.is_none_or(|row| row.pointer != pointer) {
+            self.pointers
+                .saved
+                .insert(name.to_owned(), crate::service::now_ms());
         }
         let version = self.pointers.next();
         self.pointers.rows.insert(
@@ -58,6 +66,11 @@ impl Inner {
             },
         );
         Some(version)
+    }
+
+    /// When pointer `name` last pointed at a new copy, if it did.
+    pub(super) fn saved_ms(&self, name: &str) -> Option<u64> {
+        self.pointers.saved.get(name).copied()
     }
 
     pub(super) fn pointer_names(&self) -> Vec<String> {

@@ -24,6 +24,7 @@ import {
   spilledModelToolResult,
   type CodemodeTokenWriterSession,
   type SandboxFileDownload,
+  type SpilledToolResultReaders,
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
@@ -34,6 +35,31 @@ import type { ResumedTurnSandbox } from "../../sandbox-resume";
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 
 export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
+
+/**
+ * Which readers of a spilled copy this turn's model has: a shell whenever
+ * compute is attached (the same fact that attaches the sandbox tools), and
+ * the Files download tool when one of the turn's tool refs selects the `files`
+ * server without narrowing that tool away and the deployment's server allows it.
+ */
+export function spilledToolResultReadersForTurn(input: {
+  tools: ReadonlyArray<{ kind: string; id: string; allowedTools?: readonly string[] | undefined }>;
+  mcpServers: ReadonlyArray<{ id: string; allowedTools?: readonly string[] | undefined }>;
+  sandboxBackend: Settings["sandboxBackend"];
+}): SpilledToolResultReaders {
+  const allows = (allowedTools: readonly string[] | undefined) =>
+    allowedTools === undefined || allowedTools.includes("files_get_download_url");
+  const files = input.mcpServers.find((server) => server.id === "files");
+  return {
+    shell: input.sandboxBackend !== "none",
+    fileDownload:
+      files !== undefined &&
+      allows(files.allowedTools) &&
+      input.tools.some(
+        (tool) => tool.kind === "mcp" && tool.id === "files" && allows(tool.allowedTools),
+      ),
+  };
+}
 
 /**
  * Where the spilled copy is for the shell of this attempt:
@@ -82,6 +108,8 @@ export class ToolResultSpill {
   spill = async (input: {
     operationId: string;
     result: AttemptToolResultValue;
+    /** The model's tools for opening the copy; undefined names both readers. */
+    readers?: SpilledToolResultReaders;
   }): Promise<AttemptToolResultValue> => {
     const { objectStorage } = this.deps;
     if (!objectStorage) {
@@ -136,13 +164,16 @@ export class ToolResultSpill {
     if (materialization === "deferred") {
       materialization = await this.materializeAfterSandboxStart(file);
     }
-    return spilledModelToolResult({
-      type: "tool_result_spilled",
-      sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
-      fileId: file.id,
-      byteSize: file.sizeBytes,
-      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    });
+    return spilledModelToolResult(
+      {
+        type: "tool_result_spilled",
+        sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
+        fileId: file.id,
+        byteSize: file.sizeBytes,
+        mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+      },
+      input.readers,
+    );
   };
 
   /**

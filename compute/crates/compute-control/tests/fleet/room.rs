@@ -8,7 +8,7 @@ use compute_protocol::host::{ErrorCode, Reply, Request};
 use futures::future::join_all;
 use serde_json::json;
 
-use super::support::{Act, Fleet, given_up, id, roomy};
+use super::support::{Act, Fleet, declare_gone, given_up, id, roomy};
 
 fn refuse_adopts(envelope: &Envelope) -> Act {
     match envelope.request {
@@ -50,6 +50,7 @@ async fn no_room(
     b.behave(refuse_adopts);
     a.renewing(false);
     given_up(&fleet, &a).await;
+    declare_gone(&fleet, &a).await;
     (fleet, b, created)
 }
 

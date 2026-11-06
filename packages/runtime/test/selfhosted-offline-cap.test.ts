@@ -255,6 +255,13 @@ describe("the words a command whose workspace machine stopped answering gets", (
     expect(text).toContain("This command never reached it.");
   });
 
+  test("host busy moving or saving it", () => {
+    const text = renderSelfhostedFault(unresponsive("host_busy", true));
+    expect(text).toContain("is being moved or saved by its host");
+    expect(text).toContain("so Opengeni did not restart it");
+    expect(text).toContain("wait a couple of minutes, then re-run the command");
+  });
+
   test("restart failed", () => {
     expect(renderSelfhostedFault(unresponsive("restart_failed", true))).toContain(
       "restarting it failed",

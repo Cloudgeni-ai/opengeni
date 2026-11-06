@@ -336,6 +336,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 cause,
             } => self.shrink(Id(sandbox), free, keep, request, cause),
             Action::EndForMemory { sandbox, cause } => self.end_for_memory(Id(sandbox), cause),
+            Action::EndForRestart { sandbox } => self.end_for_restart(Id(sandbox)),
             Action::Bound { sandbox, low, high } => {
                 if let Some(live) = self.slots.get(&sandbox).and_then(|slot| slot.vm.as_ref())
                     && let Err(error) = self.engine.bound_memory(&live.vm, low, high)

@@ -98,4 +98,13 @@ impl Host {
             failures: sandbox.retry.map_or(0, |retry| retry.failures),
         })
     }
+
+    /// Whether a restart of `id` is under way (see [`Input::Restart`]): its
+    /// VM has yet to end, or its memory image to be forgotten.
+    #[must_use]
+    pub fn restarting(&self, id: SandboxId) -> bool {
+        self.sandboxes
+            .get(&id)
+            .is_some_and(|sandbox| sandbox.restart.is_some())
+    }
 }

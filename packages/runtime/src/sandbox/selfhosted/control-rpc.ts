@@ -517,14 +517,17 @@ export const AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY = "_agent_unresponsive_recov
  *  - `restart_failed`: a restart was tried and failed;
  *  - `restart_unavailable`: no restart could be arranged (it could not be
  *    recorded, so none was made);
- *  - `answering`: its agent answered again before a restart, so none was made. */
+ *  - `answering`: its agent answered again before a restart, so none was made;
+ *  - `host_busy`: its host is busy with it, as handing it off to another host,
+ *    and refuses to wake it for a short while, so no restart was made. */
 export type UnresponsiveAgentRecovery =
   | "restarted"
   | "restarting"
   | "already_restarted"
   | "restart_failed"
   | "restart_unavailable"
-  | "answering";
+  | "answering"
+  | "host_busy";
 
 /** The reserved `detail` key the transport sets to "1" when a no-responder fault
  *  comes after it already waited out its reconnect window for that exact process.

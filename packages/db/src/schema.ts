@@ -10810,6 +10810,9 @@ export const sandboxLeases = pgTable(
     // The agent gateway reported the current compute sandbox asleep since then;
     // warm time does not accrue while it sleeps (0861).
     computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
+    // The agent gateway reported the current compute sandbox's host handing
+    // it off since then; it may refuse wakes for a short while (1281).
+    computeHandingOffSince: timestamp("compute_handing_off_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
     // these remain bare UUIDs here rather than generating a stricter wrong FK.

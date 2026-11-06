@@ -10,7 +10,7 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, Collector, Found, HostRow, Import, Imported, Inserted, LifecycleRow,
+    Admission, AgentRef, Collector, Found, Gone, HostRow, Import, Imported, Inserted, LifecycleRow,
     Linked, MemoryStore, PointerRow, PostgresStore, RequestRow, SandboxRow, Spec, Store,
     TEMPLATE_PREFIX, TemplateRow, Write, replace_lifecycle,
 };
@@ -47,6 +47,7 @@ fn capacity() -> Capacity {
         sandboxes: 0,
         pointers_in_service: true,
         reads_packs: true,
+        sets_aside: true,
         info: None,
     }
 }
@@ -105,6 +106,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
         sends: Sends::default(),
         class: Some("nested/none".into()),
         created_ms: 1,
+        lost: None,
         version: 0,
     }
 }
@@ -412,8 +414,16 @@ async fn owner_lost<S: Store>(store: S) {
     assert_eq!(store.insert(&owned).await.unwrap(), Write::Done);
     let count = renewals(&store, lost).await.unwrap();
     assert_eq!(store.give_up(lost, count, now_ms()).await.unwrap(), Some(1));
+    let waiting = store.sandbox(owned.id).await.unwrap().unwrap();
+    assert_eq!(waiting.ownership, owned.ownership, "it waits for its host");
+    let forsaken = store
+        .declare_gone(lost, Gone::Declared, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forsaken.len(), 1);
 
-    // Giving up cleared its owner under a raised epoch.
+    // Declaring it gone cleared its owner under a raised epoch.
     let cleared = store.sandbox(owned.id).await.unwrap().unwrap();
     assert_eq!(cleared.ownership.owner, None);
     assert!(cleared.ownership.epoch > owned.ownership.epoch);
@@ -473,7 +483,7 @@ async fn no_write_gives_a_sandbox_to_a_host_given_up_on() {
 
 async fn racing_give_up<S: Store>(store: S) {
     // Writes naming a host race its give-up: whichever order they land in,
-    // no sandbox ends up owned by the lost host.
+    // once it is declared gone no sandbox is owned by the lost host.
     for _ in 0..20 {
         let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
         let count = renewals(&store, host).await.unwrap();
@@ -491,9 +501,16 @@ async fn racing_give_up<S: Store>(store: S) {
                     .count()
             )
         );
+        // What landed waits for the host, until it is declared gone.
+        let forsaken = store
+            .declare_gone(host, Gone::Declared, now_ms())
+            .await
+            .unwrap()
+            .unwrap();
         for row in &rows {
             if let Some(stored) = store.sandbox(row.id).await.unwrap() {
                 assert_ne!(stored.ownership.owner, Some(host), "{stored:?}");
+                assert!(forsaken.iter().any(|lost| lost.id == row.id));
             }
         }
     }
@@ -526,6 +543,13 @@ async fn forgetting<S: Store>(store: S) {
     assert_eq!(store.give_up(host, count, 10).await.unwrap(), Some(1));
     store.prune_hosts(10).await.unwrap();
     assert!(listed(&store, host).await, "kept until its time is up");
+    store.prune_hosts(11).await.unwrap();
+    assert!(listed(&store, host).await, "kept while its sandbox waits");
+    store
+        .declare_gone(host, Gone::Declared, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(store.prune_hosts(11).await.unwrap() >= 1);
     assert!(!listed(&store, host).await, "forgotten");
     assert!(listed(&store, live).await, "a live host is kept");
@@ -804,9 +828,14 @@ async fn respec<S: Store>(store: S) {
         "never while a host owns it"
     );
 
-    // Its host given up on, nobody owns it.
+    // Its host given up on and declared gone, nobody owns it.
     let count = renewals(&store, host).await.unwrap();
     store.give_up(host, count, now_ms()).await.unwrap();
+    store
+        .declare_gone(host, Gone::Declared, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
     let lost = store.sandbox(created.id).await.unwrap().unwrap();
     assert_eq!(lost.ownership.owner, None);
     let mut resized = lost.clone();
@@ -832,7 +861,8 @@ async fn respec<S: Store>(store: S) {
         }
     );
 
-    // Back, the host that held it at its old shape drops its copy.
+    // Back, the host that held it at its old shape, and from before it
+    // was declared gone, sets its copy aside: it may be the newer one.
     let held = vec![Held {
         id: created.id,
         owner_epoch: created.ownership.epoch.0,
@@ -845,11 +875,12 @@ async fn respec<S: Store>(store: S) {
         panic!("a host given up on registers afresh");
     };
     assert_eq!(rulings.len(), 1, "{rulings:?}");
-    assert_eq!(rulings[0].verdict, Verdict::Drop);
+    assert_eq!(rulings[0].verdict, Verdict::SetAside);
     let after = store.sandbox(created.id).await.unwrap().unwrap();
-    assert_eq!(
-        (after.ownership, after.version),
-        (now.ownership, now.version)
+    assert_eq!(after.ownership, now.ownership);
+    assert!(
+        after.lost.unwrap().set_aside_ms.is_some(),
+        "the setting aside is noted"
     );
 }
 
@@ -864,9 +895,14 @@ async fn reclaim_forgotten<S: Store>(store: S) {
     let row = sandbox(host);
     assert_eq!(store.insert(&row).await.unwrap(), Write::Done);
     // Given up on long ago, before the give-ups other checks count on
-    // keeping, then forgotten.
+    // keeping, declared gone, then forgotten.
     let count = renewals(&store, host).await.unwrap();
     assert_eq!(store.give_up(host, count, 5).await.unwrap(), Some(1));
+    store
+        .declare_gone(host, Gone::Declared, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
     store.prune_hosts(6).await.unwrap();
     assert!(!listed(&store, host).await, "forgotten");
 
@@ -905,6 +941,119 @@ async fn reclaim_forgotten<S: Store>(store: S) {
 #[tokio::test]
 async fn a_host_back_after_being_forgotten_gets_back_what_nobody_took() {
     each(reclaim_forgotten, reclaim_forgotten).await;
+}
+
+async fn waiting_for_a_lost_host<S: Store>(store: S) {
+    let returning = name();
+    let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
+    let [kept, unlisted] = [sandbox(host), sandbox(host)];
+    for row in [&kept, &unlisted] {
+        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
+    }
+    let held = |rows: &[&SandboxRow]| {
+        rows.iter()
+            .map(|row| Held {
+                id: row.id,
+                owner_epoch: row.ownership.epoch.0,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Given up on long ago, before the give-ups other checks count on
+    // keeping, so pruning before then forgets only hosts like this one.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 3).await.unwrap(), Some(2));
+
+    // Giving up on it leaves its sandboxes its own, waiting for it, and
+    // only a host given up on can be declared gone.
+    for row in [&kept, &unlisted] {
+        let stored = store.sandbox(row.id).await.unwrap().unwrap();
+        assert_eq!(stored.ownership, row.ownership, "{stored:?}");
+        assert_eq!(stored.lost, None);
+    }
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    assert_eq!(
+        store
+            .declare_gone(live, Gone::Declared, now_ms())
+            .await
+            .unwrap(),
+        None
+    );
+    store.prune_hosts(4).await.unwrap();
+    assert!(listed(&store, host).await, "kept while its sandboxes wait");
+
+    // Back, it keeps what it lists under the same epoch; what it no longer
+    // has goes on without it from its stored copy.
+    let Admission::Registered { rulings, .. } = store
+        .register(&register(&returning, random(), held(&[&kept])))
+        .await
+        .unwrap()
+    else {
+        panic!("a host given up on registers afresh");
+    };
+    assert_eq!(
+        rulings
+            .iter()
+            .find(|ruling| ruling.id == kept.id)
+            .map(|ruling| ruling.verdict),
+        Some(Verdict::Keep {
+            owner_epoch: kept.ownership.epoch.0
+        })
+    );
+    let back = store.sandbox(kept.id).await.unwrap().unwrap();
+    assert_eq!(back.ownership.owner, Some(host));
+    assert!(back.version > kept.version, "a reader sees it changed");
+    let gone = store.sandbox(unlisted.id).await.unwrap().unwrap();
+    assert_eq!(gone.ownership.owner, None);
+    assert!(gone.ownership.epoch > unlisted.ownership.epoch);
+
+    // Given up on and declared gone, each sandbox it still owns notes the
+    // loss; back after all, it gets back what nobody took, the note gone.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(1));
+    let at_ms = now_ms();
+    let forsaken = store
+        .declare_gone(host, Gone::Declared, at_ms)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        forsaken.iter().map(|lost| lost.id).collect::<Vec<_>>(),
+        [kept.id]
+    );
+    let noted = store.sandbox(kept.id).await.unwrap().unwrap();
+    let lost = noted.lost.clone().unwrap();
+    assert_eq!(
+        (lost.host.as_str(), lost.why, lost.at_ms, lost.epoch),
+        (
+            returning.as_str(),
+            Gone::Declared,
+            at_ms,
+            noted.ownership.epoch.0
+        )
+    );
+    assert_eq!(noted.ownership.owner, None);
+    let Admission::Registered { rulings, .. } = store
+        .register(&register(&returning, random(), held(&[&kept])))
+        .await
+        .unwrap()
+    else {
+        panic!("a host declared gone registers afresh");
+    };
+    assert!(
+        matches!(rulings[0].verdict, Verdict::Keep { .. }),
+        "{rulings:?}"
+    );
+    let reclaimed = store.sandbox(kept.id).await.unwrap().unwrap();
+    assert_eq!(reclaimed.ownership.owner, Some(host));
+    assert_eq!(reclaimed.lost, None, "nothing was lost after all");
+}
+
+/// A host given up on keeps its sandboxes, which wait for it, until it is
+/// declared gone; back, it keeps what it still has, and a declaration it
+/// comes back from is undone for what nobody took.
+#[tokio::test]
+async fn a_host_given_up_on_keeps_its_sandboxes_until_declared_gone() {
+    each(waiting_for_a_lost_host, waiting_for_a_lost_host).await;
 }
 
 fn image_id() -> ImageId {
@@ -1432,7 +1581,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
