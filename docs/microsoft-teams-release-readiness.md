@@ -399,10 +399,15 @@ conversation, organization connected or not, account linked or not).
   Teams can deliver one install several times and to any API replica, so each
   replica first claims the chat's welcome in `teams_bot_welcomes` (a hash of the
   tenant and conversation, no content); an install of the same chat within ten
-  minutes isn't welcomed again on any replica, and messages never repeat it. The
-  install activity never fails: a failed send gives the claim back for a later
-  delivery. Teams may accept a message with a card with an empty 202 and no
-  message id; that counts as delivered. A linked person's first 1:1 chat adds one line
+  minutes isn't welcomed again on any replica, and messages never repeat it.
+  Claims are removed a day later. The install never fails once a welcome may
+  have arrived. When Teams clearly refused the send, the claim is given back,
+  and a throttled or unreachable send answers 503 so that Teams redelivers.
+  When the send may have arrived (a timeout, a Teams 5xx), or the replica
+  stopped between claiming and sending, the claim is kept: that install gets no
+  welcome rather than a second one. Teams may accept a message with a card with
+  an empty 202 and no message id; that counts as delivered. A linked person's
+  first 1:1 chat adds one line
   about AI and `help` to the "Started" notice. In an organization that hasn't
   connected Opengeni and has self-serve on, the installer gets the
   "Connect your organization" card instead of this welcome; see

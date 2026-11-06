@@ -143,6 +143,23 @@ export async function releaseTeamsWelcome(db: Database, claim: TeamsWelcomeClaim
     sql`delete from teams_bot_welcomes where scope_hash=${claim.scopeHash} and claim_id=${claim.claimId}::uuid`,
   );
 }
+/** How long a welcome claim is kept after its window: a day, then it is removed. */
+export const TEAMS_WELCOME_RETENTION_MS = 24 * 60 * 60_000;
+/**
+ * Removes up to `limit` claims older than the retention, so the table holds
+ * roughly a day of installs. Returns how many it removed.
+ */
+export async function pruneTeamsWelcomes(
+  db: Database,
+  limit = 100,
+  retentionMs: number = TEAMS_WELCOME_RETENTION_MS,
+): Promise<number> {
+  const rows = await rawRows<{ scope_hash: string }>(
+    db,
+    sql`delete from teams_bot_welcomes where scope_hash in (select scope_hash from teams_bot_welcomes where claimed_at<now()-(${Math.max(TEAMS_WELCOME_WINDOW_MS, Math.trunc(retentionMs))}*interval '1 millisecond') limit ${Math.max(1, Math.trunc(limit))} for update skip locked) returning scope_hash`,
+  );
+  return rows.length;
+}
 export async function installTeamsBot(
   db: Database,
   input: {

@@ -9,7 +9,8 @@
 -- claim token and the claim time. An organization that hasn't connected
 -- Opengeni has no account or workspace yet, so the policy can't be
 -- organization-scoped. A row grants no authority; it only suppresses a
--- repeated welcome. A new table only, so the previous release is unaffected.
+-- repeated welcome. Claims older than a day are removed as new welcomes are
+-- sent. A new table only, so the previous release is unaffected.
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE teams_bot_welcomes (

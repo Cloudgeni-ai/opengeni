@@ -31,6 +31,7 @@ import {
   getTeamsInstallation,
   claimTeamsWelcome,
   releaseTeamsWelcome,
+  pruneTeamsWelcomes,
   invalidateTeamsGroup,
   teamsGroupRouteActive,
   type TeamsGroupAudience,
@@ -508,60 +509,98 @@ function experienceState(
  *
  * Teams may deliver one install several times, to any API replica, so the
  * chat's welcome is claimed in the database first and sent at most once per
- * claim window. The install activity never fails: a failed send gives the
- * claim back, so a later delivery or reinstall can try again, and Teams isn't
- * asked to redeliver an install whose welcome may already have arrived.
+ * claim window. The install never fails once a welcome may have arrived:
+ * Teams is asked to redeliver it (503) only when nothing reached the person
+ * and a retry can help, and then the claim is given back first. When the send
+ * may have arrived (a timeout, a reset, a Teams 5xx), the claim is kept, so a
+ * replica that stops between claiming and sending leaves that install without
+ * a welcome rather than risk a second one.
  */
 async function welcomeTeamsInstall(
   deps: ApiRouteDeps,
   app: App,
   install: TeamsPersonalInstall,
-): Promise<string> {
+): Promise<{ outcome: string; status: number }> {
   const claim = await claimTeamsWelcome(deps.db, install);
-  if (!claim) return "welcome_duplicate";
-  let outcome: string;
+  if (!claim) return { outcome: "welcome_duplicate", status: 200 };
+  const attempt = { sending: false, connected: true };
+  let result: { outcome: string; delivered: boolean };
   try {
-    outcome = await sendTeamsInstallWelcome(deps, app, install);
-  } catch {
-    outcome = "welcome_failed";
-  }
-  // Every outcome that delivered something ends in "_sent".
-  if (!outcome.endsWith("_sent"))
+    result = await sendTeamsInstallWelcome(deps, app, install, attempt);
+  } catch (error) {
+    const failure = attempt.sending ? teamsSendFailure(error) : { refused: true, retry: true };
+    const outcome = attempt.connected ? "welcome_failed" : "onboarding_reply_failed";
+    if (!failure.refused) return { outcome, status: 200 };
     await releaseTeamsWelcome(deps.db, claim).catch(() => {
       // The claim then lapses at the end of its window.
     });
-  return outcome;
+    return { outcome, status: failure.retry ? 503 : 200 };
+  }
+  if (result.delivered)
+    await pruneTeamsWelcomes(deps.db).catch(() => {
+      // Pruning is housekeeping; the next welcome tries again.
+    });
+  else
+    await releaseTeamsWelcome(deps.db, claim).catch(() => {
+      // The claim then lapses at the end of its window.
+    });
+  return { outcome: result.outcome, status: 200 };
 }
+/**
+ * Whether a failed Teams send clearly didn't reach the person (`refused`), and
+ * whether Teams redelivering the activity could help (`retry`). A send that may
+ * have arrived, such as a timeout, a reset connection or a Teams 5xx, is
+ * neither.
+ */
+function teamsSendFailure(error: unknown): { refused: boolean; retry: boolean } {
+  const e = error as { response?: { status?: unknown }; code?: unknown } | null | undefined;
+  const status = e?.response?.status;
+  if (typeof status === "number")
+    return { refused: status >= 400 && status < 500, retry: status === 429 };
+  const code = e?.code;
+  // Thrown before any request, such as a rejected service URL.
+  if (typeof code !== "string") return { refused: true, retry: false };
+  const unsent = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code);
+  return { refused: unsent, retry: unsent };
+}
+/** What an organization that hasn't connected may have been sent. */
+const UNCONNECTED_DELIVERED: ReadonlySet<TeamsUnconnectedOutcome> = new Set([
+  "tenant_unavailable_notice_sent",
+  "setup_link_sent",
+  "connect_link_sent",
+]);
 async function sendTeamsInstallWelcome(
   deps: ApiRouteDeps,
   app: App,
   install: TeamsPersonalInstall,
-): Promise<string> {
+  attempt: { sending: boolean; connected: boolean },
+): Promise<{ outcome: string; delivered: boolean }> {
   const i = await getTeamsInstallation(deps.db, install.tenantId);
   const active = i?.active ? i : null;
   if (!active && install.actorId) {
-    let outcome: TeamsUnconnectedOutcome;
-    try {
-      outcome = await replyToUnconnectedTeamsTenant(
-        deps,
-        app,
-        { ...install, actorId: install.actorId, personal: true },
-        "install",
-      );
-    } catch {
-      return "onboarding_reply_failed";
-    }
-    if (outcome !== "setup_not_permitted") return outcome;
+    attempt.connected = false;
+    attempt.sending = true;
+    const outcome = await replyToUnconnectedTeamsTenant(
+      deps,
+      app,
+      { ...install, actorId: install.actorId, personal: true },
+      "install",
+    );
+    if (outcome !== "setup_not_permitted")
+      return { outcome, delivered: UNCONNECTED_DELIVERED.has(outcome) };
+    attempt.connected = true;
+    attempt.sending = false;
   }
   // When Teams doesn't name who added the bot, offer linking; the link
   // command answers from the sender's own authenticated message either way.
   const grant = active && install.actorId ? await actorGrant(deps, active, install.actorId) : null;
+  attempt.sending = true;
   await sendTeamsReply(
     app,
     { ...install, threadId: null, personal: true },
     teamsWelcome(experienceState(true, active, grant)),
   );
-  return "welcome_sent";
+  return { outcome: "welcome_sent", delivered: true };
 }
 /**
  * Help and account commands: fixed replies that never reach the agent.
@@ -776,7 +815,11 @@ export async function handleTeamsActivity(
   if (install) {
     if (install.botId.toLowerCase() !== botId) observed("bot_identity_mismatch");
     else if (!teamsTenantEnabled(deps.settings, install.tenantId)) observed("tenant_disabled");
-    else observed(await welcomeTeamsInstall(deps, app, install));
+    else {
+      const welcome = await welcomeTeamsInstall(deps, app, install);
+      observed(welcome.outcome);
+      return { status: welcome.status };
+    }
     return { status: 200 };
   }
   const feedback = normalizeTeamsFeedback(body);

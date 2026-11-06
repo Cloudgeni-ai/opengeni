@@ -411,18 +411,31 @@ test("in an organization that hasn't connected Opengeni, a redelivered install g
   expect(f.outcomes).toEqual(["connect_link_sent", "welcome_duplicate"]);
 });
 
-test("a welcome that fails to send doesn't fail the install, and a later delivery sends it; a reinstall after the window is welcomed again", async () => {
+test("a welcome Teams refuses is given back for a later delivery, one that may have arrived isn't repeated, and a reinstall after the window is welcomed again", async () => {
   const f = await fixture();
   const replicaB = f.replica();
   const person = crypto.randomUUID();
   const install = personalInstall(f, person);
+  // A local failure before anything reached Teams: the install succeeds and
+  // gives the claim back.
   f.failures.push(new Error("teams_unreachable"));
   expect(await f.handle(install)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(0);
-  // The failed send gave its claim back.
+  // Teams throttles the send: the install asks Teams to redeliver.
+  f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
+  expect(await f.handle(install)).toEqual({ status: 503 });
+  expect(f.calls).toHaveLength(0);
+  // The redelivery, on another replica, sends the welcome; later ones don't.
   expect(await replicaB(install)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(1);
   expect(await f.handle(install)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(1);
+
+  // A send that timed out may have arrived, so its claim is kept: no second try.
+  const timedOut = personalInstall(f, crypto.randomUUID());
+  f.failures.push(Object.assign(new Error("timeout"), { code: "ECONNABORTED" }));
+  expect(await f.handle(timedOut)).toEqual({ status: 200 });
+  expect(await replicaB(timedOut)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(1);
 
   // Once the claim window has passed, installing again welcomes again.
@@ -435,7 +448,10 @@ test("a welcome that fails to send doesn't fail the install, and a later deliver
   expect(f.calls).toHaveLength(2);
   expect(f.outcomes).toEqual([
     "welcome_failed",
+    "welcome_failed",
     "welcome_sent",
+    "welcome_duplicate",
+    "welcome_failed",
     "welcome_duplicate",
     "welcome_sent",
   ]);
