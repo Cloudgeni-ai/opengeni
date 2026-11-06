@@ -3281,6 +3281,12 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
+  /**
+   * Only for checking a database migrated to an earlier point of the migration ledger, such as a
+   * migration test's predecessor state. Contract tables named here may be absent because a later
+   * migration creates them; when one is present it is checked like every other contract table.
+   */
+  tablesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4366,14 +4372,15 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
+  const notYetCreatedTables = new Set(options.tablesCreatedByLaterMigrations ?? []);
   const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
   const missingTables = difference(protectedTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);

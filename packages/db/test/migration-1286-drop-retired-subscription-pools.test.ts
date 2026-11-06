@@ -18,6 +18,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
+import { postureBeforeMigration, postureThroughMigration } from "./predecessor-runtime-posture";
 
 const migration = "1286_drop_retired_subscription_pools.sql";
 const providers = ["codex", "claude", "xai"] as const;
@@ -164,7 +165,7 @@ async function assertRolledBack() {
     await owned!
       .admin`select 1 from opengeni_private.product_lifecycle_backfill_queue where source = 'model.connected'`,
   ).toHaveLength(0);
-  await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+  await assertRuntimeDatabasePosture(client!.db, postureBeforeMigration(migration));
 }
 
 describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
@@ -300,9 +301,9 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
         opengeni_subscription_internal.subscription_core_writer_context('unknown', ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, 'user:pool-retirement-test') as unknown`;
     });
     expect(gate).toEqual({ writer: true, administration: true, unknown: false });
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
     // A new organization still gets its seeded settings row, failover on.
     const seeded = await bootstrapWorkspace(client!.db, {
       accountExternalSource: "pool-retirement-test",

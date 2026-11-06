@@ -37,6 +37,7 @@ import {
 // Namespace access for the owner-routine lists, which other open PRs import
 // by name in the list above: a merge must not duplicate an imported binding.
 import * as runtimePosture from "../src/runtime-posture";
+import { postureBeforeMigration, publicTablesCreatedAfter } from "./predecessor-runtime-posture";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -923,6 +924,50 @@ describe("runtime database posture evaluator", () => {
       "runtime privilege tables are missing: still_used",
       "protected tables are missing: still_used",
     ]);
+  });
+
+  test("a predecessor check excuses only absent tables that later migrations create", () => {
+    const posture = safePosture();
+    const present = posture.tables[0]!;
+    const contract = {
+      ...options,
+      protectedTables: [...options.protectedTables!, "created_later", "still_used"],
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        created_later: ["SELECT"] as const,
+        still_used: ["SELECT"] as const,
+      },
+      protectedNoDirectDmlTables: [],
+      tablesCreatedByLaterMigrations: ["created_later", present.name],
+    };
+    const missing = evaluateRuntimeDatabasePosture(posture, contract);
+    expect(missing.filter((violation) => violation.includes("tables are missing"))).toEqual([
+      "runtime privilege tables are missing: still_used",
+      "protected tables are missing: still_used",
+    ]);
+    // A named table that is present is still held to the full contract.
+    Object.assign(present, { owner: "opengeni_app", rlsForced: false });
+    const violations = evaluateRuntimeDatabasePosture(posture, contract);
+    expect(violations).toContain(`runtime role owns table ${present.name}`);
+    expect(violations).toContain(`table ${present.name} does not FORCE RLS`);
+  });
+
+  test("predecessor table lists come from the tables later migration files create", () => {
+    const holds = "1290_model_call_credit_holds.sql";
+    const before = publicTablesCreatedAfter(holds, true);
+    expect(before).toContain("model_call_credit_holds");
+    expect(publicTablesCreatedAfter(holds, false)).not.toContain("model_call_credit_holds");
+    // Tables that existed before the boundary, and private-schema tables, are never excused.
+    expect(publicTablesCreatedAfter("0977_baseline_04.sql", true)).toContain("workspaces");
+    expect(before).not.toContain("workspaces");
+    expect(before).not.toContain("tenant_rows");
+    expect(before.every((name) => !name.includes("."))).toBe(true);
+    const automation = "1273_drop_retired_automation_and_pr_review.sql";
+    expect(postureBeforeMigration(automation)).toEqual({
+      rlsStrategy: "force",
+      tablesCreatedByLaterMigrations: publicTablesCreatedAfter(automation, true),
+    });
+    expect(() => postureBeforeMigration("9999_missing.sql")).toThrow("unknown migration");
   });
 
   test("retiring tables retain their exact privileges, ownership and RLS while present", () => {

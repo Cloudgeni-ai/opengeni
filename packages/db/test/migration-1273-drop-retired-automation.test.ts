@@ -11,6 +11,7 @@ import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../s
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture, RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
+import { postureBeforeMigration } from "./predecessor-runtime-posture";
 
 const migration = "1273_drop_retired_automation_and_pr_review.sql";
 const sourceDirectory = join(import.meta.dir, "../drizzle");
@@ -80,7 +81,7 @@ async function assertNotApplied() {
   const [receipt] = await owned!.admin<{ present: boolean }[]>`
     select exists(select 1 from schema_migrations where name = ${migration}) as present`;
   expect(receipt?.present).toBe(false);
-  await assertRuntimeDatabasePosture(client!.db, options);
+  await assertRuntimeDatabasePosture(client!.db, postureBeforeMigration(migration, options));
 }
 
 describe.skipIf(!realDatabase)("retired automation and PR-review contraction", () => {
