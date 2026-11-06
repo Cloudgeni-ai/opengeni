@@ -61,9 +61,12 @@ export type SitePageUsage = {
   workspaceTools: boolean;
 };
 
-const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-
-/** What a page's source uses (see the heuristics above). */
+/**
+ * What a page's source uses (see the heuristics above). Every pattern starts
+ * an identifier only where no identifier character precedes it, and the
+ * source is read a fixed number of times, so the work stays linear in the
+ * page size however many collections it assigns.
+ */
 export function scanSitePageUsage(source: string): SitePageUsage {
   const collections = new Map<string, { writes: boolean; changes: boolean }>();
   const note = (name: string, method: string | undefined) => {
@@ -80,17 +83,24 @@ export function scanSitePageUsage(source: string): SitePageUsage {
   );
   for (const match of source.matchAll(direct)) note(match[2]!, match[3]);
   const assigned = new RegExp(
-    `\\b([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?[\\w$.]*collection\\(\\s*(["'\`])(${NAME})\\2\\s*\\)\\s*[;,\\n)]`,
+    `(?<![\\w$])([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?[\\w$.]*collection\\(\\s*(["'\`])(${NAME})\\2\\s*\\)\\s*[;,\\n)]`,
     "gu",
   );
+  /** Collections each variable is assigned, for the writes made through it. */
+  const variables = new Map<string, Set<string>>();
   for (const match of source.matchAll(assigned)) {
-    const variable = match[1]!;
-    const name = match[3]!;
+    const names = variables.get(match[1]!) ?? new Set<string>();
+    names.add(match[3]!);
+    variables.set(match[1]!, names);
+  }
+  if (variables.size > 0) {
     const calls = new RegExp(
-      `(?<![\\w$.])${escapeRegExp(variable)}\\s*\\.\\s*(${WRITE_METHODS})\\s*\\(`,
+      `(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\.\\s*(${WRITE_METHODS})\\s*\\(`,
       "gu",
     );
-    for (const call of source.matchAll(calls)) note(name, call[1]);
+    for (const call of source.matchAll(calls)) {
+      for (const name of variables.get(call[1]!) ?? []) note(name, call[2]);
+    }
   }
   const queries = new Set<string>();
   for (const match of source.matchAll(

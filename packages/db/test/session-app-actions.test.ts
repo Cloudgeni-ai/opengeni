@@ -13,6 +13,7 @@ import {
   prepareConnectorActionApproval,
   recordTurnAppActionGrant,
   resolveSessionAppActionAuthority,
+  resolveSessionAdminAuthority,
   sessionStartedByPerson,
   setOrganizationAgentAdminAccess,
   submitHumanPromptInTransaction,
@@ -292,6 +293,100 @@ describe("app actions in a chat", () => {
     expect(await resolveSessionAppActionAuthority(db, key)).toEqual({
       kind: "full_access",
       subjectId: org.member,
+    });
+  });
+
+  test("full access runs as the person who gave it only in turns they caused", async () => {
+    if (!client) return;
+    const db = client.db;
+    const org = await organization("app-actions-full-access-sender");
+    await setOrganizationAgentAdminAccess(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      sessionAdminAccessAllowed: true,
+    });
+    const keyOf = (turn: Awaited<ReturnType<typeof claimedTurn>>) => ({
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+    });
+    const giveFullAccess = async (sessionId: string) =>
+      await grantSessionAdminAccess(db, {
+        organizationId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId,
+        actorSubjectId: org.owner,
+        durationHours: 1,
+      });
+
+    // The owner's own message in their full-access chat runs as them.
+    const own = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.owner,
+    });
+    await giveFullAccess(own.sessionId);
+    expect(await resolveSessionAppActionAuthority(db, keyOf(own))).toEqual({
+      kind: "full_access",
+      subjectId: org.owner,
+    });
+
+    // Another member's message in the owner's shared full-access chat runs as
+    // that member, exactly as it would without full access, while the session
+    // itself (its grant state and tool listing) still has full access.
+    const others = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.member,
+    });
+    expect(others.initiator).toMatchObject({ kind: "subject", subjectId: org.member });
+    await giveFullAccess(others.sessionId);
+    expect(await resolveSessionAdminAuthority(db, keyOf(others))).toMatchObject({
+      subjectId: org.owner,
+    });
+    expect(await resolveSessionAppActionAuthority(db, keyOf(others))).toEqual({
+      kind: "confirm",
+      subjectId: org.member,
+      permissions: [...SENT_PERMISSIONS],
+    });
+    expect(await turnWorkspaceSettingsAccess(db, keyOf(others))).toBeNull();
+
+    // A message claiming the owner's identity without the owner's own frozen
+    // grant (a key, a service, or someone else's sign-in) gets none either.
+    const unsigned = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.owner,
+      frozen: null,
+    });
+    await giveFullAccess(unsigned.sessionId);
+    expect(await resolveSessionAppActionAuthority(db, keyOf(unsigned))).toEqual({
+      kind: "unavailable",
+      reason: "not_signed_in_person",
+    });
+
+    // A continuation (a goal, schedule or inbox delivery) runs as the owner
+    // only when the person recorded as causing it is the owner.
+    const continuation = async (causalPerson: string | null) => {
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          update session_turns
+          set source = 'goal', initiator_kind = 'service', initiator_subject_id = 'scheduler',
+            initiating_human_subject_id = ${causalPerson}
+          where id = ${others.turnId}`;
+      });
+      return await resolveSessionAppActionAuthority(db, keyOf(others));
+    };
+    expect(await continuation(org.member)).toEqual({
+      kind: "unavailable",
+      reason: "no_person_present",
+    });
+    expect(await continuation(null)).toEqual({
+      kind: "unavailable",
+      reason: "no_person_present",
+    });
+    expect(await continuation(org.owner)).toEqual({
+      kind: "full_access",
+      subjectId: org.owner,
     });
   });
 

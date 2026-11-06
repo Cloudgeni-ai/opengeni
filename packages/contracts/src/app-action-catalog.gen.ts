@@ -7058,14 +7058,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
-    "id": "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links",
-    "request": [],
-    "response": [],
-    "permission": "sessions:create"
-  },
-  {
     "id": "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",

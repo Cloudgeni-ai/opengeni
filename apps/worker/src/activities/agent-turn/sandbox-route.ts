@@ -176,10 +176,11 @@ export function sandboxEstablishPolicyDecision(input: {
 }
 
 /**
- * Repo-backed workspace skills bind into the first-request prompt-cache prefix
- * (`WorkspaceSkillsCapability.instructions()` listDirs the live box). Starting
- * the managed-box establish as soon as its inputs exist lets Modal create overlap
- * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
+ * A repository turn's box is likely to be used by a tool (see
+ * `shouldDeferRepositorySkillIndex`). Starting the managed-box establish as
+ * soon as its inputs exist lets the provider create overlap
+ * tools/history/agent and the model's first response; `get()` still owns
+ * clone/setup, at the first sandbox operation.
  *
  * Do not flip those turns to eager: that serializes create BEFORE tools and
  * increases first-token latency. Chat-only turns without a repository still
@@ -201,6 +202,37 @@ export function shouldPrefetchManagedSandbox(input: {
     return false;
   }
   return input.hasRepositoryResources || input.automaticRecoveryPending === true;
+}
+
+/**
+ * On a lazily provisioned managed box, indexing a repository's skills would
+ * be the turn's first workspace operation: the first model request would wait
+ * for the box, its environment setup and the clone, even when the turn needs
+ * no tool. Such sessions leave the index out and prepare the workspace at the
+ * first sandbox tool call instead. Connected Machines and deployments without
+ * lazy provisioning keep the live index.
+ *
+ * Only inputs that hold for the whole session decide this. A single turn can
+ * be established eagerly for its own reasons (attached files, generated
+ * video); deciding per turn would flip this section of the system prompt
+ * between turns and miss the model's prompt cache on both.
+ */
+export function shouldDeferRepositorySkillIndex(input: {
+  lazyEnabled: boolean;
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+  hasRepositoryResources: boolean;
+}): boolean {
+  return (
+    input.lazyEnabled &&
+    input.hasRepositoryResources &&
+    shouldPrefetchManagedSandbox({
+      establishPolicy: "on-demand",
+      machinePrimary: input.machinePrimary,
+      groupBoxBackend: input.groupBoxBackend,
+      hasRepositoryResources: true,
+    })
+  );
 }
 
 /**

@@ -153,7 +153,8 @@ type Session = {
   scope: string;
   subscriptions: Map<string, { sid: AgentLinkSid; unsubscribe: () => void }>;
   /** Reply subjects of the requests forwarded to the agent that it has not
-   * answered yet. When the session ends each gets an empty reply marked
+   * answered yet: the only `_INBOX` subjects the agent may publish to, once
+   * each. When the session ends each gets an empty reply marked
    * AGENT_LINK_LOST_HEADER, so no requester waits on a link that is gone. */
   unanswered: Set<string>;
   relayExpiresAtMs: number;
@@ -867,7 +868,7 @@ class AgentLink implements ApiWebSocketConnection {
           return;
         }
         if (
-          !mayPublish(scope, frame.subject) ||
+          !mayPublish(scope, frame.subject, session.unanswered) ||
           (frame.reply !== undefined && !mayReplyTo(scope, frame.reply))
         ) {
           this.send({

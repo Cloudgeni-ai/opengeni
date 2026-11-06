@@ -26,7 +26,7 @@ import { ActivityIndicator, Platform, Pressable, Text, View, type TextStyle } fr
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
 import { Icon } from "./icon";
-import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
+import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useLiveNow, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 
@@ -81,15 +81,7 @@ export type StickyWorkHeaderRegistry = {
 const StickyWorkHeaderContext = createContext<StickyWorkHeaderRegistry | null>(null);
 export const StickyWorkHeaderProvider = StickyWorkHeaderContext.Provider;
 
-export function useLiveNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [active]);
-  return now;
-}
+export { useLiveNow };
 
 function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
   const t = useOpenGeniText();

@@ -56,6 +56,38 @@ describe("client error text scrubbing", () => {
     for (const [input, expected] of cases) expect(scrubClientErrorText(input)).toBe(expected);
   });
 
+  test("cuts URL query strings and redacts JWTs at token boundaries", () => {
+    const cases: Array<[string, string]> = [
+      ["see http://http://http://a.test/x?token=1 now", "see http://http://http://a.test/x now"],
+      ["HTTPS://A.test/Path#Section:4:2)", "HTTPS://A.test/Path:4:2)"],
+      [
+        "at f (https://app.example.test/a.js#L1:10:20)",
+        "at f (https://app.example.test/a.js:10:20)",
+      ],
+      [
+        "plain https://app.example.test/assets/a.js:1:2 frame",
+        "plain https://app.example.test/assets/a.js:1:2 frame",
+      ],
+      ["x-eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0 tail", "x-[redacted] tail"],
+      ["eyJab.eyJabcdef.ghijk.lmn end", "eyJab.[redacted] end"],
+      ["eyJabcdef.abc short payload", "eyJabcdef.abc short payload"],
+      ["eyJabcdef-eyJabcdef.payload.sig", "[redacted]"],
+    ];
+    for (const [input, expected] of cases) expect(scrubClientErrorText(input)).toBe(expected);
+  });
+
+  test("takes time linear in the input on repeated URL and JWT prefixes", () => {
+    // Runs of URL or JWT prefixes that never complete a match used to make
+    // the scrubber rescan to the end of the run from every prefix.
+    for (const prefix of ["http://", "https://", "eyJ-"]) {
+      const text = prefix.repeat(Math.ceil(200_000 / prefix.length));
+      const started = performance.now();
+      const scrubbed = scrubClientErrorText(text);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(scrubbed.length).toBeGreaterThan(0);
+    }
+  });
+
   test("is idempotent, including on truncated output", () => {
     const samples = [
       "token=abc then Authorization: Bearer x1y2z3w4v5 and https://a.test/p?q=1",

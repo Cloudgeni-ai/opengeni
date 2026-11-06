@@ -20,7 +20,9 @@ A session with full access (see [MCP surfaces](mcp-surfaces.md)) also reaches
 chats in the granting person's other workspaces through the same session tools
 with `workspaceId`. Those calls are not agent-scope calls: they run in that
 workspace as the person, under their live permissions, exactly as
-`admin_action_call` does.
+`admin_action_call` does. Only turns that person caused carry it; in a turn
+another member caused in the same shared chat, the session tools behave as if
+the session had no full access.
 
 A private parent can create a same-owner private child from a live internal-update
 attempt as well as a human-message attempt. Internal updates keep their service
