@@ -5556,6 +5556,8 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.sandboxReattached": "Sandbox reattached",
   "timeline.platformActivityPresentation.sandboxRestored": "Sandbox restored",
   "timeline.platformActivityPresentation.sandboxStartupInterrupted": "Sandbox startup interrupted",
+  "timeline.platformActivityPresentation.settingUpNamedSandboxEnvironment":
+    "Setting up the {name} environment",
   "timeline.platformActivityPresentation.settingUpSandboxEnvironment":
     "Setting up sandbox environment",
   "timeline.platformActivityPresentation.spawnedName": "Spawned {name}",

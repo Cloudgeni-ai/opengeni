@@ -618,6 +618,11 @@ export function buildTimeline(
         blockedReason,
       );
       recordStartupFailureDetail(setupPhase, payload);
+      const rigName = setupPhase === "rig" ? stringValue(payload.rigName)?.trim() : undefined;
+      if (rigName) {
+        const rigItem = startupPhases.get(`${startupTurnId}:rig`)?.[0];
+        if (rigItem) rigItem.subject = rigName;
+      }
       continue;
     }
 

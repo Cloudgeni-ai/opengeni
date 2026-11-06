@@ -11,6 +11,7 @@ import {
   pathDirname,
   presentsToolOutputPreview,
   sandboxRowTitle,
+  startupElapsed,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
@@ -25,7 +26,7 @@ import {
   type WebSearchResult,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { createContext, useContext, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
 import {
@@ -602,7 +603,9 @@ function StartupPhaseRow({
   const failed = item.status === "failed";
   const t = useOpenGeniText();
   const running = item.status === "running";
-  const duration = startupDuration(item.durationMs);
+  const nowMs = useSecondTick(running);
+  // A running step shows how long it has taken so far; a settled one its duration.
+  const duration = running ? startupElapsed(item.startedAt, nowMs) : startupDuration(item.durationMs);
   return (
     <ActivityDisclosure
       icon="bot"
@@ -610,7 +613,7 @@ function StartupPhaseRow({
       title={
         item.blockedReason
           ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
-          : startupPhaseTitle(t, item.phase, item.status, item.outcome)
+          : startupPhaseTitle(t, item.phase, item.status, item.outcome, item.subject)
       }
       preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
@@ -621,6 +624,18 @@ function StartupPhaseRow({
       compact={compact}
     />
   );
+}
+
+/** The current time, refreshed once a second while `live`. */
+function useSecondTick(live: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [live]);
+  return nowMs;
 }
 
 function WorkerRow({ item, compact }: { item: WorkerItem; compact: boolean }) {

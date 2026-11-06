@@ -34,6 +34,8 @@ export function startupPhaseTitle(
   phase: StartupPhaseItem["phase"],
   status: StartupPhaseItem["status"],
   outcome: StartupPhaseItem["outcome"],
+  /** The Sandbox Environment a running setup step sets up, when known. */
+  subject?: string | null,
 ): string {
   if (status === "complete" && phase === "sandbox" && outcome && outcome !== "skipped") {
     if (outcome === "created") return t("timeline.platformActivityPresentation.sandboxCreated");
@@ -42,6 +44,11 @@ export function startupPhaseTitle(
   }
   if (status === "complete" && phase === "rig" && outcome === "skipped") {
     return t("timeline.platformActivityPresentation.sandboxEnvironmentAlreadyReady");
+  }
+  if (status === "running" && phase === "rig" && subject?.trim()) {
+    return t("timeline.platformActivityPresentation.settingUpNamedSandboxEnvironment", {
+      name: subject.trim(),
+    });
   }
   const statusIndex =
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;
@@ -148,6 +155,19 @@ export function startupDuration(durationMs: number | null): string | null {
   const minutes = Math.floor(durationMs / 60_000);
   const seconds = Math.round((durationMs % 60_000) / 1_000);
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+/**
+ * How long a still-running startup step has taken so far, in whole seconds
+ * so a once-a-second tick reads steadily. Null before its first second.
+ */
+export function startupElapsed(startedAt: string, nowMs: number): string | null {
+  const elapsedMs = nowMs - Date.parse(startedAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 1_000) return null;
+  const totalSeconds = Math.floor(elapsedMs / 1_000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
 }
 
 /**
