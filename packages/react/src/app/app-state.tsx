@@ -2866,6 +2866,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextRenameWorkspace,
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
+    contextSearchPersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
     contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,

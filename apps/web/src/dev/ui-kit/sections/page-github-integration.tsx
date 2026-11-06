@@ -70,7 +70,36 @@ type State = {
   connectionStatus?: "active" | "needs_reauth";
   /** False when the repository selection could not be read. */
   selectionLoaded?: boolean;
+  /** All my repositories, at this access. */
+  allRepositoriesAccess?: "read" | "write";
 };
+
+function personalRepository(
+  id: number,
+  fullName: string,
+  push: boolean,
+  selectedAccess: "read" | "write" | null,
+) {
+  return {
+    repositoryId: String(id),
+    fullName,
+    canonicalUrl: `https://github.com/${fullName}`,
+    defaultBranch: "main",
+    visibility: "private",
+    private: true,
+    archived: false,
+    disabled: false,
+    permissions: { pull: true, triage: push, push, maintain: false, admin: false },
+    selectedAccess,
+    lastVerifiedAt: NOW,
+  };
+}
+const PERSONAL_REPOSITORIES = [
+  personalRepository(101, "octocat/dotfiles", true, "write"),
+  personalRepository(102, "acme/web", true, "write"),
+  personalRepository(103, "acme/api", true, null),
+  personalRepository(104, "acme/handbook", false, null),
+];
 
 const MANAGER = ["github:use", "github:manage", "connections:read", "connections:write"];
 const STATES: State[] = [
@@ -97,6 +126,15 @@ const STATES: State[] = [
     bound: true,
     connected: true,
     repositories: 3,
+  },
+  {
+    key: "all-repositories",
+    label: "All my repositories: anything @octocat can reach on GitHub",
+    permissions: MANAGER,
+    bound: true,
+    connected: true,
+    repositories: 2,
+    allRepositoriesAccess: "write",
   },
   {
     key: "needs-reconnect",
@@ -164,9 +202,24 @@ function fakeContext(state: State) {
       },
       personalGitHubSelection:
         state.connected && state.selectionLoaded !== false
-          ? { repositories: Array.from({ length: state.repositories }, () => ({})) }
+          ? {
+              repositories: PERSONAL_REPOSITORIES.slice(0, state.repositories),
+              allRepositoriesAccess: state.allRepositoriesAccess ?? null,
+            }
           : null,
-      personalGitHubRepositories: [],
+      personalGitHubRepositories: state.connected
+        ? PERSONAL_REPOSITORIES.map((repository) =>
+            state.allRepositoriesAccess
+              ? {
+                  ...repository,
+                  selectedAccess:
+                    state.allRepositoriesAccess === "write" && repository.permissions.push
+                      ? "write"
+                      : "read",
+                }
+              : repository,
+          )
+        : [],
       personalGitHubCatalogReady: true,
       personalGitHubBusy: false,
       // Preview wiring: the production disconnect retries a connection that
