@@ -323,6 +323,7 @@ import {
 import { allowedCorsOrigin } from "./http/cors";
 import {
   createLocalBrowserBoundary,
+  createLocalCorsOriginPolicy,
   localBrowserRequestHost,
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
@@ -957,23 +958,23 @@ export function createAppComposition(deps: AppDependencies): {
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
-  const localCors = localBrowserBoundary
+  const localCorsOriginAllowed = createLocalCorsOriginPolicy(deps.settings, localBrowserBoundary);
+  const localCors = localCorsOriginAllowed
     ? cors({
         ...corsHeaders,
         credentials: true,
         origin: (origin, c) =>
-          localBrowserBoundary.originAllowed(origin, localBrowserRequestHost(c.req.raw))
-            ? origin
-            : null,
+          localCorsOriginAllowed(origin, localBrowserRequestHost(c.req.raw)) ? origin : null,
       })
     : null;
 
   app.use("*", (c, next) => {
     const origin = c.req.header("origin");
     if (localCors) {
-      // The boundary above already refused every other origin. Local mode
-      // never answers with wildcard CORS: a request without credentials acts
-      // as the local user, so any site could otherwise read its responses.
+      // Local mode never answers with wildcard CORS, in any environment: a
+      // request without credentials acts as the local user, so any site could
+      // otherwise read its responses. Origins outside the local policy get no
+      // CORS grant (in local development the boundary above refused them).
       return origin ? localCors(c, next) : next();
     }
     const middleware =
