@@ -76,6 +76,7 @@ import {
   verifyTeamsProof,
   type TeamsFeedback,
   type TeamsMessage,
+  type TeamsMessageRejection,
   type TeamsPersonalInstall,
 } from "./teams-protocol";
 import {
@@ -648,22 +649,26 @@ export async function handleTeamsActivity(
     observed("context_revise_failed");
     return { status: 200 };
   }
+  const ignored: TeamsMessageRejection[] = [];
+  const m = normalizeTeamsMessage(body, (diagnostic) => ignored.push(diagnostic));
   // Every human message in an approved channel or group chat is kept as
-  // bounded context for the next mention there. Only a mention below
-  // starts work; a failed write never blocks it.
+  // bounded context for the next mention there, except commands to
+  // Opengeni such as "help". Only a mention below starts work; a failed
+  // write never blocks it.
   let recorded = false;
-  try {
-    recorded = await recordTeamsContext(deps, body);
-    if (recorded) observed("context_recorded");
-  } catch {
-    observed("context_record_failed");
-  }
-  const m = normalizeTeamsMessage(body, (diagnostic) => {
+  if (!(m && teamsCommand(m.text)))
+    try {
+      recorded = await recordTeamsContext(deps, body);
+      if (recorded) observed("context_recorded");
+    } catch {
+      observed("context_record_failed");
+    }
+  for (const diagnostic of ignored) {
     // With resource-specific consent most recorded messages carry no
     // mention: that is expected, not worth a log line each.
-    if (recorded && diagnostic.reason === "missing_mention") return;
+    if (recorded && diagnostic.reason === "missing_mention") continue;
     deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
-  });
+  }
   if (!m) return { status: 200 };
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
