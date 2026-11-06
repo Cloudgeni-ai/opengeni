@@ -345,7 +345,10 @@ describe("workspace repository skills", () => {
       expect(String(output)).toContain("transient provision failure");
     expect(discoveries).toBe(1);
     failing = false;
-    const results = await Promise.all([reader.invoke(undefined!, id), reader.invoke(undefined!, id)]);
+    const results = await Promise.all([
+      reader.invoke(undefined!, id),
+      reader.invoke(undefined!, id),
+    ]);
     for (const output of results)
       expect(JSON.parse(output as string).files[0].content).toContain("# Guidance");
     expect(discoveries).toBe(2);
