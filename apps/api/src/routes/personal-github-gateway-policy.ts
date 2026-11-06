@@ -296,13 +296,24 @@ export async function inspectPersonalGitHubPush(input: {
       return { kind: "forward", body: forwardBody, requestId: decision.requestId };
     }
     await prefix.stream?.cancel().catch(() => undefined);
+    // Git shows a side-band error (band 3) as `remote: ...`; without
+    // side-band an `ERR` packet ends the push with the same text.
+    const sideBand = Buffer.from(prefix.bytes.subarray(0, 4096)).includes("side-band");
+    const line = Buffer.from(
+      `${sideBand ? "\u0003" : "ERR "}Opengeni: ${decision.message}\n`,
+      "utf8",
+    );
+    const packet = Buffer.concat([
+      Buffer.from((line.byteLength + 4).toString(16).padStart(4, "0"), "ascii"),
+      line,
+    ]);
     return {
       kind: "respond",
-      response: new Response(`Opengeni: ${decision.message}\n`, {
-        status: 403,
+      response: new Response(packet as unknown as BodyInit, {
+        status: 200,
         headers: {
           "cache-control": "no-store",
-          "content-type": "text/plain; charset=utf-8",
+          "content-type": "application/x-git-receive-pack-result",
           "x-content-type-options": "nosniff",
         },
       }),

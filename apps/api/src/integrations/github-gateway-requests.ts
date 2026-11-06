@@ -675,6 +675,23 @@ function resolveValue(value: GraphqlValue, variables: Record<string, unknown>): 
 const GITHUB_REPOSITORY_URL =
   /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
 
+/** First path segments of github.com URLs that are not repository owners. */
+const GITHUB_RESERVED_OWNERS = new Set([
+  "orgs",
+  "users",
+  "enterprises",
+  "settings",
+  "apps",
+  "marketplace",
+  "sponsors",
+  "topics",
+  "collections",
+  "search",
+  "notifications",
+  "login",
+  "features",
+]);
+
 /**
  * Repositories a mutation's input names directly rather than by node ID:
  * `repositoryNameWithOwner` (createCommitOnBranch) and github.com URLs
@@ -692,9 +709,12 @@ function collectNamedRepositories(
     let name: string | undefined;
     if (key === "repositoryNameWithOwner" && /^[^/\s]+\/[^/\s]+$/u.test(value)) {
       [owner, name] = value.split("/") as [string, string];
-    } else {
+    } else if (key !== null && /url$/iu.test(key)) {
+      // URL-typed inputs only (`subIssueUrl`), never free text such as a body.
       const match = GITHUB_REPOSITORY_URL.exec(value);
-      if (match) [owner, name] = [match[1]!, match[2]!.replace(/\.git$/iu, "")];
+      if (match && !GITHUB_RESERVED_OWNERS.has(match[1]!.toLowerCase())) {
+        [owner, name] = [match[1]!, match[2]!.replace(/\.git$/iu, "")];
+      }
     }
     if (owner && name) into.set(`${owner}/${name}`.toLowerCase(), { owner, name });
     return;

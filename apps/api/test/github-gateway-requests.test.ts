@@ -207,6 +207,20 @@ describe("GitHub gateway review fixes", () => {
     expect(result.accountLevel).toBe(false);
   });
 
+  test("links in free text are not repository targets", () => {
+    const result = classifyGitHubGraphqlRequest({
+      query: "mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }",
+      variables: {
+        input: {
+          subjectId: "PR_kwDOAbcdefgh",
+          body: "https://github.com/upstream/lib/issues/42 is fixed by this",
+          projectUrl: "https://github.com/orgs/acme/projects/3",
+        },
+      },
+    });
+    expect(result.mutationRepositories).toEqual([]);
+  });
+
   test("account-level mutations and owner-scoped reads", () => {
     expect(
       classifyGitHubGraphqlRequest({

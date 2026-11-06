@@ -246,8 +246,21 @@ describe("pushes the gateway cannot read", () => {
     expect(calls[0]!.action).toMatchObject({ alwaysAsk: true });
     expect(result.kind).toBe("respond");
     if (result.kind === "respond") {
-      expect(result.response.status).toBe(403);
-      expect(await result.response.text()).toContain("Waiting for your approval");
+      expect(result.response.status).toBe(200);
+      const text = await result.response.text();
+      expect(text.slice(4)).toStartWith("ERR Opengeni: Waiting for your approval");
+      expect(Number.parseInt(text.slice(0, 4), 16)).toBe(Buffer.byteLength(text));
+    }
+    const sideBand = await inspectPersonalGitHubPush({
+      body: stream(Buffer.from("garbage report-status side-band-64k")),
+      gzip: false,
+      repositoryFullName: "acme/widgets",
+      isAncestor: async () => null,
+      identity,
+      decide,
+    });
+    if (sideBand.kind === "respond") {
+      expect((await sideBand.response.text()).slice(4)).toStartWith("\u0003Opengeni: Waiting");
     }
   });
 
