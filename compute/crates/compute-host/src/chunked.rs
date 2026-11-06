@@ -37,10 +37,10 @@
 //! confirmed recently names it (see [`confirmed`]).
 
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -52,10 +52,10 @@ use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::{Begun, ChunkStore, Held, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 pub use crate::image::CHUNK_BYTES;
-use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
+use crate::image::{Hash, ZERO, chunk_count, chunk_range};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{
@@ -66,6 +66,7 @@ use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 use confirmed::{Confirmed, ImageChunks};
 use files::{Earlier, reusable};
+use seeds::{Identity, Seed, Seeds};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -132,140 +133,6 @@ pub struct Chunked {
     /// What each sandbox's archive stored that it has not published yet,
     /// held across its tries, and when a try last began.
     in_flight: Arc<InFlight>,
-}
-
-/// What identifies one version of a local file: if any of it changes, the
-/// file's chunk hashes must be computed again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Identity {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-impl Identity {
-    fn of(path: &Path) -> io::Result<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
-    }
-}
-
-/// A local file a fetched disk probably shares most of its chunks with, at
-/// the same offsets, and the hash of each of its chunks.
-#[derive(Debug)]
-struct Seed {
-    path: PathBuf,
-    identity: Identity,
-    hashes: Vec<Hash>,
-}
-
-impl Seed {
-    fn compute(path: &Path) -> io::Result<Self> {
-        let identity = Identity::of(path)?;
-        let file = File::open(path)?;
-        let indices: Vec<usize> = (0..chunk_count(identity.len)).collect();
-        let hashes = hash_chunks(&file, identity.len, &indices)?;
-        if Identity::of(path)? != identity {
-            return Err(io::Error::other("the file changed while it was hashed"));
-        }
-        Ok(Self {
-            path: path.to_owned(),
-            identity,
-            hashes,
-        })
-    }
-
-    /// Whether chunk `index` of the seed holds exactly `hash`.
-    fn holds(&self, index: usize, hash: &str) -> bool {
-        self.hashes
-            .get(index)
-            .zip(hash_from_hex(hash).ok())
-            .is_some_and(|(held, wanted)| *held == wanted)
-    }
-}
-
-/// The chunk hashes of each local file disks are fetched over (the host's
-/// base image and each sandbox image it keeps), computed at most once per
-/// version of the file however many fetches ask at once. One file's
-/// hashing never holds up fetches over another, and the hashes of a file
-/// that is gone (an image retired) are dropped by the next fetch.
-#[derive(Debug, Default)]
-struct Seeds {
-    by_path: std::sync::Mutex<HashMap<PathBuf, SeedSlot>>,
-}
-
-/// Where the hashes of one file are kept, once taken.
-type SeedSlot = Arc<Mutex<Option<Arc<Seed>>>>;
-
-impl Seeds {
-    /// The hashes of `path` as it is now, from `compute` (which blocks) if
-    /// none were taken of this version of it. `None` if it cannot be read.
-    async fn get(
-        &self,
-        path: &Path,
-        compute: impl FnOnce(&Path) -> io::Result<Seed> + Send + 'static,
-    ) -> Option<Arc<Seed>> {
-        let slot = {
-            let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
-            // A slot no fetch holds, for a file that is gone, keeps nothing
-            // anyone can use again. There are only as many as the host has
-            // had images since the last fetch.
-            by_path
-                .retain(|held, slot| held == path || Arc::strong_count(slot) > 1 || held.exists());
-            Arc::clone(by_path.entry(path.to_owned()).or_default())
-        };
-        let mut cached = slot.lock().await;
-        let current = match Identity::of(path) {
-            Ok(current) => current,
-            Err(error) => {
-                // Gone (an image retired): nothing more to keep for it.
-                drop(cached);
-                self.forget(path, &slot);
-                tracing::debug!(path = %path.display(), %error, "no seed to fetch over");
-                return None;
-            }
-        };
-        if let Some(seed) = cached.as_ref()
-            && seed.identity == current
-        {
-            return Some(Arc::clone(seed));
-        }
-        *cached = None;
-        let owned = path.to_owned();
-        match tokio::task::spawn_blocking(move || compute(&owned)).await {
-            Ok(Ok(seed)) => {
-                let seed = Arc::new(seed);
-                *cached = Some(Arc::clone(&seed));
-                Some(seed)
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(path = %path.display(), %error, "base image unreadable; downloading whole disks");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(%error, "hashing the base image failed");
-                None
-            }
-        }
-    }
-
-    /// Drops the slot for `path` if it is still `slot`.
-    fn forget(&self, path: &Path, slot: &SeedSlot) {
-        let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
-        if by_path
-            .get(path)
-            .is_some_and(|held| Arc::ptr_eq(held, slot))
-        {
-            by_path.remove(path);
-        }
-    }
 }
 
 impl Chunked {
@@ -1276,6 +1143,7 @@ mod confirmed;
 mod files;
 mod packed;
 mod rootfs;
+mod seeds;
 pub(crate) use rootfs::file_id;
 #[cfg(test)]
 mod tests;
