@@ -6,6 +6,63 @@ import { join } from "node:path";
 export const ffmpegPath = process.env.OPENGENI_TEST_FFMPEG_PATH ?? "ffmpeg";
 export const hasFfmpeg = spawnSync(ffmpegPath, ["-version"]).status === 0;
 
+/**
+ * Captures a browser made, as the web recorder records: Chromium's
+ * MediaRecorder, `audio/webm;codecs=opus` at 32 kbit/s, cut every 5 s, with
+ * each chunk's start and duration measured as the recorder does (pauses
+ * left out). `bytes` are the lengths of the chunks the browser handed out.
+ *
+ * - `suspended`: 2 s of tone from an AudioContext's MediaStreamDestination,
+ *   the context suspended for 130 s, then 2 s more. The track delivers no
+ *   audio while suspended, so its timestamps jump 130 s.
+ * - `paused`: 2 s of a microphone, the recorder paused for 130 s, then 2 s
+ *   more. The recorder leaves the pause out of its timestamps, as the
+ *   chunks' durations do.
+ */
+export const BROWSER_CAPTURES = {
+  suspended: {
+    file: "recording-capture-suspended-130s.webm",
+    chunks: [
+      { bytes: 8_280, startMilliseconds: 0, durationMilliseconds: 132_024 },
+      { bytes: 8_134, startMilliseconds: 132_024, durationMilliseconds: 1_980 },
+    ],
+  },
+  paused: {
+    file: "recording-capture-paused-130s.webm",
+    chunks: [
+      { bytes: 5_622, startMilliseconds: 0, durationMilliseconds: 2_031 },
+      { bytes: 8_117, startMilliseconds: 2_031, durationMilliseconds: 1_971 },
+    ],
+  },
+} as const;
+
+/** A browser capture's chunks as they were uploaded. */
+export function browserCaptureChunks(capture: keyof typeof BROWSER_CAPTURES) {
+  const { file, chunks } = BROWSER_CAPTURES[capture];
+  const bytes = new Uint8Array(readFileSync(join(import.meta.dir, "fixtures", file)));
+  let offset = 0;
+  return chunks.map((chunk, chunkNumber) => {
+    const piece = bytes.slice(offset, offset + chunk.bytes);
+    offset += chunk.bytes;
+    return {
+      chunkNumber,
+      startMilliseconds: chunk.startMilliseconds,
+      durationMilliseconds: chunk.durationMilliseconds,
+      objectKey: `k${chunkNumber}`,
+      bytes: piece,
+    };
+  });
+}
+
+/** How loud 16 kHz mono PCM is around a second of it, as RMS of full scale. */
+export function loudnessAt(samples: Int16Array, second: number): number {
+  const from = Math.max(0, Math.round((second - 0.25) * 16_000));
+  const to = Math.min(samples.length, Math.round((second + 0.25) * 16_000));
+  let sum = 0;
+  for (let index = from; index < to; index += 1) sum += (samples[index]! / 32_768) ** 2;
+  return to > from ? Math.sqrt(sum / (to - from)) : 0;
+}
+
 /** A WebM/Opus tone, the way a browser MediaRecorder would produce it. */
 export function opusWebm(seconds: number, frequency = 440): Uint8Array {
   return tone(
