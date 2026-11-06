@@ -910,22 +910,31 @@ export class NatsControlRpc implements ControlRpc {
 
 /** A received but malformed response is not evidence of an offline agent.
  * Decoding stays outside the transport catch so corruption cannot become a
- * retryable refresh outage (or license retry of an already-sent operation). */
+ * retryable refresh outage (or license retry of an already-sent operation).
+ * A reply is accepted only for the request it names: anything published to
+ * this request's reply subject that answers another request (or none) is
+ * refused as malformed, never returned as this request's result. */
 function decodeControlReply(requestId: string, data: Uint8Array): ControlResponse {
+  let response: ControlResponse;
   try {
-    return ControlResponse.decode(data);
+    response = ControlResponse.decode(data);
   } catch {
-    return {
-      requestId,
-      error: {
-        code: ErrorCode.ERROR_CODE_PROTOCOL,
-        message: "The machine returned a malformed control response.",
-        retryable: false,
-        detail: {},
-      },
-      result: undefined,
-    };
+    return malformedControlResponse(requestId);
   }
+  return response.requestId === requestId ? response : malformedControlResponse(requestId);
+}
+
+function malformedControlResponse(requestId: string): ControlResponse {
+  return {
+    requestId,
+    error: {
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      message: "The machine returned a malformed control response.",
+      retryable: false,
+      detail: {},
+    },
+    result: undefined,
+  };
 }
 
 /** A `ControlResponse` carrying a synthesized AGENT_OFFLINE error. `neverSent` marks

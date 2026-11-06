@@ -46,6 +46,7 @@ import {
   learnConfirmedVoices,
   rejectedVoices,
   rejectVoiceSuggestion,
+  releaseRecordingVoices,
   suggestSpeakersByVoice,
   syncSpeakerVoice,
   type RecordingSpeakerVoice,
@@ -1059,7 +1060,8 @@ export async function nameRecording(
 /**
  * Start deleting a recording: it disappears from every read at once, and the
  * deletion workflow then removes its media objects and its rows. Only the
- * person who recorded it may delete it. Repeating it is harmless.
+ * person who recorded it may delete it. Its speakers' voices leave the
+ * voiceprints they taught in the same step. Repeating it is harmless.
  */
 export async function markRecordingDeleting(
   db: Database,
@@ -1078,6 +1080,12 @@ export async function markRecordingDeleting(
       .for("update");
     if (!row) throw new RecordingNotFoundError();
     if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+    // Also on a retry: a recording marked deleting before this step existed
+    // still releases its voices.
+    await releaseRecordingVoices(tx, {
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+    });
     if (row.state === "deleting") return { ownerSubjectId: row.ownerSubjectId };
     await tx
       .update(schema.recordings)

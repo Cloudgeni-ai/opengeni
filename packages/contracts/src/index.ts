@@ -5398,10 +5398,23 @@ export const SlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
     createdAt: primitives.string.datetime({ offset: true }),
     updatedAt: primitives.string.datetime({ offset: true }),
     /**
-     * Shown to the person linking when they may link this Slack account as a
-     * member of the organization, without workspace access, once they confirm
-     * it (`POST …/user-link-intents/:requestId/link`). The label names the
-     * Slack account when Slack says who it is.
+     * The Slack account this request links, shown to the person linking while
+     * it is prepared so they see whose account it is. Names it by display
+     * name, real name and unique Slack username plus the Slack workspace, when
+     * Slack says who it is.
+     */
+    slackAccountLabel: z.string().min(1).max(256).nullable().optional(),
+    /**
+     * Whether the person linking may link this Slack account now by confirming
+     * it (`POST …/user-link-intents/:requestId/link` with this request's
+     * `version`). Preparing a request never links it, so a link someone else
+     * sent can't attach the sender's Slack account to whoever opens it.
+     */
+    canLink: z.boolean().optional(),
+    /**
+     * @deprecated Use `canLink` and `slackAccountLabel`. Set when `canLink` is
+     * true because the person is a member of the organization without access
+     * to the workspace.
      */
     organizationMemberLink: z
       .object({ slackAccountLabel: z.string().min(1).max(256).nullable() })
@@ -23747,6 +23760,7 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
+export * from "./agent-instructions-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

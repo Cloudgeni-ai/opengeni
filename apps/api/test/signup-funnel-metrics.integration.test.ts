@@ -186,7 +186,10 @@ describe("managed sign-up funnel metrics", () => {
       "/?auth_event=email_verified&utm_source=producthunt",
     );
     const verificationPath = `${verificationUrl.pathname}${verificationUrl.search}`;
-    const verified = await app.request(verificationPath, { headers: requestHeaders() });
+    // Followed in the browser that signed up, so its password stays usable.
+    const verified = await app.request(verificationPath, {
+      headers: requestHeaders(cookiePairs(signUp)),
+    });
     expect(verified.status).toBeLessThan(400);
     expect(
       await counter(observability, "opengeni_auth_events_total", {

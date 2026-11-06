@@ -230,10 +230,11 @@ exactly their access, and each change waits for them to confirm it in the chat.
   child or service session). Their descriptions never change with the
   session's access. A host that embeds Opengeni turns them off by leaving them
   out of its tool selection.
-- Each call resolves, live, as whom it runs. With full access (below): the
-  person who gave it, as before. Otherwise: the person who sent this turn's
-  message. Scheduled, goal, inbox and other turns nobody sent run nothing, and
-  neither do API-key and service turns, or child and service sessions.
+- Each call resolves, live, as whom it runs. With full access (below), in a
+  turn the person who gave it caused: that person. Otherwise: the person who
+  sent this turn's message. Scheduled, goal, inbox and other turns nobody sent
+  run nothing, and neither do API-key and service turns, or child and service
+  sessions.
 - When the API accepts a person's message it freezes, with that turn, what the
   message may do (`session_turn_app_action_grants`): who sent it, whether they
   can confirm changes from where they sent it, and the most it may do, which
@@ -316,11 +317,21 @@ or admin manages.
   the title or the same menu (`DELETE`; `GET` returns the state and what the
   viewer may do).
 - While it is on, the app-action tools are listed whatever the session's tool
-  selection, changes run without a confirmation, in any workspace the granter
-  can use, and every call checks again, so turning it off, the organization
-  turning it off, or the granter leaving the session's workspace (or losing
-  the owner or admin role that gave them access to it) applies to the very
-  next call.
+  selection (the listing follows the session, so it never changes between
+  turns of one chat), and every call checks again, so turning it off, the
+  organization turning it off, or the granter leaving the session's workspace
+  (or losing the owner or admin role that gave them access to it) applies to
+  the very next call.
+- Each call runs as the granter only in a turn the granter caused: their own
+  message (sent with their own sign-in, so the grant frozen with the turn is
+  theirs) or a continuation whose recorded causal person
+  (`initiating_human_subject_id`) is them, such as their goals, schedules and
+  child results. There, changes run without a confirmation, in any workspace
+  the granter can use. In a turn anyone else caused in the same shared chat
+  (another member's message, their schedule or agent, a workspace key), app
+  actions run exactly as if the session had no full access, as that sender
+  with their own confirmations, and session tools given another workspace's
+  `workspaceId` are refused.
 - They cover exactly the organization MCP server's catalog and run each
   action in process as the granter, capped by the granter's own live access
   (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth

@@ -395,6 +395,7 @@ export function buildTimeline(
         outcome,
         blockedReason,
         detail: undefined,
+        subject: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -618,6 +619,11 @@ export function buildTimeline(
         blockedReason,
       );
       recordStartupFailureDetail(setupPhase, payload);
+      const rigName = setupPhase === "rig" ? stringValue(payload.rigName)?.trim() : undefined;
+      if (rigName) {
+        const rigItem = startupPhases.get(`${startupTurnId}:rig`)?.[0];
+        if (rigItem) rigItem.subject = rigName;
+      }
       continue;
     }
 

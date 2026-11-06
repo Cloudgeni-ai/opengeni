@@ -6,6 +6,10 @@ class FakeNotification extends EventEmitter {
   }
 }
 
+class FakeClipboardItem {
+  constructor(readonly items: unknown) {}
+}
+
 /** A page's process: runs scripts, and can be made to fail or hang. */
 export class FakeWebContents extends EventEmitter {
   /** How every page answers a script, unless one page is told otherwise. */
@@ -85,17 +89,26 @@ export const electronStub = {
   BrowserWindow: FakeBrowserWindow,
   WebContentsView: EventEmitter,
   clipboard: {},
+  ClipboardItem: FakeClipboardItem,
   contextBridge: { exposeInMainWorld: (_key: string, _api: unknown): void => {} },
+  globalShortcut: {},
+  ipcMain: new EventEmitter(),
   ipcRenderer: new EventEmitter(),
   webFrame: { getZoomFactor: () => 1 },
   nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
   nativeTheme: {},
+  net: {},
+  powerMonitor: new EventEmitter(),
+  protocol: {},
+  safeStorage: {},
   screen: {
     getAllDisplays: () => [display],
     getDisplayNearestPoint: () => display,
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
   },
+  session: {},
   shell: { openExternal: async (_url: string): Promise<void> => {} },
+  systemPreferences: {},
   Menu: { buildFromTemplate: (template: unknown) => template },
   Tray: EventEmitter,
   dialog: { showMessageBox: async () => ({ response: 0 }) },

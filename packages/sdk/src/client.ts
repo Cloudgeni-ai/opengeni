@@ -1,3 +1,4 @@
+import { version as sdkVersion } from "../package.json";
 import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
@@ -7948,8 +7949,9 @@ export class OpenGeniClient {
   }
 
   /**
-   * Link the Slack account as a member of the organization, without workspace
-   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   * Link the request's Slack account once the person confirmed it (offered as
+   * `canLink`, naming the account in `slackAccountLabel`). Preparing a request
+   * never links it; this confirmation is required for every link.
    */
   async linkSlackUserAsOrganizationMember(
     workspaceId: string,
@@ -12324,6 +12326,7 @@ export class OpenGeniClient {
     const headers: Record<string, string> = {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      ...(sdkVersion ? { "x-opengeni-sdk-version": sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };

@@ -1817,6 +1817,12 @@ response fields, enum values and event types. Official server builds expose
 `docs/design/api-compatibility-policy.md`.
 Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
 
+The committed `test/integration/sdk-compatibility/versions.json` matrix tests
+pinned stable releases and known customer pins against the current API; it is
+not a limit on the compatibility promise. Requests include
+`x-opengeni-sdk-version` for server diagnostics; missing or unknown versions
+never change authorization or compatibility admission.
+
 ## Proxy through your own API
 
 For the React conversation, use the packaged

@@ -10,8 +10,12 @@ import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
-import { assertRuntimeDatabasePostureForLedger } from "./helpers/runtime-posture-for-ledger";
+import {
+  assertRuntimeDatabasePosture,
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+  RETIRING_FEATURE_TABLES,
+} from "../src/runtime-posture";
 
 const migration = "1273_drop_retired_automation_and_pr_review.sql";
 const sourceDirectory = join(import.meta.dir, "../drizzle");
@@ -23,6 +27,17 @@ let owner: postgres.Sql | null = null;
 let client: DbClient | null = null;
 let prefix: string | null = null;
 let scope: { accountId: string; workspaceId: string };
+let predecessorViolations: string[] = [];
+
+// The database stops before 1273, so objects later migrations add are absent
+// from it by design. Compare the posture with the predecessor's own rather
+// than with the current contract, which grows with every later migration.
+async function postureViolations(): Promise<string[]> {
+  return evaluateRuntimeDatabasePosture(
+    await inspectRuntimeDatabasePosture(client!.db, options),
+    options,
+  );
+}
 
 beforeAll(async () => {
   if (!realDatabase) return;
@@ -52,6 +67,7 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
+  predecessorViolations = await postureViolations();
 }, 600_000);
 
 afterAll(async () => {
@@ -81,7 +97,7 @@ async function assertNotApplied() {
   const [receipt] = await owned!.admin<{ present: boolean }[]>`
     select exists(select 1 from schema_migrations where name = ${migration}) as present`;
   expect(receipt?.present).toBe(false);
-  await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
+  expect(await postureViolations()).toEqual(predecessorViolations);
 }
 
 describe.skipIf(!realDatabase)("retired automation and PR-review contraction", () => {
@@ -144,10 +160,10 @@ describe.skipIf(!realDatabase)("retired automation and PR-review contraction", (
       createdBy: { kind: "subject", subjectId: "contract-test-owner" },
     });
     expect(session.workspaceId).toBe(scope.workspaceId);
-    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
+    await assertRuntimeDatabasePosture(client!.db, options);
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
-    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
+    await assertRuntimeDatabasePosture(client!.db, options);
     await migrate(owned!.ownerUrl);
-    await assertRuntimeDatabasePostureForLedger(client!.db, owned!.admin, options);
+    await assertRuntimeDatabasePosture(client!.db, options);
   }, 180_000);
 });

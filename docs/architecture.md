@@ -1158,9 +1158,14 @@ readers. A major release or deprecation period never permits a break; an
 incompatible design ships as a new version beside the old one, with
 version-specific adapters over shared application logic. `bun run
 check:public-api` and the major-changeset guard enforce it in CI.
+The [published SDK integration lane](api-compatibility-testing.md) runs current
+source and pinned npm builds against the current API and worker. The static
+guard also prevents silently removing tested versions from this bounded matrix;
+the matrix is not a limit on the compatibility promise.
 
 Official builds expose `serverVersion` in health and client config; nothing
-negotiates at runtime.
+negotiates at runtime. `x-opengeni-sdk-version` is optional, content-free
+request/trace metadata, never an admission gate or metric label.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
 ([details](product-integration.md#api-contract-revision)).
@@ -1689,6 +1694,11 @@ Canonical: [`human-input.md`](human-input.md),
 Accepted turns freeze model choice, provider/deployment routing, billing,
 governance, initiating authority, and tool/connection delegations. Recovery
 reuses these snapshots, never mutable workspace defaults.
+
+Chat streaming completion is checked in `packages/runtime/src/model-provider-routing.ts`
+before the SDK can release tool calls: transport EOF alone is not completion.
+Missing primary-choice finish evidence stops without automatic replay; see
+[`model-providers.md`](model-providers.md).
 
 Built-in tool and MCP-server defaults inherit independently when their
 `settings.sessionToolDefaults` key is absent. Arrays, including empty ones,

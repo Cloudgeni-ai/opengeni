@@ -252,6 +252,34 @@ Before editing, identify which layer owns the behavior:
 - Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
 
+### Model-facing text (prompts and tool descriptions)
+
+Every model request carries the prompt modules in
+`packages/runtime/src/agent-instructions/` and every attached tool's
+description and schema, so each sentence there is paid on every call of every
+session. Embedded product agents pay for it too, and their customers compare
+the cost with leaner platforms. Before you add or change this text:
+
+- Gate it on the fact that makes it relevant: a capability, an attached tool,
+  a sandbox, a feature flag or a session kind. It must disappear when that fact
+  is absent. Never write always-on text about a feature that can be off, and
+  name a tool only where it is attached.
+- Say each rule once, where it belongs: tool mechanics go in that tool's
+  description, and a cross-cutting rule goes in the section that owns it. Do
+  not restate a rule elsewhere for emphasis.
+- Fix a behaviour problem by changing the sentence that causes it before you
+  add a new one, and check whether your change makes existing text redundant.
+  Add an example or an edge case only when it changes behaviour.
+- Keep the cached prefix stable. Per-turn data, times and caller context go in
+  the user message, never in instructions or tool definitions (see
+  `AGENTS.md`).
+- Measure the change. Record the byte or token delta in
+  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
+  tests green, and do not raise a budget without a reason stated in the PR.
+- Shortening existing behavioural text needs before/after behaviour evidence,
+  for example from `scripts/agent-behavior-eval`, because most of it guards a
+  known failure. Omitting text for a feature that is switched off does not.
+
 ### Public API compatibility
 
 Canonical policy: `docs/design/api-compatibility-policy.md`. Existing customer

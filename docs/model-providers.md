@@ -1030,6 +1030,14 @@ existing fenced recovery path from durable history. This is intentionally
 narrower than blindly replaying every interrupted stream; ordinary partial or
 outcome-unknown provider operations retain their existing safety classification.
 
+The Chat streaming adapter also requires a nonempty finish reason on choice 0
+before accepting the SDK's `response_done`. Clean EOF or `[DONE]` alone cannot
+complete partial text or release assembled tool calls. A missing finish reason
+fails with `provider_incomplete_response` without automatic replay; a provider's
+explicit streamed error keeps its original evidence. Usage-only trailing chunks
+do not erase an observed finish reason, and a terminal reason does not require a
+redundant `[DONE]` marker.
+
 Other Zen models use the same generic registry, but authentication and billing
 ownership must stay explicit:
 
