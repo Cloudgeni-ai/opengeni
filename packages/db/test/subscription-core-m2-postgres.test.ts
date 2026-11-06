@@ -1257,27 +1257,6 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         'subscription_connection', 1
       )`;
       await verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId);
-      const legacyClaudeId = crypto.randomUUID();
-      const legacyClaudeAuthorityId = crypto.randomUUID();
-      await shared!.admin`
-      insert into organization_user_resource_authorities (
-        id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
-      ) values (
-        ${legacyClaudeAuthorityId}::uuid, ${fixture.accountId}, ${membership!.id}::uuid,
-        'claude_subscription', ${legacyClaudeId}::uuid, 1, 'active'
-      )`;
-      await shared!.admin`
-      insert into claude_subscription_credentials (
-        id, account_id, workspace_id, credential_encrypted, status,
-        authority_scope, owner_organization_membership_id,
-        organization_user_resource_authority_id, organization_user_resource_kind,
-        organization_user_resource_authority_generation
-      ) values (
-        ${legacyClaudeId}::uuid, ${fixture.accountId}, ${personalWorkspace!.id}::uuid,
-        'v1:legacy-claude', 'active', 'user', ${membership!.id}::uuid,
-        ${legacyClaudeAuthorityId}::uuid, 'claude_subscription', 1
-      )`;
-
       const removed = await updateOrganizationMember(client!.db, {
         organizationId: fixture.accountId,
         actorSubjectId: fixture.subjectId,
@@ -1317,7 +1296,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
           ),
         ),
       );
-      expect(finalized).toEqual({ subscriptions: "1", claude: "1" });
+      expect(finalized).toEqual({ subscriptions: "1", claude: "0" });
       const [remaining] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from subscription_connections where id = ${connectionId}::uuid`;
       expect(remaining?.count).toBe(0);

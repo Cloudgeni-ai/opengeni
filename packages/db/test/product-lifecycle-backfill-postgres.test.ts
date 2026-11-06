@@ -323,8 +323,6 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
     const sourceTables = [
       "self_service_organization_setup_receipts",
       "additional_organization_creation_receipts",
-      "codex_subscription_credentials",
-      "xai_subscription_credentials",
       "organization_model_provider_connections",
       "organization_model_provider_connection_operations",
       "credit_ledger_entries",
@@ -415,8 +413,6 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
     const sourceTables = new Set([
       "connections",
       "credit_ledger_entries",
-      "codex_subscription_credentials",
-      "xai_subscription_credentials",
       "organization_model_provider_connections",
       "organization_model_provider_connection_operations",
     ]);
