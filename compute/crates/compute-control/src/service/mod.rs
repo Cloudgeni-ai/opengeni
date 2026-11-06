@@ -427,6 +427,18 @@ impl<S: Store> Service<S> {
                     row.sends.send(change.set.epoch, stamp);
                 }
                 Next::Clear(change) => row.ownership = change.set,
+                // It exists nowhere: its row goes, unless written meanwhile.
+                Next::Forget => {
+                    if self.store.delete(id, row.version).await? {
+                        tracing::info!(
+                            sandbox = %id,
+                            host = asked.host.0,
+                            "forgot a sandbox its host never held and nothing archived"
+                        );
+                        return Ok((next, None));
+                    }
+                    continue;
+                }
                 Next::Nothing | Next::PlaceElsewhere => {}
             }
             if (row.ownership, row.sends) == before {

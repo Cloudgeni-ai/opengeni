@@ -37,7 +37,8 @@ fn validate(request_id: &str) -> Result<(), Failure> {
 impl<S: Store> Service<S> {
     /// Creates `team`'s sandbox for request `request_id`, whose create
     /// digests to `digest`, or, when that request made one already, wakes
-    /// it and answers it.
+    /// it and answers it. One whose host failed its create, so that it
+    /// exists nowhere, is forgotten by that wake and created again.
     ///
     /// # Errors
     ///
@@ -61,28 +62,36 @@ impl<S: Store> Service<S> {
             created_ms: now_ms(),
             gone_ms: None,
         };
-        let claimed = self.store.claim_request(&asked).await?;
-        if claimed.digest != digest {
-            return Err(Failure::Mismatch(request_id.to_owned()));
-        }
-        if claimed.gone() {
-            return Err(Failure::Gone(request_id.to_owned()));
-        }
-        match self.store.sandbox(claimed.id).await? {
-            // The first attempt, or one after a create that left nothing;
-            // if its sandbox was deleted since the request was read, the
-            // insert finds the request retired.
-            None => {
-                self.create_for(claimed.id, team, spec, metadata, Some(request_id))
-                    .await
+        let mut woken = false;
+        loop {
+            let claimed = self.store.claim_request(&asked).await?;
+            if claimed.digest != digest {
+                return Err(Failure::Mismatch(request_id.to_owned()));
             }
-            Some(row) if row.team == team => {
-                let reached = self
-                    .wake(team, claimed.id, PriorityName::Interactive)
-                    .await?;
-                Ok(reached.row)
+            if claimed.gone() {
+                return Err(Failure::Gone(request_id.to_owned()));
             }
-            Some(_) => Err(Failure::NotFound),
+            match self.store.sandbox(claimed.id).await? {
+                // The first attempt, or one after a create that left
+                // nothing; if its sandbox was deleted since the request was
+                // read, the insert finds the request retired.
+                None => {
+                    return self
+                        .create_for(claimed.id, team, spec, metadata, Some(request_id))
+                        .await;
+                }
+                Some(row) if row.team == team => {
+                    match self.wake(team, claimed.id, PriorityName::Interactive).await {
+                        Ok(reached) => return Ok(reached.row),
+                        // Its host failed the create, so the wake forgot
+                        // it (or it was deleted): read the request again,
+                        // once.
+                        Err(Failure::NotFound) if !woken => woken = true,
+                        Err(failure) => return Err(failure),
+                    }
+                }
+                Some(_) => return Err(Failure::NotFound),
+            }
         }
     }
 

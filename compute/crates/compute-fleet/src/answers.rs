@@ -137,6 +137,12 @@ pub enum Next {
     /// ([`Ownership::release`]); one that answered it holds nothing
     /// leaves the copy as whole as it was ([`Ownership::clear`]).
     Clear(Change),
+    /// The host holds nothing of it, no owner ever confirmed holding it,
+    /// and it has no archive: it exists nowhere, as after a create its
+    /// host failed. Delete its row, so a wake answers at once that there
+    /// is no such sandbox, and retrying the create that named it makes it
+    /// again, rather than asking the host again and again.
+    Forget,
 }
 
 /// The answer `outcome`, given `at`, to `op` sent to `host` under `epoch`:
@@ -169,6 +175,7 @@ pub fn answered(
         (Op::Wake, Outcome::NotFound) if still && settled && archived => {
             Next::AdoptHere(row.give(host))
         }
+        (Op::Wake, Outcome::NotFound) if still && settled && sends.landed.is_none() => Next::Forget,
         (Op::HandOff, Outcome::Done) if still => Next::Clear(row.release()),
         (Op::HandOff, Outcome::NotFound) if still && settled => Next::Clear(row.clear()),
         _ => Next::Nothing,
@@ -274,9 +281,10 @@ mod tests {
         assert_eq!(wake(&mut sends, at(1, 7)), Next::Nothing);
         assert_eq!(wake(&mut sends, at(1, 8)), Next::AdoptHere(row.give(A)));
 
-        // Without an archive there is nothing to adopt.
+        // Without an archive there is nothing to adopt: a sandbox that
+        // landed waits for its host.
         let none = answered(
-            &mut Sends::default(),
+            &mut sends,
             TERMS,
             (Op::Wake, A, E),
             Outcome::NotFound,
@@ -285,6 +293,45 @@ mod tests {
             false,
         );
         assert_eq!(none, Next::Nothing);
+    }
+
+    #[test]
+    fn a_create_the_host_failed_is_forgotten_once_not_found_is_final() {
+        let row = owned_by(A);
+        let mut sends = Sends::default();
+        sends.send(E, 4);
+        // The host failed the create: it can no longer land.
+        let failed = answered(
+            &mut sends,
+            TERMS,
+            (Op::Create, A, E),
+            Outcome::Other,
+            at(1, 4),
+            row,
+            false,
+        );
+        assert_eq!(failed, Next::Nothing);
+        assert_eq!(sends, Sends::default(), "answered, and never landed");
+        let wake = |sends: &mut Sends, row, archived| {
+            answered(
+                sends,
+                TERMS,
+                (Op::Wake, A, E),
+                Outcome::NotFound,
+                at(1, 5),
+                row,
+                archived,
+            )
+        };
+        assert_eq!(wake(&mut sends, row, false), Next::Forget);
+        // An archive is adopted instead, and only the owner's answer
+        // counts.
+        assert_eq!(wake(&mut sends, row, true), Next::AdoptHere(row.give(A)));
+        assert_eq!(wake(&mut sends, owned_by(B), false), Next::Nothing);
+        // Not while a create may still land.
+        let mut sending = Sends::default();
+        sending.send(E, 5);
+        assert_eq!(wake(&mut sending, row, false), Next::Nothing);
     }
 
     #[test]
