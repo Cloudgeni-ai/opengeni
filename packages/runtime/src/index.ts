@@ -284,7 +284,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
-import { uniqueListedMcpTools } from "./mcp-listed-tools";
+import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -10330,6 +10330,11 @@ export class PrefixedMcpServer implements MCPServer {
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // Opengeni's own server validates every UUID itself; the model needs
+          // only `format: "uuid"`, not the regular expression repeating it.
+          if (this.firstPartyCatalog) {
+            tool = { ...tool, inputSchema: withoutRedundantUuidPatterns(tool.inputSchema) };
+          }
           // A recoverable operation is never filled, so it keeps its own schema.
           const defaults = configuredMcpOperationRecovery(this, tool.name)
             ? { inputSchema: tool.inputSchema, filled: [] }
