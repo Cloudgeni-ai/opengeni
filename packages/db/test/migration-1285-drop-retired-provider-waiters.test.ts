@@ -17,6 +17,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
+import { postureBeforeMigration, postureThroughMigration } from "./predecessor-runtime-posture";
 
 const migration = "1285_drop_retired_provider_waiters.sql";
 const providers = ["claude", "codex", "xai"] as const;
@@ -152,7 +153,7 @@ async function assertRolledBack() {
   const [state] = await owned!.admin<{ applied: boolean }[]>`
     select exists(select 1 from schema_migrations where name = ${migration}) as applied`;
   expect(state?.applied).toBe(false);
-  await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+  await assertRuntimeDatabasePosture(client!.db, postureBeforeMigration(migration));
 }
 
 describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", () => {
@@ -232,9 +233,9 @@ describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", (
     expect(after.find((routine) => routine.name === "list_continuable_sessions")?.body).toContain(
       "subscription_capacity_waiters",
     );
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
-    await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
+    await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
     await applyContract();
     expect(await definitions()).toEqual(after);
   }, 180_000);

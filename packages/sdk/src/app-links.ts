@@ -29,14 +29,16 @@ export interface AppLinkAccount {
 /**
  * A web link the app can show itself: a conversation or a workspace on some
  * deployment. Everything else on the web (settings, organization, artifacts)
- * stays in the browser.
+ * stays in the browser, unless the app shows the whole web app and asks for
+ * any page (`anyPage`, the desktop app): then a link to any page on the
+ * deployment is one, with its workspace when its address names one.
  */
 export interface AppLink {
   /** The deployment's origin, normalized like a stored account's baseUrl. */
   origin: string;
-  /** Absent for the web's workspace-less `/sessions/:id` links. */
+  /** Absent for the web's workspace-less `/sessions/:id` links and pages naming none. */
   workspaceId: string | null;
-  /** Absent for a link to the workspace itself. */
+  /** Absent for a link to the workspace itself or another of its pages. */
   sessionId: string | null;
   /** The session moment the link points at (`?at=`). */
   at: number | null;
@@ -66,18 +68,27 @@ export interface AppWebPaths {
    * browser and aren't reopened. A workspace-less session link has a null
    * `workspaceId`. A page the app should reopen whose address names neither
    * (say, one addressed by the product's own names) returns both null: the
-   * desktop app then reopens it, but a link to it still opens in the browser.
+   * desktop app then reopens it, but a phone app opens a link to it in the
+   * browser.
    */
   match(
     path: string,
     query: string,
   ): { workspaceId: string | null; sessionId: string | null; at?: number | null } | null;
+  /**
+   * The workspace any page belongs to (its settings, plugins…), read from its
+   * path and query, or null when the address names none. The desktop app
+   * opens a link to such a page on that workspace's account. Absent: links to
+   * pages `match` doesn't know open on the deployment's active account.
+   */
+  workspaceOf?(path: string, query: string): string | null;
 }
 
 const WEB_URL = /^(https?:\/\/[^/?#]+)(\/[^?#]*)?(\?[^#]*)?(#.*)?$/iu;
 const ID = "([A-Za-z0-9][A-Za-z0-9_-]{0,127})";
 const SESSION_PATH = new RegExp(`^/workspaces/${ID}/sessions/${ID}/?$`, "u");
 const WORKSPACE_PATH = new RegExp(`^/workspaces/${ID}(?:/sessions)?/?$`, "u");
+const ANY_WORKSPACE_PAGE = new RegExp(`^/workspaces/${ID}(?:/|$)`, "u");
 const BARE_SESSION_PATH = new RegExp(`^/sessions/${ID}/?$`, "u");
 const SCHEME = /^[a-z][a-z0-9+.-]*$/u;
 
@@ -104,6 +115,7 @@ export const OPENGENI_WEB_PATHS: AppWebPaths = {
     if (workspace) return { workspaceId: workspace[1]!, sessionId: null, at: null };
     return null;
   },
+  workspaceOf: (path) => ANY_WORKSPACE_PAGE.exec(path)?.[1] ?? null,
 };
 
 /** How a product's app reads its links. Both default to Opengeni's own. */
@@ -112,6 +124,13 @@ export interface AppLinkOptions {
   scheme?: string;
   /** The product web app's pages. */
   paths?: AppWebPaths;
+  /**
+   * Also read links to the web app's other pages (settings, plugins, a page a
+   * finished sign-in returns to), for an app that shows the whole web app,
+   * like the desktop app. A phone app, which shows only workspaces and
+   * sessions, leaves this off so those links open in the browser.
+   */
+  anyPage?: boolean;
 }
 
 function appScheme(scheme: string | undefined): string {
@@ -151,15 +170,22 @@ export function parseAppLink(raw: string, options: AppLinkOptions = {}): AppLink
   if (!match) return null;
   const origin = normalizeServerUrl(match[1]!);
   if (!origin) return null;
-  const page = (options.paths ?? OPENGENI_WEB_PATHS).match(match[2] ?? "/", match[3] ?? "");
-  if (!page || (!page.workspaceId && !page.sessionId)) return null;
-  return {
-    origin,
-    workspaceId: page.workspaceId,
-    sessionId: page.sessionId,
-    at: page.sessionId ? (page.at ?? null) : null,
-    webUrl,
-  };
+  const paths = options.paths ?? OPENGENI_WEB_PATHS;
+  const path = match[2] ?? "/";
+  const query = match[3] ?? "";
+  const page = paths.match(path, query);
+  if (page && (page.workspaceId || page.sessionId)) {
+    return {
+      origin,
+      workspaceId: page.workspaceId,
+      sessionId: page.sessionId,
+      at: page.sessionId ? (page.at ?? null) : null,
+      webUrl,
+    };
+  }
+  if (!options.anyPage) return null;
+  const workspaceId = paths.workspaceOf?.(path, query) ?? null;
+  return { origin, workspaceId, sessionId: null, at: null, webUrl };
 }
 
 /**

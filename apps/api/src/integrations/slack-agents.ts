@@ -141,10 +141,8 @@ export function slackAgentSessionInstructions(input: {
     lines.push(
       `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}"; your messages post as ${agent.name}.`,
     );
-    const adminInstructions = agent.instructions.trim();
-    if (adminInstructions.length > 0) {
-      lines.push(`Instructions for ${agent.name}:\n${adminInstructions}`);
-    }
+    // The agent's own Instructions are a prompt layer of their own (the chat
+    // is bound to the agent), never copied here.
     const memory = agent.knowledgeCollectionId;
     lines.push(
       memory

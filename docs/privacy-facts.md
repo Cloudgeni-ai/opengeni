@@ -98,6 +98,10 @@ api.openai.com), and otherwise that storage is not turned off for every request 
 operator's own provider for api.openai.com, or
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`).
 
+The result never names the product: it says "this deployment" and describes
+requests in the passive voice, so an agent with a host's own identity keeps
+that identity while stating every fact (asserted by test).
+
 ## Not covered
 
 Opengeni the company's own commitments (hosting region, log retention, DPA,

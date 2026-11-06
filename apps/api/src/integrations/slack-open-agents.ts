@@ -340,16 +340,14 @@ export function slackOpenAgentSessionInstructions(workspaceName: string | null):
 
 /** The whole agent part of an open chat's instructions. */
 export function openSlackAgentInstructions(
-  agent: Pick<SlackAgentRecord, "name" | "description" | "instructions" | "knowledgeCollectionId">,
+  agent: Pick<SlackAgentRecord, "name" | "description" | "knowledgeCollectionId">,
   workspaceName: string | null,
 ): string {
+  // The agent's own Instructions are a prompt layer of their own (the chat is
+  // bound to the agent), never copied here.
   const lines = [
     `You are ${agent.name}, a Slack agent: ${agent.description} Your Slack messages post as ${agent.name}.`,
   ];
-  const adminInstructions = agent.instructions.trim();
-  if (adminInstructions.length > 0) {
-    lines.push(`Instructions for ${agent.name}:\n${adminInstructions}`);
-  }
   if (agent.knowledgeCollectionId) {
     lines.push(
       `Your Memory is Knowledge collection ${agent.knowledgeCollectionId}; when context is missing, search it with knowledge_search (groupId ${agent.knowledgeCollectionId}). This chat can read it but not save to it.`,

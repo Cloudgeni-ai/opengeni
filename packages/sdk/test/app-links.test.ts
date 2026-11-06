@@ -43,6 +43,55 @@ describe("app links", () => {
     expect(() => appHandoffUrl(web, "not a scheme")).toThrow();
   });
 
+  test("an app showing the whole web app reads links to any page, keeping their query", () => {
+    // Where a connector sign-in started in the desktop app returns once the browser is done.
+    const web =
+      "https://app.example.com/workspaces/w2/plugins?connect_item=mcp%3Aitem&integration_oauth=success&connectionId=c1";
+    expect(parseAppLink(appHandoffUrl(web))).toBeNull();
+    expect(parseAppLink(appHandoffUrl(web), { anyPage: true })).toEqual({
+      origin: "https://app.example.com",
+      workspaceId: "w2",
+      sessionId: null,
+      at: null,
+      webUrl: web,
+    });
+    for (const page of ["/workspaces/w2/settings", "/workspaces/w2/secrets/v1/i1?view=edit"]) {
+      expect(parseAppLink(`https://app.example.com${page}`, { anyPage: true })?.workspaceId).toBe(
+        "w2",
+      );
+    }
+    expect(parseAppLink("https://app.example.com/integrations?x=1", { anyPage: true })).toEqual({
+      origin: "https://app.example.com",
+      workspaceId: null,
+      sessionId: null,
+      at: null,
+      webUrl: "https://app.example.com/integrations?x=1",
+    });
+    // Sessions and workspaces read the same either way.
+    expect(
+      parseAppLink("https://app.example.com/workspaces/w1/sessions/s1?at=3", { anyPage: true }),
+    ).toMatchObject({ workspaceId: "w1", sessionId: "s1", at: 3 });
+    // Still only a web page with a plain server address.
+    for (const raw of [
+      "https://user:pass@app.example.com/workspaces/w1/plugins",
+      "javascript:alert(1)",
+      "opengeni://open?url=ftp%3A%2F%2Fapp.example.com%2Fx",
+      "opengeni://elsewhere?url=https%3A%2F%2Fapp.example.com%2Fx",
+    ]) {
+      expect(parseAppLink(raw, { anyPage: true })).toBeNull();
+    }
+    const accounts = [
+      { id: "a", baseUrl: "https://app.example.com", workspaceId: "w1" },
+      { id: "b", baseUrl: "https://app.example.com", workspaceId: "w2" },
+    ];
+    const link = parseAppLink(appHandoffUrl(web), { anyPage: true })!;
+    expect(accountForAppLink(link, accounts, "a")?.id).toBe("b");
+    const elsewhere = parseAppLink("https://other.example.com/workspaces/w2/plugins", {
+      anyPage: true,
+    })!;
+    expect(accountForAppLink(elsewhere, accounts, "a")).toBeNull();
+  });
+
   test("reads a product's own web routes", () => {
     const paths: AppWebPaths = {
       home: (workspaceId) => `/app/${workspaceId}`,
@@ -68,6 +117,9 @@ describe("app links", () => {
       at: null,
     });
     expect(parseAppLink("https://app.example.com/workspaces/w1/sessions/s1", { paths })).toBeNull();
+    expect(
+      parseAppLink("https://app.example.com/app/w1/billing", { paths, anyPage: true }),
+    ).toMatchObject({ workspaceId: null, sessionId: null });
     expect(parseAppLink(web)).toBeNull();
     const connect = computerConnectUrl({
       webUrl: "https://app.example.com/app/w1/chat/s1",

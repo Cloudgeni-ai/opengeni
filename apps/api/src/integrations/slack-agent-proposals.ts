@@ -527,6 +527,7 @@ export async function handleSlackAgentProposalAction(
   const outcome = await createSlackAgent(deps, {
     grant,
     agentId: proposal.id,
+    origin: "slack",
     request: {
       connectionId: proposal.connectionId,
       name: proposal.name,
@@ -547,7 +548,9 @@ export async function handleSlackAgentProposalAction(
         ? `Another agent is already called ${proposal.name}, so it was not created. Ask in the thread for another name.`
         : outcome.kind === "slack_bot_unavailable"
           ? `The Opengeni app is not available in the ${view.workspaceName} workspace, so ${proposal.name} was not created. Turn it on in Opengeni under Capabilities, then Slack, and press Create again.`
-          : `${proposal.name} needs a shared workspace, so it was not created.`;
+          : outcome.kind === "limit_reached"
+            ? `The ${view.workspaceName} workspace has as many agents as it can keep, so ${proposal.name} was not created. Delete one in Opengeni and press Create again.`
+            : `${proposal.name} needs a shared workspace, so it was not created.`;
     return await tellPrivately(outcome.kind, reason);
   }
   const created = await transitionSlackAgentProposal(deps.db, home, {

@@ -11,6 +11,7 @@ import { requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import {
   AutoTopUpStoreError,
   billingAutoTopUpStore,
+  enqueueBillingAutoTopUpNotification,
   type AutoTopUpNotificationPort,
 } from "@opengeni/db";
 import { StripeAutoTopUps } from "../billing-auto-top-up";
@@ -27,7 +28,7 @@ import {
 export function createBillingAutoTopUpService(
   deps: ApiRouteDeps,
   stripe: Stripe = stripeClient(deps),
-  notifications?: AutoTopUpNotificationPort,
+  notifications: AutoTopUpNotificationPort = enqueueBillingAutoTopUpNotification,
 ): StripeAutoTopUps {
   return new StripeAutoTopUps(stripe, billingAutoTopUpStore(deps.db, notifications), {
     enabled: deps.settings.billingMode === "stripe" && deps.settings.billingAutoTopUpEnabled,

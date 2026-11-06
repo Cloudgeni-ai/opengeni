@@ -12192,15 +12192,25 @@ describe("Slack agents", () => {
     const [chat] = await agentInteractions(value.routed!.workspaceId);
     expect(chat).toMatchObject({ slack_agent_id: analytics.id });
     const [session] = await shared!.admin<
-      { initial_message: string; instructions: string | null; metadata: Record<string, unknown> }[]
-    >`select initial_message, instructions, metadata from sessions where id = ${chat!.session_id}`;
+      {
+        initial_message: string;
+        instructions: string | null;
+        metadata: Record<string, unknown>;
+        agent_id: string | null;
+        agent_prompt_revision: number | null;
+      }[]
+    >`select initial_message, instructions, metadata, agent_id::text, agent_prompt_revision
+      from sessions where id = ${chat!.session_id}`;
     expect(session!.initial_message).toContain("revenue last week?");
     expect(session!.initial_message).not.toContain("+analytics");
     expect(session!.metadata).toMatchObject({
       slackAgent: { id: analytics.id, name: "Analytics" },
     });
+    // The chat is bound to the agent at its current revision; the agent's own
+    // Instructions reach it through the agent prompt layer, never copied here.
+    expect(session).toMatchObject({ agent_id: analytics.id, agent_prompt_revision: 1 });
     expect(session!.instructions).toContain("You are Analytics");
-    expect(session!.instructions).toContain("Always sign off as Analytics.");
+    expect(session!.instructions).not.toContain("Always sign off as Analytics.");
     expect(session!.instructions).toContain("Handles incidents.");
     expect(session!.instructions).toContain("- Ops Desk (");
     expect(session!.instructions).not.toContain("+ops-desk");
