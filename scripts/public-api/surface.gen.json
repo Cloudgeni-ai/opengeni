@@ -30127,6 +30127,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.canLink": "boolean?",
         "$.completedAt": "string! null",
         "$.createdAt": "string!",
         "$.decidedAt": "string! null",
@@ -30135,6 +30136,7 @@
         "$.organizationMemberLink": "object? null",
         "$.organizationMemberLink.slackAccountLabel": "string! null",
         "$.requestedAt": "string! null",
+        "$.slackAccountLabel": "string? null",
         "$.status": "ref(SlackUserLinkAccessRequestStatus)!",
         "$.subjectLabel": "string! null",
         "$.updatedAt": "string!",

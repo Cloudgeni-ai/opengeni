@@ -3271,6 +3271,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(prepared).toMatchObject({
       status: "prepared",
       version: 1,
+      canLink: true,
+      slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
       organizationMemberLink: {
         slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
       },
@@ -3330,7 +3332,11 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // Someone outside the organization is not offered it and can't force it.
     const outsiderSlackUserId = `U_OUTSIDER_${crypto.randomUUID()}`;
     const outsider = await prepare(outsiderId, outsiderSlackUserId);
-    expect(outsider).toMatchObject({ status: "prepared", organizationMemberLink: null });
+    expect(outsider).toMatchObject({
+      status: "prepared",
+      canLink: false,
+      organizationMemberLink: null,
+    });
     expect((await link(outsiderId, outsider.id, 1)).status).toBe(403);
     expect(
       await getSlackBotUserLink(
@@ -3342,6 +3348,111 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ).toBeNull();
     // Nor can anyone confirm another person's request.
     expect((await link(memberId, outsider.id, 1)).status).toBe(400);
+  });
+
+  test("a workspace member's opened link links nothing until they confirm which Slack account it is", async () => {
+    if (!available) return;
+    const value = await fixture({ ownerPermissions: ["sessions:create", "sessions:read"] });
+    const memberId = value.owner.subjectId.replace(/^user:/, "");
+    await shared!.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${memberId}, 'Slack linker', ${`${memberId}@example.test`}, true)`;
+    await shared!.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${memberId}, 'credential', ${memberId})`;
+    const identity = await synchronizeCanonicalHumanLoginBindings(client.db, memberId);
+    await shared!.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+      ) values (
+        ${`session-${memberId}`}, ${memberId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      )`;
+    Reflect.set(value.deps, "managedAuth", {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const userId = headers.get("x-test-managed-user");
+          return {
+            headers: new Headers(),
+            response: userId
+              ? {
+                  session: {
+                    id: `session-${userId}`,
+                    userId,
+                    expiresAt: new Date(Date.now() + 60_000),
+                  },
+                  user: { id: userId, email: `${userId}@example.test`, name: "Slack linker" },
+                }
+              : null,
+          };
+        },
+      },
+    });
+    const headers = { "content-type": "application/json", "x-test-managed-user": memberId };
+    const linkToken = createSlackUserLinkToken(signingMaterial, {
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackUserId: "U0SAM",
+    });
+    const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
+    const storedLinks = async () =>
+      await shared!.admin<{ subjectId: string }[]>`
+        select subject_id as "subjectId" from slack_bot_user_links
+        where connection_id = ${value.connectionId} and slack_user_id = 'U0SAM'`;
+
+    // Opening the link (which may have come from someone else) only prepares
+    // it, naming the Slack account, even though the member could link it.
+    const prepareResponse = await value.app.request(basePath, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ linkToken }),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = (await prepareResponse.json()) as { id: string; version: number };
+    expect(prepared).toMatchObject({
+      status: "prepared",
+      version: 1,
+      canLink: true,
+      slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
+      organizationMemberLink: null,
+    });
+    expect([...(await storedLinks())]).toEqual([]);
+    // Preparing again, or reading it, links nothing either.
+    expect(
+      await (
+        await value.app.request(basePath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ linkToken }),
+        })
+      ).json(),
+    ).toMatchObject({ id: prepared.id, status: "prepared", version: 1 });
+    expect(
+      await (await value.app.request(`${basePath}/${prepared.id}`, { headers })).json(),
+    ).toMatchObject({ status: "prepared", version: 1, canLink: true });
+    expect([...(await storedLinks())]).toEqual([]);
+
+    // Only the explicit confirmation, at the version shown, links it.
+    const link = (expectedVersion: number) =>
+      value.app.request(`${basePath}/${prepared.id}/link`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
+      });
+    expect((await link(2)).status).toBe(409);
+    expect([...(await storedLinks())]).toEqual([]);
+    const linked = await link(1);
+    expect(linked.status).toBe(200);
+    expect(await linked.json()).toMatchObject({ status: "completed", version: 2 });
+    expect([...(await storedLinks())]).toEqual([{ subjectId: value.owner.subjectId }]);
+
+    // The route that linked on first use is gone.
+    const legacy = await value.app.request(
+      `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-links`,
+      { method: "POST", headers, body: JSON.stringify({ linkToken }) },
+    );
+    expect(legacy.status).toBe(404);
   });
 
   test("reaction ingress filters disabled, legacy-scope, wrong-emoji, and disallowed-channel events before content fetch", async () => {
