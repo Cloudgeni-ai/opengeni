@@ -4480,7 +4480,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             ? { personalResourceAttachment: payload.personalResourceAttachment }
             : {}),
           authorization,
-          delivery: "steer",
+          // `steer_or_send` is resolved atomically with turn state inside
+          // the prompt transaction.
+          delivery: payload.delivery ?? "steer",
           origin: "human",
           ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
           ...(payload.expectedDraftRevision !== undefined

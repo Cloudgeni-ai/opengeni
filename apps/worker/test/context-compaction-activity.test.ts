@@ -48,6 +48,7 @@ import {
   createProductionAgentRuntime,
   EmptyCompactionSummaryError,
   DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+  estimateTokens,
   RETAINED_REPLY_TURN_FIELD,
   SUMMARY_PREFIX,
   TRIMMED_CONTEXT_NOTICE,
@@ -3671,7 +3672,13 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  async function codexCompactedSession() {
+  async function codexCompactedSession(
+    conversation: Array<Record<string, unknown>> = [
+      { type: "message", role: "user", content: "original question" },
+      { type: "message", role: "assistant", content: "original answer" },
+      { type: "message", role: "user", content: "latest ask" },
+    ],
+  ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -3696,11 +3703,6 @@ describe("standalone context compaction execution", () => {
       sandboxBackend: "none",
       frozenCodexCompactionMode: "remote_v2",
     });
-    const conversation = [
-      { type: "message", role: "user", content: "original question" },
-      { type: "message", role: "assistant", content: "original answer" },
-      { type: "message", role: "user", content: "latest ask" },
-    ];
     await withWorkspaceRls(client.db, workspaceId, async (db) => {
       await db.insert(schema.sessionHistoryItems).values(
         conversation.map((item, position) => ({
@@ -3820,6 +3822,166 @@ describe("standalone context compaction execution", () => {
     expect(
       events.filter((event) => event.type === "session.context.compaction.skipped"),
     ).toHaveLength(1);
+  });
+
+  // Production shape: a long Codex chat (one person message, then a long
+  // autonomous run of tool batches and system updates, far beyond the new
+  // model's window) switches to a model with a smaller window.
+  const longAutonomousRun = (steps: number) => [
+    { type: "message", role: "user", content: "start the long task" },
+    ...Array.from({ length: steps }, (_, step) => [
+      {
+        type: "function_call",
+        callId: `call-${step}`,
+        name: "exec",
+        status: "completed",
+        arguments: JSON.stringify({ step }),
+      },
+      {
+        type: "function_call_result",
+        callId: `call-${step}`,
+        name: "exec",
+        status: "completed",
+        output: `result ${step} `.repeat(800),
+      },
+      { type: "message", role: "system", content: `update ${step}` },
+    ]).flat(),
+  ];
+  const SMALL_WINDOW = 100_000;
+  const smallWindowSettings = () =>
+    testSettings({ contextWindowTokens: SMALL_WINDOW, contextReservedOutputTokens: 20_000 });
+  // A Claude-like summarizer on the smaller model: it measures request bytes,
+  // counts tokens with its own tokenizer (`ratio` times the local estimate),
+  // and rejects, as the provider does, any request its window cannot hold.
+  function smallWindowSummarizer(ratio = 1) {
+    const requests: Array<{ input: Array<Record<string, unknown>>; tokens: number; ok: boolean }> =
+      [];
+    const summarize: CompactionSummarizer = async (_settings, input) => {
+      const tokens = Math.ceil(estimateTokens(input) * ratio);
+      const ok = tokens + 20_000 <= SMALL_WINDOW;
+      requests.push({ input, tokens, ok });
+      if (!ok) {
+        throw Object.assign(new Error("Claude context window exceeded"), {
+          code: "context_length_exceeded",
+          status: 400,
+        });
+      }
+      return `summary ${requests.filter((request) => request.ok).length}`;
+    };
+    summarize.estimatePrefixTokens = () => 0;
+    summarize.measureInputBytes = async (_settings, input) =>
+      new TextEncoder().encode(JSON.stringify(input)).length;
+    return { summarize, requests };
+  }
+  function expectToolCallsPaired(input: Array<Record<string, unknown>>) {
+    const calls = new Set<unknown>();
+    for (const item of input) {
+      if (item.type === "function_call") calls.add(item.callId);
+      if (item.type === "function_call_result") expect(calls.has(item.callId)).toBe(true);
+    }
+  }
+
+  test("switching a long chat to a smaller-window model summarizes it in bounded requests", async () => {
+    // About four times the new model's window: nothing may be left out.
+    const { workspaceId, session, scope } = await codexCompactedSession(longAutonomousRun(200));
+    const { summarize, requests } = smallWindowSummarizer();
+    const outcome = await maybeCompactContext(
+      client.db,
+      smallWindowSettings(),
+      scope,
+      null,
+      summarize,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    if (!outcome.compacted) throw new Error("expected the switch to compact");
+    // The history is larger than the new model's whole window...
+    expect(outcome.estimatedTokensBefore).toBeGreaterThan(4 * SMALL_WINDOW);
+    // ...yet no request was larger than it accepts, and none was rejected.
+    expect(requests.length).toBeGreaterThan(4);
+    for (const request of requests) {
+      expect(request.ok).toBe(true);
+      expectToolCallsPaired(request.input);
+    }
+    // Each later request carries the summary so far, so the final summary
+    // covers the whole transcript; nothing was left out.
+    expect(JSON.stringify(requests[0]!.input)).toContain("start the long task");
+    for (const [index, request] of requests.entries()) {
+      if (index === 0) continue;
+      expect(request.input[0]).toMatchObject({
+        role: "user",
+        content: `${SUMMARY_PREFIX}\nsummary ${index}`,
+      });
+    }
+    expect(JSON.stringify(requests.at(-1)!.input)).toContain("update 199");
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(active.some((row) => row.item.type === "compaction")).toBe(false);
+    expect(JSON.stringify(active.map((row) => row.item))).toContain(`summary ${requests.length}`);
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    const compacted = (
+      await listSessionEvents(client.db, workspaceId, session.id, { after: 0, limit: 100 })
+    ).find(
+      (event) =>
+        event.type === "session.context.compacted" &&
+        (event.payload as Record<string, unknown>).implementation === "portable_model_switch",
+    );
+    expect(compacted?.payload).toMatchObject({
+      estimatedTokensBefore: outcome.estimatedTokensBefore,
+      compactionInputProviderCalls: requests.length,
+    });
+  });
+
+  test("a model switch refits a chunk the new model rejects as too long instead of failing", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession(longAutonomousRun(60));
+    // The new model's tokenizer counts half again as many tokens as the local
+    // estimate, so the first full-size chunk is rejected.
+    const { summarize, requests } = smallWindowSummarizer(1.5);
+    const outcome = await maybeCompactContext(
+      client.db,
+      smallWindowSettings(),
+      scope,
+      null,
+      summarize,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(requests[0]!.ok).toBe(false);
+    // After the rejection every request is smaller and accepted.
+    for (const request of requests.slice(1)) {
+      expect(request.ok).toBe(true);
+      expect(request.tokens).toBeLessThan(requests[0]!.tokens);
+    }
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(JSON.stringify(active.map((row) => row.item))).toContain(
+      `summary ${requests.filter((request) => request.ok).length}`,
+    );
+  });
+
+  test("a model switch whose newest batch alone exceeds the new window fails without sending that batch", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession([
+      { type: "message", role: "user", content: "start" },
+      { type: "message", role: "assistant", content: "x".repeat(400_000) },
+    ]);
+    const { summarize, requests } = smallWindowSummarizer();
+    await expect(
+      maybeCompactContext(client.db, smallWindowSettings(), scope, null, summarize, {
+        clearRequestedCompaction: true,
+        trigger: "operator",
+        codexCompactionMode: "portable",
+      }),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    // Only the fitting first message was summarized; the oversized reply was
+    // never sent, and nothing reached the provider as too long.
+    expect(requests.every((request) => request.ok)).toBe(true);
+    expect(requests.some((request) => JSON.stringify(request.input).includes("xxxx"))).toBe(false);
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
+    );
   });
 
   test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {

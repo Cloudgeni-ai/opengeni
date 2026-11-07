@@ -40,10 +40,25 @@ marker that a compaction retained is one of those inserted rows, never a new
 clear. Both bounds are resolved once per read, so the row filter compares
 constants. Compaction
 never deletes rows, so only Codex's opaque checkpoint and encrypted reasoning
-are unreadable; the portable path drops those as usual. The newest complete
-work units that fit the new model's checkpoint request are summarized
-(`portableSwitchTranscriptStart`); older ones are left out, and the receipt
-records how many (`modelSwitchEarlierItemsOmitted`). The replacement is
+are unreadable; the portable path drops those as usual.
+
+That stored transcript spans every Codex checkpoint since the last clear, so it
+can be far larger than any model's window, the new one included (the
+recovery-view read above bounds it). The new model therefore summarizes it in
+bounded requests, oldest first (`summarizeTranscriptInBoundedRequests`): each
+request reads the summary so far and then the largest next chunk, cut between
+whole assistant/tool batches, that fits the same checkpoint input budget as any
+portable checkpoint on that model (its declared window minus the summary
+output, its prepared tools and instructions) and, on Claude, the exact
+request-byte limit. The last summary covers the whole transcript, just as
+repeated ordinary checkpoints build on each other. The provider's token count
+is authoritative over the local estimate: when it rejects a request as too
+long, the budget becomes half of that request's estimate and the chunk is
+refitted, and later chunks keep the smaller budget. A single batch that cannot
+fit (after shortening its tool output, where the portable preparation can)
+fails the rebuild without being sent. The receipt counts the requests in
+`compactionInputProviderCalls`. These requests read no warm cache: the
+transcript differs from what Codex was sent. The replacement is
 installed with `implementation: "portable_model_switch"` (the timeline says
 "Earlier messages summarized for the new model") and switches
 `codex_compaction_mode` to `portable` in the same transaction, so a failed

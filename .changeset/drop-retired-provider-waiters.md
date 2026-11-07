@@ -1,5 +1,0 @@
----
-"@opengeni/db": patch
----
-
-Retire the removed provider pools' capacity-waiter, credential, lease and settings tables, the per-account provider switch table, the old Variable Set tables and the retired resumable-transcription tables after the compatible predecessor release. Remove their obsolete routines and subscription session columns, preserving current subscription connections, shared capacity waits, Rig and Connected Machine authority, current recordings, accepted execution records, retention obligations and historical lifecycle-backfill inputs. The subscription-core gates that read the switch table now check only the provider registry, and new organizations keep their seeded subscription settings. Personal Variable Sets retire as their owner's revoke did: their authority and still-active grants are revoked, and grant history stays. Refuse contraction while any old secret values, live legacy leases, organizations without every provider switched on, transcription processing or unconfirmed audio-object deletions remain.

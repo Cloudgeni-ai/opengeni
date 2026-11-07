@@ -1,7 +1,7 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
-import type { BillingOrigin } from "@opengeni/contracts";
+import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -2022,7 +2022,7 @@ type PostUserMessageTurnInput = {
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
-  delivery?: "send" | "steer";
+  delivery?: SessionPromptDelivery;
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
@@ -2089,7 +2089,11 @@ function finalizePostUserMessageTurn(
             sessionId,
             workflowId: result.turn.temporalWorkflowId,
             wakeRevision: result.wakeRevision,
-            ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+            // `steer_or_send` asks for the interruption only when the server
+            // resolved it to a Steer.
+            ...((input.delivery ?? "send") === "steer" ||
+            (input.delivery === "steer_or_send" && result.routing === "accepted_for_steering") ||
+            result.interruptionCount > 0
               ? { interruptionRequested: true }
               : {}),
           });
@@ -4480,7 +4484,7 @@ export async function createSessionForRequest(
 }
 
 function sessionPromptBoundaryRequestHash(input: {
-  delivery: "send" | "steer";
+  delivery: SessionPromptDelivery;
   controlEtag: string | null;
   expectedDraftRevision: number | null;
   text: string;
@@ -4551,7 +4555,7 @@ async function acceptSessionUserMessageInFileScope(
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
-    delivery?: "send" | "steer";
+    delivery?: SessionPromptDelivery;
     /** The sender's IANA zone as the client reported it; unresolvable names are ignored. */
     timeZone?: string | null;
     origin?: "human" | "operator";
@@ -4614,9 +4618,10 @@ async function acceptSessionUserMessageInFileScope(
         context: delegatedServiceInitiator.context,
       }
     : (promptInitiator.actor ?? { type: "human", subjectId: grant.subjectId });
+  // `steer_or_send` may steer, so it needs Steer authority.
   await requireSessionAuthorization(deps, grant, {
     sessionId,
-    operation: delivery === "steer" ? "session.steer" : "session.append",
+    operation: delivery === "send" ? "session.append" : "session.steer",
     surface: "core",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
@@ -4701,7 +4706,7 @@ async function acceptSessionUserMessageInFileScope(
     await requireSessionUsageLimitAllows(
       db,
       { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
-      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+      { sink: deps.observability, boundary: delivery === "send" ? "send" : "steer" },
     );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
@@ -4767,7 +4772,8 @@ async function acceptSessionUserMessageInFileScope(
     // Re-submitting a checked-out queue edit retains the original turn's
     // causal human when its own sender resubmits it, just as the locked
     // prompt transaction does. Anyone else's edit is their own message.
-    if (delivery === "send" && input.expectedDraftRevision != null) {
+    // A queue edit resubmitted with `steer_or_send` is always a Send.
+    if (delivery !== "steer" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
         workspaceId,

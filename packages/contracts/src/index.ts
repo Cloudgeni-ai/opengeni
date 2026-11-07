@@ -10840,6 +10840,21 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 /**
+ * How a person's message reaches the agent. `send` starts a turn when nothing
+ * runs and otherwise waits behind the current one. `steer` has the current
+ * turn read it at its next step. `steer_or_send` lets the server decide,
+ * atomically with the session's turn state: it steers when a turn is running
+ * (or accepted and about to start), and otherwise sends, so a message reaches
+ * a running turn however stale the sender's view of the session is. A paused
+ * chat keeps it waiting, as a Send. The accepted event records which one the
+ * server chose (`delivery` and `routing`).
+ */
+export const SessionPromptDelivery = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["send", "steer", "steer_or_send"]),
+);
+export type SessionPromptDelivery = z.infer<typeof SessionPromptDelivery>;
+
+/**
  * Submit one exact established-session draft. Content is repeated only as an
  * integrity fence for outcome-unknown idempotent replay; the matching durable
  * draft revision remains authoritative and is atomically rotated on acceptance.
@@ -10863,7 +10878,7 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       .extend({
         expectedDraftRevision: primitives.positiveInteger,
         clientEventId: SessionOperationKey,
-        delivery: z.enum(["send", "steer"]),
+        delivery: SessionPromptDelivery,
         controlEtag: z.string().min(1).optional(),
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
         // The sender's IANA time zone; the model sees the message's local time.
@@ -21394,6 +21409,12 @@ export const SteerSessionMessageRequest = /* @__PURE__ */ defineSchema(() =>
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.default([]),
       personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+      /**
+       * `steer` (absent) always steers. `steer_or_send` steers only while a
+       * turn runs or is about to start, and otherwise sends; see
+       * `SessionPromptDelivery`.
+       */
+      delivery: z.enum(["steer", "steer_or_send"]).optional(),
     })
     .strict()
     .superRefine(requireMessageTextOrAnnotations)
