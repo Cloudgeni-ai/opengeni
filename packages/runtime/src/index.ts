@@ -1327,6 +1327,8 @@ export type GenerateSessionTitleOptions = {
    * lowest runnable effort to leave room in the output budget for the title.
    */
   reasoningEffort?: ReasoningEffort;
+  /** The host's `agent.titleInstructions`, added after the fixed rules. */
+  titleInstructions?: string;
   signal?: AbortSignal;
 };
 
@@ -1416,7 +1418,12 @@ export async function generateSessionTitle(
     : { model: options.model! };
   const result = await runSingleModelCall(target, {
     messages: [
-      { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+      {
+        role: "system",
+        content: options.titleInstructions
+          ? `${SESSION_TITLE_GENERATION_INSTRUCTIONS}\n\n${options.titleInstructions}`
+          : SESSION_TITLE_GENERATION_INSTRUCTIONS,
+      },
       { role: "user", content: boundedPrompt },
     ],
     maxOutputTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
