@@ -46,6 +46,15 @@ describe("an agent's move onto a personal machine its turn may no longer use", (
     );
   });
 
+  test("run_on's one statement that admits and then checks still names the pre-use refusal", () => {
+    const combined = databaseRefusal(
+      "authorize_session_attempt_personal_machine($1) and assert_session_attempt_personal_machine",
+      "42501",
+      "personal machine authority is no longer live",
+    );
+    expect(personalMachineRefusal(combined, "Studio Mac")?.code).toBe("machine_access_required");
+  });
+
   test("admission refusals keep their own codes", () => {
     expect(
       personalMachineRefusal(

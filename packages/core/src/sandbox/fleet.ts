@@ -316,8 +316,10 @@ export function personalMachineRefusal(
   machineName?: string | null,
 ): { code: PersonalMachineRefusalCode; reason: string } | null {
   const admission = personalMachineAdmissionRefusal(error);
-  if (admission) return admission;
-  if (!isPersonalMachineAccessRefusal(error)) return null;
+  // Admission's "requires explicit grant" has its own setup card. Otherwise the
+  // exact pre-use refusal wins, even when one statement ran both checks.
+  if (admission?.code === "personal_machine_permission_required") return admission;
+  if (!isPersonalMachineAccessRefusal(error)) return admission;
   return {
     code: "machine_access_required",
     reason:
