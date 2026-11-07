@@ -440,11 +440,9 @@ describe("recordAuthoritativeModelCallFact", () => {
   test("external billing returns pricedCostMicros 0 for facts", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("credits must NOT be debited for an externally billed turn");
+    });
     restores.push(() => debitSpy.mockRestore());
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
@@ -468,11 +466,9 @@ describe("recordAuthoritativeModelCallFact", () => {
   test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("credits must NOT be debited for an externally billed turn");
+    });
     restores.push(() => debitSpy.mockRestore());
 
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
@@ -501,7 +497,7 @@ describe("recordAuthoritativeModelCallFact", () => {
 
   test("reviewed list-only pricing supplies future estimates without becoming debit authority", async () => {
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
       debitedMicros: 0,
     } as never);
     restores.push(
@@ -543,7 +539,7 @@ describe("recordAuthoritativeModelCallFact", () => {
 
   test("comparison snapshot totals never replace the nominal debit or equivalent-credit calculation", async () => {
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
       debitedMicros: 37,
     } as never);
     const snapshotSpy = spyOn(config, "calculateModelListUsageCostSnapshot").mockReturnValue({
@@ -579,7 +575,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       latencyMode: "standard",
       priceContextKnown: false,
     });
-    expect(debitSpy.mock.calls[0]?.[1].requestedAmountMicros).toBe(14700);
+    expect(debitSpy.mock.calls[0]?.[1].amountMicros).toBe(14700);
     expect(usageSpy.mock.calls.at(-1)?.[1]).toMatchObject({
       eventType: "model.cost",
       quantity: 14700,
@@ -720,11 +716,9 @@ describe("recordAuthoritativeModelCallFact", () => {
   test("partial or malformed configured usage stays externally uncharged and unpriced", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("credits must NOT be debited for an externally billed turn");
+    });
     restores.push(() => debitSpy.mockRestore());
 
     const usageCases = [
@@ -766,7 +760,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   test("Gateway exact cost remains known with malformed core token telemetry", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
       balance: {
         accountId: ACCOUNT,
         balanceMicros: 1_000_000,

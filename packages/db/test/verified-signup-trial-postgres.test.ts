@@ -6,7 +6,6 @@ import {
 
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   applyCreditLedgerEntryOnce,
   completeSelfServiceOrganizationSetup,
@@ -109,23 +108,24 @@ describe("verified signup eligibility and post-use credit settlement", () => {
     const debit = {
       accountId,
       type: "model_usage_debit",
-      requestedAmountMicros: 12_000_000,
-      modelId: "model-a",
+      amountMicros: 12_000_000,
+      usage: "model-a",
       sourceType: "model_response",
       sourceId: "turn:response-1",
       idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
     };
-    const first = await applyCreditDebitUpToBalance(client.db, debit);
+    const first = await applyCreditDebitAfterUse(client.db, debit);
     expect(first.debitedMicros).toBe(12_000_000);
     expect(first.grantDebitedMicros).toBe(10_000_000);
-    const replay = await applyCreditDebitUpToBalance(client.db, debit);
+    const replay = await applyCreditDebitAfterUse(client.db, debit);
     expect(replay).toMatchObject({ debitedMicros: 0, grantDebitedMicros: 0 });
 
     // A model monthly credit does not cover is paid from general credit only.
-    const general = await applyCreditDebitUpToBalance(client.db, {
+    const general = await applyCreditDebitAfterUse(client.db, {
       ...debit,
-      modelId: "model-b",
-      requestedAmountMicros: 1_000_000,
+      usage: "model-b",
+      amountMicros: 1_000_000,
+      sourceId: "turn:response-2",
       idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
     });
     expect(general).toMatchObject({ debitedMicros: 1_000_000, grantDebitedMicros: 0 });

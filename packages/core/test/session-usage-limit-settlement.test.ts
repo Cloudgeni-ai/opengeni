@@ -33,7 +33,7 @@ function spyWrites(options: { settleFails?: boolean } = {}) {
       calls.push({ fn: "usage", input: input as unknown as Record<string, unknown> });
       return undefined as never;
     }),
-    spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (_db, input) => {
+    spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (_db, input) => {
       calls.push({ fn: "debit", input: input as unknown as Record<string, unknown> });
       return {
         balance: {
@@ -42,7 +42,7 @@ function spyWrites(options: { settleFails?: boolean } = {}) {
           currency: "usd",
           updatedAt: new Date().toISOString(),
         },
-        debitedMicros: input.requestedAmountMicros,
+        debitedMicros: input.amountMicros,
       } as never;
     }),
     spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(async (_db, input) => {

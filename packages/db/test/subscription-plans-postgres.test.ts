@@ -8,7 +8,6 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   acceptOrganizationInvitation,
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   completeOrganizationUserSetup,
   completeSelfServiceOrganizationSetup,
@@ -203,11 +202,13 @@ test("spends plan before promotional and top-up credit; refunds reduce usage and
   });
   expect(
     (
-      await applyCreditDebitUpToBalance(client.db, {
+      await applyCreditDebitAfterUse(client.db, {
         accountId,
         type: "model_usage_debit",
-        requestedAmountMicros: 150 * M,
-        modelId: "model-a",
+        amountMicros: 150 * M,
+        usage: "model-a",
+        sourceType: "model_response",
+        sourceId: crypto.randomUUID(),
         idempotencyKey: crypto.randomUUID(),
       })
     ).grantDebitedMicros,
@@ -274,11 +275,13 @@ test("a request exhausts the plan mid-charge before using promotional credit, th
     sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   });
-  const mixed = await applyCreditDebitUpToBalance(client.db, {
+  const mixed = await applyCreditDebitAfterUse(client.db, {
     accountId,
     type: "model_usage_debit",
-    requestedAmountMicros: 80 * M,
-    modelId: "model-a",
+    amountMicros: 80 * M,
+    usage: "model-a",
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   });
   expect(mixed.grantDebitedMicros).toBe(60 * M);
@@ -469,11 +472,13 @@ test("a state sync before invoice payment keeps spending the already-granted all
     currentPeriodStart: unpaid.periodStart,
     currentPeriodEnd: unpaid.periodEnd,
   });
-  const charged = await applyCreditDebitUpToBalance(client.db, {
+  const charged = await applyCreditDebitAfterUse(client.db, {
     accountId,
     type: "model_usage_debit",
-    requestedAmountMicros: 50 * M,
-    modelId: "model-a",
+    amountMicros: 50 * M,
+    usage: "model-a",
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   });
   expect(charged.grantDebitedMicros).toBe(0);
@@ -613,10 +618,10 @@ test("interleaved video reversals across expiry preserve exactly the purchased f
   await topup(accountId, 100 * M);
   const video = async (amountMicros: number) => {
     const sourceId = crypto.randomUUID();
-    await applyCreditDebitUpToBalance(client!.db, {
+    await applyCreditDebitAfterUse(client!.db, {
       accountId,
       type: "video_generation_debit",
-      requestedAmountMicros: amountMicros,
+      amountMicros,
       sourceType: "video_generation_operation",
       sourceId,
       idempotencyKey: crypto.randomUUID(),
@@ -744,16 +749,21 @@ test("pre-existing general debt cannot make a prepaid plan spend promotional fun
     idempotencyKey: crypto.randomUUID(),
   });
   const spend = () =>
-    applyCreditDebitUpToBalance(client!.db, {
+    applyCreditDebitAfterUse(client!.db, {
       accountId,
       type: "model_usage_debit",
-      requestedAmountMicros: 100 * M,
-      modelId: "model-a",
+      amountMicros: 100 * M,
+      usage: "model-a",
+      sourceType: "model_response",
+      sourceId: crypto.randomUUID(),
       idempotencyKey: crypto.randomUUID(),
     });
   expect((await spend()).grantDebitedMicros).toBe(100 * M);
-  expect((await spend()).debitedMicros).toBe(0);
-  expect((await getBillingBalance(client.db, accountId)).generalBalanceMicros).toBe(-50 * M);
+  // The next response is still charged in full, from general credit only.
+  expect(await spend()).toMatchObject({ debitedMicros: 100 * M, grantDebitedMicros: 0 });
+  const after = await getBillingBalance(client.db, accountId);
+  expect(after.generalBalanceMicros).toBe(-150 * M);
+  expect(after.promotionalCredits?.filter((grant) => !grant.planCredit)).toEqual([]);
 }, 180_000);
 
 const invite = (accountId: string, actorSubjectId: string, targetSubjectId: string | null = null) =>

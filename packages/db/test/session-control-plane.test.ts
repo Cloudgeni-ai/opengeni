@@ -12,7 +12,7 @@ import {
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
-  applyCreditDebitUpToBalance,
+  applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   applyContextCompaction,
   applySessionTurnSettlement,
@@ -8439,14 +8439,14 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       type: "model_usage_debit",
-      requestedAmountMicros: 400,
+      amountMicros: 400,
       sourceType: "model_response",
       sourceId: crypto.randomUUID(),
       idempotencyKey,
     };
 
-    const first = await applyCreditDebitUpToBalance(client.db, input);
-    const duplicate = await applyCreditDebitUpToBalance(client.db, input);
+    const first = await applyCreditDebitAfterUse(client.db, input);
+    const duplicate = await applyCreditDebitAfterUse(client.db, input);
     expect(first.debitedMicros).toBe(400);
     expect(duplicate.debitedMicros).toBe(0);
     expect(duplicate.balance.balanceMicros).toBe(before.balanceMicros + 600);

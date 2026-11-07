@@ -29,13 +29,12 @@ function spyWrites() {
       calls.push({ fn: "usage", input: input as unknown as Record<string, unknown> });
       return undefined as never;
     }),
-    spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (_db, input) => {
-      calls.push({ fn: "model_debit", input: input as unknown as Record<string, unknown> });
-      return { balance: {}, debitedMicros: input.requestedAmountMicros } as never;
-    }),
     spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (_db, input) => {
-      calls.push({ fn: "after_use_debit", input: input as unknown as Record<string, unknown> });
-      return { balance: {}, debitedMicros: input.amountMicros } as never;
+      calls.push({
+        fn: input.type === "model_usage_debit" ? "model_debit" : "after_use_debit",
+        input: input as unknown as Record<string, unknown>,
+      });
+      return { balance: {}, debitedMicros: input.amountMicros, grantDebitedMicros: 0 } as never;
     }),
     spyOn(opengeniDb, "creditDebitAttributionForTurn").mockImplementation(
       async (_db, input) =>
@@ -179,7 +178,7 @@ describe("hosted web search settlement", () => {
       settlement({ model: "fixture-alias" }),
     );
     const modelDebit = active.calls.find((call) => call.fn === "model_debit")!.input;
-    expect(modelDebit.modelId).toBe("fixture/model");
+    expect(modelDebit.usage).toBe("fixture/model");
     expect(searchDebits(active.calls)[0]!.input).toMatchObject({
       usage: { kind: "tool", modelId: "fixture/model" },
     });

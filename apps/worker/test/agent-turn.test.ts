@@ -2354,11 +2354,9 @@ describe("production model-response usage callback authority", () => {
         throw new Error("fact writer unavailable");
       },
     );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("workspace Gateway usage must not debit Opengeni credits");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("workspace Gateway usage must not debit Opengeni credits");
+    });
     try {
       const result = await processModelResponseTerminalEvent({
         event,

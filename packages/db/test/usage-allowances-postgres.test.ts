@@ -8,7 +8,6 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   appendSessionEvents,
   bootstrapWorkspace,
@@ -654,10 +653,12 @@ describe("usage allowance DB lifecycle", () => {
       amountMicros: 100,
       idempotencyKey: crypto.randomUUID(),
     });
-    await applyCreditDebitUpToBalance(app.db, {
+    await applyCreditDebitAfterUse(app.db, {
       ...scope,
       type: "model",
-      requestedAmountMicros: 20,
+      amountMicros: 20,
+      sourceType: "model_response",
+      sourceId: crypto.randomUUID(),
       idempotencyKey: crypto.randomUUID(),
     });
     await applyCreditLedgerEntry(app.db, {
