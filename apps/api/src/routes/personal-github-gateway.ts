@@ -25,6 +25,7 @@ import {
   classifyGitHubGraphqlRequest,
   classifyGitHubRestRequest,
   GRAPHQL_NODE_IDS_MAX,
+  refRewriteFollowsPolicy,
   type GitHubGatewayAction,
   type GitHubGatewayRepositoryRef,
 } from "../integrations/github-gateway-requests";
@@ -96,7 +97,15 @@ export type PersonalGitHubGatewayServices = {
   /** Git smart HTTP for `owner/name` routes (clones through `gh`). */
   git: PersonalGitHubGitBrokerServices;
   fetch: typeof fetch;
+  /** Repository default branches, looked up with the person's token. */
+  defaultBranches?: DefaultBranchCache;
 };
+
+/** Default branch by connection and repository, kept for a minute. */
+export type DefaultBranchCache = Map<string, { branch: string; expiresAt: number }>;
+
+const DEFAULT_BRANCH_TTL_MS = 60_000;
+const DEFAULT_BRANCH_CACHE_MAX = 1_000;
 
 export type GatewayRepositoryCheck = {
   repository: GitHubGatewayRepositoryRef;
@@ -523,6 +532,186 @@ async function resolveNodeRepositories(
   return repositories;
 }
 
+/**
+ * A repository's default branch, read with the person's token and kept for a
+ * minute. Null when GitHub does not say.
+ */
+export async function repositoryDefaultBranch(
+  services: Pick<
+    PersonalGitHubGatewayServices,
+    "authorizeProviderRequest" | "fetch" | "defaultBranches"
+  >,
+  authority: PersonalGitHubGatewayAuthority,
+  repository: GitHubGatewayRepositoryRef,
+): Promise<string | null> {
+  const path =
+    repository.kind === "id"
+      ? `/repositories/${encodeURIComponent(repository.id)}`
+      : `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+  const key = `${authority.claims.connectionId}\u0000${path.toLowerCase()}`;
+  const cache = services.defaultBranches;
+  const cached = cache?.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.branch;
+  const url = new URL(path, PERSONAL_GITHUB_API_ORIGIN);
+  let branch: unknown;
+  try {
+    const authorization = await services.authorizeProviderRequest(
+      authority,
+      url.toString(),
+      "github_read",
+      [],
+    );
+    branch = (await fetchLiveGitHubJson(services.fetch, url, authorization))?.default_branch;
+  } catch {
+    return null;
+  }
+  if (typeof branch !== "string" || branch.length === 0) return null;
+  if (cache) {
+    cache.delete(key);
+    if (cache.size >= DEFAULT_BRANCH_CACHE_MAX) cache.delete(cache.keys().next().value!);
+    cache.set(key, { branch, expiresAt: Date.now() + DEFAULT_BRANCH_TTL_MS });
+  }
+  return branch;
+}
+
+const REF_TARGETS_QUERY = `query OpengeniGatewayRefs($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    __typename
+    ... on Ref { name prefix repository { nameWithOwner defaultBranchRef { name } } }
+    ... on Repository { nameWithOwner defaultBranchRef { name } }
+  }
+}`;
+
+/** GraphQL Ref and Repository nodes by ID, or null when GitHub can't say. */
+async function graphqlRefNodes(
+  services: PersonalGitHubGatewayServices,
+  authority: PersonalGitHubGatewayAuthority,
+  ids: string[],
+): Promise<Map<string, Record<string, unknown>> | null> {
+  if (ids.length === 0) return new Map();
+  if (ids.length > GRAPHQL_NODE_IDS_MAX) return null;
+  const url = new URL("/graphql", PERSONAL_GITHUB_API_ORIGIN);
+  try {
+    const authorization = await services.authorizeProviderRequest(
+      authority,
+      url.toString(),
+      "github_request",
+      [],
+    );
+    const response = await services.fetch(url, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        accept: "application/json",
+        authorization,
+        "content-type": "application/json",
+        "user-agent": "Opengeni-GitHub-Gateway/1",
+      },
+      body: JSON.stringify({ query: REF_TARGETS_QUERY, variables: { ids } }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const payload = (await response.json()) as { data?: { nodes?: unknown[] } };
+    const nodes = payload.data?.nodes;
+    if (!Array.isArray(nodes) || nodes.length !== ids.length) return null;
+    const byId = new Map<string, Record<string, unknown>>();
+    nodes.forEach((node, index) => {
+      if (node !== null && typeof node === "object") {
+        byId.set(ids[index]!, node as Record<string, unknown>);
+      }
+    });
+    return byId;
+  } catch {
+    return null;
+  }
+}
+
+function defaultBranchRefName(value: unknown): string | null {
+  if (value === null || typeof value !== "object") return null;
+  const name = (value as Record<string, unknown>).name;
+  return typeof name === "string" && name.length > 0 ? name : null;
+}
+
+/** Ask whatever the policy, and whatever the refs it changes. */
+function alwaysAsk(action: GitHubGatewayAction): GitHubGatewayAction {
+  if (action.kind !== "write") return action;
+  const { refRewrites: _ignored, ...rest } = action;
+  return { ...rest, alwaysAsk: true };
+}
+
+/**
+ * A force update or deletion asks unless every ref it touches is a branch
+ * other than its repository's default branch, in a repository the gateway
+ * has already checked; then the person's policy decides. Anything the
+ * gateway can't confirm keeps asking.
+ */
+async function applyRefRewritePolicy(
+  services: PersonalGitHubGatewayServices,
+  authority: PersonalGitHubGatewayAuthority,
+  action: GitHubGatewayAction,
+  repository: GitHubGatewayRepositoryRef | null,
+  checks: GatewayRepositoryCheck[],
+): Promise<GitHubGatewayAction> {
+  if (action.kind !== "write" || !action.refRewrites) return action;
+  const { targets, alwaysAskOtherwise } = action.refRewrites;
+  const nodeIds = [
+    ...new Set(
+      targets.flatMap((target) =>
+        target.kind === "node"
+          ? [target.refNodeId]
+          : target.repositoryNodeId
+            ? [target.repositoryNodeId]
+            : [],
+      ),
+    ),
+  ];
+  const nodes = await graphqlRefNodes(services, authority, nodeIds);
+  if (!nodes) return action;
+  const checked = new Set(
+    checks.flatMap((check) =>
+      check.access === "write" && check.repository.kind === "name"
+        ? [`${check.repository.owner}/${check.repository.name}`.toLowerCase()]
+        : [],
+    ),
+  );
+  const isChecked = (node: Record<string, unknown>) =>
+    typeof node.nameWithOwner === "string" && checked.has(node.nameWithOwner.toLowerCase());
+  for (const target of targets) {
+    let ref: string | null = null;
+    let defaultBranch: string | null = null;
+    if (target.kind === "node") {
+      const node = nodes.get(target.refNodeId);
+      if (
+        node?.__typename === "Ref" &&
+        typeof node.prefix === "string" &&
+        typeof node.name === "string" &&
+        node.repository !== null &&
+        typeof node.repository === "object" &&
+        isChecked(node.repository as Record<string, unknown>)
+      ) {
+        ref = `${node.prefix}${node.name}`;
+        defaultBranch = defaultBranchRefName(
+          (node.repository as Record<string, unknown>).defaultBranchRef,
+        );
+      }
+    } else if (target.repositoryNodeId) {
+      const node = nodes.get(target.repositoryNodeId);
+      if (node?.__typename === "Repository" && isChecked(node)) {
+        ref = target.ref;
+        defaultBranch = defaultBranchRefName(node.defaultBranchRef);
+      }
+    } else if (repository) {
+      ref = target.ref;
+      defaultBranch = await repositoryDefaultBranch(services, authority, repository);
+    }
+    if (!ref || !refRewriteFollowsPolicy(ref, defaultBranch)) return action;
+  }
+  return { ...action, alwaysAsk: alwaysAskOtherwise };
+}
+
 function reviewArgumentsFor(
   method: string,
   path: string,
@@ -577,6 +766,7 @@ export async function handlePersonalGitHubGatewayRequest(
   let action: GitHubGatewayAction;
   let checks: GatewayRepositoryCheck[] = [];
   let reviewExtra: Record<string, unknown> = {};
+  let restRepository: GitHubGatewayRepositoryRef | null = null;
   if (target === "api" && pathname === "/graphql" && method !== "POST") {
     return gatewayError(405, "GitHub GraphQL takes POST requests.");
   }
@@ -596,18 +786,19 @@ export async function handlePersonalGitHubGatewayRequest(
       }
       const nodeRepositories = await resolveNodeRepositories(services, authority, graphql.nodeIds);
       if (nodeRepositories === null) {
-        action = { ...action, alwaysAsk: true };
+        action = alwaysAsk(action);
       } else {
         writeTargets += nodeRepositories.length;
         for (const repository of nodeRepositories) checks.push({ repository, access: "write" });
       }
       // A repository mutation whose repository the gateway could not find
       // (an input shape it does not know) asks.
-      if (writeTargets === 0 && !graphql.accountLevel) action = { ...action, alwaysAsk: true };
+      if (writeTargets === 0 && !graphql.accountLevel) action = alwaysAsk(action);
     }
   } else {
     const rest = classifyGitHubRestRequest(method, pathname, parsedBody ?? null);
     action = rest.action;
+    restRepository = rest.repository;
     if (rest.repository) {
       checks.push({
         repository: rest.repository,
@@ -621,6 +812,7 @@ export async function handlePersonalGitHubGatewayRequest(
   } catch (error) {
     return authorityError(error);
   }
+  action = await applyRefRewritePolicy(services, authority, action, restRepository, checks);
 
   let requestId: string | null = null;
   if (action.kind === "write") {
@@ -890,5 +1082,6 @@ export function personalGitHubGatewayServices(deps: ApiRouteDeps): PersonalGitHu
     complete: databaseGatewayCompleter(deps.db),
     git: gatewayGitServices(deps, { openClaims, resolveAuthority }, fetchImpl),
     fetch: fetchImpl,
+    defaultBranches: new Map(),
   };
 }

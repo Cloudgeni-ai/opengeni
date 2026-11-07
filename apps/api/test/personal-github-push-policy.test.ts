@@ -91,6 +91,26 @@ function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
   });
 }
 
+/**
+ * Decides like `databaseGatewayDecider` with every GitHub action at `policy`:
+ * Allow runs unless the request always asks; otherwise it waits for approval.
+ */
+function policyDecider(policy: "allow" | "ask") {
+  const calls: GatewayDecisionInput[] = [];
+  const decide: GatewayDecider = async (_identity, input) => {
+    calls.push(input);
+    return policy === "allow" && !input.action.alwaysAsk
+      ? { kind: "allow" }
+      : {
+          kind: "refuse",
+          status: 403,
+          waiting: true,
+          message: `Waiting for approval: ${input.title}.`,
+        };
+  };
+  return { calls, decide };
+}
+
 function recordingDecider(answer: Awaited<ReturnType<GatewayDecider>>) {
   const calls: GatewayDecisionInput[] = [];
   const decide: GatewayDecider = async (_identity, input) => {
@@ -361,6 +381,12 @@ describe("pushes a real Git client sends from a shallow clone", () => {
     await run(client, ["commit", "-q", "--amend", "-m", "topic rewritten"]);
     await push("forcePush", ["--force", "topic"]);
     await push("deletion", [":topic"]);
+    await run(client, ["checkout", "-q", "main"]);
+    await run(client, ["commit", "-q", "--amend", "-m", "four rewritten"]);
+    await push("defaultForcePush", ["--force", "main"]);
+    await run(client, ["tag", "v1"]);
+    await push("tag", ["v1"]);
+    await push("tagDeletion", [":refs/tags/v1"]);
   }, 60_000);
 
   afterAll(() => {
@@ -380,7 +406,12 @@ describe("pushes a real Git client sends from a shallow clone", () => {
     }
   };
 
-  const inspectCaptured = async (name: string, gzip: boolean, decide: GatewayDecider) => {
+  const inspectCaptured = async (
+    name: string,
+    gzip: boolean,
+    decide: GatewayDecider,
+    defaultBranch: string | null = null,
+  ) => {
     const sent = captured[name]!;
     const plain = sent.gzip ? gunzipSync(sent.body) : sent.body;
     expect(plain.subarray(4, 12).toString("latin1")).toBe("shallow ");
@@ -388,6 +419,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
       body: stream(gzip ? gzipSync(plain) : plain),
       gzip,
       repositoryFullName: "acme/widgets",
+      defaultBranch,
       isAncestor,
       identity,
       decide,
@@ -410,7 +442,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
       expect(calls).toEqual([]);
     });
 
-    test(`a force push and a deletion still ask${label}`, async () => {
+    test(`a force push and a deletion ask when the default branch is unknown${label}`, async () => {
       const { calls, decide } = recordingDecider({
         kind: "refuse",
         status: 403,
@@ -432,6 +464,53 @@ describe("pushes a real Git client sends from a shallow clone", () => {
       }
     });
   }
+
+  test("with Allow, force-pushing and deleting another branch go through", async () => {
+    const { calls, decide } = policyDecider("allow");
+    for (const name of ["forcePush", "deletion"]) {
+      expect(await inspectCaptured(name, false, decide, "main")).toMatchObject({
+        kind: "forward",
+        requestId: null,
+      });
+    }
+    expect(calls.map((call) => [call.title, call.action.alwaysAsk])).toEqual([
+      ["Force-push topic on acme/widgets", false],
+      ["Delete topic on acme/widgets", false],
+    ]);
+  });
+
+  test("with Ask first, force-pushing and deleting another branch ask", async () => {
+    const { calls, decide } = policyDecider("ask");
+    for (const name of ["forcePush", "deletion"]) {
+      const result = await inspectCaptured(name, true, decide, "main");
+      expect(result.kind).toBe("respond");
+      if (result.kind !== "respond") continue;
+      const text = Buffer.from(await result.response.arrayBuffer()).toString("latin1");
+      expect(text).toContain("ng refs/heads/topic waiting for approval");
+    }
+    expect(calls).toHaveLength(2);
+  });
+
+  test("with Allow, force-pushing the default branch and deleting a tag still ask", async () => {
+    const { calls, decide } = policyDecider("allow");
+    const forced = await inspectCaptured("defaultForcePush", false, decide, "main");
+    const tagDeleted = await inspectCaptured("tagDeletion", false, decide, "main");
+    expect(calls.map((call) => [call.title, call.action.alwaysAsk])).toEqual([
+      ["Force-push main on acme/widgets", true],
+      ["Delete tag v1 on acme/widgets", true],
+    ]);
+    for (const [result, ref] of [
+      [forced, "refs/heads/main"],
+      [tagDeleted, "refs/tags/v1"],
+    ] as const) {
+      expect(result.kind).toBe("respond");
+      if (result.kind !== "respond") continue;
+      const text = Buffer.from(await result.response.arrayBuffer()).toString("latin1");
+      expect(text).toContain(`ng ${ref} waiting for approval`);
+    }
+    // A default branch spelled in another case is still the default branch.
+    expect((await inspectCaptured("defaultForcePush", false, decide, "MAIN")).kind).toBe("respond");
+  });
 
   test("the captured commands are the pushes that were made", () => {
     const plainOf = (name: string) => {
