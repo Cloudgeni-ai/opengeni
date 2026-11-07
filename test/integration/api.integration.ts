@@ -6335,6 +6335,44 @@ describe("API component integration", () => {
     const accepted = await followUp(optionalSessionId);
     expect(accepted.status).toBe(202);
 
+    // The composer sends through its saved draft; that path accepts it too.
+    const draftPath = workspacePath(
+      revokedWorkspaceId,
+      `/sessions/${optionalSessionId}/composer-draft`,
+    );
+    const current = (await (await app.request(draftPath)).json()) as {
+      revision: number;
+      model: string;
+      reasoningEffort: string;
+      latencyMode: string;
+    };
+    const composed = {
+      text: "A follow-up from the composer",
+      annotations: [],
+      resources: [],
+      model: current.model,
+      reasoningEffort: current.reasoningEffort,
+      latencyMode: current.latencyMode,
+    };
+    const saved = await app.request(draftPath, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...composed, expectedRevision: current.revision }),
+    });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    const savedDraft = (await saved.json()) as { revision: number };
+    const submitted = await app.request(`${draftPath}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...composed,
+        expectedDraftRevision: savedDraft.revision,
+        clientEventId: `submit-${crypto.randomUUID()}`,
+        delivery: "send",
+      }),
+    });
+    expect(submitted.status, await submitted.clone().text()).toBe(202);
+
     // A repository the person attached explicitly is still refused, and the
     // refusal says which one so it can be removed or restored.
     const refused = await followUp(explicitSessionId);
