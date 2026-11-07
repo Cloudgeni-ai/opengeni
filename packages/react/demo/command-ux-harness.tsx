@@ -475,7 +475,7 @@ function CommandUxHarness() {
       const attempt = (state.attempts.get(request.clientEventId) ?? 0) + 1;
       state.attempts.set(request.clientEventId, attempt);
       recordCall({
-        kind: request.delivery,
+        kind: request.delivery === "steer_or_send" ? "steer" : request.delivery,
         key: request.clientEventId,
         expectedControlEtag: request.controlEtag ?? null,
         attempt,

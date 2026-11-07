@@ -216,6 +216,23 @@ export type SteerQueueCommandResult = QueueCommandResult & {
   wakeRevision: number;
 };
 
+/**
+ * How a person's prompt asks to be delivered. `steer_or_send` is resolved to
+ * `steer` or `send` inside the prompt transaction (see
+ * `submitHumanPromptInTransaction`); only the resolved one is recorded.
+ */
+export type HumanPromptDelivery = "send" | "steer" | "steer_or_send";
+
+/**
+ * The receipt action of a prompt. `steer_or_send` may steer, so it shares the
+ * Steer action; its request hash keeps it distinct from a plain Steer.
+ */
+export function humanPromptCommandAction(
+  delivery: HumanPromptDelivery,
+): "prompt.send" | "prompt.steer" {
+  return delivery === "send" ? "prompt.send" : "prompt.steer";
+}
+
 export type SubmitHumanPromptResult = {
   receipt: SessionCommandReceiptRow;
   routing: SessionPromptRouting;
@@ -313,7 +330,7 @@ async function loadSubmittedHumanPromptReplay(
     workspaceId: string;
     sessionId: string;
     subjectId: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     expectedDraftRevision?: number | null;
     receipt: SessionCommandReceiptRow;
   },
@@ -372,7 +389,7 @@ async function loadSubmittedHumanPromptReplay(
       input.receipt.result.routing === "queued_for_execution" ||
       input.receipt.result.routing === "accepted_for_steering"
         ? input.receipt.result.routing
-        : input.delivery === "steer"
+        : input.delivery !== "send"
           ? "accepted_for_steering"
           : // Pre-routing receipts cannot reconstruct admission-time activity
             // or Pause truth. Queue is the only conservative placement; a
@@ -405,7 +422,7 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
     subjectId: string;
     actor: SessionCommandActor;
     operationKey: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     boundaryRequestHash: string;
     expectedDraftRevision?: number | null;
     /** Wait for an overlapping same-key transaction before checking committed replay truth. */
@@ -418,7 +435,7 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
   const receipt = await getCompletedSessionPromptCommandReceipt(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,
-    action: input.delivery === "steer" ? "prompt.steer" : "prompt.send",
+    action: humanPromptCommandAction(input.delivery),
     targetSessionId: input.sessionId,
     operationKey: input.operationKey,
     boundaryRequestHash: input.boundaryRequestHash,
@@ -1142,6 +1159,40 @@ function steerQueueOrder(
     waiting += 1;
   }
   return [...others.slice(0, waiting), target, ...others.slice(waiting)];
+}
+
+/**
+ * Queue order for a `steer_or_send` message that steers a turn about to start
+ * (accepted, not yet claimed). It goes right behind that turn and the Steers
+ * already waiting for it, in the order they were sent, and ahead of later
+ * Sends. The starting turn claims first and, finding this Steer pending,
+ * hands over to it before its first model request, so the agent reads both
+ * messages together; a leading Steer is claimed together with it.
+ */
+function steerStartingTurnOrder(
+  target: QueuedTurnRow,
+  others: QueuedTurnRow[],
+  machineOwner: string | null,
+): QueuedTurnRow[] {
+  // Messages waiting for a personal machine's owner never start by themselves
+  // (`machine-owner-wait.ts`), so the starting turn is the first other row.
+  const waits = (row: QueuedTurnRow): boolean => {
+    if (machineOwner === null || row.startedAt !== null) return false;
+    const causal =
+      row.initiatingHumanSubjectId?.trim() ||
+      (row.initiatorKind === "subject" ? row.initiatorSubjectId?.trim() : "") ||
+      null;
+    return causal !== machineOwner;
+  };
+  const starting = others.findIndex((row) => !waits(row));
+  let behind = starting < 0 ? others.length : starting + 1;
+  while (behind < others.length) {
+    const row = others[behind]!;
+    const metadata = row.metadata as Record<string, unknown> | null;
+    if (metadata?.delivery !== "steer" || waits(row)) break;
+    behind += 1;
+  }
+  return [...others.slice(0, behind), target, ...others.slice(behind)];
 }
 
 async function normalizeQueuePositions(
@@ -2294,7 +2345,7 @@ export async function submitHumanPromptInTransaction(
     operationKey: string;
     /** Stable parsed boundary-request identity used before mutable enrichment. */
     boundaryRequestHash?: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     text: string;
@@ -2363,7 +2414,8 @@ export async function submitHumanPromptInTransaction(
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   // Send is inert queue admission while paused; Steer deliberately resumes.
-  // Tell the lock helper which path may need the exclusive control prefix.
+  // `steer_or_send` never resumes: it steers only an active branch. Tell the
+  // lock helper which path may need the exclusive control prefix.
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
@@ -2432,7 +2484,7 @@ export async function submitHumanPromptInTransaction(
         }
       : {}),
   });
-  const action = input.delivery === "steer" ? "prompt.steer" : "prompt.send";
+  const action = humanPromptCommandAction(input.delivery);
   const reserved = input.boundaryRequestHash
     ? await reserveSessionPromptCommandReceipt(db, {
         accountId: input.accountId,
@@ -2571,17 +2623,47 @@ export async function submitHumanPromptInTransaction(
   // explicitly paused branch remains inert until Resume or an explicit Steer;
   // running and recovering work, and agent or machine input, retain ordinary
   // queue semantics.
-  const effectiveDelivery = waitsForMachineOwner
+  //
+  // `steer_or_send` is decided here, under the same locks as the turn state it
+  // reads, so a sender's stale view of the session never changes where the
+  // message goes. It steers whenever an active branch has a current turn
+  // (running, recovering, or one of the ownerless waits above) or accepted
+  // work about to start, and otherwise is an ordinary Send: an idle chat
+  // starts a turn, and a paused chat, a chat held by used-up allowance, a
+  // queue edit, and a message waiting for the machine's owner keep their
+  // ordinary queueing.
+  const steerOrSendCanSteer =
+    input.delivery === "steer_or_send" &&
+    !waitsForMachineOwner &&
+    !isQueueEditSubmission &&
+    before.state === "active" &&
+    !session.admissionBlock;
+  // A turn accepted but not yet claimed (or the next one, between turns) is
+  // about to start. The message steers it as soon as it does.
+  const steersStartingTurn =
+    steerOrSendCanSteer &&
+    session.activeTurnId === null &&
+    (await runnableQueuedTurnExists(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sources: ["user", "api"],
+    }));
+  const effectiveDelivery: "send" | "steer" = waitsForMachineOwner
     ? "send"
-    : input.delivery === "send" &&
-        (input.actor.type === "human" || input.actor.type === "operator") &&
-        !isQueueEditSubmission &&
-        before.state === "active" &&
-        sendTakesOverActiveWait(session.status) &&
-        !session.admissionBlock &&
-        session.activeTurnId !== null
-      ? "steer"
-      : input.delivery;
+    : input.delivery === "steer_or_send"
+      ? steerOrSendCanSteer && (session.activeTurnId !== null || steersStartingTurn)
+        ? "steer"
+        : "send"
+      : input.delivery === "send" &&
+          (input.actor.type === "human" || input.actor.type === "operator") &&
+          !isQueueEditSubmission &&
+          before.state === "active" &&
+          sendTakesOverActiveWait(session.status) &&
+          !session.admissionBlock &&
+          session.activeTurnId !== null
+        ? "steer"
+        : input.delivery;
   const resumed =
     effectiveDelivery === "send"
       ? {
@@ -3212,9 +3294,11 @@ export async function submitHumanPromptInTransaction(
   }
 
   const ordered =
-    effectiveDelivery === "steer"
-      ? steerQueueOrder(turn, existingQueued, supersession)
-      : [...existingQueued, turn];
+    effectiveDelivery !== "steer"
+      ? [...existingQueued, turn]
+      : steersStartingTurn
+        ? steerStartingTurnOrder(turn, existingQueued, machineOwner)
+        : steerQueueOrder(turn, existingQueued, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,
