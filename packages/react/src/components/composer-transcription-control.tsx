@@ -84,6 +84,7 @@ export type ComposerTranscriptionMessages = {
   errorTooLarge: string;
   errorInvalidAudio: string;
   errorStorageUnavailable: string;
+  errorProviderQuotaExceeded: string;
   errorRetryable: string;
   errorHandoffUncertain: string;
   errorUnknown: string;
@@ -120,6 +121,7 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   errorTooLarge: t("composerTranscriptionControl.recordingIsTooLargeTry"),
   errorInvalidAudio: t("composerTranscriptionControl.theRecordingCouldNotBe"),
   errorStorageUnavailable: t("composerTranscriptionControl.voiceInputStoppedBecauseAudio"),
+  errorProviderQuotaExceeded: t("composerTranscriptionControl.speechServiceOutOfCredit"),
   errorRetryable: t("composerTranscriptionControl.savedTranscriptionFailedRetryWhen"),
   errorHandoffUncertain: t("composerTranscriptionControl.transcriptSavedCheckYourDraft"),
   errorUnknown: t("composerTranscriptionControl.voiceInputCouldNotStart"),
@@ -686,6 +688,8 @@ function transcriptionErrorMessage(code: string, messages: ComposerTranscription
       return messages.errorInvalidAudio;
     case "storage_unavailable":
       return messages.errorStorageUnavailable;
+    case "provider_quota_exceeded":
+      return messages.errorProviderQuotaExceeded;
     case "network":
     case "provider":
     case "timeout":
