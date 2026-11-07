@@ -296,7 +296,7 @@ This read does not consume or change the website draft. Draft text, goals, uploa
 
 The first message does not list connectors, repositories or the Sandbox Environment. New interactions leave `slack_interactions.session_defaults_line` null. An interaction bound before that change may still carry a frozen line; a repair or a control update of its acknowledgement keeps those bytes and their post-ledger identity rather than conflicting with a message Slack already shows.
 
-When a task turns out to need a repository it was not started with, the agent can ask for one with `github_repository_attach`. The request is an ordinary tool approval card in the task's thread (Approve once and Reject, under the same rules as every Slack approval card) and in the app; once approved, the next turn clones the repository. See [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository).
+When a task turns out to need a repository it was not started with, the agent can ask for one with `github_repository_attach`. The request is an ordinary tool approval card in the app and in the task's Slack conversation, under the same rules as every Slack approval card: a direct message with the bot shows the repository, branch and access with Approve action and Decline, and a channel thread links to the task. Once approved, the repository is one of the task's repositories from the next turn. See [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository).
 
 ### Links to another deployment
 

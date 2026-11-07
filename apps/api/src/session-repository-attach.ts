@@ -1,4 +1,8 @@
-import { defaultRepositoryMountPath, type RepositoryResourceRef } from "@opengeni/contracts";
+import {
+  defaultRepositoryMountPath,
+  repositoryMembershipKey,
+  type RepositoryResourceRef,
+} from "@opengeni/contracts";
 import { attachSessionRepositoryResource, type ApiRouteDeps } from "@opengeni/core";
 import { listPersonApprovedFirstPartyToolCalls } from "@opengeni/db";
 import { githubRepositoryResourceRef, listWorkspaceGitHubRepositories } from "./github-access";
@@ -136,13 +140,24 @@ export async function attachApprovedSessionRepository(
     resource,
   });
   if (!result.attached) {
+    // What the chat has, which may be another branch than the one asked for.
+    const memberKey = repositoryMembershipKey(resource.uri);
+    const existing = result.session.resources.find(
+      (candidate): candidate is RepositoryResourceRef =>
+        candidate.kind === "repository" && repositoryMembershipKey(candidate.uri) === memberKey,
+    );
+    const attachedRef = existing?.ref ?? resource.ref;
     return {
       status: "already_attached",
       repository: repository.fullName,
-      ref: resource.ref,
-      mountPath,
+      ref: attachedRef,
+      mountPath:
+        existing?.mountPath ?? defaultRepositoryMountPath(existing?.uri ?? resource.uri, "github"),
       reattached: false,
-      message: `${repository.fullName} is already attached to this chat.`,
+      message:
+        attachedRef === resource.ref
+          ? `${repository.fullName} is already attached to this chat.`
+          : `${repository.fullName} is already attached to this chat, on branch ${attachedRef}.`,
     };
   }
   return {
@@ -151,6 +166,6 @@ export async function attachApprovedSessionRepository(
     ref: resource.ref,
     mountPath,
     reattached: result.reattached,
-    message: `Attached ${repository.fullName} (branch ${resource.ref}). It is cloned at ${mountPath} when the next turn starts.`,
+    message: `Attached ${repository.fullName} (branch ${resource.ref}). It is one of this chat's repositories from the next turn; a managed sandbox clones it at ${mountPath}.`,
   };
 }

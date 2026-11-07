@@ -351,7 +351,7 @@ describe("github_repository_attach (real PostgreSQL)", () => {
         mountPath: "repos/github.com/example-owner/service",
         reattached: false,
         message:
-          "Attached example-owner/service (branch main). It is cloned at repos/github.com/example-owner/service when the next turn starts.",
+          "Attached example-owner/service (branch main). It is one of this chat's repositories from the next turn; a managed sandbox clones it at repos/github.com/example-owner/service.",
       });
       // The same approval again changes nothing.
       const again = await mcp.callTool({
@@ -421,6 +421,62 @@ describe("github_repository_attach (real PostgreSQL)", () => {
       expect.objectContaining({ githubRepositoryId: 42, ref: "feature", optional: true }),
     ]);
     expect(session.removedRepositories ?? []).toEqual([]);
+  });
+
+  test("a repository the App lost does not block another attach; one already attached names its branch", async () => {
+    if (!shared) return;
+    const turn = await claimedTurn([
+      // The App no longer offers this one to the workspace.
+      {
+        kind: "repository",
+        uri: "https://github.com/example-owner/gone.git",
+        ref: "main",
+        provider: "github",
+        githubInstallationId: 99,
+        githubRepositoryId: 999,
+        optional: true,
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/example-owner/service.git",
+        ref: "release",
+        provider: "github",
+        githubInstallationId: 71,
+        githubRepositoryId: 43,
+        optional: true,
+      },
+    ]);
+    await decideAndBegin(turn, "project", { repository: "example-owner/project" });
+    await decideAndBegin(turn, "service", { repository: "example-owner/service" });
+    await withMcp(turn, ["github:use"], async (mcp) => {
+      const project = await mcp.callTool({
+        name: "github_repository_attach",
+        arguments: { repository: "example-owner/project" },
+      });
+      expect(project.isError, resultText(project)).not.toBe(true);
+      expect(JSON.parse(resultText(project))).toMatchObject({ status: "attached", ref: "main" });
+      const service = await mcp.callTool({
+        name: "github_repository_attach",
+        arguments: { repository: "example-owner/service" },
+      });
+      expect(JSON.parse(resultText(service))).toEqual({
+        status: "already_attached",
+        repository: "example-owner/service",
+        ref: "release",
+        mountPath: "repos/github.com/example-owner/service",
+        reattached: false,
+        message: "example-owner/service is already attached to this chat, on branch release.",
+      });
+    });
+    expect(
+      (await sessionResources(turn)).map((resource) =>
+        resource.kind === "repository" ? resource.uri : resource.kind,
+      ),
+    ).toEqual([
+      "https://github.com/example-owner/gone.git",
+      "https://github.com/example-owner/service.git",
+      "https://github.com/example-owner/project.git",
+    ]);
   });
 
   test("refuses repositories the workspace App does not offer, archived and empty ones", async () => {

@@ -50,7 +50,9 @@ export async function attachSessionRepositoryResource(
   if (resourcesIncludeRepository(current.resources, resource.uri)) {
     return { attached: false, reattached: false, session: current };
   }
-  await validateGitHubRepositorySelection(deps.db, workspaceId, [...current.resources, resource]);
+  // Only the new repository: the chat's others were checked when they were
+  // attached, and one the App has since lost must not block every attach.
+  await validateGitHubRepositorySelection(deps.db, workspaceId, [resource]);
   let attached = false;
   let reattached = false;
   const events = await appendSessionEventsWithLockedSessionUpdate(

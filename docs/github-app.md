@@ -337,10 +337,11 @@ other way, attaches nothing. The repository must be one the workspace GitHub
 App offers now, the same catalog and permission as the repository picker, and
 neither archived nor empty. It is attached to the chat's own repositories as
 `optional` on the requested branch or its default branch, with a
-`session.resources.added` event, and the next turn clones it at
+`session.resources.added` event, and from the next turn it is one of the
+chat's repositories, handled like the others: a managed sandbox clones it at
 `repos/github.com/<owner>/<name>`. A turn already running keeps the
 credentials it started with. Asking for a repository the chat already has
-changes nothing.
+changes nothing, and the result names the branch the chat has.
 
 ## Operational notes
 

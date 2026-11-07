@@ -1657,7 +1657,7 @@ export function buildOpenGeniMcpServer(
       GITHUB_REPOSITORY_ATTACH_TOOL_NAME,
       {
         description:
-          "Ask to attach a repository the workspace GitHub App offers to this chat. A person approves it in the chat; once approved it is cloned at repos/github.com/<owner>/<name> when the next turn starts, with this chat's GitHub App access. Find it with github_repositories_list.",
+          "Ask to attach a repository the workspace GitHub App offers to this chat. A person approves it in the chat; once approved it joins this chat's repositories from the next turn, with this chat's GitHub App access. Find it with github_repositories_list.",
         inputSchema: {
           repository: z4
             .string()
