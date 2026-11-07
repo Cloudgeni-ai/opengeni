@@ -3,6 +3,7 @@ import {
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
   defaultRepositoryMountPath,
+  GitHubRepositoryUnavailableError,
   mergeResourceRefs as mergeContractResourceRefs,
   mergeToolRefEager,
   mergeToolRefs,
@@ -22,7 +23,7 @@ import {
   type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import {
-  areGitHubRepositoriesAllowedForWorkspace,
+  listAllowedGitHubRepositoryIdsForWorkspace,
   requireFileForSubject,
   withSessionRlsActorContext,
   type SessionRlsActorContext,
@@ -464,23 +465,72 @@ export async function validateGitHubRepositorySelection(
     return;
   }
   const selections = gitHubRepositorySelections(resources);
+  const unavailableRepositoryIds = new Set<string>();
   for (const installationId of installationIds) {
     const repositoryIds = selections
       .filter((selection) => selection.installationId === installationId)
       .map((selection) => selection.repositoryId);
-    if (
-      !(await areGitHubRepositoriesAllowedForWorkspace(
-        db,
-        workspaceId,
-        installationId,
-        repositoryIds,
-      ))
-    ) {
-      throw new HTTPException(422, {
-        message:
-          "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
-      });
+    const allowed = new Set(
+      await listAllowedGitHubRepositoryIdsForWorkspace(db, workspaceId, installationId, [
+        ...new Set(repositoryIds),
+      ]),
+    );
+    for (const repositoryId of repositoryIds) {
+      if (!allowed.has(repositoryId)) {
+        unavailableRepositoryIds.add(`${installationId}:${repositoryId}`);
+      }
     }
+  }
+  if (unavailableRepositoryIds.size > 0) {
+    // Name what lost access so the person can remove it or restore it; the
+    // message keeps its historical text.
+    const cause = new GitHubRepositoryUnavailableError(
+      unavailableGitHubRepositoryNames(resources, unavailableRepositoryIds),
+    );
+    throw new HTTPException(422, { message: cause.message, cause });
+  }
+}
+
+/** `owner/name` of each refused repository, in request order, without duplicates. */
+function unavailableGitHubRepositoryNames(
+  resources: ResourceRef[],
+  unavailable: ReadonlySet<string>,
+): string[] {
+  const names = new Set<string>();
+  for (const resource of resources) {
+    const [selection] = gitHubRepositorySelections([resource]);
+    if (!selection || !unavailable.has(`${selection.installationId}:${selection.repositoryId}`)) {
+      continue;
+    }
+    names.add(githubRepositoryDisplayName(resource));
+  }
+  return [...names];
+}
+
+function githubRepositoryDisplayName(resource: ResourceRef): string {
+  if (resource.kind !== "repository") return "";
+  try {
+    const path = new URL(resource.uri).pathname.replace(/\.git$/u, "");
+    const [owner, name] = path.split("/").filter(Boolean);
+    if (owner && name) return `${owner}/${name}`;
+  } catch {
+    // Not a URL: fall back to the stored identity below.
+  }
+  return resource.uri;
+}
+
+/**
+ * An automatically attached (`optional: true`) GitHub App repository. A
+ * session keeps these across turns; when one loses access the worker drops it
+ * for the turn and reports it as skipped instead of failing the turn.
+ */
+export function isOptionalGitHubAppRepositoryResource(resource: ResourceRef): boolean {
+  if (resource.kind !== "repository" || resource.optional !== true) return false;
+  try {
+    return gitHubRepositorySelections([resource]).length === 1;
+  } catch {
+    // A malformed selection is not exempt: the strict check refuses it.
+    return false;
   }
 }
 

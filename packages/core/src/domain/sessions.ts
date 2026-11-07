@@ -337,6 +337,7 @@ import {
 import {
   assertToolRefsSubset,
   availableToolRefs,
+  isOptionalGitHubAppRepositoryResource,
   mergeToolRefs,
   mergeToolRefEager,
   normalizeResources,
@@ -4832,8 +4833,15 @@ async function acceptSessionUserMessageInFileScope(
       requestedResources,
       attachmentOwnerContext,
     );
+    // The chat's automatically attached repositories that later lose access
+    // (the installation is removed, or the repository is taken out of it)
+    // must not refuse every later message: the worker drops each one for
+    // the turn and reports it as skipped. Repositories this message adds and
+    // ones the person attached explicitly are still checked here.
     await validateGitHubRepositorySelection(db, workspaceId, [
-      ...existingSession.resources,
+      ...existingSession.resources.filter(
+        (resource) => !isOptionalGitHubAppRepositoryResource(resource),
+      ),
       ...requestedResources,
     ]);
     const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({

@@ -144,6 +144,7 @@ export const SITE_BROWSER_RUNTIME: string = [
   "let bounded=boundedApiField(entry);",
   "if(bounded!==void 0)details[key]=bounded}",
   "else if(typeof entry===\"number\"||typeof entry===\"boolean\"||entry===null)details[key]=entry;",
+  "else if(Array.isArray(entry)&&entry.every((item)=>typeof item===\"string\"))details[key]=entry.slice(0,16).map((item)=>boundedApiField(item)).filter((item)=>item!==void 0);",
   "else if(key===\"action\"&&typeof entry===\"object\"&&!Array.isArray(entry)&&PUBLIC_BILLING_ACTIONS.has(String(entry.type))&&entry.href===\"/billing\")details.action={",
   "type:String(entry.type),href:\"/billing\"}",
   "}",
