@@ -561,9 +561,16 @@ conversation, organization connected or not, account linked or not).
   redelivered message starts none. The loop lives in the process that accepted
   the message and is best-effort.
 - **Markdown.** Messages are sent with `textFormat: "markdown"`. Agent Markdown
-  Teams can't show in text messages is rewritten: tables become one list item per
-  row, headings below level three become bold lines, setext headings become ATX
-  headings, images become links and horizontal rules are dropped. Text that
+  Teams can't show in text messages is rewritten: each table row becomes a list
+  item led by its first cell in bold, with every other cell on its own nested
+  line as `Header: value` (cells joined on one line ran together), headings
+  below level three become bold lines, setext headings become ATX headings,
+  images become links and horizontal rules are dropped. Teams shows paragraphs
+  with no gap between them and joins a line to the one before it, so a heading
+  or a line that is only bold text (`**Next steps**`) right after a paragraph
+  gets an empty `<br>` paragraph before it, and such a bold line is kept on its
+  own line; after a list, quote or code block Teams already leaves a gap. The
+  help and welcome text go through the same rules. Text that
   looks like an HTML tag (`List<string>`) is backslash-escaped outside code so
   Teams doesn't swallow it; autolinks, link targets and `<br>` are kept. Code is
   left as written: fenced blocks (including fences nested in list items),
@@ -572,6 +579,18 @@ conversation, organization connected or not, account linked or not).
   closed and reopened with only its fence and language, and room for the closing
   fence is kept, so no part exceeds the limit. Verify tag-like text on desktop,
   web and mobile during acceptance.
+- **Notices.** Opengeni's own notices about a chat's session (Started, needs
+  your input or approval, could not finish) and the refusal notices go out as
+  an Adaptive Card with the notice text and a labelled button (Open in
+  Opengeni, Open Opengeni, Continue in Opengeni), never a bare URL. The outbox
+  stores `link: "session"` and the card text; the button's URL is built when
+  the notice is sent. The stored `text` still writes the URL out, which is what
+  a replica from before notice cards sends during a rolling deploy. In a
+  channel thread Teams starts a new message header after a card, so the
+  agent's answer that follows has its own header with the AI label instead of
+  being grouped under the notice. In 1:1 and group chats Teams groups
+  consecutive bot messages anyway; there the Started notice comes only before
+  a chat's first answer.
 - **AI label and feedback.** Agent replies (from `turn.completed`) carry the
   schema.org `AIGeneratedContent` message entity and `channelData.feedbackLoop`.
   The authenticated `message/submitAction` feedback invoke passes the same tenant

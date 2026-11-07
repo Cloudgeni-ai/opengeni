@@ -7,6 +7,7 @@ import {
   teamsHelp,
   teamsMarkdown,
   teamsMarkdownParts,
+  teamsNoticeCard,
   teamsAccountReply,
   teamsWelcome,
   type TeamsExperienceState,
@@ -100,10 +101,49 @@ describe("Teams welcome and help", () => {
     });
     expect(teamsCommand("unlink confirm")).toBe("unlink_confirm");
   });
+  test("help's section headings are spaced from the paragraph above them", () => {
+    const { text } = teamsHelp({ personal: true, installation: "active", linked: true });
+    // Teams leaves no gap between paragraphs; a list already has one after it.
+    expect(text).toContain("done.\n\n<br>\n\n**Commands**\n- **help**");
+    expect(text).toContain(
+      "unlink**: disconnect your Teams account from Opengeni\n\n**Good to know**",
+    );
+    expect(text.startsWith("**Opengeni help**\n\n")).toBe(true);
+  });
+});
+
+describe("Teams notices", () => {
+  test("a notice is a card with its paragraphs and a labelled button, not a bare URL", () => {
+    const card = teamsNoticeCard(
+      "Started. Follow progress or approve requests in Opengeni.\n\nSend **help** for tips.",
+      { title: "Open in Opengeni", url: "https://app.example.test/workspaces/w/sessions/s" },
+    );
+    expect(card).toEqual({
+      $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+      type: "AdaptiveCard",
+      version: "1.2",
+      body: [
+        {
+          type: "TextBlock",
+          text: "Started. Follow progress or approve requests in Opengeni.",
+          wrap: true,
+        },
+        { type: "TextBlock", text: "Send **help** for tips.", wrap: true },
+      ],
+      actions: [
+        {
+          type: "Action.OpenUrl",
+          title: "Open in Opengeni",
+          url: "https://app.example.test/workspaces/w/sessions/s",
+        },
+      ],
+    });
+    expect(JSON.stringify(card.body)).not.toContain("https:");
+  });
 });
 
 describe("Teams Markdown", () => {
-  test("tables become lists, deep headings bold lines, images links; rules are dropped", () => {
+  test("tables become nested lists, deep headings bold lines, images links; rules are dropped", () => {
     const input = [
       "# Title",
       "#### Detail",
@@ -123,8 +163,9 @@ describe("Teams Markdown", () => {
         "# Title",
         "**Detail**",
         "",
-        "- **Name:** API; **Status:** **up**",
-        "- **Name:** Web",
+        "- **API**",
+        "  - Status: **up**",
+        "- **Web**",
         "",
         "",
         "[diagram](https://example.test/a.png)",
@@ -132,6 +173,110 @@ describe("Teams Markdown", () => {
         "- ☑ done",
       ].join("\n"),
     );
+  });
+  test("each table cell gets its own line, so sentence cells don't run together", () => {
+    const input = [
+      "| Step | Why it matters | Owner |",
+      "| --- | --- | --- |",
+      "| Kickoff | Aligns goals. | PM |",
+      "| **Train** | Builds confidence. | |",
+      "| | Unnamed row. | Ops |",
+      "| Solo | | |",
+    ].join("\n");
+    expect(teamsMarkdown(input)).toBe(
+      [
+        "- **Kickoff**",
+        "  - Why it matters: Aligns goals.",
+        "  - Owner: PM",
+        "- **Train**",
+        "  - Why it matters: Builds confidence.",
+        "- Why it matters: Unnamed row.",
+        "  - Owner: Ops",
+        "- **Solo**",
+      ].join("\n"),
+    );
+    expect(teamsMarkdown(input)).not.toContain(";");
+    // A one-column table is a plain list.
+    expect(teamsMarkdown("| Item |\n| --- |\n| one |\n| two |")).toBe("- one\n- two");
+  });
+  test("headings after a paragraph get a gap; bold heading lines stand on their own line", () => {
+    expect(
+      teamsMarkdown(
+        [
+          "**Headline:** Support improved.",
+          "**Highlights**",
+          "- Volume down",
+          "",
+          "**Risks to watch**",
+          "Watch quality.",
+          "",
+          "### Next steps",
+          "Agree owners.",
+          "#### Detail",
+          "",
+          "Closing",
+          "---",
+        ].join("\n"),
+      ),
+    ).toBe(
+      [
+        "**Headline:** Support improved.",
+        "",
+        "<br>",
+        "",
+        "**Highlights**",
+        "- Volume down",
+        "",
+        // After a list Teams already leaves a gap.
+        "**Risks to watch**",
+        "",
+        "Watch quality.",
+        "",
+        "<br>",
+        "",
+        "### Next steps",
+        "Agree owners.",
+        "",
+        "<br>",
+        "",
+        "**Detail**",
+        "",
+        "## Closing",
+      ].join("\n"),
+    );
+    // The first line, a line under a heading, and bold inside a sentence need no gap.
+    expect(teamsMarkdown("**Summary**\n- one")).toBe("**Summary**\n- one");
+    expect(teamsMarkdown("# Title\n**Sub**")).toBe("# Title\n**Sub**");
+    expect(teamsMarkdown("Text with **bold** words.\n**a** and **b**")).toBe(
+      "Text with **bold** words.\n**a** and **b**",
+    );
+    expect(teamsMarkdown("```\ncode\n```\n## After code")).toBe("```\ncode\n```\n## After code");
+  });
+  test("bold lines in list items, under setext underlines and in a row keep their structure", () => {
+    // An indented bold line inside a list item stays in the item.
+    expect(teamsMarkdown("- Item one\n  **Note**\n  continued text")).toBe(
+      "- Item one\n  **Note**\n  continued text",
+    );
+    // A bold line underlined with = or - is a heading, not a stray underline.
+    expect(teamsMarkdown("**Title**\n===\nBody")).toBe("# **Title**\nBody");
+    expect(teamsMarkdown("Intro\n**Title**\n---\nBody")).toBe(
+      "Intro\n\n<br>\n\n## **Title**\nBody",
+    );
+    // Consecutive bold lines each stand on their own line.
+    expect(teamsMarkdown("Para\n**A**\n**B**\nText")).toBe(
+      "Para\n\n<br>\n\n**A**\n\n**B**\n\nText",
+    );
+  });
+  test("a part never ends on the gap before a heading that starts the next part", () => {
+    const text = teamsMarkdown(`${"Paragraph text.\n".repeat(60)}## Next\nMore`);
+    const gap = text.indexOf("\n\n<br>\n\n## Next");
+    expect(gap).toBeGreaterThan(0);
+    // Split exactly where the heading starts.
+    const parts = teamsMarkdownParts(text, gap + "\n\n<br>\n\n".length);
+    expect(parts.length).toBe(2);
+    expect(parts[0]!.endsWith("Paragraph text.\n")).toBe(true);
+    expect(parts[0]).not.toContain("<br>");
+    expect(parts[1]!.startsWith("## Next")).toBe(true);
   });
   test("leaves code blocks, links, emphasis and lists as written", () => {
     const input = [

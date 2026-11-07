@@ -638,14 +638,23 @@ test("an accepted message shows typing until its reply is queued", async () => {
     teamsReplyPending(client.db, f.i, { eventId, replySequence });
   expect(await pending(inbox!.event_id)).toBe(true);
   // Admission queues only the "started" notice: still working.
-  const deliveries: Array<{ text: string; ai: boolean }> = [];
-  const send = async (_m: unknown, text: string, options?: { ai?: boolean }) => {
-    deliveries.push({ text, ai: options?.ai === true });
+  const deliveries: Array<{ text: string; ai: boolean; link?: string }> = [];
+  const send = async (
+    _m: unknown,
+    text: string,
+    options?: { ai?: boolean; link?: { title: string } },
+  ) => {
+    deliveries.push({
+      text,
+      ai: options?.ai === true,
+      ...(options?.link ? { link: options.link.title } : {}),
+    });
     return `sent-${deliveries.length}`;
   };
   await drainTeamsBotOnce(f.deps, send);
   expect(deliveries).toHaveLength(1);
   expect(deliveries[0]!.ai).toBe(false);
+  expect(deliveries[0]!.link).toBe("Open in Opengeni");
   expect(await pending(inbox!.event_id)).toBe(true);
   const [route] =
     await shared.admin`select session_id,session_workspace_id,workspace_id from teams_bot_routes where route_id=${inbox!.route_id}`;
@@ -668,10 +677,10 @@ test("an accepted message shows typing until its reply is queued", async () => {
   await drainTeamsBotOnce(f.deps, send);
   expect(await pending(inbox!.event_id)).toBe(false);
   // The agent reply is Teams Markdown and carries the AI label and feedback.
-  expect(deliveries.at(-1)).toEqual({ text: "- **A:** 1; **B:** 2", ai: true });
+  expect(deliveries.at(-1)).toEqual({ text: "- **1**\n  - B: 2", ai: true });
   const [outbox] =
     await shared.admin`select payload from teams_bot_outbox where route_id=${inbox!.route_id} and source_sequence>0`;
-  expect(outbox!.payload).toMatchObject({ text: "- **A:** 1; **B:** 2", ai: true });
+  expect(outbox!.payload).toMatchObject({ text: "- **1**\n  - B: 2", ai: true });
 
   // A message admitted without a known turn (by an older release) falls back
   // to its chat: a turn that completes, even without text, ends typing.
