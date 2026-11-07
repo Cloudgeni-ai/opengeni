@@ -36,7 +36,9 @@ function platformChatProvider(): NonNullable<Options["provider"]> {
   } as unknown as NonNullable<Options["provider"]>;
 }
 
-function chatClient(create: (request: Request) => Promise<unknown>): NonNullable<Options["client"]> {
+function chatClient(
+  create: (request: Request) => Promise<unknown>,
+): NonNullable<Options["client"]> {
   return { chat: { completions: { create } } } as unknown as NonNullable<Options["client"]>;
 }
 
@@ -240,18 +242,26 @@ describe("trimmed checkpoint", () => {
       content: [{ type: "output_text", text: "Changelog drafted; running checks next." }],
     },
   ];
-  const itemTurnIds = [turnA, turnA, active, active, active, active, active, active, active, active];
+  const itemTurnIds = [
+    turnA,
+    turnA,
+    active,
+    active,
+    active,
+    active,
+    active,
+    active,
+    active,
+    active,
+  ];
 
   test("keeps recent requests, notes the current turn and is read as a summary", () => {
-    const replacement = buildTrimmedCompactionReplacement(
-      items,
-      undefined,
-      undefined,
-      undefined,
-      { itemTurnIds, activeTurnId: active },
-    );
-    const history = replacement.history;
-    const checkpoint = history.at(-1)!;
+    const replacement = buildTrimmedCompactionReplacement(items, undefined, undefined, undefined, {
+      itemTurnIds,
+      activeTurnId: active,
+    });
+    const rebuilt = replacement.history;
+    const checkpoint = rebuilt.at(-1)!;
 
     expect(isCompactionSummary(checkpoint)).toBe(true);
     expect(checkpoint.content).toBe(
@@ -261,14 +271,14 @@ describe("trimmed checkpoint", () => {
         "Your latest message in the current turn, before the removal:\nChangelog drafted; running checks next.",
       ].join("\n\n"),
     );
-    expect(history).toContainEqual(
+    expect(rebuilt).toContainEqual(
       expect.objectContaining({ role: "user", content: "Set up the release branch" }),
     );
-    expect(history).toContainEqual(
+    expect(rebuilt).toContainEqual(
       expect.objectContaining({ role: "user", content: "Now update the changelog" }),
     );
-    expect(history.some((item) => item.type === "function_call")).toBe(false);
-    expect(history.some((item) => item.type === "function_call_result")).toBe(false);
+    expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
+    expect(rebuilt.some((item) => item.type === "function_call_result")).toBe(false);
   });
 
   test("carries an earlier summary forward once, without nesting notices", () => {
@@ -276,7 +286,8 @@ describe("trimmed checkpoint", () => {
       {
         type: "message",
         role: "user",
-        content: "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\nThe release is version 4.2.",
+        content:
+          "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\nThe release is version 4.2.",
         opengeni_context_summary: true,
       },
       ...items,

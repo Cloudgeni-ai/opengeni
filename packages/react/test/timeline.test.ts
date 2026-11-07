@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
   compactionSkipTitle,
+  isTrimmedCompaction,
   presentTurnFailureText,
 } from "../src/timeline/compaction-copy";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
@@ -2931,6 +2934,96 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(malformed[0]).toMatchObject({ providerRejection: null });
+  });
+
+  test("a checkpoint that trimmed history names it and keeps the provider's reason behind Details", () => {
+    reset();
+    const providerRejection = {
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "invalid_request_error",
+      param: null,
+      requestId: "req_trimmed",
+    };
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.started", { trigger: "auto" }, { turnId: "turn-t" }),
+      event(
+        "session.context.compacted",
+        {
+          trigger: "auto",
+          implementation: "deterministic_trim",
+          estimatedTokensBefore: 900_000,
+          estimatedTokensAfter: 12_000,
+          fallback: {
+            reason: "provider_rejected",
+            providerRejection,
+            providerMessage: "max_tokens is too large",
+          },
+        },
+        { turnId: "turn-t" },
+      ),
+    ]);
+    const landmarks = items.filter((item) => item.kind === "context-compaction");
+    expect(landmarks).toHaveLength(1);
+    const landmark = landmarks[0]!;
+    if (landmark.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark).toMatchObject({
+      phase: "compacted",
+      implementation: "deterministic_trim",
+      providerRejection: { ...providerRejection, code: "invalid_request_error" },
+      providerMessage: "max_tokens is too large",
+    });
+    expect(isTrimmedCompaction(landmark)).toBe(true);
+    expect(COMPACTION_TRIMMED_TITLE(englishText)).toBe("Older messages trimmed");
+    expect(COMPACTION_TRIMMED_SUBTITLE(englishText)).toBe(
+      "The model couldn’t summarize them. Chat history above is unchanged.",
+    );
+    // The trim already recovered, so the repeat warning is not shown.
+    expect(compactionFailureDetails(englishText, landmark)).toEqual({
+      note: null,
+      facts: [
+        { label: "Response", value: "HTTP 400 · invalid_request_error · invalid_request_error" },
+        { label: "Request ID", value: "req_trimmed" },
+        { label: "Provider message", value: "max_tokens is too large" },
+      ],
+    });
+    // Without a rejection, the provider's message alone; without either, no Details.
+    expect(compactionFailureDetails(englishText, { ...landmark, providerRejection: null })).toEqual(
+      { note: null, facts: [{ label: "Provider message", value: "max_tokens is too large" }] },
+    );
+    const { providerMessage: _message, ...withoutMessage } = landmark;
+    expect(
+      compactionFailureDetails(englishText, { ...withoutMessage, providerRejection: null }),
+    ).toBeNull();
+    // An ordinary checkpoint is not a trimmed one.
+    expect(isTrimmedCompaction({ phase: "compacted", implementation: null })).toBe(false);
+  });
+
+  test("a compaction failure landmark lists the provider's message after its identifiers", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.skipped", {
+        reason: "summarization_failed",
+        providerRejection: {
+          httpStatus: 422,
+          type: null,
+          code: null,
+          param: null,
+          requestId: null,
+        },
+        providerMessage: "Unprocessable request",
+      }),
+    ]);
+    const landmark = items[0];
+    if (landmark?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark.providerMessage).toBe("Unprocessable request");
+    expect(compactionFailureDetails(englishText, landmark)).toEqual({
+      note: "The provider rejects this request the same way until the conversation changes.",
+      facts: [
+        { label: "Response", value: "HTTP 422" },
+        { label: "Provider message", value: "Unprocessable request" },
+      ],
+    });
   });
 
   test("names a compaction turn failure and keeps the recorded text as detail", () => {

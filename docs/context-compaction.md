@@ -8,9 +8,11 @@ Opengeni freezes a per-session compaction mode at create time
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` (API only); `remote_v2` sessions after their first non-Codex turn | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
 | `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the same 20k budget as portable compaction. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. While the session stays on Codex models it stays `remote_v2`; see "Switching a remote_v2 session to another model" below. |
 
-There is no off switch, compatibility ladder, ordinary-turn history trim, or
-deterministic non-model fallback. A `remote_v2` session never silently falls
-back to portable on remote failure (avoids mixed history shapes). Its single
+There is no off switch, compatibility ladder or ordinary-turn history trim.
+The one deterministic non-model fallback is the portable trimmed checkpoint
+described under "When the summary fails" below. A `remote_v2` session never
+silently falls back to portable on remote failure (avoids mixed history
+shapes). Its single
 overflow retry is described below. Azure / OpenAI platform remote compact APIs
 are out of scope.
 
@@ -625,10 +627,52 @@ terminal `session.context.compacted` or `session.context.compaction.skipped`
 landmark is durable, the ordinary turn settles `superseded` before another
 model request and the Steer runs next. Pause and Cancel are not deferred.
 
-If summarization produces an authoritative terminal failure, the turn ends
-with an honest `context_compaction_failed` result. Opengeni does not continue
-with silently trimmed input and does not install a mechanical fallback summary.
-Retryable provider failures instead recover the same accepted turn through the
+### When the summary fails
+
+A portable checkpoint asks the chat's own model for its summary. For an
+OpenAI-compatible endpoint (a workspace or organization custom provider), a
+summary request rejected with HTTP 400 or 422 is sent once more without its
+output cap (`max_tokens`, or `max_output_tokens` on the Responses API), since
+such endpoints often reject a cap above their own model's limit. Other
+providers are not retried this way.
+
+If the summary still fails terminally (a definitive provider rejection,
+another failure that retrying the same request cannot fix, an unusable or
+empty summary, or no history fitting the summary request), the portable path
+installs a trimmed checkpoint instead of failing the turn. It is rebuilt
+exactly like a summarized checkpoint (platform context, the newest requests
+with shortened copies of their replies, attachment catalog), but a fixed
+model-visible note (`TRIMMED_CONTEXT_NOTICE` in
+`packages/runtime/src/context-compaction.ts`) takes the summary's place. The
+note carries forward the newest earlier checkpoint's summary (bounded), the
+tools the current turn has called so far, and the current turn's latest
+assistant text (bounded). It is marked like a summary, so a later compaction
+reads it as one. No other model is called, so no history leaves the chat's
+provider, and the workspace's data-residency, training and billing choices
+hold unchanged. `session.context.compacted` then carries
+`implementation: "deterministic_trim"` and
+`fallback: { reason, providerRejection?, providerMessage? }`, where `reason` is
+`provider_rejected`, `provider_failed` or `summary_unusable`; the timeline
+shows "Older messages trimmed" with the provider's reason behind Details. The
+worker logs one content-free warning (identifiers and classifications only).
+
+The fallback never applies to a retryable provider or capacity failure (the
+same-turn recovery below owns it), an exhausted quota (the next ordinary
+request would be refused too), the attempt's own cancellation, or a
+`remote_v2` checkpoint. When the trimmed checkpoint would not help (it exceeds
+the model's budget, is unchanged or is not smaller), history stays as it was
+and the turn fails with the summary's own error, as below.
+
+The provider's own error message, bounded to 500 characters on one line, is
+kept apart from the content-free diagnostics. It is recorded only on the
+session's own events (the trimmed checkpoint's `fallback`, the
+`summarization_failed` skip landmark, and the `turn.failed` payload's
+`providerMessage` and reason text), which the conversation's readers can
+already see. Worker logs, metrics and telemetry never carry it.
+
+If summarization produces an authoritative terminal failure that the trimmed
+checkpoint cannot replace, the turn ends with an honest
+`context_compaction_failed` result. Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
 and an explicit `/compact` request remains pending for that same-turn retry.
 The attempt's own cancellation (worker shutdown or another activity
@@ -672,8 +716,9 @@ and `response.incomplete` events are converted to ordinary non-2xx provider
 errors before the SDK sees them; a stream with no terminal event is a protocol
 error. None of these shapes may collapse to `{}` or be mislabeled as a
 semantically empty assistant response. Persisted diagnostics contain only
-bounded status/code/request identifiers, never the provider message or model
-input.
+bounded status/code/request identifiers, never model input; the provider's
+bounded message is recorded only on the session's own events, as described
+under "When the summary fails".
 
 When the latest finished inference has `code="context_compaction_failed"`, an
 active goal remains active and the machine inputs that were already pending at

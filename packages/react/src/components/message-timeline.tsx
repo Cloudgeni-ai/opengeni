@@ -31,9 +31,12 @@ import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
   compactionSkipTitle,
+  isTrimmedCompaction,
 } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
@@ -4357,6 +4360,8 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   // Switching a Codex chat to another model rebuilds its context once; say
   // that plainly instead of describing an ordinary compaction.
   const modelSwitch = item.implementation === "portable_model_switch";
+  // The chat's model could not summarize, so older messages were trimmed.
+  const trimmed = isTrimmedCompaction(item);
   const trigger =
     item.trigger && item.phase !== "started" && !modelSwitch
       ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
@@ -4375,14 +4380,17 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
         : t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
-        ? modelSwitch
-          ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
-          : before && after
-            ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-            : t("messageTimeline.conversationHistoryCompacted")
+        ? trimmed
+          ? COMPACTION_TRIMMED_TITLE(t)
+          : modelSwitch
+            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+            : before && after
+              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+              : t("messageTimeline.conversationHistoryCompacted")
         : compactionSkipTitle(t, item.skipReason);
-  const subtitle =
-    item.phase === "compacted" && !modelSwitch
+  const subtitle = trimmed
+    ? COMPACTION_TRIMMED_SUBTITLE(t)
+    : item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
         ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
@@ -4390,6 +4398,8 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
   const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  // Longer copy wraps, centred, instead of truncating.
+  const wraps = failed || trimmed;
   const pill = failed
     ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
     : item.phase === "started"
@@ -4402,7 +4412,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 border px-3 py-1.5 text-og-sm",
           // A failure's recovery step may wrap on narrow screens; a full pill
           // radius would pinch its second line.
-          failed ? "rounded-og-lg" : "rounded-full",
+          wraps ? "rounded-og-lg" : "rounded-full",
           pill,
         )}
         role="status"
@@ -4418,13 +4428,13 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           <span
             className={cn(
               "min-w-0 max-w-full text-og-xs",
-              failed ? "text-balance text-center" : "inline-flex items-center gap-1",
+              wraps ? "text-balance text-center" : "inline-flex items-center gap-1",
             )}
           >
             {subtitle ? (
-              <span className={cn("opacity-80", !failed && "min-w-0 truncate")}>{subtitle}</span>
+              <span className={cn("opacity-80", !wraps && "min-w-0 truncate")}>{subtitle}</span>
             ) : null}
-            {subtitle && details && failed ? " " : null}
+            {subtitle && details && wraps ? " " : null}
             {details ? (
               <button
                 type="button"

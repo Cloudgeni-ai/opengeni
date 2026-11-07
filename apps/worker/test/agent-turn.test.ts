@@ -6755,6 +6755,43 @@ describe("transient provider error classifier", () => {
     });
   });
 
+  test("a failed compaction request carries the provider's own message, bounded", () => {
+    const cause = Object.assign(new Error("400 status code (no body)"), {
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message: `max_tokens is too large:\n${"x".repeat(2_000)}`,
+      },
+    });
+    const rejected = new CompactionProviderResponseError(
+      { httpStatus: 400, type: "invalid_request_error" },
+      cause,
+    );
+    expect(rejected.providerMessage?.startsWith("max_tokens is too large: xxx")).toBe(true);
+    expect(rejected.providerMessage?.length).toBe(500);
+    // The content-free message and diagnostics never carry it.
+    expect(rejected.message).not.toContain("max_tokens");
+    const payload = compactionFailureTurnEventPayload(rejected);
+    expect(payload.providerMessage).toBe(rejected.providerMessage!);
+    expect(payload.error).toContain(
+      `the model provider rejected the compaction request (HTTP 400 invalid_request_error): "max_tokens is too large: x`,
+    );
+    // A non-rejection failure appends it after its own reason.
+    const failed = new CompactionProviderResponseError(
+      { responseStatus: "failed", code: "server_error" },
+      undefined,
+      { status: "failed", error: { code: "server_error", message: "Upstream overloaded" } },
+    );
+    expect(compactionFailureTurnEventPayload(failed)).toMatchObject({
+      providerMessage: "Upstream overloaded",
+      error: expect.stringContaining('. Provider message: "Upstream overloaded"'),
+    });
+    // Nothing recorded when the provider sent no message.
+    expect(
+      compactionFailureTurnEventPayload(new CompactionProviderResponseError({ httpStatus: 400 })),
+    ).not.toHaveProperty("providerMessage");
+  });
+
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {
     // Classifier → retryable, then the retryable turn-failure branch recovers the
     // accepted turn itself. No goal lookup or synthetic continuation is involved.
