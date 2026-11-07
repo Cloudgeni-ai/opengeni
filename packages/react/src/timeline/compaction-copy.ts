@@ -128,7 +128,12 @@ export function compactionFailureDetails(
   const facts = [
     {
       label: t("timeline.compactionCopy.response"),
-      value: [`HTTP ${rejection.httpStatus}`, rejection.type, rejection.code]
+      // Some providers repeat the type as the code; name it once.
+      value: [
+        `HTTP ${rejection.httpStatus}`,
+        rejection.type,
+        rejection.code === rejection.type ? null : rejection.code,
+      ]
         .filter((part): part is string => Boolean(part))
         .join(" · "),
     },

@@ -2982,7 +2982,7 @@ describe("buildTimeline", () => {
     expect(compactionFailureDetails(englishText, landmark)).toEqual({
       note: null,
       facts: [
-        { label: "Response", value: "HTTP 400 · invalid_request_error · invalid_request_error" },
+        { label: "Response", value: "HTTP 400 · invalid_request_error" },
         { label: "Request ID", value: "req_trimmed" },
         { label: "Provider message", value: "max_tokens is too large" },
       ],
