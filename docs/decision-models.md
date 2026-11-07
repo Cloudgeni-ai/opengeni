@@ -24,7 +24,7 @@ Three consumers use it:
 
 ## Deployment configuration
 
-Configure all three explicitly, on API and worker servers:
+Configure the shared model explicitly, on API and worker servers:
 
 ```dotenv
 OPENGENI_DECISION_MODEL_PROVIDER=openrouter
@@ -37,6 +37,14 @@ its existing `OPENGENI_CODE_SEARCH_MODE` and workspace/session setting. No paid
 model is configured by default. No customer key or subscription is borrowed.
 Partial explicit configuration is unavailable; it never falls back to a different
 credential. Configure the category as one deployment change.
+
+Public API calls can select a separate deployment-owned category through
+`OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER/ID/API_KEY/BASE_URL/AUTH` on the API
+process. It uses these same adapters and residency rules without changing tool
+discovery or code search. When every public setting is unset, public calls use
+the shared category above. An explicit public category is complete and independent;
+it never borrows missing credentials or endpoint settings from the shared category.
+See [public decision configuration](model-inference.md#authority-funding-and-configuration).
 
 | Provider | Model example | Endpoint | Optional base URL |
 | --- | --- | --- | --- |

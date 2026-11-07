@@ -3,6 +3,7 @@ import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
+import { configuredDecisionModel } from "@opengeni/runtime/model-call";
 import { createDecisionCallService } from "../src/model-calls/decisions";
 import * as rls from "../src/access-grant-rls";
 
@@ -57,10 +58,15 @@ function harness(
   } = {},
 ) {
   const effective = options.settings ?? settings();
-  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const calls: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> =
+    [];
   const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(init?.body as string);
-    calls.push({ url: String(url), body });
+    calls.push({
+      url: String(url),
+      body,
+      authorization: new Headers(init?.headers).get("authorization"),
+    });
     if (options.respond) return options.respond(String(url), body);
     return Response.json({
       model: "returned-model",
@@ -102,6 +108,7 @@ describe("public platform-funded decisions", () => {
       costUsd: 0.004,
       costSource: "provider-reported",
     });
+    expect(result.model).toBe("openai/returned-model");
     expect(h.calls[0]).toMatchObject({
       url: "https://models.example.test/v1/decisions",
       body: { model: "decision-test" },
@@ -110,10 +117,76 @@ describe("public platform-funded decisions", () => {
     await h.service.flushUsage();
     expect(h.settle.mock.calls[0]![2]).toMatchObject({
       sourceId: "model_call:server-request",
+      model: "openai/returned-model",
+      initiatorContext: { model: "openai/returned-model" },
       normalizedUsage: { telemetry: { inputTokens: 12, outputTokens: 3 } },
       externalProviderCost: { costUsd: 0.004, source: "provider-reported" },
       processingResidency: { geography: "unknown" },
     });
+  });
+  test("a separate public model leaves agent routing unchanged and records the answered model", async () => {
+    const shared = {
+      ...settings(),
+      publicDecisionModelProvider: "openrouter" as const,
+      publicDecisionModelId: "product-model",
+      publicDecisionModelApiKey: "product-key",
+    };
+    const h = harness({
+      settings: shared,
+      respond: () =>
+        Response.json({
+          model: "returned-model",
+          answers: Object.fromEntries(answers.map(({ name, ...answer }) => [name, answer])),
+          usage: { input_tokens: 12, output_tokens: 3, cost: 0.004 },
+        }),
+    });
+    const result = await h.service.decide({ ...caller, request: { input: "x", questions } });
+    expect(h.calls[0]).toMatchObject({
+      url: "https://openrouter.ai/api/alpha/decisions",
+      body: { model: "product-model" },
+      authorization: "Bearer product-key",
+    });
+    expect(configuredDecisionModel(shared)?.id).toBe("openai/decision-test");
+    expect(result.model).toBe("openrouter/returned-model");
+    await h.service.flushUsage();
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({ model: "openrouter/returned-model" });
+  });
+  test("an incomplete public override returns unavailable instead of calling the agent model", async () => {
+    const h = harness({ settings: { ...settings(), publicDecisionModelId: "product-model" } });
+    await expect(
+      h.service.decide({ ...caller, request: { input: "x", questions } }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(h.calls).toHaveLength(0);
+  });
+  test("workspace residency checks apply to the public model rather than the agent route", async () => {
+    const h = harness({
+      settings: {
+        ...settings(),
+        publicDecisionModelProvider: "openrouter",
+        publicDecisionModelId: "product-model",
+        publicDecisionModelApiKey: "product-key",
+        sideFeatureResidencyJson: JSON.stringify({
+          "decision_model.openai": {
+            endpoint: "https://models.example.test/v1",
+            residency: {
+              geography: "eu",
+              deploymentType: "azure_data_zone",
+              regions: ["swedencentral"],
+              evidence: {
+                source: "operator_declaration",
+                reference: "test",
+                verifiedAt: "2026-11-07",
+              },
+            },
+          },
+        }),
+      },
+    });
+    spy(db, "isWorkspaceEuOnly", async () => true);
+    await expect(
+      h.service.decide({ ...caller, request: { input: "x", questions } }),
+    ).rejects.toMatchObject({ code: "region_restricted" });
+    expect(h.calls).toHaveLength(0);
   });
   test("malformed typed answers are refused but received usage is settled", async () => {
     const h = harness({
@@ -151,14 +224,18 @@ describe("public platform-funded decisions", () => {
     ).rejects.toThrow("db down");
     expect(h.calls).toHaveLength(0);
   });
-  test("declared EU decision endpoint runs and keeps its residency receipt", async () => {
+  test("declared EU public decision endpoint runs and keeps its residency receipt", async () => {
     const h = harness({
       settings: {
         ...settings(),
         requiredModelGeography: "eu",
+        publicDecisionModelProvider: "openai",
+        publicDecisionModelId: "eu-product-model",
+        publicDecisionModelApiKey: "eu-product-key",
+        publicDecisionModelBaseUrl: "https://public.example.test/v1",
         sideFeatureResidencyJson: JSON.stringify({
           "decision_model.openai": {
-            endpoint: "https://models.example.test/v1",
+            endpoint: "https://public.example.test/v1",
             residency: {
               geography: "eu",
               deploymentType: "azure_data_zone",
@@ -174,6 +251,10 @@ describe("public platform-funded decisions", () => {
       },
     });
     await h.service.decide({ ...caller, request: { input: "x", questions } });
+    expect(h.calls[0]).toMatchObject({
+      url: "https://public.example.test/v1/decisions",
+      body: { model: "eu-product-model" },
+    });
     await h.service.flushUsage();
     expect(h.settle.mock.calls[0]![2]).toMatchObject({ processingResidency: { geography: "eu" } });
   });
