@@ -602,11 +602,17 @@ describe("force updates and deletions of refs", () => {
             REF_kwDOMainRef1: ["refs/heads/", "main"],
             REF_kwDOTagRef01: ["refs/tags/", "v1"],
           }[id] ?? ["refs/heads/", "unknown"];
+          // Asked again for the ref, GitHub names a repository the gateway
+          // didn't check.
+          const nameWithOwner =
+            id === "REF_kwDOElsewhr" && body.query.includes("OpengeniGatewayRefs")
+              ? "other/widgets"
+              : "acme/widgets";
           return {
             __typename: "Ref",
             name,
             prefix,
-            repository: { nameWithOwner: "acme/widgets", defaultBranchRef: branchRef },
+            repository: { nameWithOwner, defaultBranchRef: branchRef },
           };
         });
         if (body.query.includes("OpengeniGateway")) return Response.json({ data: { nodes } });
@@ -699,6 +705,11 @@ describe("force updates and deletions of refs", () => {
         },
       }),
     );
+    // A ref in a repository other than the one the gateway checked.
+    await send(
+      "/graphql",
+      graphql('mutation { deleteRef(input: {refId: "REF_kwDOElsewhr"}) { clientMutationId } }'),
+    );
     // Another mutation that always asks keeps the request asking.
     await send(
       "/graphql",
@@ -706,7 +717,7 @@ describe("force updates and deletions of refs", () => {
         'mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } updateRepository(input: {repositoryId: "R_kgDOWidgets", hasWikiEnabled: false}) { clientMutationId } }',
       ),
     );
-    expect(decisions.map((decision) => decision.action)).toHaveLength(7);
+    expect(decisions.map((decision) => decision.action)).toHaveLength(8);
     expect(
       decisions.every((decision) => decision.action.kind === "write" && decision.action.alwaysAsk),
     ).toBe(true);

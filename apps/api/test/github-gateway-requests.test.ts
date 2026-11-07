@@ -293,6 +293,47 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     });
     // No ref to confirm.
     expect(rest("DELETE", "/repos/acme/widgets/git/refs").action).not.toHaveProperty("refRewrites");
+    // Only a path under heads/ names a branch.
+    expect(
+      rest("DELETE", "/repos/acme/widgets/git/refs/refs/heads/feature").action,
+    ).not.toHaveProperty("refRewrites");
+    // A force that is present and not exactly false counts.
+    expect(
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: "true" })
+        .action,
+    ).toMatchObject({ alwaysAsk: true, title: "Force-update branch" });
+  });
+
+  test("GraphQL variable defaults count, as GitHub applies them", () => {
+    const forcedByDefault = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
+    }).action;
+    expect(forcedByDefault).toMatchObject({
+      title: "Force-update branch",
+      alwaysAsk: true,
+      refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
+    });
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($i: UpdateRefInput! = {refId: "REF_kwDOAbCdEf", oid: "abc", force: true}) { updateRef(input: $i) { clientMutationId } }',
+      }).action,
+    ).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    // A variable the request sets wins over its default.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
+        variables: { f: false },
+      }).action,
+    ).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    // An input the gateway can't read asks, and names no ref.
+    const unreadable = classifyGitHubGraphqlRequest({
+      query: "mutation($i: UpdateRefInput!) { updateRef(input: $i) { clientMutationId } }",
+    }).action;
+    expect(unreadable).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    expect(unreadable).not.toHaveProperty("refRewrites");
   });
 
   test("GraphQL deleteRef, forced updateRef and updateRefs name their refs", () => {
