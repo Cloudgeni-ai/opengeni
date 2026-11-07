@@ -1007,14 +1007,15 @@ from the clone transport URI.
 
 A repository resource may carry `optional: true` to make its materialization
 best effort: when its clone fails (for example the repository is empty, the
-ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
-mount path in `skippedOptionalRepositories` on the `repository-clone`
-`sandbox.operation.completed` event, and the session continues without it.
-Without the flag a failed clone fails sandbox setup, as before. Opengeni sets
-it only on repositories it attaches on a person's behalf (a Slack task's
-recently used repositories); it grants no access and changes no credential
-routing. An optional clone is bounded to 60 seconds (90 seconds for all
-optional clones of one setup command) when the sandbox has a `timeout` binary,
+ref no longer exists, or an anonymous remote is unreachable), the clone hook
+logs a warning, reports the mount path in `skippedOptionalRepositories` on the
+`repository-clone` `sandbox.operation.completed` event, and the session
+continues without it. Without the flag a failed clone fails sandbox setup, as
+before. Opengeni sets it only on repositories it attaches on a person's behalf
+(a Slack task's repositories from the person's new-chat form); it grants no
+access and changes no credential routing. An optional clone is bounded to 60
+seconds (90 seconds for all optional clones of one setup command) when the
+sandbox has a `timeout` binary,
 so a hung fetch is skipped the same way. Before each turn's strict GitHub App
 allowlist recheck and installation-token mint, the worker also drops, for that
 turn only, an optional GitHub App repository that the workspace allowlist no

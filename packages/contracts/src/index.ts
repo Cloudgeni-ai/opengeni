@@ -7077,9 +7077,9 @@ export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
      * Best-effort materialization. When true, a failed clone of this repository
      * logs a warning and the session continues without it instead of failing
      * sandbox setup. Opengeni sets it on repositories it attaches on the
-     * person's behalf (a Slack task's recently used repositories); a repository
-     * a caller names explicitly stays strict unless the caller opts in. Only
-     * `true` is stored.
+     * person's behalf (a Slack task's repositories from the person's new-chat
+     * form); a repository a caller names explicitly stays strict unless the
+     * caller opts in. Only `true` is stored.
      */
     optional: primitives.optionalBoolean,
   }),

@@ -11,8 +11,8 @@ import { gitHubTokenAuthorizationSelections } from "../environment";
  * Turn-time access check for automatically attached (`optional: true`) GitHub
  * App repositories.
  *
- * A Slack-started session attaches the caller's recently used repositories as
- * optional resources. The per-turn workspace-allowlist recheck and the
+ * A Slack-started session attaches the repositories in the caller's new-chat
+ * form as optional resources. The per-turn workspace-allowlist recheck and the
  * installation-token mint both cover every GitHub repository of the session in
  * one request, so one optional repository that loses access after the session
  * started (an admin removes it from the allowlist, or it is deleted or removed
