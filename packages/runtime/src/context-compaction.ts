@@ -2641,6 +2641,14 @@ function isImageContentPart(part: unknown): boolean {
   return type === "input_image" || type === "image_url";
 }
 
+/**
+ * A summary held to an output cap after it was produced without one: kept
+ * whole when it fits, otherwise cut from the middle with the usual marker.
+ */
+export function truncateCompactionSummary(summary: string, maxTokens: number): string {
+  return truncateMiddleByEstimatedTokens(summary, maxTokens);
+}
+
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {
   const budget = Math.max(0, Math.floor(maxTokens));
   if (estimateTextTokens(text) <= budget) {

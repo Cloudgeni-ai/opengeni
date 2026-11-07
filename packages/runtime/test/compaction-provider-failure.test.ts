@@ -11,6 +11,7 @@ import {
   summarizeForCompaction,
   TRIMMED_CONTEXT_NOTICE,
 } from "../src/index";
+import { estimateTextTokens, USER_MESSAGE_TRUNCATION_MARKER } from "../src/context-compaction";
 
 type Options = NonNullable<Parameters<typeof summarizeForCompaction>[2]>;
 type Request = Record<string, unknown>;
@@ -75,6 +76,36 @@ describe("compaction on an OpenAI-compatible endpoint", () => {
     expect(requests[0]).toHaveProperty("max_tokens", 20_000);
     expect(requests[1]).not.toHaveProperty("max_tokens");
     expect(requests[1]!.messages).toEqual(requests[0]!.messages);
+  });
+
+  test("a summary requested without the cap is held to the cap, cut from the middle", async () => {
+    const long = `Start of the summary. ${"middle detail ".repeat(400)}End of the summary.`;
+    let calls = 0;
+    const summary = await summarizeForCompaction(settings, history, {
+      api: "chat",
+      provider: compatibleProvider("chat"),
+      maxOutputTokens: 100,
+      client: chatClient(async () => {
+        calls += 1;
+        if (calls === 1) throw rejection(400, "max_tokens must be at most 64");
+        return stop(long);
+      }),
+    });
+
+    expect(calls).toBe(2);
+    expect(estimateTextTokens(summary)).toBeLessThanOrEqual(100);
+    expect(summary.startsWith("Start of the summary.")).toBe(true);
+    expect(summary.endsWith("End of the summary.")).toBe(true);
+    expect(summary).toContain(USER_MESSAGE_TRUNCATION_MARKER);
+
+    // A summary the endpoint produced under the cap is returned as it came.
+    const capped = await summarizeForCompaction(settings, history, {
+      api: "chat",
+      provider: compatibleProvider("chat"),
+      maxOutputTokens: 100,
+      client: chatClient(async () => stop(long)),
+    });
+    expect(capped).toBe(long);
   });
 
   test("a 422 validation refusal is retried the same way", async () => {
@@ -167,6 +198,64 @@ describe("compaction on an OpenAI-compatible endpoint", () => {
     }).catch((error: unknown) => error);
     expect(calls).toBe(1);
     expect((failure as CompactionProviderResponseError).providerMessage).toBe("bad request");
+  });
+
+  test.each([
+    ["a compatible endpoint", compatibleProvider("responses")],
+    ["a platform provider", { ...platformChatProvider(), api: "responses" }],
+  ] as const)(
+    "an error from usage accounting on %s passes through unchanged and is not retried",
+    async (_label, provider) => {
+      class UsageRecordingFailed extends Error {}
+      let calls = 0;
+      const failure = await summarizeForCompaction(settings, history, {
+        api: "responses",
+        provider: provider as NonNullable<Options["provider"]>,
+        client: {
+          responses: {
+            create: async () => {
+              calls += 1;
+              return {
+                id: "resp_summary",
+                usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+                output: [
+                  {
+                    type: "message",
+                    role: "assistant",
+                    status: "completed",
+                    content: [{ type: "output_text", text: "Responses summary" }],
+                  },
+                ],
+              };
+            },
+          },
+        } as unknown as NonNullable<Options["client"]>,
+        onUsage: () => {
+          throw new UsageRecordingFailed("usage could not be recorded");
+        },
+      }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(UsageRecordingFailed);
+      expect(failure).not.toBeInstanceOf(CompactionProviderResponseError);
+      expect(calls).toBe(1);
+    },
+  );
+
+  test("an error from usage accounting on the chat path passes through unchanged", async () => {
+    class UsageRecordingFailed extends Error {}
+    const failure = await summarizeForCompaction(settings, history, {
+      api: "chat",
+      provider: compatibleProvider("chat"),
+      client: chatClient(async () => ({
+        ...stop("Continue the approved task"),
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      })),
+      onUsage: () => {
+        throw new UsageRecordingFailed("usage could not be recorded");
+      },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(UsageRecordingFailed);
   });
 });
 

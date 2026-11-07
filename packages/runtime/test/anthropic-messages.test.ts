@@ -14,7 +14,10 @@ import {
 import { isModelCallFetch } from "../src/model-provider-transport";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
-import { buildCompactionReplacementHistory } from "../src/context-compaction";
+import {
+  buildCompactionReplacementHistory,
+  EmptyCompactionSummaryError,
+} from "../src/context-compaction";
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -1306,13 +1309,15 @@ test("native title and compaction calls handle output limits without accepting i
       }),
     ).toBe("Fix native stream truncat");
     stop = "max_tokens";
+    // A summary cut off at the output limit is unusable, like a Chat
+    // Completions `length` finish, rather than a provider failure.
     await expect(
       summarizeForCompaction(testSettings(), history, {
         provider: native,
         client,
         model: "claude-test",
       }),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
     const title = await generateSessionTitle(testSettings(), "Repair streaming", {
       provider: native,
       client,

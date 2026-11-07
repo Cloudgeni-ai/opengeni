@@ -633,15 +633,21 @@ A portable checkpoint asks the chat's own model for its summary. For an
 OpenAI-compatible endpoint (a workspace or organization custom provider), a
 summary request rejected with HTTP 400 or 422 is sent once more without its
 output cap (`max_tokens`, or `max_output_tokens` on the Responses API), since
-such endpoints often reject a cap above their own model's limit. Other
-providers are not retried this way.
+such endpoints often reject a cap above their own model's limit. A summary
+produced by that retry is then held to the cap it would have had, cut from the
+middle with the usual truncation marker, so it fits exactly as a capped summary
+would. Other providers are not retried this way. Only the provider call itself
+is retried or classified as a provider failure: an error from recording the
+summary's usage (a lost credential lease, a database error) propagates
+unchanged to its own recovery.
 
 If the summary still fails in a way that repeating the same request cannot
 fix, the portable path installs a trimmed checkpoint instead of failing the
 turn. That covers a definitive rejection (HTTP 400, 413 or 422), a failed or
 incomplete response whose code is not a temporary condition, an empty or
-unusable summary, no history fitting the summary request, and a summary that
-came back too long to install. The trimmed checkpoint is rebuilt exactly like
+unusable summary (including one cut off at the output limit), and no history
+fitting the summary request. A summary that was produced is never thrown away
+for a trim. The trimmed checkpoint is rebuilt exactly like
 a summarized one (platform context, the newest requests with shortened copies
 of their replies, attachment catalog), but a fixed model-visible note
 (`TRIMMED_CONTEXT_NOTICE` in `packages/runtime/src/context-compaction.ts`)
@@ -668,19 +674,21 @@ one-time rebuild when a Codex chat switches to another model (trimming would
 move the chat off Codex for good, so that rebuild keeps failing until a
 summary succeeds). When the trimmed checkpoint would not help (it exceeds the
 model's budget, is unchanged or is not smaller), history stays as it was and
-the turn fails with the summary's own error, as below; for a summary that was
-only too long, the checkpoint settles
-`skipped(reason="replacement_exceeds_model_budget")` as before.
+the turn fails with the summary's own error, as below. A summary that is too
+long to install settles `skipped(reason="replacement_exceeds_model_budget")` as
+before.
 
 The provider's own error message, bounded to 500 characters on one line, is
 kept apart from the content-free diagnostics. Only the provider's error body
 is read (`error.message`, or a bare string `error`); SDK, transport and
 runtime error text never stands in for it, and it is not an enumerable error
-property, so error serializers do not carry it. It is recorded only on the
-session's own events (the trimmed checkpoint's `fallback`, the
-`summarization_failed` skip landmark, and the `turn.failed` payload's
-`providerMessage` and reason text), which the conversation's readers can
-already see. Worker logs, metrics and telemetry never carry it.
+property, so error serializers do not carry it. It is recorded only in the
+structured `providerMessage` field of the session's own events (the trimmed
+checkpoint's `fallback`, the `summarization_failed` skip landmark, and the
+`turn.failed` payload), which the conversation's readers can already see. It
+is never put in the free-text `turn.failed` `error`, which workspace activity
+also copies for event triggers and automations. Worker logs, metrics and
+telemetry never carry it.
 
 If summarization produces an authoritative terminal failure that the trimmed
 checkpoint cannot replace, the turn ends with an honest

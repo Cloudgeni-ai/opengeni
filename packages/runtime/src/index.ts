@@ -534,6 +534,7 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionSummaryOutputTokens,
+  truncateCompactionSummary,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
@@ -1512,23 +1513,30 @@ export async function summarizeForCompaction(
   const azureResponses = provider.wireProfile === "azure-openai";
   const maxTokens =
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
+  // Set when an endpoint refused the output cap and the summary was requested
+  // without one; the summary is then held to the cap here instead.
+  let outputCapDropped = false;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    const requestCompletion = (outputCap: boolean) =>
-      client.chat.completions.create(
-        {
-          model,
-          ...(outputCap ? { max_tokens: maxTokens } : {}),
-          messages: [
-            ...(options.systemInstructions
-              ? [{ role: "system" as const, content: options.systemInstructions }]
-              : []),
-            { role: "user", content: transcript },
-          ],
-          ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-        } as any,
-        options.signal ? { signal: options.signal } : undefined,
+    const requestCompletion = (outputCap: boolean) => {
+      if (!outputCap) outputCapDropped = true;
+      return sendCompactionRequest(() =>
+        client.chat.completions.create(
+          {
+            model,
+            ...(outputCap ? { max_tokens: maxTokens } : {}),
+            messages: [
+              ...(options.systemInstructions
+                ? [{ role: "system" as const, content: options.systemInstructions }]
+                : []),
+              { role: "user", content: transcript },
+            ],
+            ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+          } as any,
+          options.signal ? { signal: options.signal } : undefined,
+        ),
       );
+    };
     const completion = await withCompactionOutputCapRetry(provider, requestCompletion);
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
@@ -1555,7 +1563,7 @@ export async function summarizeForCompaction(
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
     }
-    return summary;
+    return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
@@ -1645,21 +1653,24 @@ export async function summarizeForCompaction(
     }
   } else {
     const responses = new CompactionResponsesModel(client, model, provider);
-    response = await withCompactionOutputCapRetry(provider, (outputCap) =>
-      dispatch(() =>
+    response = await withCompactionOutputCapRetry(provider, (outputCap) => {
+      if (!outputCap) outputCapDropped = true;
+      return dispatch(() =>
         responses.fetchResponse(
           outputCap ? request : { ...request, modelSettings: withoutMaxTokens(request) },
         ),
-      ),
-    );
+      );
+    });
   }
   if (compactionResponseCalledTool(response)) {
     throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "tool_call" });
   }
-  if (
-    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
-    isFailedCompactionProviderResponse(response)
-  ) {
+  // A summary cut off at the output limit is unusable, the same as a Chat
+  // Completions `length` finish; it is not a provider failure.
+  if ((response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens") {
+    throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "max_tokens" });
+  }
+  if (isFailedCompactionProviderResponse(response)) {
     throw new CompactionProviderResponseError(
       compactionProviderFailureDiagnostics(response),
       undefined,
@@ -1670,7 +1681,7 @@ export async function summarizeForCompaction(
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
-  return summary;
+  return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
 }
 
 /** Send one checkpoint request; any provider or transport failure becomes the content-free error. */
@@ -1699,18 +1710,20 @@ const COMPACTION_OUTPUT_CAP_RETRY_STATUSES = new Set([400, 422]);
  * as invalid, send it once more without the output cap. Ordinary requests to
  * these endpoints carry no cap, and compatible servers commonly refuse one
  * that is above the model's output limit or above what is left of its context
- * window. The retry uses the request shape the endpoint already accepts. A
- * summary that comes back too long to install is handled by the worker, so
- * the cap is not needed for safety. A context-length refusal is retried too:
+ * window. The retry uses the request shape the endpoint already accepts. The
+ * caller holds the uncapped summary to the cap afterwards (cut from the
+ * middle), so the checkpoint fits exactly as a capped one would. A context-length refusal is retried too:
  * such servers often count the requested output against the window, so it
  * cannot be told apart from an oversized cap. Other providers are not retried.
+ * Each `send` wraps its own provider call; any other error it throws, such as
+ * one from usage accounting, passes through unchanged and is never retried.
  */
 async function withCompactionOutputCapRetry<T>(
   provider: ResolvedModelProvider,
   send: (outputCap: boolean) => Promise<T>,
 ): Promise<T> {
   try {
-    return await sendCompactionRequest(() => send(true));
+    return await send(true);
   } catch (error) {
     if (
       !isCompatibleModelEndpoint(provider) ||
@@ -1721,7 +1734,7 @@ async function withCompactionOutputCapRetry<T>(
       throw error;
     }
     try {
-      return await sendCompactionRequest(() => send(false));
+      return await send(false);
     } catch (retryError) {
       if (!(retryError instanceof CompactionProviderResponseError)) throw retryError;
       throw new CompactionProviderResponseError(

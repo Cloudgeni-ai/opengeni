@@ -1391,8 +1391,10 @@ export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
 
 /**
  * The provider's own error message for a failed compaction request, bounded
- * at capture. It is recorded on the session's own events (readable by the
- * same people as the conversation) and never logged.
+ * at capture. It is recorded only in the structured `providerMessage` field
+ * of the session's own events (readable by the same people as the
+ * conversation), never in the free-text `error`, which is also copied into
+ * workspace activity for automations, and never logged.
  */
 export function compactionFailureProviderMessage(error: unknown): string | null {
   return error instanceof CompactionProviderResponseError ? error.providerMessage : null;
@@ -1400,12 +1402,9 @@ export function compactionFailureProviderMessage(error: unknown): string | null 
 
 export function compactionFailureReasonFromError(error: unknown): string {
   const rejection = compactionProviderRejection(error);
-  const providerMessage = compactionFailureProviderMessage(error);
   if (rejection) {
     return compactionFailureReason(
-      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}${
-        providerMessage ? ` Provider message: "${providerMessage}"` : ""
-      }`,
+      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
     );
   }
   // An exhausted provider quota is not retried (see agentRunFailurePayload),
@@ -1416,12 +1415,10 @@ export function compactionFailureReasonFromError(error: unknown): string {
       `${providerQuotaExhaustedMessage(quota.scope)} Active history was preserved.`,
     );
   }
-  if (error instanceof CompactionProviderResponseError) {
-    return compactionFailureReason(
-      providerMessage ? `${error.message}; provider message: "${providerMessage}"` : error.message,
-    );
-  }
-  if (error instanceof EmptyCompactionSummaryError) {
+  if (
+    error instanceof CompactionProviderResponseError ||
+    error instanceof EmptyCompactionSummaryError
+  ) {
     return compactionFailureReason(error.message);
   }
   const errorName = error instanceof Error && error.name ? error.name : "unknown error";

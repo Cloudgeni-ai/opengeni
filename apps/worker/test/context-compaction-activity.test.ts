@@ -2003,8 +2003,9 @@ describe("standalone context compaction execution", () => {
     expect(failureText).toContain(
       "the model provider rejected the compaction request (HTTP 400 invalid_request_error invalid_value; param input[1].content; request req_rejected_fixture). Active history was preserved.",
     );
-    expect(failureText).toContain(`start a new session. Provider message: "${providerMessage}"`);
     expect(failureText).toContain("start a new session");
+    // The provider's message stays in the structured field only.
+    expect(failureText).not.toContain(providerMessage);
   });
 
   test("standalone compaction recovers after throttling on a fresh worker and clears recovery tracking", async () => {
@@ -3239,7 +3240,7 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  test("a summary too long to install, or no summary at all, trims history instead", async () => {
+  test("no usable summary trims history; a summary too long to install settles as before", async () => {
     const run = async (summarize: CompactionSummarizer) => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(client.db, {
@@ -3318,41 +3319,49 @@ describe("standalone context compaction execution", () => {
       return { outcome, active, warnings };
     };
 
-    for (const summarize of [
-      // Too long for the model's window (as an uncapped summary can be).
-      async () => "an overlong summary ".repeat(40_000),
-      // A response with no usable summary.
-      async () => {
-        throw new EmptyCompactionSummaryError({ reason: "empty_summary" });
-      },
-    ] satisfies CompactionSummarizer[]) {
-      const { outcome, active, warnings } = await run(summarize);
-      expect(outcome).toMatchObject({ compacted: true });
-      if (!outcome.compacted) throw new Error("expected a trimmed checkpoint");
-      const compacted = outcome.events.find((event) => event.type === "session.context.compacted");
-      expect(compacted?.payload).toMatchObject({
-        implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
-        fallback: { reason: "summary_unusable" },
-      });
-      expect(active).toContainEqual(
-        expect.objectContaining({ role: "user", content: "keep this request" }),
-      );
-      expect(
-        active.some(
-          (item) =>
-            typeof item.content === "string" && item.content.startsWith(TRIMMED_CONTEXT_NOTICE),
-        ),
-      ).toBe(true);
-      expect(JSON.stringify(active)).not.toContain("an overlong summary an overlong summary");
-      // One content-free warning: identifiers and classifications only.
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]!.fields).toMatchObject({
-        fallbackReason: "summary_unusable",
-        outcome: "trimmed",
-        trigger: "operator",
-      });
-      expect(JSON.stringify(warnings)).not.toContain("long answer");
-    }
+    // A response with no usable summary is replaced by a trimmed checkpoint.
+    const { outcome, active, warnings } = await run(async () => {
+      throw new EmptyCompactionSummaryError({ reason: "empty_summary" });
+    });
+    expect(outcome).toMatchObject({ compacted: true });
+    if (!outcome.compacted) throw new Error("expected a trimmed checkpoint");
+    const compacted = outcome.events.find((event) => event.type === "session.context.compacted");
+    expect(compacted?.payload).toMatchObject({
+      implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+      fallback: { reason: "summary_unusable" },
+    });
+    expect(active).toContainEqual(
+      expect.objectContaining({ role: "user", content: "keep this request" }),
+    );
+    expect(
+      active.some(
+        (item) =>
+          typeof item.content === "string" && item.content.startsWith(TRIMMED_CONTEXT_NOTICE),
+      ),
+    ).toBe(true);
+    // One content-free warning: identifiers and classifications only.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.fields).toMatchObject({
+      fallbackReason: "summary_unusable",
+      outcome: "trimmed",
+      trigger: "operator",
+    });
+    expect(JSON.stringify(warnings)).not.toContain("long answer");
+
+    // A summary that was produced is never thrown away for a trim. One too
+    // long to install (the runtime already holds an uncapped one to the cap)
+    // settles over budget with history unchanged, as it always has.
+    const overlong = await run(async () => "an overlong summary ".repeat(40_000));
+    expect(overlong.outcome).toMatchObject({
+      compacted: false,
+      reason: "replacement_exceeds_model_budget",
+    });
+    expect(overlong.active).toContainEqual(
+      expect.objectContaining({ role: "user", content: "keep this request" }),
+    );
+    expect(JSON.stringify(overlong.active)).not.toContain(TRIMMED_CONTEXT_NOTICE);
+    expect(JSON.stringify(overlong.active)).not.toContain("an overlong summary an overlong");
+    expect(overlong.warnings).toHaveLength(0);
   });
 
   test("a summary failure outside the summary request is not replaced by trimming", async () => {

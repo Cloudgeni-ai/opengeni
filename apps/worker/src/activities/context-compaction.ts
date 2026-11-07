@@ -84,11 +84,6 @@ export type CompactionObservability = {
 type CompactionTrimFallback = {
   reason: CompactionTrimFallbackReason;
   error: unknown;
-  /**
-   * Set when a summary was produced but was too long to install: if trimming
-   * does not help either, settle this skip instead of failing the turn.
-   */
-  settleWhenUnhelpful?: "replacement_exceeds_model_budget";
 };
 
 /**
@@ -952,39 +947,12 @@ async function compactContextPortable(
     const tokensAfter = estimateTokens(await projectForWire([...built.history, ...deferredItems]));
     return { replacement: built, estimatedTokensAfter: tokensAfter };
   };
-  let built = await buildReplacement();
-  if (
-    built.estimatedTokensAfter + prefixTokens > structuralBudget &&
-    summarized &&
-    !options.portableModelSwitch
-  ) {
-    // The summary came back too long to install (for example after the
-    // output-cap retry). Trim instead; if that does not help either, settle as
-    // the over-budget checkpoint would have.
-    fallback = {
-      reason: "summary_unusable",
-      error: new EmptyCompactionSummaryError({
-        stage: "portable_replacement",
-        reason: "summary_exceeds_model_budget",
-      }),
-      settleWhenUnhelpful: "replacement_exceeds_model_budget",
-    };
-    summarized = null;
-    summarizedItems = canonicalItems;
-    deferredItems = [];
-    built = await buildReplacement();
-  }
-  const { replacement, estimatedTokensAfter } = built;
+  const { replacement, estimatedTokensAfter } = await buildReplacement();
   // A trimmed checkpoint that would not help leaves history as it was, and
-  // the turn fails with the summary's own error (or settles as the summarized
-  // checkpoint would have), as it did without the fallback.
-  const trimDidNotHelp = async (outcome: string): Promise<MaybeCompactResult> => {
-    const failed = fallback!;
-    logCompactionTrimFallback(options.observability, scope, options.trigger, failed, outcome);
-    if (failed.settleWhenUnhelpful) {
-      return await settleSkippedAfterStart(db, scope, options, failed.settleWhenUnhelpful);
-    }
-    throw failed.error;
+  // the turn fails with the summary's own error, as it did without the fallback.
+  const trimDidNotHelp = async (outcome: string): Promise<never> => {
+    logCompactionTrimFallback(options.observability, scope, options.trigger, fallback!, outcome);
+    throw fallback!.error;
   };
   const replacementHistory = replacement.history;
   if (estimatedTokensAfter + prefixTokens > structuralBudget) {
