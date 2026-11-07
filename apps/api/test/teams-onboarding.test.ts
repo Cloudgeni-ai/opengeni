@@ -646,7 +646,7 @@ describe("Teams onboarding limiter", () => {
       actorCooldownMs: 10_000,
       actorDailyMax: 1,
       tenantDailyMax: 1,
-      overallHourlyMax: 1,
+      overallHourlyMax: 10,
       maxTrackedKeys: 100,
     });
     expect(limiter.tryReserve("T", "A", 0)).toBe(true);
@@ -658,6 +658,42 @@ describe("Teams onboarding limiter", () => {
     limiter.release("T", "B", 5);
     limiter.release("T", "B", 5);
     expect(limiter.tryReserve("T", "B", 6)).toBe(false);
+  });
+
+  test("a refused reply gives back only its own person's and tenant's count, once", async () => {
+    const limiter = new TeamsOnboardingLimiter({
+      actorCooldownMs: 0,
+      actorDailyMax: 10,
+      tenantDailyMax: 10,
+      overallHourlyMax: 3,
+      maxTrackedKeys: 100,
+    });
+    // Teams keeps throttling one person's reply: each attempt is given back
+    // to the person and tenant, but the hourly count bounds the attempts.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const reservation = await limiter.reserve("T", "A");
+      expect(reservation).not.toBeNull();
+      await reservation!.release();
+      // Releasing twice gives back nothing more.
+      await reservation!.release();
+    }
+    expect(await limiter.reserve("T", "A")).toBeNull();
+    expect(await limiter.reserve("T2", "B")).toBeNull();
+    // A released reservation never gives back another person's count.
+    const other = new TeamsOnboardingLimiter({
+      actorCooldownMs: 0,
+      actorDailyMax: 1,
+      tenantDailyMax: 2,
+      overallHourlyMax: 100,
+      maxTrackedKeys: 100,
+    });
+    const first = await other.reserve("T", "A");
+    expect(await other.reserve("T", "B")).not.toBeNull();
+    await first!.release();
+    await first!.release();
+    expect(await other.reserve("T", "B")).toBeNull();
+    expect(await other.reserve("T", "A")).not.toBeNull();
+    expect(await other.reserve("T", "C")).toBeNull();
   });
 
   test("tracked keys stay bounded", () => {

@@ -102,14 +102,48 @@ export class TeamsOnboardingLimiter implements TeamsOnboardingBudget {
   constructor(private readonly limits: TeamsOnboardingLimits = DEFAULT_TEAMS_ONBOARDING_LIMITS) {}
 
   async reserve(tenantId: string, actorId: string): Promise<TeamsOnboardingReservation | null> {
-    if (!this.tryReserve(tenantId, actorId)) return null;
-    return { release: async () => this.release(tenantId, actorId) };
+    const counted = this.reserveWindows(tenantId, actorId, Date.now());
+    if (!counted) return null;
+    let released = false;
+    return {
+      release: async () => {
+        if (released) return;
+        released = true;
+        this.giveBack(counted, Date.now());
+      },
+    };
   }
 
   /** Reserves one reply when every limit allows it; otherwise reserves nothing. */
   tryReserve(tenantId: string, actorId: string, now = Date.now()): boolean {
+    return this.reserveWindows(tenantId, actorId, now) !== null;
+  }
+
+  /**
+   * Gives back the person's reservation whose reply Teams clearly never
+   * received. Prefer a reservation's own `release()`, which gives back exactly
+   * the windows it counted.
+   */
+  release(tenantId: string, actorId: string, now = Date.now()): void {
+    const { tenantKey, actorKey } = this.keys(tenantId, actorId);
+    const actor = this.actors.get(actorKey);
+    const tenant = this.tenants.get(tenantKey);
+    // Only a person's own reservation can be given back.
+    if (!actor || actor.count === 0 || now - actor.start >= DAY_MS) return;
+    this.giveBack({ actor, tenant: tenant ?? null }, now);
+  }
+
+  private keys(tenantId: string, actorId: string) {
     const tenantKey = tenantId.toLowerCase();
-    const actorKey = `${tenantKey}:${actorId.toLowerCase()}`;
+    return { tenantKey, actorKey: `${tenantKey}:${actorId.toLowerCase()}` };
+  }
+
+  private reserveWindows(
+    tenantId: string,
+    actorId: string,
+    now: number,
+  ): { actor: Window; tenant: Window | null } | null {
+    const { tenantKey, actorKey } = this.keys(tenantId, actorId);
     const actor = this.current(this.actors, actorKey, DAY_MS, now);
     const tenant = this.current(this.tenants, tenantKey, DAY_MS, now);
     if (now - this.process.start >= HOUR_MS) this.process = { start: now, count: 0, last: 0 };
@@ -119,30 +153,26 @@ export class TeamsOnboardingLimiter implements TeamsOnboardingBudget {
       tenant.count >= this.limits.tenantDailyMax ||
       this.process.count >= this.limits.overallHourlyMax
     )
-      return false;
+      return null;
     for (const window of [actor, tenant, this.process]) {
       window.count += 1;
       window.last = now;
     }
     this.store(this.actors, actorKey, actor);
     this.store(this.tenants, tenantKey, tenant);
-    return true;
+    return { actor, tenant };
   }
 
-  /** Gives back a reservation whose reply Teams clearly never received. */
-  release(tenantId: string, actorId: string, now = Date.now()): void {
-    const tenantKey = tenantId.toLowerCase();
-    const actorKey = `${tenantKey}:${actorId.toLowerCase()}`;
-    const actor = this.actors.get(actorKey);
-    const tenant = this.tenants.get(tenantKey);
-    // Only a person's own reservation can be given back.
-    if (!actor || actor.count === 0 || now - actor.start >= DAY_MS) return;
-    for (const [window, span] of [
-      [actor, DAY_MS],
-      [tenant, DAY_MS],
-      [this.process, HOUR_MS],
-    ] as const) {
-      if (!window || window.count === 0 || now - window.start >= span) continue;
+  /**
+   * Gives back one reply to the person's and tenant's windows, if they are
+   * still current. The process's hourly count is kept: it bounds attempts, so
+   * replies Teams keeps refusing (such as throttling) can't retry without
+   * limit.
+   */
+  private giveBack(counted: { actor: Window; tenant: Window | null }, now: number): void {
+    if (counted.actor.count === 0 || now - counted.actor.start >= DAY_MS) return;
+    for (const window of [counted.actor, counted.tenant]) {
+      if (!window || window.count === 0 || now - window.start >= DAY_MS) continue;
       window.count -= 1;
       // Without a reply in the window, there is no cooldown to wait out.
       if (window.count === 0) window.last = 0;
@@ -198,10 +228,15 @@ export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
     void pruneTeamsOnboardingLimits(this.db).catch(() => {
       // Pruning is housekeeping; the next reply tries again.
     });
+    let released = false;
     return {
       release: async () => {
+        if (released) return;
+        released = true;
         try {
-          await releaseTeamsOnboardingReply(this.db, grant, actor!, rest);
+          // The deployment's count is kept: it bounds attempts, so replies
+          // Teams keeps refusing (such as throttling) can't retry without limit.
+          await releaseTeamsOnboardingReply(this.db, grant, actor!, rest.slice(0, 1));
         } catch (error) {
           // The reservation then lapses with its window.
           this.onError(error);

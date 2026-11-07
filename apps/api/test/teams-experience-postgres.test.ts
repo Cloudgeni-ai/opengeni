@@ -17,6 +17,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { drainTeamsBotOnce, handleTeamsActivity } from "../src/integrations/teams-bot";
 import { verifyTeamsProof } from "../src/integrations/teams-protocol";
+import { DurableTeamsOnboardingBudget } from "../src/integrations/teams-onboarding-limit";
 import {
   TEAMS_CANNOT_START_TEXT,
   TEAMS_CONNECT_REMINDER_TEXT,
@@ -1087,4 +1088,37 @@ test("a 1:1 message with a file or image, or no text, is told to send text", asy
   const [inbox] =
     await shared.admin`select count(*)::int as n from teams_bot_inbox where workspace_id=${f.i.workspace_id}`;
   expect(inbox!.n).toBe(0);
+});
+
+test("a reply Teams refuses gives back the person's and tenant's count once, and the deployment's hourly count still bounds retries", async () => {
+  const name = `refused-${crypto.randomUUID()}`;
+  const budget = new DurableTeamsOnboardingBudget(client.db, name, {
+    actorCooldownMs: 0,
+    actorDailyMax: 10,
+    tenantDailyMax: 10,
+    overallHourlyMax: 3,
+    maxTrackedKeys: 100,
+  });
+  const tenant = crypto.randomUUID();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const reservation = await budget.reserve(tenant, "person");
+    expect(reservation).not.toBeNull();
+    await reservation!.release();
+    await reservation!.release();
+  }
+  expect(await budget.reserve(tenant, "person")).toBeNull();
+  expect(await budget.reserve(crypto.randomUUID(), "someone else")).toBeNull();
+  const hash = (key: string) => createHash("sha256").update(key).digest("hex");
+  const counts = await shared.admin<Array<{ scope_hash: string; count: number }>>`
+    select scope_hash, count from teams_bot_onboarding_limits where scope_hash in (
+      ${hash(`teams-onboarding\n${name}\nactor\n${tenant}\nperson`)},
+      ${hash(`teams-onboarding\n${name}\ntenant\n${tenant}`)},
+      ${hash(`teams-onboarding\n${name}\noverall`)})`;
+  expect(new Map(counts.map((row) => [row.scope_hash, row.count]))).toEqual(
+    new Map([
+      [hash(`teams-onboarding\n${name}\nactor\n${tenant}\nperson`), 0],
+      [hash(`teams-onboarding\n${name}\ntenant\n${tenant}`), 0],
+      [hash(`teams-onboarding\n${name}\noverall`), 3],
+    ]),
+  );
 });
