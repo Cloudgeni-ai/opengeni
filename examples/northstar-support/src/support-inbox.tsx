@@ -161,7 +161,7 @@ export function NorthstarMark({ className }: { className?: string }) {
     <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
       <path
         fill="currentColor"
-        d="M12 1.5c.5 5.6 2.4 8.4 5.2 9.7l5.3 0.8-5.3.8c-2.8 1.3-4.7 4.1-5.2 9.7-.5-5.6-2.4-8.4-5.2-9.7L1.5 12l5.3-.8C9.6 9.9 11.5 7.1 12 1.5Z"
+        d="M 12 1.5c.5 5.6 2.4 8.4 5.2 9.7l5.3 0.8-5.3.8c-2.8 1.3-4.7 4.1-5.2 9.7-.5-5.6-2.4-8.4-5.2-9.7L1.5 12l5.3-.8C9.6 9.9 11.5 7.1 12 1.5Z"
       />
       <circle cx="18.6" cy="5.4" r="1.6" fill="var(--color-ns-star)" />
     </svg>
