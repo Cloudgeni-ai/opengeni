@@ -173,6 +173,7 @@ import {
   compactionFailureReason,
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
+  compactionFailureProviderMessage,
   compactionFailureTurnEventPayload,
   compactionFirstPreparationEventPayload,
   modelPreparationFailureEventPayload,
@@ -3086,6 +3087,7 @@ export async function runTurnStreamAttempt(
               clearRequestedCompaction: recoveryKind === "operator",
               publishLiveEvents: publishCompactionLiveEvents,
               providerRejection: compactionProviderRejection(compactError),
+              providerMessage: compactionFailureProviderMessage(compactError),
             },
           );
           compactionRequestCleared = landmark.requestConsumed;

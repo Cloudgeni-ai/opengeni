@@ -5287,11 +5287,15 @@ export const englishMessages = {
   "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
   "timeline.compactionCopy.noSubscriptionCapacityRightNow":
     "No subscription capacity right now. It runs with your next message if still needed.",
+  "timeline.compactionCopy.olderMessagesTrimmed": "Older messages trimmed",
   "timeline.compactionCopy.parameter": "Parameter",
+  "timeline.compactionCopy.providerMessage": "Provider message",
   "timeline.compactionCopy.requestId": "Request ID",
   "timeline.compactionCopy.requestItAgainToRetry":
     "Request it again to retry. Chat history is unchanged.",
   "timeline.compactionCopy.response": "Response",
+  "timeline.compactionCopy.theModelCouldnTSummarizeThem":
+    "The model couldn’t summarize them. Chat history above is unchanged.",
   "timeline.compactionCopy.theProviderRejectsThisRequest":
     "The provider rejects this request the same way until the conversation changes.",
   "timeline.fleetDecisionRow.admission": "Admission",
