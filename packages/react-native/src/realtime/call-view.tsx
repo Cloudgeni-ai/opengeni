@@ -171,6 +171,14 @@ export function OpenGeniNativeCallView({
           <Text style={[styles.error, fontStyle(theme, 400), { color: colors.danger }]}>
             {call.error}
           </Text>
+        ) : call.notice && call.phase === "active" ? (
+          <Text
+            testID="opengeni-call-notice"
+            accessibilityRole="alert"
+            style={[styles.error, fontStyle(theme, 500), { color: colors["status-waiting"] }]}
+          >
+            {call.notice}
+          </Text>
         ) : null}
       </View>
       <View style={styles.controls}>

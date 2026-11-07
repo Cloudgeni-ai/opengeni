@@ -129,6 +129,54 @@ describe("native realtime call", () => {
     expect(system.log.filter((entry) => entry === "call.connected")).toHaveLength(1);
   });
 
+  test("an adapter that only sets up call audio (Android) is driven like a call without claiming a system call", async () => {
+    const voice = fakeRealtime();
+    const system = fakeCall();
+    system.call.showsSystemCall = false;
+    const hook = await renderHook(
+      (realtime: NativeCallRealtime) =>
+        useNativeRealtimeCall({ realtime, call: system.call, title: "Plan" }),
+      voice.realtime,
+    );
+    await act(async () => await hook.result.current.start());
+    expect(hook.result.current.systemCall).toBe(false);
+    expect(hook.result.current.speaker).toBe(true);
+    await hook.rerender({ ...voice.realtime, snapshot: snapshot("active") });
+    await act(async () => await hook.result.current.end());
+    expect(system.log).toEqual(["call.start:Plan", "call.connected", "call.end:ended"]);
+    await hook.unmount();
+  });
+
+  test("a live call that is silent on one side says why, and stops once audio flows", async () => {
+    const { voice, hook } = await setup();
+    await act(async () => await hook.result.current.start());
+    const silent = (kind: "no_input_audio" | "output_silent" | null, inputMuted = false) =>
+      hook.rerender({
+        ...voice.realtime,
+        snapshot: {
+          ...snapshot("active", inputMuted),
+          diagnostic: kind
+            ? { kind, message: kind, recoverable: true, connectionGeneration: 1, attempt: 0 }
+            : null,
+        },
+      });
+    await silent(null);
+    expect(hook.result.current.notice).toBeNull();
+    await silent("no_input_audio");
+    expect(hook.result.current.notice).toBe(
+      "Your microphone isn't picking up any sound. Check that no other app is using it.",
+    );
+    // Muting silences the microphone on purpose.
+    await silent("no_input_audio", true);
+    expect(hook.result.current.notice).toBeNull();
+    await silent("output_silent");
+    expect(hook.result.current.notice).toBe(
+      "A reply arrived but couldn't be played. Check your volume.",
+    );
+    await silent(null);
+    expect(hook.result.current.notice).toBeNull();
+  });
+
   test("hanging up from the lock screen stops voice", async () => {
     const { voice, system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());

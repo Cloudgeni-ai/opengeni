@@ -26,6 +26,8 @@ import type {
   CodexRealtimeWebrtcSession,
 } from "./codex-realtime";
 import { OpenGeniApiError } from "./errors";
+import { watchRealtimeAudioFlow } from "./realtime-audio-flow";
+import type { RealtimeAudioFlowIssue, RealtimeAudioFlowWatch } from "./realtime-audio-flow";
 import type {
   ActivateCodexRealtimeConnectionRequest,
   BeginSessionRealtimeRequest,
@@ -102,7 +104,20 @@ export type CodexRealtimeDiagnosticKind =
   | "rotation"
   | "reconnect"
   | "lost_owner"
-  | "terminal_stop";
+  | "terminal_stop"
+  /**
+   * The call is live but the microphone delivers no sound at all, so the
+   * voice cannot hear the person. Clears once sound arrives.
+   */
+  | "no_input_audio"
+  /** A reply was produced but none of its audio played. Clears once audio plays. */
+  | "output_silent";
+
+const AUDIO_FLOW_MESSAGES: Record<RealtimeAudioFlowIssue, string> = {
+  no_input_audio:
+    "Your microphone isn't picking up any sound, so the voice can't hear you. Check that no other app is using the microphone, or end the call and try again.",
+  output_silent: "A reply arrived but couldn't be played. Check your volume and audio output.",
+};
 
 export type CodexRealtimeDiagnostic = {
   kind: CodexRealtimeDiagnosticKind;
@@ -368,6 +383,8 @@ type ConnectionRuntime = {
   generation: number;
   transport: CodexRealtimeWebrtcSession;
   bridge: CodexRealtimeV3Bridge;
+  /** Watches the live call for silent audio; absent where stats are unavailable. */
+  audioFlow: RealtimeAudioFlowWatch | null;
 };
 
 type RecoveryCause = "rotation" | "reconnect" | "microphone" | "reload" | "manual";
@@ -593,6 +610,7 @@ export function createCodexRealtimeController(
   const closeActive = (): void => {
     const current = active;
     active = null;
+    current?.audioFlow?.stop();
     current?.bridge.close();
     current?.transport.stop();
     publish({ bridge: null, audibleOutput: "inactive" });
@@ -754,6 +772,42 @@ export function createCodexRealtimeController(
     });
   };
 
+  // Say so when a live call is silent on one side instead of leaving the
+  // person talking to nothing; clear it once audio flows again.
+  const onAudioFlowIssue = (
+    targetGeneration: number,
+    issue: RealtimeAudioFlowIssue | null,
+  ): void => {
+    if (closed || stopping || active?.generation !== targetGeneration) return;
+    const current = state.diagnostic?.kind;
+    const showing = current === "no_input_audio" || current === "output_silent";
+    if (issue === null) {
+      if (showing) publish({ diagnostic: null, error: null });
+      return;
+    }
+    if (state.status !== "active") return;
+    const message = AUDIO_FLOW_MESSAGES[issue];
+    publish({ diagnostic: diagnostic(issue, message, true, targetGeneration), error: message });
+  };
+
+  const startAudioFlow = (
+    targetGeneration: number,
+    transport: CodexRealtimeWebrtcSession,
+  ): RealtimeAudioFlowWatch | null => {
+    const peerConnection = transport.peerConnection as RTCPeerConnection | null | undefined;
+    if (!peerConnection || typeof peerConnection.getStats !== "function") return null;
+    return watchRealtimeAudioFlow({
+      peerConnection,
+      inputMuted: () => state.inputMuted,
+      // Blocked playback already has its own diagnostic and remedy.
+      outputMuted: () => state.outputMuted || state.audibleOutput === "blocked",
+      onIssue: (issue) => onAudioFlowIssue(targetGeneration, issue),
+      now: () => now().getTime(),
+      setInterval: scheduleInterval,
+      clearInterval: unscheduleInterval,
+    });
+  };
+
   const startActiveIntervals = (): void => {
     if (heartbeatTimer === null) {
       heartbeatTimer = scheduleInterval(() => {
@@ -912,6 +966,7 @@ export function createCodexRealtimeController(
     const current = active;
     if (closed || stopping || !current || current.generation !== targetGeneration) return;
     active = null;
+    current.audioFlow?.stop();
     failedBridge.close();
     current.transport.stop();
     publish({
@@ -1087,6 +1142,7 @@ export function createCodexRealtimeController(
       }
       throw error;
     }
+    let audioFlow: RealtimeAudioFlowWatch | null = null;
     try {
       await waitForDataChannelOpen(connected.events, abort.signal);
       if (
@@ -1173,8 +1229,12 @@ export function createCodexRealtimeController(
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
         onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
+        onFinalTranscript: (role) => {
+          if (role === "assistant") audioFlow?.assistantReplied();
+        },
       });
-      active = { generation: targetGeneration, transport: connected, bridge };
+      audioFlow = startAudioFlow(targetGeneration, connected);
+      active = { generation: targetGeneration, transport: connected, bridge, audioFlow };
       connectedInMode = true;
       connected.setOutputMuted(state.outputMuted);
       recoveryTerminal = false;
@@ -1204,6 +1264,7 @@ export function createCodexRealtimeController(
       });
       connected.activateRemoteAudio();
       previous?.bridge.close();
+      previous?.audioFlow?.stop();
       previous?.transport.stop();
       earlyEvents.handoff(bridge);
       if (active?.generation !== targetGeneration) {
@@ -1214,6 +1275,7 @@ export function createCodexRealtimeController(
       }
       startTimers();
     } catch (error) {
+      audioFlow?.stop();
       clearNegotiationTimer();
       earlyEvents.close();
       connected.stop();
