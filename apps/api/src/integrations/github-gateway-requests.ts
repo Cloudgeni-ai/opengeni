@@ -7,6 +7,9 @@
  * (`issue_create`, `pull_request_merge`, ...), or the strictest policy of the
  * routine group when no single action matches. Destructive or hard-to-undo
  * requests, and writes this module does not recognise, always ask.
+ * Force-updating or deleting a branch other than the repository's default
+ * branch follows the `ref_create` policy once the gateway has confirmed the
+ * branch (see `refRewrites`).
  */
 
 export const GITHUB_GATEWAY_ROUTINE_TOOLS = [
@@ -24,6 +27,15 @@ export type GitHubGatewayRepositoryRef =
   | { kind: "name"; owner: string; name: string }
   | { kind: "id"; id: string };
 
+/**
+ * A ref a request force-updates or deletes: a full ref name (`refs/heads/x`)
+ * in the request's repository or in a GraphQL repository node, or a GraphQL
+ * Ref node.
+ */
+export type GitHubGatewayRefTarget =
+  | { kind: "name"; ref: string; repositoryNodeId?: string }
+  | { kind: "node"; refNodeId: string };
+
 export type GitHubGatewayAction =
   | { kind: "read"; title: string }
   | {
@@ -33,6 +45,12 @@ export type GitHubGatewayAction =
       /** Ask even when the policy allows (Block still wins). */
       alwaysAsk: boolean;
       title: string;
+      /**
+       * Force updates and deletions of these refs. They set `alwaysAsk`; the
+       * gateway lowers it to `alwaysAskOtherwise` only after confirming that
+       * every ref is a branch other than the repository's default branch.
+       */
+      refRewrites?: { targets: GitHubGatewayRefTarget[]; alwaysAskOtherwise: boolean };
     };
 
 export type GitHubRestClassification = {
@@ -52,6 +70,41 @@ function routine(title: string): GitHubGatewayAction {
 
 function sensitive(title: string, tools: readonly string[] = []): GitHubGatewayAction {
   return write(tools, title, true);
+}
+
+/**
+ * Force-updating or deleting `ref` follows the person's policy when it is a
+ * branch other than the repository's default branch. Tags, other refs, the
+ * default branch, and an unknown default branch always ask.
+ */
+export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | null): boolean {
+  if (!defaultBranch || !ref.startsWith("refs/heads/")) return false;
+  const branch = ref.slice("refs/heads/".length);
+  return (
+    branch.length > 0 &&
+    branch.split("/").every((part) => part.length > 0 && !part.startsWith(".")) &&
+    !branch.includes("..") &&
+    !/[\u0000-\u0020\u007f~^:?*[\\]/u.test(branch) &&
+    branch.toLowerCase() !== defaultBranch.toLowerCase()
+  );
+}
+
+/** A force update or deletion of the ref at `refs/{refPath}`. */
+function refRewrite(title: string, refPath: string[]): GitHubGatewayAction {
+  const path = refPath.join("/").replace(/^refs\//u, "");
+  const action: Extract<GitHubGatewayAction, { kind: "write" }> = {
+    kind: "write",
+    tools: ["ref_create"],
+    alwaysAsk: true,
+    title,
+  };
+  if (path) {
+    action.refRewrites = {
+      targets: [{ kind: "name", ref: `refs/${path}` }],
+      alwaysAskOtherwise: false,
+    };
+  }
+  return action;
 }
 
 function decodeSegment(segment: string): string {
@@ -171,13 +224,13 @@ function classifyRepositoryWrite(
     if (id === "refs") {
       if (method === "POST" && sub === undefined)
         return write(["ref_create"], "Create branch or tag");
-      if (method === "DELETE") return sensitive("Delete branch or tag", ["ref_create"]);
+      if (method === "DELETE") return refRewrite("Delete branch or tag", rest.slice(2));
       if (method === "PATCH") {
         const force =
           body !== null &&
           typeof body === "object" &&
           (body as Record<string, unknown>).force === true;
-        return force ? sensitive("Force-update branch", ["ref_create"]) : routine("Update branch");
+        return force ? refRewrite("Force-update branch", rest.slice(2)) : routine("Update branch");
       }
     }
     if (
@@ -406,7 +459,6 @@ const GRAPHQL_MUTATIONS: Record<
   unmarkFileAsViewed: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Mark file as viewed" },
   addStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Star repository" },
   removeStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Unstar repository" },
-  deleteRef: { tools: ["ref_create"], title: "Delete branch or tag", alwaysAsk: true },
   deleteIssue: { tools: ["issue_update"], title: "Delete issue", alwaysAsk: true },
   deleteIssueComment: { tools: ["issue_comment"], title: "Delete comment", alwaysAsk: true },
   deletePullRequestReviewComment: {
@@ -958,6 +1010,10 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   const titles: string[] = [];
   const nodeIds = new Set<string>();
   const named = new Map<string, { owner: string; name: string }>();
+  // Force updates and deletions: they ask unless the gateway confirms every
+  // ref is a branch other than the default branch.
+  const rewriteTargets: GitHubGatewayRefTarget[] = [];
+  let unknownRewrite = false;
   for (const field of topLevel) {
     if (field.name === "__typename") continue;
     const args = Object.fromEntries(
@@ -966,23 +1022,49 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     collectNodeIds(args, nodeIds);
     collectNamedRepositories(args, named);
     let mapped = GRAPHQL_MUTATIONS[field.name];
-    if (field.name === "updateRef" || field.name === "updateRefs") {
-      const input = args.input as Record<string, unknown> | undefined;
+    const input =
+      args.input !== null && typeof args.input === "object" && !Array.isArray(args.input)
+        ? (args.input as Record<string, unknown>)
+        : undefined;
+    if (field.name === "deleteRef" || field.name === "updateRef") {
+      const rewrite = field.name === "deleteRef" || input?.force === true;
+      if (rewrite) {
+        if (typeof input?.refId === "string") {
+          rewriteTargets.push({ kind: "node", refNodeId: input.refId });
+        } else {
+          unknownRewrite = true;
+        }
+      }
+      mapped =
+        field.name === "deleteRef"
+          ? { tools: ["ref_create"], title: "Delete branch or tag" }
+          : rewrite
+            ? { tools: ["ref_create"], title: "Force-update branch" }
+            : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
+    } else if (field.name === "updateRefs") {
       const updates = Array.isArray(input?.refUpdates) ? input.refUpdates : [input];
       const records = updates.map((update) =>
         update !== null && typeof update === "object" ? (update as Record<string, unknown>) : {},
       );
-      // `updateRefs` deletes a ref whose `afterOid` is all zeros.
-      const deletes = records.some(
-        (update) =>
-          field.name === "updateRefs" &&
-          (typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid)),
-      );
-      const force = records.some((update) => update.force === true);
-      mapped = deletes
-        ? { tools: ["ref_create"], title: "Delete branch or tag", alwaysAsk: true }
-        : force
-          ? { tools: ["ref_create"], title: "Force-update branch", alwaysAsk: true }
+      // A ref whose `afterOid` is all zeros is deleted.
+      const deletes = (update: Record<string, unknown>) =>
+        typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid);
+      const rewrites = records.filter((update) => deletes(update) || update.force === true);
+      for (const update of rewrites) {
+        if (typeof update.name === "string" && typeof input?.repositoryId === "string") {
+          rewriteTargets.push({
+            kind: "name",
+            ref: update.name,
+            repositoryNodeId: input.repositoryId,
+          });
+        } else {
+          unknownRewrite = true;
+        }
+      }
+      mapped = records.some(deletes)
+        ? { tools: ["ref_create"], title: "Delete branch or tag" }
+        : rewrites.length > 0
+          ? { tools: ["ref_create"], title: "Force-update branch" }
           : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
     }
     if (!mapped) {
@@ -996,8 +1078,16 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   }
   // Too many named repositories to check: ask.
   if (named.size > GRAPHQL_NODE_IDS_MAX) alwaysAsk = true;
+  const action = write(
+    [...tools],
+    [...new Set(titles)].join(", ").slice(0, 200),
+    alwaysAsk || unknownRewrite || rewriteTargets.length > 0,
+  );
   return {
-    action: write([...tools], [...new Set(titles)].join(", ").slice(0, 200), alwaysAsk),
+    action:
+      rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
+        ? { ...action, refRewrites: { targets: rewriteTargets, alwaysAskOtherwise: alwaysAsk } }
+        : action,
     repositories,
     mutationRepositories: [...named.values()],
     accountLevel: mutations.every((name) => ACCOUNT_LEVEL_MUTATIONS.has(name)),
