@@ -1629,7 +1629,7 @@ The catalog describes:
 - hosted web search, X search, code execution, and image generation;
 - input and output modalities;
 - SSE, Responses WebSocket, and realtime-audio transports; and
-- standard, priority, and fast latency modes.
+- standard, priority, fast, and ultrafast latency modes.
 
 GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
@@ -1637,6 +1637,12 @@ use a 2× billing multiplier, and fail the turn if the provider response omits
 or downgrades that tier; Opengeni never silently falls back to Standard. The
 GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
 Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
+
+GPT-6 Astra and GPT-6.1 Sol also advertise **Ultrafast** (service tier
+`ultrafast`, 6× billing multiplier) where OpenAI serves it: the built-in
+provider only on the direct OpenAI API (`api.openai.com`, never Azure OpenAI or
+another base URL), and Codex subscription models only when a connected account's
+live model list advertises the tier for that model.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`

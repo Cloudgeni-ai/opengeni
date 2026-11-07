@@ -5640,7 +5640,7 @@ export const sessions = pgTable(
     ),
     latencyModeValid: check(
       "sessions_latency_mode_check",
-      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast', 'ultrafast')`,
     ),
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
@@ -8016,7 +8016,7 @@ export const sessionTurns = pgTable(
       ),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
-      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast', 'ultrafast')`,
     ),
     modelContextValid: check(
       "session_turns_model_context_check",
@@ -9415,7 +9415,7 @@ export const composerDrafts = pgTable(
     revisionValid: check("composer_drafts_revision_check", sql`${table.revision} >= 1`),
     latencyModeValid: check(
       "composer_drafts_latency_mode_check",
-      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast', 'ultrafast')`,
     ),
   }),
 );
@@ -9465,7 +9465,7 @@ export const newSessionDrafts = pgTable(
     revisionValid: check("new_session_drafts_revision_check", sql`${table.revision} >= 1`),
     latencyModeValid: check(
       "new_session_drafts_latency_mode_check",
-      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast', 'ultrafast')`,
     ),
     projectProvenanceValid: check(
       "new_session_drafts_project_provenance_check",
