@@ -76,8 +76,7 @@ describe("a turn whose personal machine isn't allowed", () => {
       expect((failure as Error).cause).toBe(refusal);
       const payload = agentRunFailurePayload(failure);
       expect(payload).toEqual({
-        error:
-          "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+        error: "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
         code: MACHINE_ACCESS_REQUIRED_CODE,
         retryable: false,
       });
