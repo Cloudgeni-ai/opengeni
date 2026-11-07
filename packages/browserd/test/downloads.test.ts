@@ -18,6 +18,61 @@ afterEach(async () => {
 });
 
 describe("BrowserDownloadStore", () => {
+  test("a failed background export can be retried with renewed authority", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "retry", targetId: null, suggestedFilename: "large.bin" });
+    await writeFile(join(store.filesDirectory, "retry"), "bytes");
+    await store.progress({ guid: "retry", state: "completed", receivedBytes: 5, totalBytes: 5 });
+    const request = {
+      operationId: "44444444-4444-4444-8444-444444444444",
+      downloadId: firstDownloadId,
+      upload: {
+        url: "https://storage.test/file?signature=old",
+        requiredHeaders: {},
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+    };
+    const failed = Promise.withResolvers<void>();
+    const upload = async () => {
+      await failed.promise;
+    };
+    try {
+      expect(await store.upload(request, upload, 10)).toBeNull();
+      await expect(
+        store.upload({ ...request, downloadId: secondDownloadId }, upload, 10),
+      ).rejects.toThrow();
+      await expect(
+        store.upload(
+          { ...request, upload: { ...request.upload, url: "https://storage.test/other" } },
+          upload,
+          10,
+        ),
+      ).rejects.toThrow();
+      const joined = store.export(request, upload);
+      failed.reject(new Error("synthetic upload failure"));
+      await expect(joined).rejects.toThrow("synthetic upload failure");
+      let retries = 0;
+      request.upload.url = "https://storage.test/file?signature=new";
+      const receipt = await store.upload(
+        request,
+        async (_path, authority) => {
+          retries++;
+          expect(authority.url).toBe(request.upload.url);
+        },
+        1_000,
+      );
+      expect(receipt).toMatchObject({
+        operationId: request.operationId,
+        downloadId: firstDownloadId,
+        sizeBytes: 5,
+      });
+      expect(retries).toBe(1);
+    } finally {
+      failed.resolve();
+      await store.close();
+    }
+  });
+
   test("settles one GUID-named file with exact integrity and no local path projection", async () => {
     const { store } = await fixture();
     const started = await store.begin({

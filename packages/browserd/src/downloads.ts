@@ -148,6 +148,14 @@ export class BrowserDownloadStore {
   private readonly announcedAfter = new Map<string, number>();
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
+  private readonly exportsInFlight = new Map<
+    string,
+    {
+      downloadId: string;
+      target: string;
+      done: Promise<BrowserDownloadExportReceiptValue>;
+    }
+  >();
   private closed = false;
 
   private constructor(options: BrowserDownloadStoreOptions, database: Database) {
@@ -485,7 +493,18 @@ export class BrowserDownloadStore {
     ) => Promise<void>,
   ): Promise<BrowserDownloadExportReceiptValue> {
     const request = BrowserDownloadExportRequest.parse(requestInput);
-    return this.enqueueExport(async () => {
+    const target = new URL(request.upload.url);
+    target.search = "";
+    const current = this.exportsInFlight.get(request.operationId);
+    if (current) {
+      if (current.downloadId !== request.downloadId || current.target !== target.toString()) {
+        return Promise.reject(
+          new Error("download export operation is already bound to another resource"),
+        );
+      }
+      return current.done;
+    }
+    const done = this.enqueueExport(async () => {
       const existing = this.exportRow(request.operationId);
       if (existing?.state === "completed") {
         this.assertExportBinding(existing, request.downloadId);
@@ -549,6 +568,40 @@ export class BrowserDownloadStore {
       if (result.changes !== 1) throw new Error("download export lost its operation fence");
       return receipt;
     });
+    this.exportsInFlight.set(request.operationId, {
+      downloadId: request.downloadId,
+      target: target.toString(),
+      done,
+    });
+    // A caller may stop waiting. Keep the transfer joinable until it settles,
+    // consume its rejection, and allow a later request to renew failed authority.
+    void done.then(
+      () => this.exportsInFlight.delete(request.operationId),
+      () => this.exportsInFlight.delete(request.operationId),
+    );
+    return done;
+  }
+
+  /** Wait only for this request window; the export continues and a
+   * later request joins it, including when its signed URL has been renewed. */
+  async upload(
+    request: BrowserDownloadExportRequestValue,
+    upload: Parameters<BrowserDownloadStore["export"]>[1],
+    waitMs: number,
+  ): Promise<BrowserDownloadExportReceiptValue | null> {
+    const done = this.export(request, upload);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        done,
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), waitMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async close(): Promise<void> {

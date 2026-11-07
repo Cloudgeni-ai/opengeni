@@ -1801,6 +1801,19 @@ export const BrowserDownloadSaveResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserDownloadSaveResponse = z.infer<typeof BrowserDownloadSaveResponse>;
 
+/** Returned only to save callers opting in with respondAsync=true. */
+export const BrowserDownloadSaveProgress = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.literal("uploading"),
+      operationId: primitives.uuid,
+      downloadId: primitives.uuid,
+      retryAfterMs: primitives.nonnegativeInteger.max(60_000),
+    })
+    .strict(),
+);
+export type BrowserDownloadSaveProgress = z.infer<typeof BrowserDownloadSaveProgress>;
+
 /** Controller-private, narrow object authority for publishing one exact
  * completed download. Signed URLs and headers never appear in public SDK or
  * durable controller receipts. */
@@ -1833,6 +1846,23 @@ export const BrowserDownloadExportReceipt = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;
+
+/** Controller-private bounded wait for the same export operation. */
+export const BrowserDownloadUploadRequest = /* @__PURE__ */ defineSchema(() =>
+  BrowserDownloadExportRequest.extend({ waitMs: primitives.nonnegativeInteger.max(60_000) }),
+);
+export type BrowserDownloadUploadRequest = z.infer<typeof BrowserDownloadUploadRequest>;
+
+export const BrowserDownloadUploadStatus = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: primitives.uuid,
+      downloadId: primitives.uuid,
+      receipt: BrowserDownloadExportReceipt.nullable(),
+    })
+    .strict(),
+);
+export type BrowserDownloadUploadStatus = z.infer<typeof BrowserDownloadUploadStatus>;
 
 /** One browser recording as its controller reports it. */
 export const BrowserRecordingSummary = /* @__PURE__ */ defineSchema(() =>

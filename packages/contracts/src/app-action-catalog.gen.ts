@@ -8907,7 +8907,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "BrowserDownloadSaveRequest"
     ],
+    "query": [
+      "respondAsync"
+    ],
     "response": [
+      "BrowserDownloadSaveProgress",
       "BrowserDownloadSaveResponse"
     ],
     "permission": "sessions:control"
