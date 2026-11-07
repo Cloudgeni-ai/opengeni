@@ -213,7 +213,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `social_daily_analysis_context` | Read | Existing bounded analysis input projection |
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
-| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types, plus a webhook's format (for its managers) and its last five deliveries |
+| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types (condition fields and MCP `argumentsSchema` that every type shares are given once, in `everyEventType`), plus a webhook's format (for its managers) and its last five deliveries |
 | First-party: `events_get` | Read | One stored event by id (data bounded at intake), or a run's event summaries, 50 per page with `nextOffset` |
 | First-party: `event_sources_create_webhook`, `event_sources_update` | Mutation | The source's id, name, preset, status and status reason, plus the address to give the sending app (`registerUrl`); never the signing secret |
 | First-party: `event_sources_delete` | Mutation | The deleted source's id |
