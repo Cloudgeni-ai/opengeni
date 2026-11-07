@@ -1745,6 +1745,97 @@ describe("MCP event sources", () => {
     await Promise.all([owner.close(), reader.close()]);
   });
 
+  test("fields and arguments every event type shares are listed once; types that differ keep their own", async () => {
+    // A server whose hundreds of types share one payload and one arguments schema.
+    const argumentsSchema = {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Only events in this account" },
+        region: { type: "string", description: "Only events in this region" },
+      },
+      required: ["account"],
+      additionalProperties: false,
+    };
+    const payloadSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        ["id", "account", "region", "title", "status", "actor"].map((name) => [
+          name,
+          { type: "string", description: `The record's ${name}` },
+        ]),
+      ),
+    };
+    const catalog: FakeMcpEventType[] = Array.from({ length: 300 }, (_, index) => ({
+      name: `record_${index}.changed`,
+      description: `Record ${index} changed.`,
+      delivery: ["poll"],
+      inputSchema: argumentsSchema,
+      payloadSchema,
+    }));
+    const shared = startFakeMcpEventsServer({ eventTypes: catalog });
+    const mixed = startFakeMcpEventsServer({ eventTypes: [TICKET_CREATED, TICKET_CLOSED] });
+    fakes.push(shared, mixed);
+    const f = await fixture({
+      enabled: true,
+      mcpServers: [
+        { id: "shared-fixture", name: "Shared Fixture", url: shared.url },
+        { id: "mixed-fixture", name: "Mixed Fixture", url: mixed.url },
+      ],
+    });
+    const owner = await agent(f, f.owner.subjectId);
+
+    const described = await owner.call("event_sources_list", {
+      sourceId: "mcp-server:shared-fixture",
+    });
+    expect(described.everyEventType).toEqual({
+      fields: Object.keys(payloadSchema.properties).map((name) => ({
+        field: `data.${name}`,
+        description: `The record's ${name}`,
+      })),
+      argumentsSchema,
+    });
+    expect(described.eventTypes).toEqual(
+      catalog.map(({ name, description }) => ({ type: name, description })),
+    );
+
+    // Types with different fields or arguments each keep theirs, as before.
+    const separate = await owner.call("event_sources_list", {
+      sourceId: "mcp-server:mixed-fixture",
+    });
+    expect(separate).not.toHaveProperty("everyEventType");
+    expect(separate.eventTypes).toEqual([
+      {
+        type: "ticket.created",
+        description: "A ticket was created in a queue.",
+        fields: [{ field: "data.queue" }, { field: "data.title" }],
+        argumentsSchema: TICKET_CREATED.inputSchema,
+      },
+      {
+        type: "ticket.closed",
+        description: "A ticket was closed.",
+        fields: [{ field: "data.title" }],
+        argumentsSchema: TICKET_CLOSED.inputSchema,
+      },
+    ]);
+
+    // A trigger uses the shared arguments like a type's own.
+    const created = await owner.call("scheduled_tasks_create", {
+      name: "Record 7",
+      ...separateAgent,
+      events: {
+        triggers: [
+          {
+            sourceId: "mcp-server:shared-fixture",
+            eventTypes: ["record_7.changed"],
+            arguments: { account: "acme" },
+          },
+        ],
+      },
+    });
+    expect(created.outcome).toBe("created");
+    await owner.close();
+  });
+
   test("a polled stream delivers new events once, in order, and wakes the automation", async () => {
     const f = await mcpFixture();
     const source = await f.createSource();
