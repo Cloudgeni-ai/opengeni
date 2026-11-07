@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { deflateSync, gunzipSync, gzipSync } from "node:zlib";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
 import {
   packBoundary,
@@ -15,6 +15,7 @@ import {
 import {
   canonicalJson,
   inspectPersonalGitHubPush,
+  PUSH_INSPECTION_MAX_BYTES,
   requestDigest,
   type GatewayDecider,
   type GatewayDecisionInput,
@@ -143,8 +144,33 @@ describe("receive-pack reading", () => {
       [large, `^${commits.main!}`],
     );
     const request = parseReceivePackRequest(body)!;
+    rmSync(join(root, "large.bin"));
     const cut = readPackCommits(body.subarray(request.packOffset, body.byteLength - 1024))!;
     expect(cut.commits.get(large)).toEqual([commits.main!]);
+  });
+
+  test("only the parent lines right after the tree are parents, as in Git", () => {
+    // Git accepts this header (`git fsck --strict` too) but reads one
+    // parent: a `parent` line after `author` is not one.
+    const tree = git(["write-tree"]).toString().trim();
+    const crafted = git(
+      ["hash-object", "-t", "commit", "-w", "--stdin"],
+      Buffer.from(
+        `tree ${tree}\nparent ${commits.rewritten!}\nauthor t <t@t> 0 +0000\n` +
+          `committer t <t@t> 0 +0000\nparent ${commits.main!}\n\ncrafted\n`,
+      ),
+    )
+      .toString()
+      .trim();
+    commits.crafted = crafted;
+    const body = pushBody(
+      [{ old: commits.main!, next: crafted, ref: "refs/heads/main" }],
+      [crafted, `^${commits.main!}`],
+    );
+    const request = parseReceivePackRequest(body)!;
+    const pack = readPackCommits(body.subarray(request.packOffset))!;
+    expect(pack.commits.get(crafted)).toEqual([commits.rewritten!]);
+    expect(packBoundary(pack.commits, crafted, commits.main!).reachedOld).toBe(false);
   });
 });
 
@@ -296,6 +322,8 @@ describe("pushes a real Git client sends from a shallow clone", () => {
     };
     await run(provider, ["init", "-q", "--bare", "--initial-branch=main"]);
     await run(provider, ["config", "http.receivepack", "true"]);
+    // Push options add a capability the pack offset depends on.
+    await run(provider, ["config", "receive.advertisePushOptions", "true"]);
     // Some history, so the clone below is genuinely shallow.
     const seed = join(workRoot, "seed");
     await run(workRoot, ["init", "-q", "--initial-branch=main", seed]);
@@ -328,7 +356,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
     await push("newBranch", ["-u", "topic"]);
     await run(client, ["checkout", "-q", "main"]);
     branchTips.main = await commitText("four");
-    await push("fastForward", ["main"]);
+    await push("fastForward", ["--push-option=ci.skip", "main"]);
     await run(client, ["checkout", "-q", "topic"]);
     await run(client, ["commit", "-q", "--amend", "-m", "topic rewritten"]);
     await push("forcePush", ["--force", "topic"]);
@@ -406,14 +434,16 @@ describe("pushes a real Git client sends from a shallow clone", () => {
   }
 
   test("the captured commands are the pushes that were made", () => {
-    const commandsOf = (name: string) => {
+    const plainOf = (name: string) => {
       const sent = captured[name]!;
-      return parseReceivePackRequest(sent.gzip ? gunzipSync(sent.body) : sent.body)!.commands;
+      return sent.gzip ? gunzipSync(sent.body) : sent.body;
     };
+    const commandsOf = (name: string) => parseReceivePackRequest(plainOf(name))!.commands;
     expect(commandsOf("newBranch")).toEqual([
       { oldOid: ZERO_OID, newOid: branchTips.topic!, ref: "refs/heads/topic" },
     ]);
     expect(commandsOf("fastForward")[0]!.newOid).toBe(branchTips.main!);
+    expect(parseReceivePackRequest(plainOf("fastForward"))!.capabilities).toContain("push-options");
     expect(commandsOf("deletion")[0]!.newOid).toBe(ZERO_OID);
   });
 });
@@ -505,6 +535,19 @@ describe("push approvals", () => {
     expect(calls).toHaveLength(1);
   });
 
+  test("a commit naming the old tip outside its parents is still a force push", async () => {
+    const { calls, decide } = recordingDecider({ kind: "allow" });
+    await inspect(
+      pushBody(
+        [{ old: commits.main!, next: commits.crafted!, ref: "refs/heads/main" }],
+        [commits.crafted!, `^${commits.main!}`],
+      ),
+      decide,
+      async () => false,
+    );
+    expect(calls.map((call) => call.title)).toEqual(["Force-push main on acme/widgets"]);
+  });
+
   test("deleting a branch or tag asks, and the same push has the same digest", async () => {
     const { calls, decide } = recordingDecider({ kind: "allow" });
     const body = pushBody(
@@ -520,6 +563,105 @@ describe("push approvals", () => {
     expect(calls[0]!.title).toBe("Delete old, delete tag v1 on acme/widgets");
     expect(calls[0]!.digest).toBe(calls[1]!.digest);
   });
+});
+
+describe("pushes over the inspection limit", () => {
+  const fakeOid = (seed: string) => createHash("sha1").update(seed).digest("hex");
+  const objectHeader = (type: number, size: number) => {
+    const bytes = [(type << 4) | (size & 0x0f)];
+    let rest = Math.floor(size / 16);
+    while (rest > 0) {
+      bytes[bytes.length - 1]! |= 0x80;
+      bytes.push(rest & 0x7f);
+      rest = Math.floor(rest / 128);
+    }
+    return Buffer.from(bytes);
+  };
+  const packObject = (type: number, content: Buffer, level?: number) =>
+    Buffer.concat([
+      objectHeader(type, content.length),
+      deflateSync(content, level === undefined ? {} : { level }),
+    ]);
+  const commitObject = (parent: string, message: string) => {
+    const content = Buffer.from(
+      `tree ${fakeOid("tree")}\nparent ${parent}\nauthor t <t@t> 0 +0000\n` +
+        `committer t <t@t> 0 +0000\n\n${message}\n`,
+    );
+    const oid = createHash("sha1")
+      .update(`commit ${content.length}\0`)
+      .update(content)
+      .digest("hex");
+    return { oid, object: packObject(1, content) };
+  };
+  /** A push whose pack has a blob that runs past the inspection limit. */
+  const largePush = (oldOid: string, objects: Buffer[], tip: string) => {
+    const header = Buffer.alloc(12);
+    header.write("PACK", 0, "latin1");
+    header.writeUInt32BE(2, 4);
+    header.writeUInt32BE(objects.length, 8);
+    const pack = Buffer.concat([header, ...objects, Buffer.alloc(20)]);
+    return Buffer.concat([
+      pkt(`${oldOid} ${tip} refs/heads/topic\0report-status side-band-64k\n`),
+      Buffer.from("0000"),
+      pack,
+    ]);
+  };
+  const largeBlob = () =>
+    packObject(3, Buffer.alloc(PUSH_INSPECTION_MAX_BYTES + 1024 * 1024, 7), 0);
+  const chunked = (bytes: Buffer): ReadableStream<Uint8Array> => {
+    let offset = 0;
+    return new ReadableStream({
+      pull(controller) {
+        if (offset >= bytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.subarray(offset, offset + 1024 * 1024));
+        offset += 1024 * 1024;
+      },
+    });
+  };
+  const inspectLarge = (body: Buffer, decide: GatewayDecider) =>
+    inspectPersonalGitHubPush({
+      body: chunked(body),
+      gzip: false,
+      repositoryFullName: "acme/widgets",
+      identity,
+      decide,
+      // GitHub's compare does not know commits that are only in the push.
+      isAncestor: async () => null,
+    });
+
+  test("a fast-forward goes through with the commits read before the cut", async () => {
+    const oldTip = fakeOid("old tip");
+    const tip = commitObject(oldTip, "tip");
+    const body = largePush(oldTip, [tip.object, largeBlob()], tip.oid);
+    expect(body.byteLength).toBeGreaterThan(PUSH_INSPECTION_MAX_BYTES);
+    const { calls, decide } = recordingDecider({ kind: "allow" });
+    const result = await inspectLarge(body, decide);
+    expect(calls).toEqual([]);
+    expect(result).toMatchObject({ kind: "forward", requestId: null });
+    if (result.kind !== "forward") return;
+    const forwarded = Buffer.from(await new Response(result.body as BodyInit).arrayBuffer());
+    expect(forwarded.equals(body)).toBe(true);
+  }, 60_000);
+
+  test("a force push whose history continues past the cut asks", async () => {
+    const oldTip = fakeOid("old tip");
+    const middle = commitObject(oldTip, "middle");
+    const tip = commitObject(middle.oid, "tip");
+    const body = largePush(oldTip, [tip.object, largeBlob(), middle.object], tip.oid);
+    const { calls, decide } = recordingDecider({
+      kind: "refuse",
+      status: 403,
+      waiting: true,
+      message: "Waiting for approval.",
+    });
+    const result = await inspectLarge(body, decide);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.title).toBe("Force-push topic on acme/widgets");
+    expect(result.kind).toBe("respond");
+  }, 60_000);
 });
 
 describe("pushes the gateway cannot read", () => {

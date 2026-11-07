@@ -23,6 +23,8 @@ export type ReceivePackRequest = {
 };
 
 const OID_PATTERN = /^[0-9a-f]{40}$/u;
+/** Largest object the pack scan inflates. */
+const MAX_INFLATED_OBJECT_BYTES = 64 * 1024 * 1024;
 
 function readPktLine(
   body: Uint8Array,
@@ -177,7 +179,12 @@ export function readPackCommits(
       }
       if (cursor > data.length) break;
       entry.dataOffset = cursor;
-      const inflated = inflateSync(data.subarray(cursor), { info: true }) as unknown as {
+      // The cap bounds memory for a highly compressible object; a larger
+      // object ends the scan here, which only shortens the walk.
+      const inflated = inflateSync(data.subarray(cursor), {
+        info: true,
+        maxOutputLength: MAX_INFLATED_OBJECT_BYTES,
+      }) as unknown as {
         engine: { bytesWritten: number };
       };
       cursor += inflated.engine.bytesWritten;
@@ -188,7 +195,15 @@ export function readPackCommits(
     }
   }
 
-  const inflate = (entry: Entry): Buffer => inflateSync(data.subarray(entry.dataOffset));
+  const inflate = (entry: Entry): Buffer | null => {
+    try {
+      return inflateSync(data.subarray(entry.dataOffset), {
+        maxOutputLength: MAX_INFLATED_OBJECT_BYTES,
+      });
+    } catch {
+      return null;
+    }
+  };
   const resolvedType = (entry: Entry, depth = 0): number | null => {
     if (depth > 64) return null;
     if (entry.type >= 1 && entry.type <= 4) return entry.type;
@@ -214,6 +229,7 @@ export function readPackCommits(
     let body: Buffer | null = null;
     if (entry.type === 1) {
       body = inflate(entry);
+      if (!body) continue;
     } else if (entry.type === 6 || entry.type === 7) {
       if (entry.type === 6 && resolvedType(entry) !== 1) continue;
       const base =
@@ -224,7 +240,8 @@ export function readPackCommits(
         unresolvedDeltas += 1;
         continue;
       }
-      body = applyDelta(base, inflate(entry));
+      const delta = inflate(entry);
+      body = delta ? applyDelta(base, delta) : null;
       if (!body) {
         unresolvedDeltas += 1;
         continue;
@@ -235,17 +252,29 @@ export function readPackCommits(
     const oid = objectOid(1, body);
     commitContent.set(entry.offset, body);
     commitByOid.set(oid, body);
-    commits.set(oid, commitParents(body));
+    const parents = commitParents(body);
+    // A commit Git would reject is left out, so the walk stops there.
+    if (parents) commits.set(oid, parents);
   }
   return { commits, unresolvedDeltas };
 }
 
-function commitParents(body: Buffer): string[] {
-  const parents: string[] = [];
+/**
+ * Parents as Git reads them (`parse_commit_buffer`): the header must open
+ * with `tree <oid>`, and only the `parent <oid>` lines directly after it
+ * count. A `parent` line later in the header is not a parent, so a crafted
+ * commit cannot claim ancestry Git would not recognise. Returns null for a
+ * header Git would reject.
+ */
+function commitParents(body: Buffer): string[] | null {
   const text = body.toString("latin1", 0, Math.min(body.length, 64 * 1024));
-  for (const line of text.split("\n")) {
-    if (line === "") break;
-    if (line.startsWith("parent ")) parents.push(line.slice("parent ".length).trim());
+  const lines = text.split("\n");
+  if (!/^tree [0-9a-f]{40}$/.test(lines[0] ?? "")) return null;
+  const parents: string[] = [];
+  for (const line of lines.slice(1)) {
+    const match = /^parent ([0-9a-f]{40})$/.exec(line);
+    if (!match) break;
+    parents.push(match[1]!);
   }
   return parents;
 }
