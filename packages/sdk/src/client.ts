@@ -3,8 +3,6 @@ import type {
   DecisionQuestion,
   ModelDecisionRequest,
   ModelDecisionResponse,
-  ModelEmbeddingsRequest,
-  ModelEmbeddingsResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -1539,21 +1537,6 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/decisions`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  /** Vectors from the deployment's configured document embedding model. */
-  async embed(
-    workspaceId: string,
-    request: ModelEmbeddingsRequest,
-    options?: OpenGeniRequestOptions,
-  ): Promise<ModelEmbeddingsResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/embeddings`,
       request,
       {},
       options,

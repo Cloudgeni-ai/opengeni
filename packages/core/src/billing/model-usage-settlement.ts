@@ -16,7 +16,12 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { createHash } from "node:crypto";
-import type { BillingOrigin, LatencyMode } from "@opengeni/contracts";
+import type {
+  BillingOrigin,
+  LatencyMode,
+  TurnInitiator,
+  TurnInitiatorContext,
+} from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
@@ -77,6 +82,9 @@ export type ModelUsageBillingRecord = {
 export type ModelUsageSettlementInput = {
   accountId: string;
   workspaceId: string;
+  /** Stateless caller provenance. Context labels never select a paying workspace. */
+  initiator?: TurnInitiator;
+  initiatorContext?: TurnInitiatorContext;
   /** Product model id used for pricing and ledger attribution. */
   model: string;
   chargesOpenGeniCredits: boolean;
@@ -252,6 +260,9 @@ export async function settleModelUsage(
 ): Promise<ModelUsageBillingRecord> {
   const normalizedUsage = input.normalizedUsage;
   const usageContext = {
+    ...(input.initiator
+      ? { initiator: input.initiator, initiatorContext: input.initiatorContext ?? {} }
+      : {}),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.turnAttemptId ? { turnAttemptId: input.turnAttemptId } : {}),

@@ -13,11 +13,12 @@ test("SDK stateless inference uses the existing key, scoped paths, body and abor
     fetch: (async (url, init) => {
       const request = new Request(url, init);
       calls.push({ request, body: await request.json() });
-      return Response.json({ object: request.url.endsWith("decisions") ? "decision" : "list" });
+      return Response.json({ object: "decision" });
     }) as typeof fetch,
   });
   const signal = new AbortController().signal;
   const decisionRequest = {
+    tenantLabel: "customer",
     input: "hello",
     questions: { matches: { type: "predicate" as const, instructions: "Matches?" } },
   };
@@ -27,12 +28,8 @@ test("SDK stateless inference uses the existing key, scoped paths, body and abor
     { signal },
   );
   expect(result.object).toBe("decision");
-  expect((await client.embed("workspace", { input: ["one", "two"] }, { signal })).object).toBe(
-    "list",
-  );
   expect(calls.map(({ request }) => new URL(request.url).pathname)).toEqual([
     "/v1/workspaces/workspace/decisions",
-    "/v1/workspaces/workspace/embeddings",
   ]);
   for (const { request } of calls) {
     expect(request.method).toBe("POST");
@@ -40,7 +37,6 @@ test("SDK stateless inference uses the existing key, scoped paths, body and abor
     expect(request.signal.aborted).toBe(false);
   }
   expect(calls[0]!.body).toEqual(decisionRequest);
-  expect(calls[1]!.body).toEqual({ input: ["one", "two"] });
 });
 
 test("a failed paid inference call is not silently retried", async () => {
@@ -56,6 +52,11 @@ test("a failed paid inference call is not silently retried", async () => {
       );
     }) as typeof fetch,
   });
-  await expect(client.embed("ws", { input: "hello" })).rejects.toMatchObject({ status: 502 });
+  await expect(
+    client.decide("ws", {
+      input: "hello",
+      questions: { q: { type: "predicate", instructions: "Matches?" } },
+    }),
+  ).rejects.toMatchObject({ status: 502 });
   expect(calls).toBe(1);
 });

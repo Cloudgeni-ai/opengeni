@@ -3,11 +3,13 @@ import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
-import { createAuxiliaryModelCallService } from "../src/model-calls/auxiliary";
+import { createDecisionCallService } from "../src/model-calls/decisions";
 import * as rls from "../src/access-grant-rls";
 
+const services: Array<{ flushUsage(): Promise<void> }> = [];
 const restores: Array<() => void> = [];
-afterEach(() => {
+afterEach(async () => {
+  for (const service of services.splice(0)) await service.flushUsage();
   while (restores.length) restores.pop()!();
 });
 function spy<T extends object, K extends keyof T>(target: T, key: K, impl: unknown) {
@@ -21,11 +23,6 @@ const settings = () =>
     decisionModelId: "decision-test",
     decisionModelApiKey: "test-key",
     decisionModelBaseUrl: "https://models.example.test/v1",
-    documentEmbeddingProvider: "openai",
-    documentEmbeddingApiKey: "test-key",
-    documentEmbeddingBaseUrl: "https://models.example.test/v1",
-    documentEmbeddingModel: "embedding-test",
-    documentEmbeddingDimensions: 2,
   });
 const questions = {
   allowed: { type: "predicate" as const, instructions: "Is it allowed?" },
@@ -80,15 +77,16 @@ function harness(
   spy(db, "isWorkspaceEuOnly", async () => effective.requiredModelGeography === "eu");
   const admit = spy(core, "admitModelCall", async () => ({ allowed: true }));
   const settle = spy(core, "settleModelUsage", async () => ({}));
-  const service = createAuxiliaryModelCallService({
+  const service = createDecisionCallService({
     db: {} as never,
     settings: effective,
     fetch: fetcher,
   });
+  services.push(service);
   return { service, calls, admit, settle };
 }
 
-describe("public auxiliary inference through the existing providers and meter", () => {
+describe("public platform-funded decisions", () => {
   test("typed predicate, choice, score and refusal use the deployment model and settle actual usage", async () => {
     const h = harness();
     const result = await h.service.decide({ ...caller, request: { input: "text", questions } });
@@ -108,12 +106,8 @@ describe("public auxiliary inference through the existing providers and meter", 
       url: "https://models.example.test/v1/decisions",
       body: { model: "decision-test" },
     });
-    expect(h.admit.mock.calls[0]![1]).toMatchObject({
-      model: "openai/decision-test",
-      billingOrigin: "api",
-      countsTowardTokenCap: true,
-      byok: false,
-    });
+    expect(h.admit).not.toHaveBeenCalled();
+    await h.service.flushUsage();
     expect(h.settle.mock.calls[0]![2]).toMatchObject({
       sourceId: "model_call:server-request",
       normalizedUsage: { telemetry: { inputTokens: 12, outputTokens: 3 } },
@@ -129,6 +123,7 @@ describe("public auxiliary inference through the existing providers and meter", 
     await expect(
       h.service.decide({ ...caller, request: { input: "x", questions } }),
     ).rejects.toMatchObject({ status: 502, code: "provider_error" });
+    await h.service.flushUsage();
     expect(h.settle).toHaveBeenCalledTimes(1);
   });
   test("an unconfigured decision model never borrows chat credentials", async () => {
@@ -138,15 +133,12 @@ describe("public auxiliary inference through the existing providers and meter", 
     ).rejects.toMatchObject({ status: 503 });
     expect(h.calls).toHaveLength(0);
   });
-  test("workspace EU restrictions refuse both routes before network dispatch", async () => {
+  test("workspace EU restrictions refuse decisions before network dispatch", async () => {
     const h = harness();
     spy(db, "isWorkspaceEuOnly", async () => true);
     await expect(
       h.service.decide({ ...caller, request: { input: "x", questions } }),
     ).rejects.toMatchObject({ code: "region_restricted" });
-    await expect(h.service.embed({ ...caller, request: { input: "x" } })).rejects.toMatchObject({
-      code: "region_restricted",
-    });
     expect(h.calls).toHaveLength(0);
   });
   test("a failed workspace residency read never reaches a provider", async () => {
@@ -154,9 +146,9 @@ describe("public auxiliary inference through the existing providers and meter", 
     spy(db, "isWorkspaceEuOnly", async () => {
       throw new Error("db down");
     });
-    await expect(h.service.embed({ ...caller, request: { input: "x" } })).rejects.toThrow(
-      "db down",
-    );
+    await expect(
+      h.service.decide({ ...caller, request: { input: "x", questions } }),
+    ).rejects.toThrow("db down");
     expect(h.calls).toHaveLength(0);
   });
   test("declared EU decision endpoint runs and keeps its residency receipt", async () => {
@@ -182,82 +174,8 @@ describe("public auxiliary inference through the existing providers and meter", 
       },
     });
     await h.service.decide({ ...caller, request: { input: "x", questions } });
+    await h.service.flushUsage();
     expect(h.settle.mock.calls[0]![2]).toMatchObject({ processingResidency: { geography: "eu" } });
-  });
-  test("embeddings reuse batching, preserve input order and report configured dimensions", async () => {
-    const h = harness({
-      respond: (_url, body) =>
-        Response.json({
-          model: "embedding-test",
-          data: (body.input as string[])
-            .map((_, index) => ({ index, embedding: [index, 1] }))
-            .reverse(),
-          usage: {
-            prompt_tokens: (body.input as string[]).length,
-            total_tokens: (body.input as string[]).length,
-          },
-        }),
-    });
-    const result = await h.service.embed({
-      ...caller,
-      request: { input: Array.from({ length: 65 }, (_, i) => String(i)) },
-    });
-    expect(result.dimensions).toBe(2);
-    expect(result.data).toHaveLength(65);
-    expect(result.data[0]).toEqual({ object: "embedding", index: 0, embedding: [0, 1] });
-    expect(result.usage).toEqual({
-      inputTokens: 65,
-      totalTokens: 65,
-      requests: 2,
-      costUsd: null,
-      costSource: "unknown",
-    });
-    expect(h.calls).toHaveLength(2);
-    expect(h.calls[0]!.body).toMatchObject({ model: "embedding-test", dimensions: 2 });
-    expect(h.settle.mock.calls[0]![2]).toMatchObject({ normalizedUsage: { totalTokens: 65 } });
-  });
-  test.each(["missing", "duplicate", "dimension", "nonfinite"])(
-    "invalid embedding %s is refused after settling received usage",
-    async (kind) => {
-      const data =
-        kind === "missing"
-          ? []
-          : kind === "duplicate"
-            ? [
-                { index: 0, embedding: [0, 1] },
-                { index: 0, embedding: [0, 1] },
-              ]
-            : [{ index: 0, embedding: kind === "dimension" ? [0] : [null, 1] }];
-      const h = harness({
-        respond: () =>
-          Response.json({
-            model: "embedding-test",
-            data,
-            usage: { prompt_tokens: 5, total_tokens: 5 },
-          }),
-      });
-      await expect(h.service.embed({ ...caller, request: { input: "x" } })).rejects.toMatchObject({
-        code: "provider_error",
-      });
-      expect(h.settle).toHaveBeenCalledTimes(1);
-    },
-  );
-  test("later failed batch retains the first batch's usage", async () => {
-    let batch = 0;
-    const h = harness({
-      respond: (_url, body) =>
-        ++batch === 1
-          ? Response.json({
-              model: "embedding-test",
-              data: (body.input as string[]).map((_, index) => ({ index, embedding: [0, 1] })),
-              usage: { prompt_tokens: 64, total_tokens: 64 },
-            })
-          : new Response("rejected", { status: 400 }),
-    });
-    await expect(
-      h.service.embed({ ...caller, request: { input: Array(65).fill("x") } }),
-    ).rejects.toMatchObject({ status: 400 });
-    expect(h.settle.mock.calls[0]![2]).toMatchObject({ normalizedUsage: { totalTokens: 64 } });
   });
   test("unknown usage is not invented; pre-aborted requests send nothing", async () => {
     const h = harness({ respond: () => Response.json({ answers }) });
@@ -267,24 +185,39 @@ describe("public auxiliary inference through the existing providers and meter", 
     await expect(
       h.service.decide({ ...caller, signal, request: { input: "x", questions } }),
     ).rejects.toMatchObject({ name: "AbortError" });
-    await expect(
-      h.service.embed({ ...caller, signal, request: { input: "x" } }),
-    ).rejects.toMatchObject({ name: "AbortError" });
     expect(h.calls).toHaveLength(1);
   });
-  test("allowance rejection prevents either provider call", async () => {
+  test("tenant attribution cannot invoke allowance admission or change the payer", async () => {
     const h = harness();
-    h.admit.mockImplementation(async () => ({
-      allowed: false,
-      denial: "allowance_exhausted",
-      message: "Limit reached",
-    }));
-    await expect(
-      h.service.decide({ ...caller, request: { input: "x", questions } }),
-    ).rejects.toMatchObject({ status: 429 });
-    await expect(h.service.embed({ ...caller, request: { input: "x" } })).rejects.toMatchObject({
-      status: 429,
+    h.admit.mockImplementation(async () => {
+      throw new Error("Customer allowance exhausted");
     });
-    expect(h.calls).toHaveLength(0);
+    const result = await h.service.decide({
+      ...caller,
+      request: { input: "x", questions, tenantLabel: "customer" },
+    });
+    expect(result.tenantLabel).toBe("customer");
+    expect(h.admit).not.toHaveBeenCalled();
+    expect(h.settle).not.toHaveBeenCalled();
+    await h.service.flushUsage();
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({
+      accountId: "acct",
+      workspaceId: "ws",
+      chargesOpenGeniCredits: false,
+      initiatorContext: { tenantLabel: "customer" },
+    });
+  });
+  test("receipt failure retries only the write, without replaying inference", async () => {
+    const h = harness();
+    h.settle.mockImplementationOnce(async () => {
+      throw new Error("DB unavailable");
+    });
+    const result = await h.service.decide({ ...caller, request: { input: "x", questions } });
+    expect(result.object).toBe("decision");
+    expect(h.settle).not.toHaveBeenCalled();
+    await expect(h.service.flushUsage()).rejects.toThrow("remain pending");
+    await h.service.flushUsage();
+    expect(h.settle).toHaveBeenCalledTimes(2);
+    expect(h.calls).toHaveLength(1);
   });
 });

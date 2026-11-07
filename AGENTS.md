@@ -158,11 +158,11 @@ disabled tools or grant execution outside the current catalog.
   and code-search judgments share `@opengeni/decisions`; provider adapters must not
   silently fall back to chat completions or borrow a customer's credential. See
   `docs/decision-models.md` for configuration and verified provider boundaries.
-  Public `/decisions` and `/embeddings` calls share chat-completions authority,
-  admission and settlement. The API and worker share configured decision routing;
-  the existing document embedder supplies vectors and per-batch usage. Keep unknown
-  provider costs unknown and external funding distinct from credit debits. See
-  `docs/model-inference.md`.
+  Public `/decisions` calls share chat-completions authority and canonical usage
+  settlement, but use deployment funding without agent allowance admission.
+  The API and worker share configured decision routing. Tenant labels are
+  attribution only; receipts are written off-path. Keep unknown provider costs
+  unknown. See `docs/model-inference.md`.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
   authority hierarchy: `managed_accounts.id` remains the physical organization
   id, organization membership is distinct from ordinary workspace membership,

@@ -430,8 +430,8 @@ import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerChatCompletionRoutes } from "./routes/chat-completions";
-import { registerModelInferenceRoutes } from "./routes/model-inference";
-import { createAuxiliaryModelCallService } from "./model-calls/auxiliary";
+import { registerDecisionRoutes } from "./routes/decisions";
+import { createDecisionCallService } from "./model-calls/decisions";
 import { createModelCallService } from "./model-calls/service";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
@@ -776,6 +776,14 @@ export function createAppComposition(
     transcription,
     transcriptionSegmenter,
     modelCalls,
+    decisions:
+      deps.decisions === undefined
+        ? createDecisionCallService({
+            db: deps.db,
+            settings: deps.settings,
+            log: (message, attributes) => observability.error(message, attributes),
+          })
+        : deps.decisions,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -2665,19 +2673,7 @@ export function createAppComposition(
   registerSubscriptionUsagePoolRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerChatCompletionRoutes(app, { ...routeDeps, modelCalls });
-  registerModelInferenceRoutes(app, {
-    ...routeDeps,
-    auxiliaryModelCalls:
-      deps.auxiliaryModelCalls === undefined
-        ? createAuxiliaryModelCallService({
-            db: deps.db,
-            settings: deps.settings,
-            entitlements: deps.entitlements ?? null,
-            usageLimitMetrics: observability,
-            log: (message, attributes) => observability.error(message, attributes),
-          })
-        : deps.auxiliaryModelCalls,
-  });
+  registerDecisionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);

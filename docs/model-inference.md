@@ -1,127 +1,92 @@
-# Stateless decisions and embeddings
+# Stateless typed decisions
 
-A product running its own Opengeni deployment can use its existing API key for
-typed decisions and embeddings as well as [chat completions](chat-completions.md).
-No session, agent, tool call or history is created. Both endpoints require the
-same workspace `sessions:create` authority as chat completions.
+`POST /v1/workspaces/{workspaceId}/decisions` uses the deployment's existing
+decision model. It creates no session, turn, checkpoint or turn audit. There is
+no chat fallback and no caller-selected model or provider credential.
 
-| Endpoint | SDK method | Configured model |
-| --- | --- | --- |
-| `POST /v1/workspaces/:workspaceId/decisions` | `client.decide(workspaceId, request, options?)` | Deployment decision model |
-| `POST /v1/workspaces/:workspaceId/embeddings` | `client.embed(workspaceId, request, options?)` | Deployment document embedder |
-
-Neither endpoint accepts a model, credential, dimension, streaming or request-ID
-override. The deployment owns those choices. Unknown fields return HTTP 400,
-rather than being silently ignored. `options.signal` cancels an SDK request;
-the provider receives the cancellation. SDK mutations are not automatically retried.
-
-## Decisions
+## SDK
 
 ```ts
 import { OpenGeniClient } from "@opengeni/sdk";
 
-const client = new OpenGeniClient({
-  baseUrl: process.env.OPENGENI_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-});
-
-const decision = await client.decide(workspaceId, {
-  input: { text: "Please send me the invoice." },
+const client = new OpenGeniClient({ baseUrl, apiKey });
+const result = await client.decide(platformWorkspaceId, {
+  tenantLabel: "customer-42",
+  input: { text: "Please send the invoice." },
   questions: {
-    needsReply: { type: "predicate", instructions: "Does this need a reply?" },
+    billing: { type: "predicate", instructions: "Is this about billing?" },
     category: {
-      type: "choice",
-      instructions: "Classify the request.",
-      criteria: { billing: "Invoices and payments", support: "Technical help" },
+      type: "choice", instructions: "Pick the best category",
+      criteria: { sales: "A new purchase", support: "Help with an existing purchase" },
     },
-    urgency: {
-      type: "score",
-      instructions: "How urgent is the request?",
-      criteria: ["Routine", "Time-sensitive", "Immediate"],
-    },
+    urgency: { type: "score", instructions: "How urgent?", criteria: ["Low", "High"] },
   },
-});
+}, { signal });
 
-const answer = decision.answers.needsReply;
-if (answer.type === "predicate") console.log(answer.probability);
-else console.log(answer.reason); // typed refusal
+const answer = result.answers.billing;
+if (answer.type === "refusal") console.log(answer.reason);
+else console.log(answer.probability);
+console.log(result.id, result.model, result.usage);
 ```
 
-The JSON body is `{ input, questions }`. Each question has `type`, `instructions`
-and, for choice/score, non-empty `criteria`. Instructions can be text, an object
-or an array. Predicate criteria may name `true` and `false`. Input is any JSON value.
+Predicates return a probability from zero to one; choices return an allowed key;
+scores return a zero-based criteria index. Every answer can instead be a typed
+refusal. The existing provider adapter validates all answers. A malformed answer
+fails the request, but any usage already reported by the provider is retained.
+The SDK does not silently retry a failed decision call.
 
-The response is `{ id, object: "decision", model, answers, usage }`:
+## Authority, funding and configuration
 
-- Predicate: `{ type: "predicate", probability: number }`, from 0 to 1.
-- Choice: `{ type: "choice", choice: string }`, one of the criterion keys.
-- Score: `{ type: "score", score: number }`, from 0 to `criteria.length - 1`.
-- Refusal: `{ type: "refusal", reason?: string }`, a successful typed result, not
-  a transport error. Choice and score may also carry probabilities/confidence.
+The same API key and `sessions:create` authority as chat completions apply.
+The workspace and account come from the authenticated grant, not from a label.
+API-key authentication is reused within a request; revocation, expiry and scope
+are rechecked on each new request, as on chat completions.
 
-The SDK infers each named answer's type. The shared decision adapters validate the
-complete answer set. Missing names, wrong types and invalid values fail with
-`502 provider_error`; they never become false predicates or guessed answers.
+The product should call as itself in a platform workspace. Deployment credentials
+pay the upstream provider. Decision calls bypass agent allowance admission and
+do not debit customer credits; an exhausted customer allowance does not block
+them. An optional `tenantLabel` (1–256 characters) is reporting-only: it neither
+selects a customer workspace nor changes the payer. It is returned in the answer
+and on the platform's usage events (`listUsageEvents`). Do not put secrets in it.
 
-`usage` includes the returned model/provider, nullable input/output tokens,
-successful request count, nullable `costUsd` and `costSource`
-(`provider-reported`, `estimate` or `unknown`). The top-level `model` identifies
-the configured category; `usage.model` is the provider's returned identity.
+Configure the API process using the existing [decision-model settings](decision-models.md),
+also used by worker code search and tool discovery. A missing configuration
+returns 503. Workspace/deployment EU-only requirements and the existing
+side-feature endpoint residency checks run before dispatch. Provider failures
+are sanitized; rate limiting returns 429 and other decision failures return 502.
 
-Configure the existing `OPENGENI_DECISION_MODEL_*` settings on the API server;
-see [decision models](decision-models.md), including deployment-identity sign-in.
-The API shares the worker's configured decision implementation. It never borrows
-a conversational model/key, enables legacy code-search fallback, or substitutes
-chat-generated JSON for a typed decision endpoint.
+## Usage and receipt durability
 
-## Embeddings
+The response includes the configured model, validated answers, a server-generated
+request ID, and provider usage. Unknown token counts/costs remain `null`, not zero.
+Reported and estimated cost sources stay distinct. Existing canonical settlement
+records token usage, a zero-credit `model.cost`, and (when known) provider cost
+as `model.provider_cost` or `model.estimated_provider_cost` in USD micros.
+It never borrows a conversational model's price for an unpriced decision.
 
-```ts
-const embeddings = await client.embed(workspaceId, {
-  input: ["First passage", "Second passage"],
-});
-console.log(embeddings.model, embeddings.dimensions);
-console.log(embeddings.data[0].embedding);
+Receipt writes run off the response path. Failed writes retry only database
+settlement using the same idempotency identity; they never repeat the provider
+call. Normal server shutdown drains pending writes. In-process composition hosts
+must drain `routeDeps.decisions.flushUsage()` before closing their database.
+Abrupt process loss before persistence can lose a queued receipt: this is not a
+durable exactly-once queue. The response usage remains available to the caller.
+
+## Latency verification
+
+The opt-in API test measures end-to-end HTTP time minus provider time, with a real
+API key, the full router, migrated PostgreSQL, residency reads and receipt writes.
+The controlled HTTP provider simulates 265/484 ms responses; no paid inference is
+used. It measures decisions and the unchanged chat-completions path separately,
+after ten warmups and over 120 serial samples each. It is a local-stack overhead
+measurement, not a production network or concurrency guarantee.
+
+On November 7, 2026, the local serial run measured decision overhead of 8.1 ms
+median / 13.7 ms p95, versus 28.2 ms / 37.9 ms for unchanged chat completions.
+Provider time was 265.1 ms / 484.1 ms for decisions; total time was 273.3 ms /
+492.0 ms. Fresh per-request key checks remained enabled: request-local caching
+already met the overhead target without caching revoked authority across requests.
+
+```sh
+OPENGENI_TEST_PG_URL=postgres://... OPENGENI_REQUIRE_REAL_DB=1 \
+OPENGENI_BENCH_DECISIONS=1 bun test apps/api/test/decisions-postgres.test.ts
 ```
-
-Input is a non-empty string or non-empty array of non-empty strings. The response
-is `{ id, object: "list", model, dimensions, data, usage }`. Every data entry is
-`{ object: "embedding", index, embedding: number[] }`, in original input order.
-The server validates vector count, indices, dimensions and finite values.
-
-The existing document embedder owns the model, dimensions, credentials and
-64-input batching. Configure `OPENGENI_DOCUMENT_EMBEDDING_*` on the API server,
-as for Knowledge. A deterministic local embedder stays deterministic; it is useful
-for tests, not semantic search. No alternate model is selected implicitly.
-
-Usage reports nullable `inputTokens`/`totalTokens`, successful provider request
-count and `costUsd: null, costSource: "unknown"`: the current embedding adapter
-reports token counts, not a billed USD amount. Missing usage is never fabricated.
-
-## Accounting, residency and failures
-
-All three stateless APIs share admission, billing origin, caller attribution,
-task usage-limit custody and model-usage settlement. Server-generated request IDs
-key settlement as `model_call:{id}`. Received usage is settled even if typed
-answer/vector validation or a later embedding batch fails. A receipt retry never
-reruns the provider. Client retries are new paid requests, not idempotent inference.
-
-These two deployment-owned categories use external funding, not a newly invented
-customer-credit tariff. Admission still applies workspace allowances and token
-limits. Settlement records tokens, a zero customer `model.cost` marker, and any
-decision provider cost separately as `model.provider_cost` or
-`model.estimated_provider_cost`. Known provider costs count toward an authenticated
-agent task's usage receipt; unpriced calls remain explicitly unpriced. Provider
-estimates are not billed-price claims. Knowledge's existing byte-based indexing
-tariff does not become a public inference tariff.
-
-The workspace's EU-only setting is read before inference; a failed read refuses
-the call. The existing `decision_model.*` and `knowledge.embeddings` route checks
-run before dispatch and at the transport boundary, including endpoint matching.
-Served-route residency is retained with usage as a declaration, not independent
-evidence. Local deterministic embeddings send nothing externally.
-
-Errors use the chat-completions envelope `{ error: { message, type, param, code } }`:
-400 for invalid input, 401/403 for missing authority, 422 `region_restricted`,
-429 for allowance/rate limits, 503 for an unconfigured model and 502 for provider
-or invalid-output failures. Typed decision refusals remain HTTP 200 answers.

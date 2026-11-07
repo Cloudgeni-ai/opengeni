@@ -1,8 +1,6 @@
 export type {
   ModelDecisionRequest,
   ModelDecisionResponse,
-  ModelEmbeddingsRequest,
-  ModelEmbeddingsResponse,
   DecisionQuestion,
   DecisionResult,
   DecisionUsage,

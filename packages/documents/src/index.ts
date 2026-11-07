@@ -111,17 +111,6 @@ export type DocumentChunker = {
   chunk: (parsed: ParsedDocument, file: FileAsset) => DocumentChunk[];
 };
 
-export type DocumentEmbeddingUsage = {
-  model: string;
-  inputTokens: number | null;
-  totalTokens: number | null;
-};
-export type DocumentEmbeddingOptions = {
-  signal?: AbortSignal;
-  /** Each received batch, before validating vectors, including a later failed batch. */
-  onUsage?: (usage: DocumentEmbeddingUsage) => void | Promise<void>;
-};
-
 export type DocumentEmbedder = {
   model: string;
   dimensions: number;
@@ -142,7 +131,7 @@ export type DocumentEmbedder = {
    * embedder.
    */
   readonly endpoint?: string;
-  embedMany: (texts: string[], options?: DocumentEmbeddingOptions) => Promise<number[][]>;
+  embedMany: (texts: string[]) => Promise<number[][]>;
   embedQuery: (text: string) => Promise<number[]>;
 };
 
@@ -458,13 +447,11 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     defaultQuery?: Record<string, string> | undefined;
     model?: string | undefined;
     dimensions?: number | undefined;
-    fetch?: typeof fetch | undefined;
   }) {
     this.signIn = new ProviderSignIn(args.apiKey);
     this.baseURL = args.baseURL;
     this.defaultHeaders = args.defaultHeaders;
     this.defaultQuery = args.defaultQuery;
-    this.fetch = args.fetch;
     this.model = args.model ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL;
     this.dimensions = args.dimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
     // Where the OpenAI SDK sends without a configured base URL.
@@ -476,47 +463,25 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   readonly endpoint: string;
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
-  private readonly fetch: typeof fetch | undefined;
 
   /** Without a credential every request fails before reaching the provider. */
   get available(): boolean {
     return Boolean(this.signIn.credential);
   }
 
-  async embedMany(texts: string[], options: DocumentEmbeddingOptions = {}): Promise<number[][]> {
-    options.signal?.throwIfAborted();
+  async embedMany(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     const out: number[][] = [];
     for (let start = 0; start < texts.length; start += 64) {
       const batch = texts.slice(start, start + 64);
       const client = await this.openai();
       const response = await client.embeddings
-        .create(
-          {
-            model: this.model,
-            input: batch,
-            dimensions: this.dimensions,
-            encoding_format: "float",
-          },
-          { signal: options.signal },
-        )
+        .create({ model: this.model, input: batch, dimensions: this.dimensions })
         .catch((error: unknown) => {
           this.signIn.rejected(error);
           throw error;
         });
-      const count = (value: unknown) =>
-        typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-      await options.onUsage?.({
-        model: response.model,
-        inputTokens: count(response.usage?.prompt_tokens),
-        totalTokens: count(response.usage?.total_tokens),
-      });
-      options.signal?.throwIfAborted();
-      const ordered = [...response.data].sort((a, b) => a.index - b.index);
-      if (ordered.length !== batch.length || ordered.some((item, index) => item.index !== index)) {
-        throw new Error("Embedding provider returned invalid batch indices");
-      }
-      for (const item of ordered) {
+      for (const item of response.data) {
         out.push(validateEmbedding(item.embedding, this.dimensions, this.model));
       }
     }
@@ -543,7 +508,6 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
           ...(this.baseURL ? { baseURL: this.baseURL } : {}),
           ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
           ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
-          ...(this.fetch ? { fetch: this.fetch } : {}),
         }),
     );
     return await this.clientPromise;
@@ -557,8 +521,7 @@ export class DeterministicEmbeddingProvider implements DocumentEmbedder {
     readonly model = `deterministic-local-${dimensions}`,
   ) {}
 
-  async embedMany(texts: string[], options: DocumentEmbeddingOptions = {}): Promise<number[][]> {
-    options.signal?.throwIfAborted();
+  async embedMany(texts: string[]): Promise<number[][]> {
     return texts.map((text) => deterministicEmbedding(text, this.dimensions));
   }
 
@@ -742,10 +705,7 @@ export function parseCurationOutcome(
 }
 
 /** The deployment's configured document embedder, as Knowledge uses it. */
-export function createDocumentEmbedder(
-  settings?: Settings,
-  options: { fetch?: typeof fetch } = {},
-): DocumentEmbedder {
+export function createDocumentEmbedder(settings?: Settings): DocumentEmbedder {
   const dimensions = settings?.documentEmbeddingDimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
   return settings?.documentEmbeddingProvider === "deterministic"
     ? new DeterministicEmbeddingProvider(dimensions, settings.documentEmbeddingModel)
@@ -753,7 +713,6 @@ export function createDocumentEmbedder(
         ...documentOpenAIEmbeddingConfig(settings),
         model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
         dimensions,
-        ...options,
       });
 }
 

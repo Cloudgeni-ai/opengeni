@@ -34,6 +34,7 @@ const Question = z.discriminatedUnion("type", [
 /** No model/credential override: these endpoints use the deployment's configured categories. */
 export const ModelDecisionRequest = z
   .object({
+    tenantLabel: z.string().min(1).max(256).optional(),
     input: z.unknown().refine((value) => value !== undefined, "input is required"),
     questions: z
       .record(z.string().min(1), Question)
@@ -43,6 +44,8 @@ export const ModelDecisionRequest = z
 export type ModelDecisionRequest<
   Q extends Record<string, DecisionQuestion> = Record<string, DecisionQuestion>,
 > = {
+  /** Reporting only: never changes caller identity, workspace or funding. */
+  tenantLabel?: string;
   input: unknown;
   questions: Q;
 };
@@ -52,30 +55,11 @@ export type ModelDecisionResponse<
   id: string;
   object: "decision";
   model: string;
+  tenantLabel?: string;
   answers: DecisionResult<Q>["answers"];
   usage: DecisionUsage;
 };
 
-export const ModelEmbeddingsRequest = z
-  .object({
-    input: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
-  })
-  .strict();
-export type ModelEmbeddingsRequest = z.infer<typeof ModelEmbeddingsRequest>;
-export type ModelEmbeddingsResponse = {
-  id: string;
-  object: "list";
-  model: string;
-  dimensions: number;
-  data: Array<{ object: "embedding"; index: number; embedding: number[] }>;
-  usage: {
-    inputTokens: number | null;
-    totalTokens: number | null;
-    requests: number;
-    costUsd: number | null;
-    costSource: "unknown";
-  };
-};
 export type {
   DecisionQuestion,
   DecisionResult,
