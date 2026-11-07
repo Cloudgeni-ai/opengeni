@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { getSettings } from "@opengeni/config";
 import type { ConnectorActionPolicyHooks, ConnectorActionToolCall } from "@opengeni/runtime";
 import { resolveConnectorActionPolicy, connectorActionPolicyDecision } from "@opengeni/db";
 
@@ -162,4 +163,9 @@ test("reads the repository a call names", () => {
     "https://github.com/a/b.git",
   );
   expect(githubRepositoryAttachUri("not a repository")).toBeNull();
+});
+
+test("the first-party server routes every attach through the per-call approval", () => {
+  const opengeni = getSettings({}).mcpServers.find((server) => server.id === "opengeni");
+  expect(opengeni?.requireApproval).toContain("github_repository_attach");
 });
