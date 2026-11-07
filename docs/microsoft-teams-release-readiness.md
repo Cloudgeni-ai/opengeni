@@ -62,6 +62,13 @@ testing. Test a controlled second tenant explicitly. Tenant custom-app policies,
 installation approval, user linking, and any separately requested Graph consent
 must each work. Bot messaging authentication is not user SSO or a Graph grant.
 
+The Azure Bot resource type and the Entra app registration's supported account
+types are separate settings. Keep the Azure Bot resource single-tenant. A
+single-tenant app registration is enough for mentions, but
+[conversation context](#conversation-context) in any tenant other than the home
+tenant needs a multi-tenant registration; see
+[Conversation context outside the home tenant](#conversation-context-outside-the-home-tenant).
+
 Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration?view=azure-bot-service-4.0).
 
 ## Runtime gates
@@ -735,9 +742,61 @@ package nothing changes: only the mention itself is visible.
   (`;messageid=<root>`), because Teams can omit `replyToId` on replies. A later
   mention anywhere in the thread continues the same chat.
 
-The bot's Entra app is single-tenant, so this does not read Microsoft Graph:
-an app-only Graph token in a customer tenant would need a multi-tenant app
-registration. Messages posted before the context package was installed are not
-available. Teams delivers unmentioned channel messages for standard channels;
-private and shared channels are not covered. Reference:
+Opengeni does not call Microsoft Graph for this; it only keeps what Teams
+delivers to the bot. Messages posted before the context package was installed
+are not available. Teams delivers unmentioned channel messages for standard
+channels; private and shared channels are not covered. Reference:
 [receive all conversation messages with RSC](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/channel-messages-for-bots-and-agents).
+
+### Conversation context outside the home tenant
+
+Consenting to the RSC permissions creates a service principal for the bot's
+Entra app in the installing tenant. Entra can only do that for a multi-tenant
+app registration. With a single-tenant registration, installing or updating the
+context package in any other tenant fails at consent: the app stays on its
+earlier version, no grant is recorded, and creating the service principal by hand
+fails with `NoBackingApplicationObject`. The tenant's consent settings do not
+help. The home tenant works either way, so test a second tenant before release.
+
+Before offering conversation context to customer tenants:
+
+- **Multi-tenant app registration.** Set the bot app registration's supported
+  account types to multiple organizations (`signInAudience`
+  `AzureADMultipleOrgs`). Leave the Azure Bot resource single-tenant. Entra's
+  option to allow only listed tenants is useful for a pilot; it is in preview.
+  Changing the audience changes nothing else on the registration, but Entra
+  rejects the change if the registration has an App ID URI other than
+  `api://<appId>` or one on a verified domain. To undo it, set it back to single
+  tenant (`AzureADMyOrg`).
+- **Publisher verification.** Tenants that allow consent only to apps from
+  verified publishers can block an unverified app. Verify the publisher on the
+  production app registration first;
+  see [Publisher verification and Store submission](#publisher-verification-and-store-submission).
+- **A certificate, not a client secret.** Once the registration is
+  multi-tenant, the bot credential can request app-only tokens in every tenant
+  that has consented. Production should use a certificate credential, stored
+  only in the deployment secret store and rotated on a schedule. The current
+  implementation reads a client secret (`OPENGENI_TEAMS_BOT_CLIENT_SECRET`)
+  only, so certificate support needs a code change before this goes to
+  production.
+- **A short note for customer admins**, for example:
+
+  > Opengeni asks for two resource-specific permissions. In a team where it is
+  > installed, `ChannelMessage.Read.Group` lets it receive the messages posted in
+  > that team's channels. In a group chat where it is installed,
+  > `ChatMessage.Read.Chat` lets it receive that chat's messages. The team
+  > member or chat member who adds the app grants them, only for that team or
+  > chat; removing the app ends the grant. Admins control this with the Team RSC
+  > and Chat RSC consent settings. The grant would also allow app-only Microsoft
+  > Graph reads of those messages; Opengeni does not make any.
+  >
+  > Opengeni only answers when someone mentions it. From channels and group
+  > chats approved for your Opengeni deployment, it stores each message's text,
+  > the sender's display name and Entra object ID, and the time. It stores
+  > nothing from personal chats or other bots, and never fetches attachments.
+  > It keeps at most the newest 100 messages per thread or group chat, uses only
+  > the last seven days, and deletes older messages as new ones arrive. Edits
+  > and deletions in Teams are applied. Removing the app stops new messages but
+  > does not delete stored ones; disconnecting Teams from the workspace deletes
+  > them all. Messages attached to a mention as context stay in that Opengeni
+  > chat's history, like the mention itself.
