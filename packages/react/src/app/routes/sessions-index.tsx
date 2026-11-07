@@ -177,7 +177,7 @@ import {
   type OpenedChat,
 } from "../../session-list-model";
 import { readChatDirectory, useChatDirectoryVersion } from "../lib/actions/chat-directory";
-import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
+import { NEW_CHAT_WORDING, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -1058,7 +1058,7 @@ function SessionsIndexRouteContent({
       (membership) => membership.organizationId === workspace?.accountId,
     )?.signupUseCase,
   );
-  const wording = newChatWording(starterSet);
+  const wording = NEW_CHAT_WORDING;
   // A refused start names its model until the next start or a dismissal; before
   // any Send, an uncovered model with free credit left for others does the same.
   const refusedCreate =
