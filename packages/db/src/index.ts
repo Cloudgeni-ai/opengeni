@@ -46374,6 +46374,12 @@ export async function recordSkippedContextCompaction(
       param: string | null;
       requestId: string | null;
     };
+    /**
+     * The provider's own error message (`summarization_failed` only), bounded
+     * by the caller. Session events are the conversation's own data, readable
+     * by the same people as the conversation.
+     */
+    providerMessage?: string;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -46421,6 +46427,9 @@ export async function recordSkippedContextCompaction(
                   reason: input.reason,
                   ...(input.providerRejection && input.reason === "summarization_failed"
                     ? { providerRejection: input.providerRejection }
+                    : {}),
+                  ...(input.providerMessage && input.reason === "summarization_failed"
+                    ? { providerMessage: input.providerMessage }
                     : {}),
                 },
                 occurredAt: new Date(),

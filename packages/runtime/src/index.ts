@@ -1011,7 +1011,9 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 export {
   CompactionNeededError,
   CompactionProviderResponseError,
+  COMPACTION_PROVIDER_MESSAGE_MAX_CHARS,
   EmptyCompactionSummaryError,
+  compactionProviderMessage,
   compactionProviderRejection,
   compactionProviderRejectionFromDiagnostics,
   describeCompactionProviderRejection,
@@ -1019,6 +1021,10 @@ export {
   buildCompactionPromptInput,
   buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  buildTrimmedCompactionReplacement,
+  buildTrimmedContextCheckpointItem,
+  DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+  TRIMMED_CONTEXT_NOTICE,
   type CompactionReplacement,
   type CompactionTurnContext,
   compactionAttachmentFileIds,
@@ -1508,12 +1514,11 @@ export async function summarizeForCompaction(
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    let completion: unknown;
-    try {
-      completion = await client.chat.completions.create(
+    const requestCompletion = (outputCap: boolean) =>
+      client.chat.completions.create(
         {
           model,
-          max_tokens: maxTokens,
+          ...(outputCap ? { max_tokens: maxTokens } : {}),
           messages: [
             ...(options.systemInstructions
               ? [{ role: "system" as const, content: options.systemInstructions }]
@@ -1524,9 +1529,7 @@ export async function summarizeForCompaction(
         } as any,
         options.signal ? { signal: options.signal } : undefined,
       );
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    const completion = await withCompactionOutputCapRetry(provider, requestCompletion);
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1605,12 +1608,7 @@ export async function summarizeForCompaction(
         ...(options.signal ? { signal: options.signal } : {}),
       };
   const dispatch = async (send: () => Promise<unknown>): Promise<unknown> => {
-    let result: unknown;
-    try {
-      result = await send();
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    const result = await sendCompactionRequest(send);
     const usage = modelResponseUsageFromResponse(result);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1646,8 +1644,13 @@ export async function summarizeForCompaction(
       response = await dispatch(() => claude.getResponse(claudeRequest(true)));
     }
   } else {
-    response = await dispatch(() =>
-      new CompactionResponsesModel(client, model, provider).fetchResponse(request),
+    const responses = new CompactionResponsesModel(client, model, provider);
+    response = await withCompactionOutputCapRetry(provider, (outputCap) =>
+      dispatch(() =>
+        responses.fetchResponse(
+          outputCap ? request : { ...request, modelSettings: withoutMaxTokens(request) },
+        ),
+      ),
     );
   }
   if (compactionResponseCalledTool(response)) {
@@ -1657,13 +1660,79 @@ export async function summarizeForCompaction(
     (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
     isFailedCompactionProviderResponse(response)
   ) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   const summary = extractResponseOutputText(response).trim();
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+/** Send one checkpoint request; any provider or transport failure becomes the content-free error. */
+async function sendCompactionRequest<T>(send: () => Promise<T>): Promise<T> {
+  try {
+    return await send();
+  } catch (error) {
+    if (error instanceof CompactionProviderResponseError) throw error;
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+}
+
+/** A workspace's or organization's own OpenAI-compatible endpoint. */
+function isCompatibleModelEndpoint(provider: ResolvedModelProvider): boolean {
+  return (
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization"
+  );
+}
+
+/** Statuses with which a server refuses a request it parsed as invalid. */
+const COMPACTION_OUTPUT_CAP_RETRY_STATUSES = new Set([400, 422]);
+
+/**
+ * Send a checkpoint request, and when an OpenAI-compatible endpoint refuses it
+ * as invalid, send it once more without the output cap. Ordinary requests to
+ * these endpoints carry no cap, and compatible servers commonly refuse one
+ * that is above the model's output limit or above what is left of its context
+ * window. The retry uses the request shape the endpoint already accepts. A
+ * summary that comes back too long still fails the replacement budget, so the
+ * cap is not needed for safety. Other providers are not retried.
+ */
+async function withCompactionOutputCapRetry<T>(
+  provider: ResolvedModelProvider,
+  send: (outputCap: boolean) => Promise<T>,
+): Promise<T> {
+  try {
+    return await sendCompactionRequest(() => send(true));
+  } catch (error) {
+    if (
+      !isCompatibleModelEndpoint(provider) ||
+      !(error instanceof CompactionProviderResponseError) ||
+      error.status === undefined ||
+      !COMPACTION_OUTPUT_CAP_RETRY_STATUSES.has(error.status)
+    ) {
+      throw error;
+    }
+    try {
+      return await sendCompactionRequest(() => send(false));
+    } catch (retryError) {
+      if (!(retryError instanceof CompactionProviderResponseError)) throw retryError;
+      throw new CompactionProviderResponseError(
+        { ...retryError.diagnostics, outputCapRetried: true },
+        retryError.cause,
+      );
+    }
+  }
+}
+
+function withoutMaxTokens(request: ModelRequest): ModelRequest["modelSettings"] {
+  const { maxTokens: _maxTokens, ...modelSettings } = request.modelSettings;
+  return modelSettings;
 }
 
 /**
@@ -1896,7 +1965,11 @@ export async function requestRemoteCompactionV2(
     await options.onUsage?.(usage);
   }
   if (isFailedCompactionProviderResponse(response)) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   try {
     return extractRemoteCompactionV2OutputItem(response);
