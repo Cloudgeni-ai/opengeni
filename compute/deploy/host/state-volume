@@ -34,6 +34,15 @@ marker=$var/.compute-state-volume
 log() { printf '[compute-install %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 fail() { echo "install.sh: $*" >&2; exit 1; }
 
+# put PART FINAL: gives PART, written in full, the name FINAL in one
+# rename, durably (as install.sh's put): a reset leaves FINAL as it was or
+# whole, never named but empty.
+put() {
+  sync -- "$1"
+  mv -T -- "$1" "$2"
+  sync -- "$(dirname -- "$2")"
+}
+
 device=
 reformat=
 while [ $# -gt 0 ]; do
@@ -77,8 +86,16 @@ probe() {
 mount_entry() {
   local line="UUID=$1 $var $2 noatime,nofail 0 2"
   grep -qxF "$line" "$fstab" 2>/dev/null && return
-  sed -i "\\# $var #d" "$fstab"
-  echo "$line" >>"$fstab"
+  # Written whole in place of the old one: an emptied /etc/fstab would
+  # lose the machine's other mounts too.
+  if [ -e "$fstab" ]; then
+    cp -p "$fstab" "$fstab.part"
+    sed -i "\\# $var #d" "$fstab.part"
+  else
+    install -m 644 /dev/null "$fstab.part"
+  fi
+  echo "$line" >>"$fstab.part"
+  put "$fstab.part" "$fstab"
   systemctl daemon-reload
 }
 
@@ -160,12 +177,12 @@ if [ -n "$recorded" ]; then
     fail "$var holds $mounted, not the state volume $recorded recorded for this host"
 else
   echo "$mounted" >"$record.part"
-  mv "$record.part" "$record"
+  put "$record.part" "$record"
 fi
 # The volume's own record, written whole like the one above.
 if [ "$(tr -d '[:space:]' 2>/dev/null <"$marker" || true)" != "$mounted" ]; then
   echo "$mounted" >"$marker.part"
-  mv "$marker.part" "$marker"
+  put "$marker.part" "$marker"
 fi
 [ "$(findmnt -no FSTYPE "$var")" = xfs ] ||
   log "warning: the state volume is not XFS; saves and clones copy instead of sharing extents"

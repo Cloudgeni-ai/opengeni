@@ -179,11 +179,13 @@ jobs:
             compute/deploy/host/test-compute-host-certificate \
             compute/deploy/host/agent-inputs compute/deploy/host/test-agent-inputs compute/ci/*.sh \
             compute/deploy/host/state-volume compute/deploy/host/test-state-volume \
-            deploy/terraform/gcp-compute/host-startup.sh
+            deploy/terraform/gcp-compute/host-startup.sh deploy/terraform/gcp-compute/test-host-startup
       - name: host certificate script
         run: compute/deploy/host/test-compute-host-certificate
       - name: what the agent starts with (install.sh restarts it only when that changed)
         run: compute/deploy/host/test-agent-inputs
+      - name: a host reset during its startup install comes back whole (host-startup.sh and install.sh)
+        run: deploy/terraform/gcp-compute/test-host-startup
       - name: the state volume (a host keeps a file system it finds, on loop devices)
         run: |
           command -v mkfs.xfs >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs; }

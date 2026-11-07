@@ -8,8 +8,20 @@
 # bundle reaches a host when the host is replaced or rebooted with a
 # template naming it, or when the operator runs its install.sh in place
 # (operations.md, Upgrades).
+#
+# A host reset during or just after its install (as an instance group
+# update may do) can come back with what the install wrote in place but
+# empty, so nothing here is taken as done because a file is there: the
+# bundle is checked whole before it is used, and fetched again when it is
+# not, and install.sh repairs the rest.
+#
+# COMPUTE_ETC, COMPUTE_OPT and COMPUTE_VAR (tests) stand for /etc/compute,
+# /opt/compute and /var/lib/compute; install.sh takes them too.
 set -euo pipefail
 export PATH=$PATH:/snap/bin
+etc=${COMPUTE_ETC:-/etc/compute}
+opt=${COMPUTE_OPT:-/opt/compute}
+var=${COMPUTE_VAR:-/var/lib/compute}
 
 meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
 attr() { meta "instance/attributes/$1"; }
@@ -31,6 +43,16 @@ optional_meta() {
 }
 optional_attr() { optional_meta "instance/attributes/$1"; }
 log() { echo "compute-startup: $*"; }
+
+# put PART FINAL: gives PART, a file or directory written in full, the
+# name FINAL in one rename, durably: what PART holds reaches the disk
+# before the rename does, and the rename before this returns, so a reset
+# leaves FINAL as it was or whole, never named but empty.
+put() {
+  find "$1" -exec sync -- {} +
+  mv -T -- "$1" "$2"
+  sync -- "$(dirname -- "$2")"
+}
 
 # Every step below is safe to run again, and several reach the network
 # (the bundle's store, the control service, the base image's registry),
@@ -93,7 +115,7 @@ state_device=
 # boot or on a host whose boot disk was rebuilt from a newer image while
 # its state disk or SSDs kept their data, install.sh is given the device:
 # it keeps a file system it finds there and formats only a blank device.
-recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
+recorded=$(tr -d '[:space:]' 2>/dev/null <"$etc/state-volume.uuid" || true)
 if [ -z "$recorded" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
   if [ "${#nvme[@]}" -eq 1 ]; then
@@ -123,22 +145,36 @@ if [ -z "$recorded" ]; then
         mdadm --create /dev/md/compute-state --level=0 --raid-devices="${#nvme[@]}" "${nvme[@]}" --run
       fi
     fi
-    mdadm --detail --scan >/etc/mdadm/mdadm.conf
+    mdadm --detail --scan >/etc/mdadm/mdadm.conf.part
+    put /etc/mdadm/mdadm.conf.part /etc/mdadm/mdadm.conf
   else
     state_device=/dev/disk/by-id/google-state
   fi
 else
   # A rebooted host: its striped local SSDs come back as the same array.
   mdadm --assemble --scan >/dev/null 2>&1 || true
-  mountpoint -q /var/lib/compute || mount /var/lib/compute || true
+  mountpoint -q "$var" || mount "$var" || true
 fi
 
 # --- The bundle.
-bundle=/opt/compute/bundles/$BUNDLE_SHA256
-if [ ! -f "$bundle/install.sh" ]; then
+# A bundle is unpacked into a directory named for its SHA-256 with a
+# record, .unpacked, of the SHA-256 of the SHA256SUMS that came in it, the
+# last file written before the directory takes its name. The bundle is
+# whole while its SHA256SUMS is still that one and its files all match it:
+# a reset can leave the directory with empty files (an empty install.sh
+# runs, does nothing and succeeds), or an earlier startup script's
+# directory has no record; either is fetched again.
+bundle=$opt/bundles/$BUNDLE_SHA256
+bundle_intact() {
+  [ -s "$1/.unpacked" ] && [ -s "$1/SHA256SUMS" ] &&
+    [ "$(cat "$1/.unpacked")" = "$(sha256sum <"$1/SHA256SUMS" | cut -d' ' -f1)" ] &&
+    (cd "$1" && sha256sum -c --quiet --strict SHA256SUMS >/dev/null 2>&1)
+}
+if ! bundle_intact "$bundle"; then
+  [ ! -e "$bundle" ] || log "the bundle in $bundle is not whole; fetching it again"
   # One fixed place, emptied first, so failed attempts leave at most one
   # partial download behind.
-  work=/opt/compute/bundles/.download
+  work=$opt/bundles/.download
   rm -rf "$work" "$bundle.part"
   install -d -m 700 "$work"
   case "$BUNDLE_URL" in
@@ -149,15 +185,18 @@ if [ ! -f "$bundle/install.sh" ]; then
     { log "$BUNDLE_URL does not have SHA-256 $BUNDLE_SHA256"; exit 1; }
   mkdir -p "$bundle.part"
   tar -xzf "$work/bundle.tar.gz" -C "$bundle.part" --strip-components=1
+  (cd "$bundle.part" && sha256sum -c --quiet --strict SHA256SUMS) ||
+    { log "$BUNDLE_URL does not match the SHA256SUMS in it"; exit 1; }
+  sha256sum <"$bundle.part/SHA256SUMS" | cut -d' ' -f1 >"$bundle.part/.unpacked"
   rm -rf "$work" "$bundle"
-  mv "$bundle.part" "$bundle"
+  put "$bundle.part" "$bundle"
 fi
 
 # --- The hosts' authority, the host's first trust in the control service;
 # install.sh gets the host its certificate, for its instance name, with the
 # instance's identity token, and renews it daily.
-install -d -m 700 /etc/compute
-attr compute-host-authority >/etc/compute/authority.pem.new
+install -d -m 700 "$etc"
+attr compute-host-authority >"$etc/authority.pem.new"
 
 # --- The host's configuration. The memory profile is always named: the
 # agent would otherwise pick nested on any host that is itself a VM.
@@ -173,7 +212,7 @@ if [ -n "$PUBLIC" ]; then
   args="$args --block $PUBLIC/32"
 fi
 umask 077
-cat >/etc/compute/host.env.new <<ENV
+cat >"$etc/host.env.new" <<ENV
 COMPUTE_CONTROL=$(attr compute-control)
 COMPUTE_NAME=$NAME
 COMPUTE_ADDRESS=$ADDRESS:7443
@@ -185,6 +224,6 @@ COMPUTE_HOST_ARGS="$args"
 ENV
 
 log "installing $(cat "$bundle/VERSION") as $NAME"
-"$bundle/install.sh" --config /etc/compute/host.env.new --authority /etc/compute/authority.pem.new \
+"$bundle/install.sh" --config "$etc/host.env.new" --authority "$etc/authority.pem.new" \
   ${state_device:+--state-device "$state_device"}
-rm -f /etc/compute/host.env.new /etc/compute/authority.pem.new
+rm -f "$etc/host.env.new" "$etc/authority.pem.new"

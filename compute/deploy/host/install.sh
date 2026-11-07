@@ -33,6 +33,10 @@
 #                        and get no certificate
 #
 # What it does, each step only when not done already:
+#   (what is "done" is checked by content, never by a file being there: a
+#   machine reset during or just after an install can leave the files it
+#   wrote in place but empty, so a run again repairs whatever is not whole;
+#   and every file it writes reaches the disk before it takes its name)
 #   - checks this bundle against its SHA256SUMS
 #   - installs the packages the agent runs (iproute2, nftables, e2fsprogs,
 #     xfsprogs) and its certificate script needs (curl, jq, openssl)
@@ -62,9 +66,17 @@
 # leaves its VMs running (ADR 9); a guard running another binary is handed
 # over to this one's, which picks up the watchdog well inside its timeout.
 # See docs/operations.md.
+#
+# COMPUTE_ETC, COMPUTE_OPT, COMPUTE_VAR, COMPUTE_UNITS, COMPUTE_DEV and
+# COMPUTE_RUN (tests) stand for /etc/compute, /opt/compute,
+# /var/lib/compute, /etc/systemd/system, /dev and /run.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+etc=${COMPUTE_ETC:-/etc/compute}
+opt=${COMPUTE_OPT:-/opt/compute}
+var=${COMPUTE_VAR:-/var/lib/compute}
+unit_dir=${COMPUTE_UNITS:-/etc/systemd/system}
 config=
 authority=
 state_device=
@@ -88,11 +100,34 @@ fail() { echo "install.sh: $*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || fail "run as root"
 [ "$(uname -m)" = x86_64 ] || fail "compute hosts are x86_64 only"
-[ -c /dev/kvm ] || fail "/dev/kvm is missing: the machine needs KVM (bare metal or nested virtualization)"
-[ -d /run/systemd/system ] || fail "systemd is not running"
+[ -c "${COMPUTE_DEV:-/dev}/kvm" ] || fail "/dev/kvm is missing: the machine needs KVM (bare metal or nested virtualization)"
+[ -d "${COMPUTE_RUN:-/run}/systemd/system" ] || fail "systemd is not running"
+
+# put PART FINAL: gives PART, a file, link or directory written in full,
+# the name FINAL in one rename, durably: what PART holds reaches the disk
+# before the rename does, and the rename before this returns. File systems
+# write names ahead of data, so without this a reset can leave FINAL with
+# its new name on files it emptied; with it, FINAL is as it was or whole.
+# A directory FINAL must be gone first.
+put() {
+  find "$1" -exec sync -- {} +
+  mv -T -- "$1" "$2"
+  sync -- "$(dirname -- "$2")"
+}
+
+# install_file MODE SOURCE TARGET: installs SOURCE as TARGET with MODE (as
+# 644), durably, unless TARGET has that content and mode already.
+install_file() {
+  if cmp -s "$2" "$3" && [ "$(stat -c %a "$3")" = "$1" ]; then
+    return 0
+  fi
+  rm -f "$3.part"
+  install -m "$1" "$2" "$3.part"
+  put "$3.part" "$3"
+}
 
 log "checking the bundle"
-(cd "$here" && sha256sum -c --quiet SHA256SUMS) || fail "the bundle does not match its SHA256SUMS"
+(cd "$here" && sha256sum -c --quiet --strict SHA256SUMS) || fail "the bundle does not match its SHA256SUMS"
 version=$(cat "$here/VERSION")
 # shellcheck source=pins.env
 source "$here/pins.env"
@@ -100,13 +135,17 @@ source "$here/pins.env"
 # fetch URL FILE SHA256: downloads URL to FILE, failing unless it has that
 # SHA-256.
 fetch() {
+  rm -f "$2.part"
   curl -fsSL --retry 5 -o "$2.part" "$1"
   if ! echo "$3  $2.part" | sha256sum -c --quiet -; then
     rm -f "$2.part"
     fail "$1 does not have the pinned SHA-256 $3"
   fi
-  mv "$2.part" "$2"
+  put "$2.part" "$2"
 }
+
+# has FILE SHA256: whether FILE is whole, with that SHA-256.
+has() { echo "$2  $1" | sha256sum -c --quiet --status - 2>/dev/null; }
 
 log "packages"
 missing=
@@ -122,16 +161,29 @@ if [ -n "$missing" ]; then
 fi
 
 log "release $version"
-release=/opt/compute/releases/$version
-if [ ! -x "$release/compute-host" ] || ! cmp -s "$here/compute-host" "$release/compute-host"; then
+release=$opt/releases/$version
+release_programs="compute-host check-host host-setup compute-host-certificate agent-inputs"
+release_data="pins.env VERSION SHA256SUMS"
+# Whether the release holds each of the bundle's files it is made of, as
+# they are in the bundle.
+release_intact() {
+  local file
+  for file in $release_programs $release_data; do
+    cmp -s "$here/$file" "$release/$file" || return 1
+  done
+  for file in "$here"/guest/*; do
+    cmp -s "$file" "$release/guest/${file##*/}" || return 1
+  done
+}
+if ! release_intact; then
   rm -rf "$release.part"
   install -d -m 755 "$release.part" "$release.part/guest"
-  install -m 755 "$here/compute-host" "$here/check-host" "$here/host-setup" \
-    "$here/compute-host-certificate" "$here/agent-inputs" "$release.part/"
-  install -m 644 "$here/pins.env" "$here/VERSION" "$here/SHA256SUMS" "$release.part/"
+  # shellcheck disable=SC2086
+  (cd "$here" && install -m 755 $release_programs "$release.part/" && install -m 644 $release_data "$release.part/")
   install -m 755 "$here"/guest/* "$release.part/guest/"
+  # A running agent or guard keeps the files it started from.
   rm -rf "$release"
-  mv "$release.part" "$release"
+  put "$release.part" "$release"
 fi
 # A binary that cannot run here (built for another C library or processor,
 # or damaged) must be refused before anything starts it: the guard handed
@@ -139,40 +191,57 @@ fi
 # ending every VM on it.
 "$release/compute-host" --help >/dev/null 2>&1 ||
   fail "$release/compute-host does not run on this host; the running release is left as it is"
-ln -sfn "$release" /opt/compute/current.part
-mv -T /opt/compute/current.part /opt/compute/current
+if [ "$(readlink "$opt/current" || true)" != "$release" ]; then
+  ln -sfn "$release" "$opt/current.part"
+  put "$opt/current.part" "$opt/current"
+fi
 
 log "firecracker $FC_VERSION"
-fc=/opt/compute/firecracker/$FC_VERSION
-if [ ! -x "$fc/firecracker" ] || [ ! -x "$fc/jailer" ]; then
+fc=$opt/firecracker/$FC_VERSION
+# Whether $fc holds the pinned release's firecracker and jailer, whole:
+# their SHA-256s, recorded once its download was checked, still match.
+# (Directories that earlier installs wrote have no record; they are
+# downloaded again, once.)
+fc_intact() {
+  [ "$(awk '{ print $2 }' "$fc/SHA256SUMS" 2>/dev/null | tr '\n' ' ')" = "firecracker jailer " ] &&
+    (cd "$fc" && sha256sum -c --quiet --strict SHA256SUMS >/dev/null 2>&1)
+}
+if ! fc_intact; then
   # One fixed place, emptied first, so failed attempts leave at most one
   # partial download behind.
-  work=/opt/compute/firecracker/.download
-  rm -rf "$work"
+  work=$opt/firecracker/.download
+  rm -rf "$work" "$fc.part"
   install -d -m 700 "$work"
   fetch "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" \
     "$work/firecracker.tgz" "$FC_SHA256_X86_64"
   tar -xzf "$work/firecracker.tgz" -C "$work"
-  install -d -m 755 "$fc"
-  install -m 755 "$work/release-$FC_VERSION-x86_64/firecracker-$FC_VERSION-x86_64" "$fc/firecracker"
-  install -m 755 "$work/release-$FC_VERSION-x86_64/jailer-$FC_VERSION-x86_64" "$fc/jailer"
+  install -d -m 755 "$fc.part"
+  install -m 755 "$work/release-$FC_VERSION-x86_64/firecracker-$FC_VERSION-x86_64" "$fc.part/firecracker"
+  install -m 755 "$work/release-$FC_VERSION-x86_64/jailer-$FC_VERSION-x86_64" "$fc.part/jailer"
+  (cd "$fc.part" && sha256sum firecracker jailer >SHA256SUMS)
+  # VMs running keep the binaries they started from.
+  rm -rf "$fc"
+  put "$fc.part" "$fc"
   rm -rf "$work"
 fi
 retained=
-for old in /opt/compute/firecracker/*/firecracker; do
-  [ "$old" = "$fc/firecracker" ] || retained="$retained --retained-firecracker $old"
+for old in "$opt"/firecracker/*/firecracker; do
+  case "$old" in
+    "$fc/firecracker" | *.part/firecracker) ;;
+    *) retained="$retained --retained-firecracker $old" ;;
+  esac
 done
 
 log "guest kernel $GUEST_KERNEL"
-kernel=/opt/compute/kernel/$GUEST_KERNEL
-if [ ! -f "$kernel" ]; then
-  install -d -m 755 /opt/compute/kernel
+kernel=$opt/kernel/$GUEST_KERNEL
+install -d -m 755 "$opt/kernel"
+has "$kernel" "$GUEST_KERNEL_SHA256" ||
   fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL" "$kernel" "$GUEST_KERNEL_SHA256"
+has "$kernel.config" "$GUEST_KERNEL_CONFIG_SHA256" ||
   fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL.config" "$kernel.config" "$GUEST_KERNEL_CONFIG_SHA256"
-fi
 
-install -d -m 700 /etc/compute
-cat >/etc/compute/installed.env.part <<ENV
+install -d -m 700 "$etc"
+cat >"$etc/installed.env.part" <<ENV
 # Written by install.sh of release $version; do not edit.
 COMPUTE_VERSION=$version
 COMPUTE_FIRECRACKER=$fc/firecracker
@@ -180,16 +249,20 @@ COMPUTE_JAILER=$fc/jailer
 COMPUTE_RETAINED_FIRECRACKER=${retained# }
 COMPUTE_KERNEL=$kernel
 ENV
-mv /etc/compute/installed.env.part /etc/compute/installed.env
-if [ -n "$config" ]; then
-  install -m 600 "$config" /etc/compute/host.env
+if cmp -s "$etc/installed.env.part" "$etc/installed.env"; then
+  rm -f "$etc/installed.env.part"
+else
+  put "$etc/installed.env.part" "$etc/installed.env"
 fi
-[ -f /etc/compute/host.env ] || fail "no /etc/compute/host.env: pass --config (see host.env.example)"
-if [ -n "$authority" ] && [ ! -s /etc/compute/ca.pem ]; then
-  install -m 644 "$authority" /etc/compute/ca.pem
+if [ -n "$config" ]; then
+  install_file 600 "$config" "$etc/host.env"
+fi
+[ -s "$etc/host.env" ] || fail "no /etc/compute/host.env, or an empty one: pass --config (see host.env.example)"
+if [ -n "$authority" ] && [ ! -s "$etc/ca.pem" ]; then
+  install_file 644 "$authority" "$etc/ca.pem"
 fi
 # shellcheck source=host.env.example
-source /etc/compute/host.env
+source "$etc/host.env"
 
 log "state volume"
 "$here/state-volume" ${state_device:+--device "$state_device"} ${reformat_device:+--reformat "$reformat_device"}
@@ -197,17 +270,20 @@ log "state volume"
 log "base image ${COMPUTE_BASE_IMAGE_REF:?COMPUTE_BASE_IMAGE_REF is not set}"
 # The base image is the OCI image with the bundle's guest programs (init,
 # envd, bash) put in, so it is built again when either changes.
-guest_digest=$(cd /opt/compute/current/guest && find . -type f -print0 | LC_ALL=C sort -z |
+guest_digest=$(cd "$opt/current/guest" && find . -type f -print0 | LC_ALL=C sort -z |
   xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
 base_id="$COMPUTE_BASE_IMAGE_REF guest-sha256:$guest_digest"
-if [ "$(cat /var/lib/compute/base.ref 2>/dev/null)" != "$base_id" ] || [ ! -f /var/lib/compute/base.ext4 ]; then
-  rm -f /var/lib/compute/base.ext4.part
-  /opt/compute/current/compute-host build-image "$COMPUTE_BASE_IMAGE_REF" \
-    --guest /opt/compute/current/guest --output /var/lib/compute/base.ext4.part
+# base.ref names the image only once the image is on the disk, so a
+# matching base.ref vouches for it.
+if [ "$(cat "$var/base.ref" 2>/dev/null)" != "$base_id" ] || [ ! -s "$var/base.ext4" ]; then
+  rm -f "$var/base.ext4.part" "$var/base.ref.part"
+  "$opt/current/compute-host" build-image "$COMPUTE_BASE_IMAGE_REF" \
+    --guest "$opt/current/guest" --output "$var/base.ext4.part"
   # A running agent keeps the base image it opened; the new one is used
   # from its next start.
-  mv /var/lib/compute/base.ext4.part /var/lib/compute/base.ext4
-  echo "$base_id" >/var/lib/compute/base.ref
+  put "$var/base.ext4.part" "$var/base.ext4"
+  echo "$base_id" >"$var/base.ref.part"
+  put "$var/base.ref.part" "$var/base.ref"
 fi
 
 units="compute-host-setup.service compute-guard.service compute-host.service
@@ -237,16 +313,18 @@ if [ -n "$units_installed" ]; then
   esac
 else
   log "systemd units"
+  # Each unit is written again unless it is this bundle's already: one a
+  # reset left empty, which systemd takes as masked, is put right.
   for unit in $units; do
-    install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
+    install_file 644 "$here/$unit" "$unit_dir/$unit"
   done
   case "$machine" in
     shared)
-      install -d -m 755 /etc/systemd/system/compute-guard.service.d
-      install -m 644 "$here/compute-guard-shared.conf" \
-        /etc/systemd/system/compute-guard.service.d/shared-machine.conf
+      install -d -m 755 "$unit_dir/compute-guard.service.d"
+      install_file 644 "$here/compute-guard-shared.conf" \
+        "$unit_dir/compute-guard.service.d/shared-machine.conf"
       ;;
-    dedicated) rm -f /etc/systemd/system/compute-guard.service.d/shared-machine.conf ;;
+    dedicated) rm -f "$unit_dir/compute-guard.service.d/shared-machine.conf" ;;
   esac
   # Releases before the control service issued certificates renewed them
   # with a script of their own.
@@ -254,11 +332,13 @@ else
   systemctl daemon-reload
   systemctl enable -q compute-host-setup.service compute-guard.service compute-host.service \
     compute-host-certificate.timer
+  # The links enabling them, and anything removed above, on the disk too.
+  sync -f -- "$unit_dir"
 fi
 
 if [ -n "$start" ]; then
   log "certificate"
-  /opt/compute/current/compute-host-certificate
+  "$opt/current/compute-host-certificate"
   systemctl start compute-host-certificate.timer
   systemctl start compute-host-setup.service
   # The guard runs the binary it was started from, so one running any
@@ -277,10 +357,10 @@ if [ -n "$start" ]; then
   else
     guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
     guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
-    if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
+    if [ "$guard_runs" != "$(stat -L -c %d:%i "$opt/current/compute-host")" ]; then
       if [ "$machine" = shared ]; then
         log "handing the guard over to release $version"
-        /opt/compute/current/compute-host hand-over-guard
+        "$opt/current/compute-host" hand-over-guard
       elif [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
         log "handing the guard over to release $version"
         systemctl restart compute-guard.service
@@ -294,7 +374,7 @@ if [ -n "$start" ]; then
   # restart would only stop its lease renewals and cut short the wakes it
   # started (see agent-inputs).
   restarted=no
-  if why=$(/opt/compute/current/agent-inputs current); then
+  if why=$("$opt/current/agent-inputs" current); then
     log "the agent runs release $version as installed already"
   else
     log "restarting the agent: ${why:-what it runs is not known}"
@@ -305,7 +385,7 @@ if [ -n "$start" ]; then
   # install always did before.
   for _ in 1 2; do
     for _ in $(seq 60); do
-      if /opt/compute/current/compute-host status >/dev/null 2>&1; then
+      if "$opt/current/compute-host" status >/dev/null 2>&1; then
         log "the agent of release $version is up"
         exit 0
       fi
