@@ -28,10 +28,7 @@ import {
   type SandboxRecoveryActionsProps,
 } from "./sandbox-recovery-actions";
 
-const NO_SUBSCRIPTIONS: ConnectableSubscriptions = {
-  codex: false,
-  supergrok: false,
-};
+const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: false };
 
 /** Allow the chat's own machine for it and continue; see `FailedSessionBanner`'s `allowMachine`. */
 export type AllowMachineAction = {

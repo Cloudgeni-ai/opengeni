@@ -125,7 +125,7 @@ const MACHINE_ACCESS_FAILED: {
   part: string;
   label: string;
   owner: boolean;
-  /** What Allow answers when clicked; null continues the chat. */
+  /** What Allow answers when clicked; unset continues the chat. */
   allowRefusal?: string;
 }[] = [
   { part: "machine-access-owner", label: "Your machine, not allowed here", owner: true },

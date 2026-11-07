@@ -324,7 +324,7 @@ export function personalMachineRefusal(
     code: "machine_access_required",
     reason:
       `${machineAccessNeededMessage(machineName)} ` +
-      "Trying again won't change that during this turn. Keep working where you are, and tell the person that the machine's owner can allow it for this chat.",
+      "This turn's approval for it ended, or the turn lost access to it another way, so trying again won't help during this turn. Keep working where you are, and tell the person that the machine's owner can allow it for this chat.",
   };
 }
 

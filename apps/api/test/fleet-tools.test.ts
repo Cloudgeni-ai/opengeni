@@ -795,10 +795,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       kind: "exec",
       cmd: "hostname",
     });
-    expect(refusedRun).toMatchObject({
-      ok: false,
-      code: "machine_access_required",
-    });
+    expect(refusedRun).toMatchObject({ ok: false, code: "machine_access_required" });
     expect(refusedRun.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
   }, 60_000);
 
@@ -965,23 +962,15 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("a machine-home session without a managed sandbox stays on its machine instead of swapping back", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({
-      sandboxBackend: "selfhosted",
-    });
+    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "selfhosted" });
     const machineOnly = {
       ...services,
-      settings: testSettings({
-        ...services.settings,
-        sandboxBackend: "selfhosted",
-      }),
+      settings: testSettings({ ...services.settings, sandboxBackend: "selfhosted" }),
     };
     expect((await swapActiveSandbox(machineOnly, ctx, sandbox.id)).swapped).toBe(true);
     for (const target of ["session", "default"]) {
       const back = await swapActiveSandbox(machineOnly, ctx, target);
-      expect(back).toMatchObject({
-        swapped: false,
-        code: "unsupported_backend_context",
-      });
+      expect(back).toMatchObject({ swapped: false, code: "unsupported_backend_context" });
       expect(back.reason).toBe(
         "This deployment has no managed session sandbox, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
       );
@@ -1413,9 +1402,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("run_on appends positive cleanup evidence without contaminating command output", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({
-      backgroundChildrenStopped: true,
-    });
+    const { ctx, services, sandbox } = await seedFleet({ backgroundChildrenStopped: true });
     const result = await runOnSandbox(services, ctx, sandbox.id, {
       kind: "exec",
       cmd: "sleep 60 & printf done",
