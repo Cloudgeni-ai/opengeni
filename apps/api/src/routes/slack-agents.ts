@@ -32,6 +32,7 @@ import {
   getSlackAgent,
   getWorkspace,
   getWorkspaceGrant,
+  listAgentSlackInstalls,
   listOrganizationSlackAgents,
   listSlackAgentIntroChannelIds,
   listSlackInstallationBindings,
@@ -264,20 +265,67 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  /** The agent in the path, which must work in the path workspace. */
+  /**
+   * The agent in the path, which must work in the path workspace. The list
+   * shows an agent once per Slack installation with the same id, so the
+   * optional `connectionId` query parameter picks the installation; see
+   * `requireChosenInstallation`.
+   */
   const requireManagedAgent = async (
     c: Parameters<typeof requireAccessGrant>[0],
   ): Promise<{ grant: AccessGrant; agent: SlackAgentRecord }> => {
     const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const agentId = z.string().uuid().safeParse(c.req.param("agentId"));
+    const rawConnectionId = c.req.query("connectionId")?.trim() || null;
+    const connectionId = rawConnectionId ? z.string().uuid().safeParse(rawConnectionId) : null;
+    if (connectionId && !connectionId.success) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "connectionId must be the id of a Slack connection.",
+        retryable: false,
+      });
+    }
     const agent = agentId.success
-      ? await getSlackAgent(deps.db, { accountId: grant.accountId, agentId: agentId.data })
+      ? await getSlackAgent(deps.db, {
+          accountId: grant.accountId,
+          agentId: agentId.data,
+          connectionId: connectionId?.data ?? null,
+        })
       : null;
     if (!agent || agent.targetWorkspaceId !== workspaceId) {
       throw new HTTPException(404, { message: "Slack agent not found" });
     }
     return { grant, agent };
+  };
+
+  /**
+   * Opening, deleting, channels and intros belong to one Slack installation.
+   * Without `connectionId`, an agent in several installations is refused with
+   * `slack_agent_installation_required` (details list the connection ids)
+   * rather than acting on whichever comes first. Agent-level edits (name,
+   * description, avatar, Instructions) need no installation.
+   */
+  const requireChosenInstallation = async (
+    c: Parameters<typeof requireAccessGrant>[0],
+    agent: SlackAgentRecord,
+  ): Promise<void> => {
+    if (c.req.query("connectionId")?.trim()) return;
+    const installs = await listAgentSlackInstalls(
+      deps.db,
+      { accountId: agent.targetAccountId, workspaceId: agent.targetWorkspaceId },
+      [agent.id],
+    );
+    if (installs.length <= 1) return;
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: "This agent is in more than one Slack installation. Choose one with connectionId.",
+      retryable: false,
+      details: {
+        code: "slack_agent_installation_required",
+        connectionIds: installs.map((install) => install.connectionId),
+      },
+    });
   };
 
   /**
@@ -300,6 +348,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = UpdateSlackAgentRequest.parse(
       await parseRequestJson(c, UpdateSlackAgentRequest),
     );
+    if (payload.open !== undefined) await requireChosenInstallation(c, agent);
     if (payload.open === true && !agent.open) {
       await requireOrganizationAdmin(c, agent.targetWorkspaceId);
     } else if (payload.open === true && payload.expectedVersion !== agent.version) {
@@ -325,6 +374,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
       {
         agentId: agent.id,
+        connectionId: agent.connectionId,
         expectedVersion: payload.expectedVersion,
         actorSubjectId: grant.subjectId,
         patch: {
@@ -363,16 +413,18 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete(`${base}/:agentId`, async (c) => {
     const { agent } = await requireManagedAgent(c);
+    await requireChosenInstallation(c, agent);
     const deleted = await deleteSlackAgent(
       deps.db,
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
-      { agentId: agent.id },
+      { agentId: agent.id, connectionId: agent.connectionId },
     );
     return c.json({ deleted });
   });
 
   app.get(`${base}/:agentId/channels`, async (c) => {
     const { grant, agent } = await requireManagedAgent(c);
+    await requireChosenInstallation(c, agent);
     c.header("cache-control", "private, no-store");
     const cursor = z.string().max(1_024).safeParse(c.req.query("cursor"));
     return c.json(
@@ -382,6 +434,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post(`${base}/:agentId/intro`, async (c) => {
     const { grant, agent } = await requireManagedAgent(c);
+    await requireChosenInstallation(c, agent);
     const payload = await parseRequestJson(c, SlackAgentIntroRequest);
     return c.json(await postSlackAgentIntro(deps, grant, agent, payload));
   });
@@ -433,7 +486,7 @@ export async function slackAgentChannelList(
     await listSlackAgentIntroChannelIds(
       deps.db,
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
-      { slackAgentId: agent.id },
+      { slackAgentId: agent.id, connectionId: agent.connectionId },
     ),
   );
   return SlackAgentChannelListResponse.parse({

@@ -1,0 +1,22 @@
+-- deployment-mode: rolling
+-- Agents contract (docs/agents.md, "Contract"): slack_interactions.slack_agent_id also
+-- references the agent's installation row, agent_slack_installs (agent_id,
+-- connection_id), ON DELETE SET NULL (slack_agent_id). Added NOT VALID; 1310 validates it and
+-- 1312 drops the old key to slack_agents.
+--
+-- A slack_agents row was one agent in one Slack installation, so its exact
+-- equivalent is the agent's agent_slack_installs row for that connection:
+-- turning Slack off in one installation still unlinks that installation's
+-- Slack threads, while the agent and its other installations stay. SET NULL clears only the agent column, never connection_id.
+--
+-- Rolling: a NOT VALID key checks only new writes, and every binary since
+-- #7274 writes the installation row before anything that names the
+-- agent in that installation. One key per file: adding it locks slack_interactions
+-- and then agent_slack_installs, the order writers take them in.
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE slack_interactions
+  ADD CONSTRAINT slack_interactions_agent_install_fk
+  FOREIGN KEY (slack_agent_id, connection_id)
+  REFERENCES agent_slack_installs(agent_id, connection_id)
+  ON DELETE SET NULL (slack_agent_id) NOT VALID;

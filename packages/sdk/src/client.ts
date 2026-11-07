@@ -961,6 +961,26 @@ function sessionListQuery(options: {
   return query;
 }
 
+/**
+ * Which Slack installation a legacy Slack agent call is for. The Slack agent
+ * list shows an agent once per installation; pass that record's
+ * `connectionId`. Opening, deleting, channels and intros of an agent in
+ * several installations need it (`slack_agent_installation_required`).
+ */
+export type SlackAgentInstallationOptions = {
+  connectionId?: string;
+};
+
+function slackAgentInstallationQuery(
+  options: SlackAgentInstallationOptions,
+  extra: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams(extra);
+  if (options.connectionId) query.set("connectionId", options.connectionId);
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
+
 export type SessionListPageOptions = {
   /** Chats available to this viewer in a private console Site; "current" inside its frame. */
   siteAccessId?: string;
@@ -11325,10 +11345,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: UpdateSlackAgentRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentResponse> {
     return await this.requestJson<SlackAgentResponse>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
       request,
     );
   }
@@ -11337,10 +11358,11 @@ export class OpenGeniClient {
   async deleteOpenGeniSlackAgent(
     workspaceId: string,
     agentId: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<{ deleted: boolean }> {
     return await this.requestJson<{ deleted: boolean }>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
     );
   }
 
@@ -11349,8 +11371,9 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     cursor?: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentChannelListResponse> {
-    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    const query = slackAgentInstallationQuery(options, cursor ? { cursor } : {});
     return await this.requestJson<SlackAgentChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/channels${query}`,
@@ -11362,10 +11385,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: SlackAgentIntroRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentIntroResponse> {
     return await this.requestJson<SlackAgentIntroResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro${slackAgentInstallationQuery(options)}`,
       request,
     );
   }

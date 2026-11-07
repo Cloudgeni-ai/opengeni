@@ -166,6 +166,20 @@ client.listAgentSlackInstalls = async (workspaceId: string, id: string) => {
         installs: response.installs.map((install) => ({ ...install, availability: null })),
       };
 };
+// An agent can be on in several Slack workspaces: turning it on answers with
+// the new availability there.
+Object.assign(client, {
+  async putAgentSlackAvailability(_workspaceId: string, id: string, connectionId: string) {
+    const agent = agents.find((entry) => entry.id === id) ?? releases;
+    const availability = {
+      ...releases.slack[0]!,
+      connectionId,
+      slackTeamId: connectionId === SECOND_CONNECTION ? "T02" : "T01",
+      slackTeamName: connectionId === SECOND_CONNECTION ? "Acme Support" : "Acme",
+    };
+    return { agent: { ...agent, slack: [...agent.slack, availability] }, availability };
+  },
+});
 const listChats = client.listAgentChats.bind(client);
 client.listAgentChats = async (workspaceId: string, id: string, request) => {
   const response = await listChats(workspaceId, id, request);

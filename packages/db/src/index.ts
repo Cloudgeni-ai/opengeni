@@ -97424,7 +97424,6 @@ export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
 export * from "./automation-templates";
-export * from "./bot-templates";
 export * from "./organization-model-providers";
 export * from "./organization-compatible-model-endpoints";
 export * from "./organization-model-defaults";

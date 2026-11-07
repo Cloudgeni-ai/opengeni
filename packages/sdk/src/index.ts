@@ -377,6 +377,7 @@ export type {
   OpenGeniRequestOptions,
   SendMessageInput,
   SessionListPageOptions,
+  SlackAgentInstallationOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,

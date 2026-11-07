@@ -696,14 +696,6 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Another agent in that Slack workspace already has this name. Rename this one first.",
       );
     }
-    if (outcome.kind === "single_install") {
-      throw agentError(
-        409,
-        "agent_slack_single_install",
-        "For now an agent is available in one Slack workspace. Turn it off in the other one first.",
-        { connectionId: outcome.connectionId || null },
-      );
-    }
     if (outcome.kind === "version_conflict") {
       throw agentError(409, "agent_version_conflict", "This changed. Refresh and try again.", {
         currentVersion: outcome.install.version,
@@ -742,6 +734,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const projection = await getSlackAgent(db, {
       accountId: context.home.accountId,
       agentId: agent.id,
+      connectionId,
     });
     if (
       !projection ||

@@ -45,8 +45,6 @@ export function agentSlackErrorText(error: unknown, agentName: string): string {
     }
     case "agent_slack_requires_workspace_visibility":
       return "Only agents everyone in the workspace can use can be in Slack. Change Who can use it first.";
-    case "agent_slack_single_install":
-      return "It's already available in another Slack workspace. Turn that off first.";
     case "slack_bot_unavailable":
       return "The Opengeni Slack app isn't on for this workspace. An organization admin can turn it on from the Slack page.";
     case "agent_slack_personal_workspace":
@@ -58,20 +56,6 @@ export function agentSlackErrorText(error: unknown, agentName: string): string {
   }
 }
 
-// An agent is in one Slack workspace at a time for now (`agent_slack_single_install`).
-// This and its `otherInstallReason` uses go once it can be in several.
-function otherInstallReason(
-  installs: readonly AgentSlackInstall[],
-  connectionId: string,
-): string | null {
-  const other = installs.find(
-    (row) => row.connectionId !== connectionId && row.availability !== null,
-  );
-  return other
-    ? `It's available in ${other.slackTeamName ?? "another Slack workspace"}. Turn that off first.`
-    : null;
-}
-
 const ADMIN_ONLY = "Only a workspace admin can change this.";
 const ORG_ADMIN_ONLY = "Only an organization admin can turn this on.";
 
@@ -79,15 +63,12 @@ function InstallRow({
   agent,
   install,
   workspaceName,
-  otherInstall,
   onChange,
   onIntroduce,
 }: {
   agent: Agent;
   install: AgentSlackInstall;
   workspaceName: string;
-  /** Why it can't be turned on here while it is on in another Slack workspace. */
-  otherInstall: string | null;
   onChange: (agent: Agent, install: AgentSlackInstall) => void;
   onIntroduce: (connectionId: string) => void;
 }) {
@@ -129,7 +110,7 @@ function InstallRow({
             </span>
           </>
         ) : shared ? (
-          (otherInstall ?? "Off")
+          "Off"
         ) : (
           privateReason
         )
@@ -140,8 +121,8 @@ function InstallRow({
           aria-label={`Available in ${teamName}`}
           checked={on}
           pending={pending === "availability"}
-          disabled={!canManage || (!on && (!shared || otherInstall !== null))}
-          disabledReason={!canManage ? ADMIN_ONLY : !shared ? privateReason : otherInstall}
+          disabled={!canManage || (!on && !shared)}
+          disabledReason={!canManage ? ADMIN_ONLY : !shared ? privateReason : undefined}
           onCheckedChange={(next) =>
             void run("availability", () =>
               next
@@ -271,7 +252,6 @@ export function AgentSlackSection({
           agent={agent}
           install={install}
           workspaceName={workspaceName}
-          otherInstall={otherInstallReason(value.installs, install.connectionId)}
           onIntroduce={onIntroduce}
           onChange={(nextAgent, nextInstall) => {
             onAgentChange(nextAgent);
