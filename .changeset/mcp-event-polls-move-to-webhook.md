@@ -1,6 +1,0 @@
----
-"@opengeni/core": patch
-"@opengeni/db": patch
----
-
-An MCP event subscription that polls now moves to webhook delivery once it can. Before, a subscription stayed on polling forever once it polled, so one created while its server offered only polling never moved to webhook after the server added it. Each subscription now records why it polls: `not_offered` (no webhook delivery on offer when last checked) or `callback_failed` (a webhook subscription failed), with the time (migration 1296 adds `poll_reason` and `poll_reason_at`). A polling subscription moves to webhook when its event type offers webhook and the deployment has a webhook address, unless its webhook failed less than a day ago; then it keeps polling and tries again after the day. The move subscribes with the last poll cursor, so the server replays what came after it and events are deduplicated by event id as before: nothing is lost or delivered twice. It stops polling only once the subscribe succeeds; if the attempt fails for any reason other than a sign-in or a refusal a person has to fix, the step polls instead and records `callback_failed`. A kept MCP session now reads the server's event types again at least hourly, so a newly offered delivery mode is noticed. Rows an older release moved to polling have no reason and are treated as `not_offered`.

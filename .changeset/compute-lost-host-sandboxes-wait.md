@@ -1,4 +1,0 @@
----
----
-
-A compute host that stops answering for a few minutes, for example one that hangs and is power-cycled, no longer loses its sandboxes' recent writes. Giving up on the host used to clear their owner, so a wake meanwhile took the sandbox to another host from its older stored copy, and the host coming back was told to delete its newer one. Now the sandboxes stay with their host: a wake waits for it and then fails as unavailable, saying plainly that the host stopped answering and the sandbox waits for it rather than going back to an older copy. A host that comes back keeps every sandbox. Only when the host's machine is found deleted, or an operator declares it gone (`POST /v1/hosts/<name>/gone`), does a sandbox go on from its stored copy. Its views and its wake answer then carry `restored`, with a plain notice of the point in time it went back to. If the declared host returns after all, it moves its copy aside on its disk instead of deleting it.
