@@ -93,6 +93,7 @@ function liveRepositoryResponse(): Response {
       html_url: repository.canonicalUrl,
       archived: false,
       disabled: false,
+      default_branch: "main",
       permissions: { pull: true, triage: false, push: true, maintain: false, admin: false },
     }),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -671,6 +672,7 @@ describe("personal GitHub Git broker", () => {
       execFileSync("git", ["init", "--bare", "--initial-branch=main", bareRepository]);
       execFileSync("git", ["-C", bareRepository, "config", "http.receivepack", "true"]);
       const decisions: string[] = [];
+      const alwaysAsks: boolean[] = [];
       let answer: "wait" | "allow" = "wait";
       const completed: string[] = [];
       const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -704,10 +706,11 @@ describe("personal GitHub Git broker", () => {
           },
         }),
         authorizeProviderRequest: async () => "Bearer provider-secret",
-        inspectPush: async (authority, body, gzip) =>
+        inspectPush: async (authority, body, gzip, defaultBranch) =>
           await inspectPersonalGitHubPush({
             body,
             gzip,
+            defaultBranch,
             repositoryFullName: authority.repository.fullName,
             identity: authority.identity!,
             isAncestor: async (base, head) => {
@@ -719,6 +722,7 @@ describe("personal GitHub Git broker", () => {
             },
             decide: async (_identity, input) => {
               decisions.push(input.title);
+              alwaysAsks.push(input.action.alwaysAsk);
               return answer === "allow"
                 ? { kind: "run", requestId: `request-${decisions.length}` }
                 : {
@@ -817,6 +821,9 @@ describe("personal GitHub Git broker", () => {
         "Force-push main on Cloudgeni-ai/opengeni",
         "Delete topic on Cloudgeni-ai/opengeni",
       ]);
+      // GitHub's default branch: rewriting main always asks; deleting another
+      // branch follows the person's policy.
+      expect(alwaysAsks).toEqual([true, false]);
 
       answer = "allow";
       expect((await push(["--force", "main"])).exitCode).toBe(0);
@@ -829,6 +836,40 @@ describe("personal GitHub Git broker", () => {
           { encoding: "utf8" },
         ).trim(),
       ).toBe("main");
+
+      // A shallow clone, the way managed sandboxes clone, pushes a new branch
+      // and a fast-forward without asking.
+      const asked = decisions.length;
+      const shallow = join(root, "shallow");
+      await runGitCommand(["clone", "--depth", "1", brokerBase, shallow], gitEnvironment);
+      writeFileSync(join(shallow, "file.txt"), "from a shallow clone");
+      await runGitCommand(["-C", shallow, "commit", "-am", "shallow"], gitEnvironment);
+      const shallowPush = async (args: string[]) => {
+        const child = Bun.spawn(["git", "-C", shallow, "push", "origin", ...args], {
+          env: gitEnvironment,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stderr, exitCode] = await Promise.all([
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stderr, exitCode };
+      };
+      expect(await shallowPush(["HEAD:refs/heads/shallow-topic"])).toMatchObject({ exitCode: 0 });
+      expect(await shallowPush(["HEAD:main"])).toMatchObject({ exitCode: 0 });
+      expect(decisions.length).toBe(asked);
+      expect(
+        execFileSync("git", ["-C", bareRepository, "rev-parse", "main", "shallow-topic"], {
+          encoding: "utf8",
+        })
+          .trim()
+          .split("\n"),
+      ).toEqual(
+        Array(2).fill(
+          execFileSync("git", ["-C", shallow, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        ),
+      );
     } finally {
       server?.stop(true);
       rmSync(root, { recursive: true, force: true });

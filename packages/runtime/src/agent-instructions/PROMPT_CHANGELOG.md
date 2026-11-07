@@ -1,5 +1,13 @@
 # Modular prompt changelog
 
+In a managed sandbox with a repository mounted as the person, the
+repositories module adds one sentence (144 bytes): force-pushing or deleting a
+non-default branch follows the person's GitHub settings, while the default
+branch and tags wait for their approval. The personal GitHub gateway now lets
+those branch rewrites follow the person's policy instead of always asking, so
+the agent can rebase and force-push its own pull request branches. Sessions
+without such a repository, and Connected Machines, keep their prompt bytes.
+
 The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
 chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
 keeps its meaning: precedence over the default behavior, no extra authority,
