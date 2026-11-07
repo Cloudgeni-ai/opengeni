@@ -1700,8 +1700,10 @@ const COMPACTION_OUTPUT_CAP_RETRY_STATUSES = new Set([400, 422]);
  * these endpoints carry no cap, and compatible servers commonly refuse one
  * that is above the model's output limit or above what is left of its context
  * window. The retry uses the request shape the endpoint already accepts. A
- * summary that comes back too long still fails the replacement budget, so the
- * cap is not needed for safety. Other providers are not retried.
+ * summary that comes back too long to install is handled by the worker, so
+ * the cap is not needed for safety. A context-length refusal is retried too:
+ * such servers often count the requested output against the window, so it
+ * cannot be told apart from an oversized cap. Other providers are not retried.
  */
 async function withCompactionOutputCapRetry<T>(
   provider: ResolvedModelProvider,
@@ -1725,6 +1727,7 @@ async function withCompactionOutputCapRetry<T>(
       throw new CompactionProviderResponseError(
         { ...retryError.diagnostics, outputCapRetried: true },
         retryError.cause,
+        retryError,
       );
     }
   }

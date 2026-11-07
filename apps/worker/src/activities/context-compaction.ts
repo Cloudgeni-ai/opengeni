@@ -81,7 +81,15 @@ export type CompactionObservability = {
  * trimmed history: the newest requests and platform context, with a
  * deterministic note instead of a summary. No other model is asked.
  */
-type CompactionTrimFallback = { reason: CompactionTrimFallbackReason; error: unknown };
+type CompactionTrimFallback = {
+  reason: CompactionTrimFallbackReason;
+  error: unknown;
+  /**
+   * Set when a summary was produced but was too long to install: if trimming
+   * does not help either, settle this skip instead of failing the turn.
+   */
+  settleWhenUnhelpful?: "replacement_exceeds_model_budget";
+};
 
 /**
  * The `fallback` record on `session.context.compacted`. The provider's message
@@ -898,59 +906,89 @@ async function compactContextPortable(
     // keep the newest requests and platform context exactly as a summarized
     // checkpoint would, with a deterministic note in place of the summary.
     // No other model is called, so no history leaves the chat's provider.
+    // A model switch must rebuild from a real summary: trimming would move the
+    // chat off Codex for good and drop its checkpoint, so it fails as before.
     const reason = compactionTrimFallbackReason(error, options.cancellationSignal);
-    if (!reason) throw error;
+    if (!reason || options.portableModelSwitch) throw error;
     fallback = { reason, error };
     summarizedItems = canonicalItems;
     deferredItems = [];
   }
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
-  const turnContext = {
-    itemTurnIds: canonicalTurnIds.slice(0, summarizedItems.length),
-    activeTurnId: scope.turnId,
-    ...agentPromptTurnContext(options.agentPrompt),
-  };
-  const checkpointTokens = estimateTokens([
-    summarized
-      ? buildSummaryItem(summarized.summaryBody)
-      : buildTrimmedContextCheckpointItem(summarizedItems, turnContext),
-  ]);
-  const retainedBudget = Math.min(
-    outputReserve,
-    Math.max(0, structuralBudget - prefixTokens - checkpointTokens),
-  );
   const retainedItemTokens = (item: CompactionItem) =>
     retainedTokens.get(item) ?? estimateTokens([item]);
-  const uploadTimes = await attachmentUploadTimes(db, scope.workspaceId, summarizedItems);
-  const replacement = summarized
-    ? buildCompactionReplacement(
-        summarizedItems,
-        summarized.summaryBody,
-        retainedItemTokens,
-        retainedBudget,
-        uploadTimes,
-        turnContext,
-      )
-    : buildTrimmedCompactionReplacement(
-        summarizedItems,
-        retainedItemTokens,
-        retainedBudget,
-        uploadTimes,
-        turnContext,
-      );
+  const buildReplacement = async () => {
+    const turnContext = {
+      itemTurnIds: canonicalTurnIds.slice(0, summarizedItems.length),
+      activeTurnId: scope.turnId,
+      ...agentPromptTurnContext(options.agentPrompt),
+    };
+    const checkpointTokens = estimateTokens([
+      summarized
+        ? buildSummaryItem(summarized.summaryBody)
+        : buildTrimmedContextCheckpointItem(summarizedItems, turnContext),
+    ]);
+    const retainedBudget = Math.min(
+      outputReserve,
+      Math.max(0, structuralBudget - prefixTokens - checkpointTokens),
+    );
+    const uploadTimes = await attachmentUploadTimes(db, scope.workspaceId, summarizedItems);
+    const built = summarized
+      ? buildCompactionReplacement(
+          summarizedItems,
+          summarized.summaryBody,
+          retainedItemTokens,
+          retainedBudget,
+          uploadTimes,
+          turnContext,
+        )
+      : buildTrimmedCompactionReplacement(
+          summarizedItems,
+          retainedItemTokens,
+          retainedBudget,
+          uploadTimes,
+          turnContext,
+        );
+    const tokensAfter = estimateTokens(await projectForWire([...built.history, ...deferredItems]));
+    return { replacement: built, estimatedTokensAfter: tokensAfter };
+  };
+  let built = await buildReplacement();
+  if (
+    built.estimatedTokensAfter + prefixTokens > structuralBudget &&
+    summarized &&
+    !options.portableModelSwitch
+  ) {
+    // The summary came back too long to install (for example after the
+    // output-cap retry). Trim instead; if that does not help either, settle as
+    // the over-budget checkpoint would have.
+    fallback = {
+      reason: "summary_unusable",
+      error: new EmptyCompactionSummaryError({
+        stage: "portable_replacement",
+        reason: "summary_exceeds_model_budget",
+      }),
+      settleWhenUnhelpful: "replacement_exceeds_model_budget",
+    };
+    summarized = null;
+    summarizedItems = canonicalItems;
+    deferredItems = [];
+    built = await buildReplacement();
+  }
+  const { replacement, estimatedTokensAfter } = built;
   // A trimmed checkpoint that would not help leaves history as it was, and
-  // the turn fails with the summary's own error, as it did without the
-  // fallback.
-  const trimDidNotHelp = (outcome: string): never => {
-    logCompactionTrimFallback(options.observability, scope, options.trigger, fallback!, outcome);
-    throw fallback!.error;
+  // the turn fails with the summary's own error (or settles as the summarized
+  // checkpoint would have), as it did without the fallback.
+  const trimDidNotHelp = async (outcome: string): Promise<MaybeCompactResult> => {
+    const failed = fallback!;
+    logCompactionTrimFallback(options.observability, scope, options.trigger, failed, outcome);
+    if (failed.settleWhenUnhelpful) {
+      return await settleSkippedAfterStart(db, scope, options, failed.settleWhenUnhelpful);
+    }
+    throw failed.error;
   };
   const replacementHistory = replacement.history;
-  const estimatedTokensAfter = estimateTokens(
-    await projectForWire([...replacementHistory, ...deferredItems]),
-  );
   if (estimatedTokensAfter + prefixTokens > structuralBudget) {
-    if (fallback) trimDidNotHelp("replacement_exceeds_model_budget");
+    if (fallback) return await trimDidNotHelp("replacement_exceeds_model_budget");
     // A model switch must not leave Codex's checkpoint in place. Throw rather
     // than settle: the caller settles the landmark and fails the turn.
     if (options.portableModelSwitch)
@@ -972,7 +1010,7 @@ async function compactContextPortable(
     (readReasoningConfiguration(replacementHistory.at(-1) ?? {}) ? 2 : 1);
   const summaryItem = replacementHistory[summaryIndex];
   if (!summaryItem) {
-    if (fallback) trimDidNotHelp("summarization_failed");
+    if (fallback) return await trimDidNotHelp("summarization_failed");
     // Started already fanout; settle visibly so the landmark cannot stick on
     // "Compacting…". This is not an operator-request clear path.
     if (options.portableModelSwitch)
@@ -986,11 +1024,11 @@ async function compactContextPortable(
   // context is no smaller than the transcript it summarizes.
   if (!options.portableModelSwitch) {
     if (previousReplacementFingerprint === replacementFingerprint) {
-      if (fallback) trimDidNotHelp("replacement_unchanged");
+      if (fallback) return await trimDidNotHelp("replacement_unchanged");
       return await settleSkippedAfterStart(db, scope, options, "replacement_unchanged");
     }
     if (estimatedTokensAfter >= estimatedTokensBefore) {
-      if (fallback) trimDidNotHelp("replacement_not_smaller");
+      if (fallback) return await trimDidNotHelp("replacement_not_smaller");
       return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
     }
   }
@@ -1019,7 +1057,6 @@ async function compactContextPortable(
         ? {
             implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
             fallback: compactionTrimFallbackPayload(fallback),
-            ...(options.portableModelSwitch ? { modelSwitch: true } : {}),
           }
         : options.portableModelSwitch
           ? { implementation: PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION }

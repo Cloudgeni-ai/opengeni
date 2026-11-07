@@ -1347,8 +1347,12 @@ export class CompactionProviderResponseError extends Error {
   readonly type?: string;
   /** Provider-named request field that was rejected (`error.param`), bounded. */
   readonly param?: string;
-  /** The provider's error message, bounded and single-line; null when it sent none. */
-  readonly providerMessage: string | null;
+  /**
+   * The provider's error message, bounded and single-line; null when it sent
+   * none. Not enumerable, like `cause`, so serializers that dump error fields
+   * never carry it.
+   */
+  declare readonly providerMessage: string | null;
   override readonly cause?: unknown;
 
   /**
@@ -1371,7 +1375,10 @@ export class CompactionProviderResponseError extends Error {
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
     if (typeof diagnostics.param === "string") this.param = diagnostics.param;
-    this.providerMessage = compactionProviderMessage(messageSource ?? cause);
+    Object.defineProperty(this, "providerMessage", {
+      value: compactionProviderMessage(messageSource ?? cause),
+      enumerable: false,
+    });
     if (cause !== undefined) {
       Object.defineProperty(this, "cause", { value: cause, enumerable: false });
     }
@@ -1383,18 +1390,21 @@ export const COMPACTION_PROVIDER_MESSAGE_MAX_CHARS = 500;
 
 /**
  * The provider's own error message for a failed compaction request: the error
- * body's `error.message` (or a bare string `error`), else the first error
- * message in the cause chain. Control characters and runs of whitespace become
- * single spaces, and the result is cut to
- * {@link COMPACTION_PROVIDER_MESSAGE_MAX_CHARS} characters.
+ * body's `error.message` (or a bare string `error`) anywhere in the cause
+ * chain, or the message an earlier {@link CompactionProviderResponseError}
+ * already captured. SDK, transport and runtime error text is never taken.
+ * Control characters and runs of whitespace become single spaces, and the
+ * result is cut to {@link COMPACTION_PROVIDER_MESSAGE_MAX_CHARS} characters.
  */
 export function compactionProviderMessage(source: unknown): string | null {
-  let fallback: string | null = null;
   let current = source;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
+    if (current instanceof CompactionProviderResponseError && current.providerMessage) {
+      return current.providerMessage;
+    }
     const record = current as Record<string, unknown>;
     const nested = record.error;
     const bodyMessage =
@@ -1405,16 +1415,9 @@ export function compactionProviderMessage(source: unknown): string | null {
           : undefined;
     const fromBody = typeof bodyMessage === "string" ? boundProviderMessage(bodyMessage) : null;
     if (fromBody) return fromBody;
-    if (
-      fallback === null &&
-      typeof record.message === "string" &&
-      !(current instanceof CompactionProviderResponseError)
-    ) {
-      fallback = boundProviderMessage(record.message);
-    }
     current = record.cause;
   }
-  return fallback;
+  return null;
 }
 
 function boundProviderMessage(message: string): string | null {
@@ -2108,7 +2111,7 @@ export const DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION = "deterministic_trim"
 
 /** First paragraph of a trimmed checkpoint (model-visible). */
 export const TRIMMED_CONTEXT_NOTICE =
-  "Earlier parts of this conversation were removed to fit the context window. A summary of them could not be produced, so this note stands in for one. The most recent requests are kept above, each followed by a shortened copy of its reply where there was one. Before relying on anything from the removed part, check the current state (files, repositories, tool results) or ask the user.";
+  "Earlier parts of this conversation were removed to free up context. A summary of them could not be produced, so this note stands in for one. The most recent requests are kept above, each followed by a shortened copy of its reply where there was one. Before relying on anything from the removed part, check the current state (files, repositories, tool results) or ask the user.";
 
 /** Heading of an earlier checkpoint's summary carried into a trimmed checkpoint. */
 export const TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING = "Summary from an earlier checkpoint:";

@@ -201,11 +201,26 @@ describe("the provider's error message", () => {
     expect(message.endsWith("…")).toBe(true);
   });
 
-  test("reads a bare string error body and falls back to the SDK message", () => {
+  test("reads a bare string error body, never SDK or transport text", () => {
     expect(compactionProviderMessage({ error: "model not loaded" })).toBe("model not loaded");
-    expect(compactionProviderMessage(new Error("400 status code (no body)"))).toBe(
-      "400 status code (no body)",
+    expect(
+      compactionProviderMessage(
+        Object.assign(new Error("400 status code (no body)"), { status: 400 }),
+      ),
+    ).toBeNull();
+    expect(
+      compactionProviderMessage(
+        new Error("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND gateway.internal") }),
+      ),
+    ).toBeNull();
+    // A wrapped error keeps the message its cause chain carried.
+    const inner = new CompactionProviderResponseError(
+      { httpStatus: 400 },
+      {
+        error: { message: "max_tokens too large" },
+      },
     );
+    expect(compactionProviderMessage(inner)).toBe("max_tokens too large");
     expect(compactionProviderMessage({ error: { message: "  " } })).toBeNull();
     expect(compactionProviderMessage(undefined)).toBeNull();
   });

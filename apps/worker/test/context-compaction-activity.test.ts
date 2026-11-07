@@ -2001,8 +2001,9 @@ describe("standalone context compaction execution", () => {
     });
     const failureText = String(failed?.payload.error);
     expect(failureText).toContain(
-      `the model provider rejected the compaction request (HTTP 400 invalid_request_error invalid_value; param input[1].content; request req_rejected_fixture): "${providerMessage}"`,
+      "the model provider rejected the compaction request (HTTP 400 invalid_request_error invalid_value; param input[1].content; request req_rejected_fixture). Active history was preserved.",
     );
+    expect(failureText).toContain(`start a new session. Provider message: "${providerMessage}"`);
     expect(failureText).toContain("start a new session");
   });
 
@@ -3236,6 +3237,167 @@ describe("standalone context compaction execution", () => {
         (row) => row.item,
       ),
     ).toEqual(originalItems);
+  });
+
+  test("a summary too long to install, or no summary at all, trims history instead", async () => {
+    const run = async (summarize: CompactionSummarizer) => {
+      const suffix = crypto.randomUUID();
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `account-${suffix}`,
+        accountName: "Trimmed compaction test",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `workspace-${suffix}`,
+        workspaceName: "Trimmed compaction test",
+        subjectId: `subject-${suffix}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const session = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "initial",
+        resources: [],
+        metadata: {},
+        model: "scripted-compactor",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const originalItems = [
+        { type: "message", role: "user", content: "keep this request" },
+        {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "long answer ".repeat(4_000) }],
+        },
+      ];
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        await db.insert(schema.sessionHistoryItems).values(
+          originalItems.map((item, position) => ({
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            position,
+            item,
+          })),
+        );
+      });
+      await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimCompactionForAttempt(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        attemptId,
+      );
+      const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+      const outcome = await maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 40_000 }),
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          executionGeneration: turn!.executionGeneration,
+          attemptId,
+        },
+        null,
+        summarize,
+        {
+          force: true,
+          clearRequestedCompaction: true,
+          trigger: "operator",
+          observability: { warn: (message, fields) => warnings.push({ message, fields }) },
+        },
+      );
+      const active = (
+        await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+      ).map((row) => row.item);
+      return { outcome, active, warnings };
+    };
+
+    for (const summarize of [
+      // Too long for the model's window (as an uncapped summary can be).
+      async () => "an overlong summary ".repeat(40_000),
+      // A response with no usable summary.
+      async () => {
+        throw new EmptyCompactionSummaryError({ reason: "empty_summary" });
+      },
+    ] satisfies CompactionSummarizer[]) {
+      const { outcome, active, warnings } = await run(summarize);
+      expect(outcome).toMatchObject({ compacted: true });
+      if (!outcome.compacted) throw new Error("expected a trimmed checkpoint");
+      const compacted = outcome.events.find((event) => event.type === "session.context.compacted");
+      expect(compacted?.payload).toMatchObject({
+        implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+        fallback: { reason: "summary_unusable" },
+      });
+      expect(active).toContainEqual(
+        expect.objectContaining({ role: "user", content: "keep this request" }),
+      );
+      expect(
+        active.some(
+          (item) =>
+            typeof item.content === "string" && item.content.startsWith(TRIMMED_CONTEXT_NOTICE),
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(active)).not.toContain("an overlong summary an overlong summary");
+      // One content-free warning: identifiers and classifications only.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]!.fields).toMatchObject({
+        fallbackReason: "summary_unusable",
+        outcome: "trimmed",
+        trigger: "operator",
+      });
+      expect(JSON.stringify(warnings)).not.toContain("long answer");
+    }
+  });
+
+  test("a summary failure outside the summary request is not replaced by trimming", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    const before = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    // A model switch keeps failing instead of trimming: the chat stays on
+    // Codex with its checkpoint, and the next turn asks for the rebuild again.
+    const rejected = new CompactionProviderResponseError(
+      { httpStatus: 400, type: "invalid_request_error" },
+      { error: { message: "max_tokens too large" } },
+    );
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        scope,
+        null,
+        async () => {
+          throw rejected;
+        },
+        { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+      ),
+    ).rejects.toBe(rejected);
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
+    );
+    // Errors that are not the summary's own keep propagating unchanged.
+    const unrelated = new Error("database unavailable");
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        scope,
+        null,
+        async () => {
+          throw unrelated;
+        },
+        { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+      ),
+    ).rejects.toBe(unrelated);
+    expect(
+      (await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(before.map((row) => row.item));
   });
 
   test("forced overflow compaction proves shrink against active history, not stale input tokens", async () => {

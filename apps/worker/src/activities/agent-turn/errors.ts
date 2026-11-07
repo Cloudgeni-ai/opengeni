@@ -1401,10 +1401,11 @@ export function compactionFailureProviderMessage(error: unknown): string | null 
 export function compactionFailureReasonFromError(error: unknown): string {
   const rejection = compactionProviderRejection(error);
   const providerMessage = compactionFailureProviderMessage(error);
-  const quoted = providerMessage ? `: "${providerMessage}"` : "";
   if (rejection) {
     return compactionFailureReason(
-      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)})${quoted}. Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
+      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}${
+        providerMessage ? ` Provider message: "${providerMessage}"` : ""
+      }`,
     );
   }
   // An exhausted provider quota is not retried (see agentRunFailurePayload),
@@ -1417,7 +1418,7 @@ export function compactionFailureReasonFromError(error: unknown): string {
   }
   if (error instanceof CompactionProviderResponseError) {
     return compactionFailureReason(
-      providerMessage ? `${error.message}. Provider message${quoted}` : error.message,
+      providerMessage ? `${error.message}; provider message: "${providerMessage}"` : error.message,
     );
   }
   if (error instanceof EmptyCompactionSummaryError) {

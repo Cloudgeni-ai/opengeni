@@ -6774,8 +6774,24 @@ describe("transient provider error classifier", () => {
     const payload = compactionFailureTurnEventPayload(rejected);
     expect(payload.providerMessage).toBe(rejected.providerMessage!);
     expect(payload.error).toContain(
-      `the model provider rejected the compaction request (HTTP 400 invalid_request_error): "max_tokens is too large: x`,
+      `the model provider rejected the compaction request (HTTP 400 invalid_request_error). Active history was preserved.`,
     );
+    expect(payload.error).toContain(
+      `start a new session. Provider message: "max_tokens is too large: x`,
+    );
+    // Not enumerable, so error serializers never carry it.
+    expect(Object.keys(rejected)).not.toContain("providerMessage");
+    expect(JSON.stringify(rejected)).not.toContain("max_tokens");
+    // SDK or transport text is never taken for the provider's message.
+    expect(
+      new CompactionProviderResponseError(
+        { httpStatus: 400 },
+        Object.assign(new Error("400 status code (no body)"), { status: 400 }),
+      ).providerMessage,
+    ).toBeNull();
+    expect(
+      new CompactionProviderResponseError({}, new TypeError("fetch failed")).providerMessage,
+    ).toBeNull();
     // A non-rejection failure appends it after its own reason.
     const failed = new CompactionProviderResponseError(
       { responseStatus: "failed", code: "server_error" },
@@ -6784,7 +6800,7 @@ describe("transient provider error classifier", () => {
     );
     expect(compactionFailureTurnEventPayload(failed)).toMatchObject({
       providerMessage: "Upstream overloaded",
-      error: expect.stringContaining('. Provider message: "Upstream overloaded"'),
+      error: expect.stringContaining('; provider message: "Upstream overloaded"'),
     });
     // Nothing recorded when the provider sent no message.
     expect(
