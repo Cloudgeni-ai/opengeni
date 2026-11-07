@@ -555,15 +555,27 @@ export type ContextCompactionItem = {
   skipReason: string | null;
   /**
    * Present only for a `summarization_failed` skip where the provider
-   * definitively rejected the compaction request. Content-free identifiers.
+   * definitively rejected the compaction request, or a trimmed checkpoint
+   * (`implementation: "deterministic_trim"`) whose summary request was
+   * rejected that way. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The provider's own error message for a failed summary request, bounded,
+   * when it sent one: on a `summarization_failed` skip, or on a trimmed
+   * checkpoint. Diagnostics shown behind Details only.
+   */
+  providerMessage?: string;
   /**
    * The same turn's recorded failure text, when that turn failed because this
    * compaction did. Diagnostics shown behind Details only.
    */
   failureDetail?: string;
-  /** Provider implementation id for debug disclosure only. */
+  /**
+   * Provider implementation id. `deterministic_trim` marks a checkpoint that
+   * trimmed older messages because the chat's model could not summarize them;
+   * other values are for debug disclosure only.
+   */
   implementation: string | null;
   occurredAt: string;
 };

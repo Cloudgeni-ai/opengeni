@@ -21,10 +21,15 @@ import {
   omitOpaqueArtifactsFromPortableCompactionHistory,
   buildCompactionReplacement,
   buildRemoteV2Replacement,
+  buildTrimmedCompactionReplacement,
+  buildTrimmedContextCheckpointItem,
+  CompactionProviderResponseError,
   compactionAttachmentFileIds,
+  compactionProviderRejection,
   compactionThresholdTokens,
   compactionReplacementFingerprint,
   decideCompaction,
+  DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
   estimateTokens,
   isCompactionSummary,
   isRemoteCompactionItem,
@@ -43,6 +48,10 @@ import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import { latestAgentInstructionsContext, type SessionEvent } from "@opengeni/contracts";
 import { projectRejectedProviderArtifacts } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import {
+  compactionTrimFallbackReason,
+  type CompactionTrimFallbackReason,
+} from "./agent-turn/compaction-trim-fallback";
 
 export type MaybeCompactResult =
   | {
@@ -63,11 +72,90 @@ export type MaybeCompactResult =
       events: SessionEvent[];
     };
 
+/** The worker log sink compaction uses; fields stay content-free. */
+export type CompactionObservability = {
+  warn(message: string, fields?: Record<string, unknown>): void;
+};
+
+/**
+ * A portable checkpoint whose summary failed terminally and was replaced by a
+ * trimmed history: the newest requests and platform context, with a
+ * deterministic note instead of a summary. No other model is asked.
+ */
+type CompactionTrimFallback = {
+  reason: CompactionTrimFallbackReason;
+  error: unknown;
+};
+
+/**
+ * The `fallback` record on `session.context.compacted`. The provider's message
+ * is kept here, in the session's own events, so the people who can read the
+ * conversation can see why its model refused; logs never carry it.
+ */
+function compactionTrimFallbackPayload(fallback: CompactionTrimFallback): Record<string, unknown> {
+  const rejection = compactionProviderRejection(fallback.error);
+  const providerMessage =
+    fallback.error instanceof CompactionProviderResponseError
+      ? fallback.error.providerMessage
+      : null;
+  return {
+    reason: fallback.reason,
+    ...(rejection ? { providerRejection: rejection } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
+  };
+}
+
+/** One content-free log line per fallback: identifiers and classifications only. */
+function logCompactionTrimFallback(
+  observability: CompactionObservability | undefined,
+  scope: { sessionId: string; turnId: string; attemptId: string },
+  trigger: string | undefined,
+  fallback: CompactionTrimFallback,
+  outcome: string,
+): void {
+  const error = fallback.error;
+  const diagnostics =
+    error instanceof CompactionProviderResponseError || error instanceof EmptyCompactionSummaryError
+      ? error.diagnostics
+      : {};
+  const pick = (key: string) => {
+    const value = diagnostics[key];
+    return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+      ? value
+      : undefined;
+  };
+  const fields: Record<string, string | number | boolean | undefined> = {
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    attemptId: scope.attemptId,
+    trigger: trigger ?? "auto",
+    fallbackReason: fallback.reason,
+    outcome,
+    errorName: error instanceof Error ? error.name : typeof error,
+    httpStatus: pick("httpStatus"),
+    providerErrorType: pick("type"),
+    providerErrorCode: pick("code"),
+    providerErrorParam: pick("param"),
+    providerRequestId: pick("requestId"),
+    outputCapRetried: pick("outputCapRetried"),
+    stage: pick("stage"),
+    reason: pick("reason"),
+  };
+  observability?.warn(
+    outcome === "trimmed"
+      ? "context compaction summary failed; history was trimmed instead"
+      : "context compaction summary failed and trimming could not reduce history",
+    Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)),
+  );
+}
+
 /**
  * Durable context compaction.
  *
  * Portable path: Codex CLI local plaintext checkpoint for every provider and
  * for Codex sessions frozen on `portable`.
+ * When the chat's own model cannot produce a summary there, the history is
+ * trimmed deterministically instead (see {@link CompactionTrimFallback}).
  *
  * Remote v2 path: when the session is frozen on `remote_v2` and the turn is
  * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
@@ -191,6 +279,13 @@ export async function maybeCompactContext(
     requestSizeRecovery?: { maxBytes: number; size: AnthropicRequestSize };
     /** Agent chats only; see {@link AgentPromptCompaction}. */
     agentPrompt?: AgentPromptCompaction;
+    /**
+     * The attempt's cancellation signal. A summary cut short by it never
+     * falls back to trimming; the cancellation keeps propagating.
+     */
+    cancellationSignal?: AbortSignal;
+    /** Content-free worker logs (identifiers and classifications only). */
+    observability?: CompactionObservability;
   } = {},
 ): Promise<MaybeCompactResult> {
   if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
@@ -536,6 +631,12 @@ export async function settleFailedContextCompactionLandmark(
      * rejected field instead of offering a retry that cannot succeed.
      */
     providerRejection?: CompactionProviderRejection | null;
+    /**
+     * The provider's own error message, bounded. It goes only on this
+     * session's landmark event, so the conversation's readers can see why
+     * the provider refused; logs never carry it.
+     */
+    providerMessage?: string | null;
   } = {},
 ): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
   const settled = await settleSkippedAfterStart(db, scope, options, "summarization_failed");
@@ -602,6 +703,7 @@ async function settleSkippedAfterStart(
   options: {
     clearRequestedCompaction?: boolean;
     providerRejection?: CompactionProviderRejection | null;
+    providerMessage?: string | null;
   },
   reason:
     | "no_history"
@@ -621,6 +723,7 @@ async function settleSkippedAfterStart(
     requirePendingRequest: false,
     clearRequestedCompaction,
     ...(options.providerRejection ? { providerRejection: options.providerRejection } : {}),
+    ...(options.providerMessage ? { providerMessage: options.providerMessage } : {}),
   });
   if (!skipped.recorded) {
     throw new TurnAttemptFencedError(
@@ -805,6 +908,8 @@ async function compactContextPortable(
     /** Rebuilding a Codex remote_v2 chat's context from its stored transcript. */
     portableModelSwitch?: boolean;
     agentPrompt?: AgentPromptCompaction;
+    cancellationSignal?: AbortSignal;
+    observability?: CompactionObservability;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -817,90 +922,133 @@ async function compactContextPortable(
   );
   let summarizedItems = canonicalItems;
   let deferredItems: CompactionItem[] = [];
-  let summarized: Awaited<ReturnType<typeof summarizeWithCodexOverflowTrimming>>;
+  let summarized: Awaited<ReturnType<typeof summarizeWithCodexOverflowTrimming>> | null = null;
+  let fallback: CompactionTrimFallback | null = null;
   const maxBytes = Math.min(
     ANTHROPIC_REQUEST_MAX_BYTES,
     options.requestSizeRecovery?.maxBytes ?? ANTHROPIC_REQUEST_MAX_BYTES,
   );
-  if (options.portableModelSwitch) {
-    // A model switch summarizes the stored transcript, which can be far larger
-    // than the new model's window. The withheld request still carries Codex's
-    // checkpoint and never stands in for it; consume it all the same, so a
-    // later compaction never sees a stale request.
-    summarize.withheldWireHistory?.();
-    summarized = await summarizeTranscriptInBoundedRequests(
-      summarize,
-      settings,
-      canonicalItems,
-      projectForWire,
-      { budgetTokens: Math.max(0, structuralBudget - prefixTokens), maxBytes },
-    );
-  } else if (summarize.measureInputBytes) {
-    const budget = Math.max(0, structuralBudget - prefixTokens);
-    const prepare = async (prefix: CompactionItem[]) =>
-      buildCompactionPromptInput(
-        omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix)),
+  try {
+    if (options.portableModelSwitch) {
+      // A model switch summarizes the stored transcript, which can be far larger
+      // than the new model's window. The withheld request still carries Codex's
+      // checkpoint and never stands in for it; consume it all the same, so a
+      // later compaction never sees a stale request.
+      summarize.withheldWireHistory?.();
+      summarized = await summarizeTranscriptInBoundedRequests(
+        summarize,
+        settings,
+        canonicalItems,
+        projectForWire,
+        { budgetTokens: Math.max(0, structuralBudget - prefixTokens), maxBytes },
       );
-    const fits = async (projected: CompactionItem[]) =>
-      estimateTokens(projected) <= budget &&
-      (await summarize.measureInputBytes!(settings, projected)) <= maxBytes;
-    // Prefer the exact ordinary request withheld at this boundary: it covers
-    // the whole durable history and extends the previous request byte for
-    // byte. Size recovery and oversized histories still cut a fitting prefix.
-    // Always consume it, so a later compaction never sees a stale request.
-    const taken = summarize.withheldWireHistory?.();
-    const withheld =
-      !options.requestSizeRecovery && taken && withheldHistoryCovers(taken, canonicalItems)
-        ? taken
-        : undefined;
-    const exact = withheld ? buildCompactionPromptInput(withheld) : undefined;
-    const exactFits = exact ? await fits(exact) : false;
-    const cut = exactFits
-      ? canonicalItems.length
-      : await fitCompactionPrefix(
-          canonicalItems,
-          async (prefix) => fits(await prepare(prefix)),
-          Boolean(options.requestSizeRecovery),
+    } else if (summarize.measureInputBytes) {
+      const budget = Math.max(0, structuralBudget - prefixTokens);
+      const prepare = async (prefix: CompactionItem[]) =>
+        buildCompactionPromptInput(
+          omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix)),
         );
-    if (cut === null)
-      throw new EmptyCompactionSummaryError({
-        stage: "portable_byte_budget",
-        reason: "no_complete_prefix_fit",
-      });
-    summarizedItems = canonicalItems.slice(0, cut);
-    deferredItems = canonicalItems.slice(cut);
-    const projected = exactFits && exact ? exact : await prepare(summarizedItems);
-    summarized = {
-      summaryBody: await summarize(settings, projected),
-      preparation: {
-        input: projected,
-        estimatedInputTokens: estimateTokens(projected),
-        rewrittenToolOutputs: 0,
-        droppedHistoryItems: 0,
-      },
-      providerCalls: 1,
-    };
-  } else summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
-  const summaryBody = summarized.summaryBody;
+      const fits = async (projected: CompactionItem[]) =>
+        estimateTokens(projected) <= budget &&
+        (await summarize.measureInputBytes!(settings, projected)) <= maxBytes;
+      // Prefer the exact ordinary request withheld at this boundary: it covers
+      // the whole durable history and extends the previous request byte for
+      // byte. Size recovery and oversized histories still cut a fitting prefix.
+      // Always consume it, so a later compaction never sees a stale request.
+      const taken = summarize.withheldWireHistory?.();
+      const withheld =
+        !options.requestSizeRecovery && taken && withheldHistoryCovers(taken, canonicalItems)
+          ? taken
+          : undefined;
+      const exact = withheld ? buildCompactionPromptInput(withheld) : undefined;
+      const exactFits = exact ? await fits(exact) : false;
+      const cut = exactFits
+        ? canonicalItems.length
+        : await fitCompactionPrefix(
+            canonicalItems,
+            async (prefix) => fits(await prepare(prefix)),
+            Boolean(options.requestSizeRecovery),
+          );
+      if (cut === null)
+        throw new EmptyCompactionSummaryError({
+          stage: "portable_byte_budget",
+          reason: "no_complete_prefix_fit",
+        });
+      summarizedItems = canonicalItems.slice(0, cut);
+      deferredItems = canonicalItems.slice(cut);
+      const projected = exactFits && exact ? exact : await prepare(summarizedItems);
+      summarized = {
+        summaryBody: await summarize(settings, projected),
+        preparation: {
+          input: projected,
+          estimatedInputTokens: estimateTokens(projected),
+          rewrittenToolOutputs: 0,
+          droppedHistoryItems: 0,
+        },
+        providerCalls: 1,
+      };
+    } else summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  } catch (error) {
+    // The chat's own model could not summarize. Rather than fail the turn,
+    // keep the newest requests and platform context exactly as a summarized
+    // checkpoint would, with a deterministic note in place of the summary.
+    // No other model is called, so no history leaves the chat's provider.
+    // A model switch must rebuild from a real summary: trimming would move the
+    // chat off Codex for good and drop its checkpoint, so it fails as before.
+    const reason = compactionTrimFallbackReason(error, options.cancellationSignal);
+    if (!reason || options.portableModelSwitch) throw error;
+    fallback = { reason, error };
+    summarizedItems = canonicalItems;
+    deferredItems = [];
+  }
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
-  const summaryTokens = estimateTokens([buildSummaryItem(summaryBody)]);
-  const replacement = buildCompactionReplacement(
-    summarizedItems,
-    summaryBody,
-    (item) => retainedTokens.get(item) ?? estimateTokens([item]),
-    Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
-    await attachmentUploadTimes(db, scope.workspaceId, summarizedItems),
-    {
+  const retainedItemTokens = (item: CompactionItem) =>
+    retainedTokens.get(item) ?? estimateTokens([item]);
+  const buildReplacement = async () => {
+    const turnContext = {
       itemTurnIds: canonicalTurnIds.slice(0, summarizedItems.length),
       activeTurnId: scope.turnId,
       ...agentPromptTurnContext(options.agentPrompt),
-    },
-  );
+    };
+    const checkpointTokens = estimateTokens([
+      summarized
+        ? buildSummaryItem(summarized.summaryBody)
+        : buildTrimmedContextCheckpointItem(summarizedItems, turnContext),
+    ]);
+    const retainedBudget = Math.min(
+      outputReserve,
+      Math.max(0, structuralBudget - prefixTokens - checkpointTokens),
+    );
+    const uploadTimes = await attachmentUploadTimes(db, scope.workspaceId, summarizedItems);
+    const built = summarized
+      ? buildCompactionReplacement(
+          summarizedItems,
+          summarized.summaryBody,
+          retainedItemTokens,
+          retainedBudget,
+          uploadTimes,
+          turnContext,
+        )
+      : buildTrimmedCompactionReplacement(
+          summarizedItems,
+          retainedItemTokens,
+          retainedBudget,
+          uploadTimes,
+          turnContext,
+        );
+    const tokensAfter = estimateTokens(await projectForWire([...built.history, ...deferredItems]));
+    return { replacement: built, estimatedTokensAfter: tokensAfter };
+  };
+  const { replacement, estimatedTokensAfter } = await buildReplacement();
+  // A trimmed checkpoint that would not help leaves history as it was, and
+  // the turn fails with the summary's own error, as it did without the fallback.
+  const trimDidNotHelp = async (outcome: string): Promise<never> => {
+    logCompactionTrimFallback(options.observability, scope, options.trigger, fallback!, outcome);
+    throw fallback!.error;
+  };
   const replacementHistory = replacement.history;
-  const estimatedTokensAfter = estimateTokens(
-    await projectForWire([...replacementHistory, ...deferredItems]),
-  );
   if (estimatedTokensAfter + prefixTokens > structuralBudget) {
+    if (fallback) return await trimDidNotHelp("replacement_exceeds_model_budget");
     // A model switch must not leave Codex's checkpoint in place. Throw rather
     // than settle: the caller settles the landmark and fails the turn.
     if (options.portableModelSwitch)
@@ -922,6 +1070,7 @@ async function compactContextPortable(
     (readReasoningConfiguration(replacementHistory.at(-1) ?? {}) ? 2 : 1);
   const summaryItem = replacementHistory[summaryIndex];
   if (!summaryItem) {
+    if (fallback) return await trimDidNotHelp("summarization_failed");
     // Started already fanout; settle visibly so the landmark cannot stick on
     // "Compacting…". This is not an operator-request clear path.
     if (options.portableModelSwitch)
@@ -935,11 +1084,16 @@ async function compactContextPortable(
   // context is no smaller than the transcript it summarizes.
   if (!options.portableModelSwitch) {
     if (previousReplacementFingerprint === replacementFingerprint) {
+      if (fallback) return await trimDidNotHelp("replacement_unchanged");
       return await settleSkippedAfterStart(db, scope, options, "replacement_unchanged");
     }
     if (estimatedTokensAfter >= estimatedTokensBefore) {
+      if (fallback) return await trimDidNotHelp("replacement_not_smaller");
       return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
     }
+  }
+  if (fallback) {
+    logCompactionTrimFallback(options.observability, scope, options.trigger, fallback, "trimmed");
   }
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
@@ -959,16 +1113,25 @@ async function compactContextPortable(
     ...foldedAgentPromptRevision(summarizedItems, options.agentPrompt),
     eventPayload: {
       trigger: options.trigger ?? "auto",
-      ...(options.portableModelSwitch
-        ? { implementation: PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION }
-        : {}),
+      ...(fallback
+        ? {
+            implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+            fallback: compactionTrimFallbackPayload(fallback),
+          }
+        : options.portableModelSwitch
+          ? { implementation: PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION }
+          : {}),
       estimatedTokensBefore,
       estimatedTokensAfter,
-      compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,
-      compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
-      compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
-      compactionInputProviderCalls: summarized.providerCalls,
-      ...(summarize.measureInputBytes
+      ...(summarized
+        ? {
+            compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,
+            compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
+            compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
+            compactionInputProviderCalls: summarized.providerCalls,
+          }
+        : {}),
+      ...(summarize.measureInputBytes && summarized
         ? { compactionDeferredHistoryItems: deferredItems.length }
         : {}),
       ...options.inputRecoveryPayload,

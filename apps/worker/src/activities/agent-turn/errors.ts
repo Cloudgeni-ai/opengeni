@@ -1390,6 +1390,17 @@ export function safeErrorForTelemetry(error: unknown): Error {
 export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
   "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
 
+/**
+ * The provider's own error message for a failed compaction request, bounded
+ * at capture. It is recorded only in the structured `providerMessage` field
+ * of the session's own events (readable by the same people as the
+ * conversation), never in the free-text `error`, which is also copied into
+ * workspace activity for automations, and never logged.
+ */
+export function compactionFailureProviderMessage(error: unknown): string | null {
+  return error instanceof CompactionProviderResponseError ? error.providerMessage : null;
+}
+
 export function compactionFailureReasonFromError(error: unknown): string {
   const rejection = compactionProviderRejection(error);
   if (rejection) {
@@ -1431,12 +1442,14 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  providerMessage?: string;
   quotaScope?: ProviderQuotaScope;
 } {
   const rejection = compactionProviderRejection(error);
   // The same closed marker as a `provider_quota_exhausted` turn failure, so
   // clients can name the exhausted limit and offer another model here too.
   const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
+  const providerMessage = compactionFailureProviderMessage(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -1444,6 +1457,7 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
     ...(quota ? { quotaScope: quota.scope } : {}),
   };
 }
