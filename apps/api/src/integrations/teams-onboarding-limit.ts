@@ -166,8 +166,7 @@ export class TeamsOnboardingLimiter implements TeamsOnboardingBudget {
   /**
    * Gives back one reply to the person's and tenant's windows, if they are
    * still current. The process's hourly count is kept: it bounds attempts, so
-   * replies Teams keeps refusing (such as throttling) can't retry without
-   * limit.
+   * replies Teams keeps refusing can't retry without limit.
    */
   private giveBack(counted: { actor: Window; tenant: Window | null }, now: number): void {
     if (counted.actor.count === 0 || now - counted.actor.start >= DAY_MS) return;
@@ -215,10 +214,10 @@ export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
   }
 
   async reserve(tenantId: string, actorId: string): Promise<TeamsOnboardingReservation | null> {
-    const [actor, ...rest] = this.windows(tenantId, actorId);
+    const { actor, tenant, overall } = this.windows(tenantId, actorId);
     let grant: TeamsOnboardingGrant | null;
     try {
-      grant = await reserveTeamsOnboardingReply(this.db, [actor!, ...rest]);
+      grant = await reserveTeamsOnboardingReply(this.db, [actor, tenant, overall]);
     } catch (error) {
       this.onError(error);
       // Given back to the store that counted it.
@@ -235,8 +234,8 @@ export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
         released = true;
         try {
           // The deployment's count is kept: it bounds attempts, so replies
-          // Teams keeps refusing (such as throttling) can't retry without limit.
-          await releaseTeamsOnboardingReply(this.db, grant, actor!, rest.slice(0, 1));
+          // Teams keeps refusing can't retry without limit.
+          await releaseTeamsOnboardingReply(this.db, grant, actor, [tenant]);
         } catch (error) {
           // The reservation then lapses with its window.
           this.onError(error);
@@ -245,20 +244,31 @@ export class DurableTeamsOnboardingBudget implements TeamsOnboardingBudget {
     };
   }
 
-  /** The person's window first, then the tenant's and the deployment's. */
-  private windows(tenantId: string, actorId: string): TeamsOnboardingWindow[] {
+  /** The person's, the tenant's and the deployment's windows. */
+  private windows(
+    tenantId: string,
+    actorId: string,
+  ): {
+    actor: TeamsOnboardingWindow;
+    tenant: TeamsOnboardingWindow;
+    overall: TeamsOnboardingWindow;
+  } {
     const tenant = tenantId.toLowerCase();
     const prefix = `teams-onboarding\n${this.name}`;
-    return [
-      {
+    return {
+      actor: {
         key: `${prefix}\nactor\n${tenant}\n${actorId.toLowerCase()}`,
         spanMs: DAY_MS,
         max: this.limits.actorDailyMax,
         cooldownMs: this.limits.actorCooldownMs,
       },
-      { key: `${prefix}\ntenant\n${tenant}`, spanMs: DAY_MS, max: this.limits.tenantDailyMax },
-      { key: `${prefix}\noverall`, spanMs: HOUR_MS, max: this.limits.overallHourlyMax },
-    ];
+      tenant: {
+        key: `${prefix}\ntenant\n${tenant}`,
+        spanMs: DAY_MS,
+        max: this.limits.tenantDailyMax,
+      },
+      overall: { key: `${prefix}\noverall`, spanMs: HOUR_MS, max: this.limits.overallHourlyMax },
+    };
   }
 }
 /**

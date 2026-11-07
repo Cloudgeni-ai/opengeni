@@ -260,10 +260,13 @@ the budget and the person, tenant or deployment, using the database clock, and
 removed once both the window's start and the last reply are two days old. A
 refused reply changes no existing row, and a window starts with its first
 reply. A replica that can't reach the database counts in its own memory until
-it can, so replies stay bounded and still go out. A reply Teams clearly never
-received (refused, throttled or unreachable) is given back to the person's and
-tenant's counts, once; the deployment's hourly count keeps it, so replies Teams
-keeps refusing can't retry without limit. An install's welcome is also claimed once in the database (see
+it can, so replies stay bounded and still go out. A reply Teams clearly refused
+or never received (a 4xx other than throttling, or unreachable) is given back to
+the person's and tenant's counts, once; the deployment's hourly count keeps it,
+so replies Teams keeps refusing can't retry without limit. A throttled reply
+(429) keeps every count: Teams throttles per conversation, so a person flooding
+their own chat is bounded by their own caps and can't use up other tenants'
+replies. Its redelivery then gets the short reminder. An install's welcome is also claimed once in the database (see
 [In-Teams experience](#in-teams-experience)).
 
 ### Entra app configuration

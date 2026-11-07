@@ -565,18 +565,20 @@ test("in an organization that hasn't connected Opengeni, a redelivered install g
   expect(await replicaB(install)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(1);
   expect(f.calls[0]!.activity.text).toContain("Your organization hasn't connected Opengeni yet.");
-  // Throttled: Teams is asked to redeliver, and the reply budget is given
-  // back in the database, so the redelivery sends the card.
+  // Throttled: Teams is asked to redeliver. The throttled card keeps its
+  // count, so a person flooding their own chat can't retry without limit, and
+  // the redelivery gets the short welcome.
   const throttled = personalInstall(f, crypto.randomUUID(), other);
   f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
   expect(await replicaA(throttled)).toEqual({ status: 503 });
   expect(await replicaA(throttled)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(2);
+  expect(f.calls[1]!.activity.text).toBe(`Welcome to Opengeni. ${TEAMS_CONNECT_REMINDER_TEXT}`);
   expect(f.outcomes).toEqual([
     "connect_link_sent",
     "welcome_duplicate",
     "onboarding_reply_failed",
-    "connect_link_sent",
+    "connect_reminder_sent",
   ]);
 });
 

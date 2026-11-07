@@ -322,6 +322,67 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       expect(JSON.stringify(call.activity)).not.toContain("teams_setup");
   });
 
+  test("a person whose replies Teams keeps throttling can't use up other tenants' replies", async () => {
+    const calls: string[] = [];
+    const app = {
+      api: {
+        fromServiceUrl: () => ({
+          conversations: {
+            createActivity: async (conversationId: string) => {
+              if (conversationId === "19:flooded")
+                throw Object.assign(new Error("throttled"), { response: { status: 429 } });
+              calls.push(conversationId);
+              return { id: "sent" };
+            },
+          },
+        }),
+      },
+    } as unknown as App;
+    const other = "30000000-0000-4000-8000-000000000007";
+    const deps = onboardingDeps({
+      teamsBotSelfServeSetupEnabled: true,
+      teamsBotAllowedTenantIds: [tenantId, other],
+    });
+    const budgets = budgetsOf(
+      new TeamsOnboardingLimiter({
+        actorCooldownMs: 60_000,
+        actorDailyMax: 2,
+        tenantDailyMax: 100,
+        overallHourlyMax: 10,
+        maxTrackedKeys: 100,
+      }),
+      new TeamsOnboardingLimiter({
+        actorCooldownMs: 0,
+        actorDailyMax: 3,
+        tenantDailyMax: 100,
+        overallHourlyMax: 10,
+        maxTrackedKeys: 100,
+      }),
+    );
+    const flooder = { ...message, conversationId: "19:flooded" };
+    const outcomes: string[] = [];
+    for (let attempt = 0; attempt < 50; attempt += 1)
+      outcomes.push(
+        await replyToUnconnectedTeamsTenant(deps, app, flooder, "message", budgets).catch(
+          () => "throttled",
+        ),
+      );
+    // Throttled replies keep their count, so the person's own caps bound them:
+    // one card (then its cooldown) and three reminders.
+    expect(outcomes.filter((outcome) => outcome === "throttled")).toHaveLength(4);
+    expect(outcomes.at(-1)).toBe("onboarding_reply_limited");
+    const elsewhere = {
+      ...message,
+      tenantId: other,
+      actorId: "30000000-0000-4000-8000-000000000008",
+      conversationId: "19:elsewhere",
+    };
+    expect(await replyToUnconnectedTeamsTenant(deps, app, elsewhere, "message", budgets)).toBe(
+      "connect_link_sent",
+    );
+    expect(calls).toEqual(["19:elsewhere"]);
+  });
+
   test("a reinstall within a day gets a short welcome once its card is used up", async () => {
     const { app, calls } = transport();
     const deps = onboardingDeps({ teamsBotSelfServeSetupEnabled: true });

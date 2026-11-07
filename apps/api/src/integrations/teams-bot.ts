@@ -486,7 +486,10 @@ export async function replyToUnconnectedTeamsTenant(
 }
 /**
  * Sends a reserved reply, giving the reservation back when Teams clearly
- * never received it, so a redelivery can still answer.
+ * refused it, so a redelivery can still answer. A throttled reply keeps its
+ * count: Teams throttles per conversation, so a person flooding their own chat
+ * could otherwise retry without limit and use up the shared budgets. Their own
+ * caps bound those retries, and a redelivery falls back to the short reminder.
  */
 async function sendReserved(
   reservation: TeamsOnboardingReservation,
@@ -495,7 +498,8 @@ async function sendReserved(
   try {
     await reply();
   } catch (error) {
-    if (teamsSendFailure(error).refused)
+    const failure = teamsSendFailure(error);
+    if (failure.refused && !failure.throttled)
       await reservation.release().catch(() => {
         // The reservation then lapses with its window.
       });
@@ -678,7 +682,9 @@ async function welcomeTeamsInstall(
   try {
     result = await sendTeamsInstallWelcome(deps, app, install, attempt);
   } catch (error) {
-    const failure = attempt.sending ? teamsSendFailure(error) : { refused: true, retry: true };
+    const failure = attempt.sending
+      ? teamsSendFailure(error)
+      : { refused: true, retry: true, throttled: false };
     const outcome = attempt.connected ? "welcome_failed" : "onboarding_reply_failed";
     if (!failure.refused) return { outcome, status: 200 };
     // A redelivery can only send once the claim is back; otherwise the claim
@@ -700,21 +706,29 @@ async function welcomeTeamsInstall(
   return { outcome: result.outcome, status: 200 };
 }
 /**
- * Whether a failed Teams send clearly didn't reach the person (`refused`), and
- * whether Teams redelivering the activity could help (`retry`). A send that may
- * have arrived, such as a timeout, a reset connection or a Teams 5xx, is
- * neither.
+ * Whether a failed Teams send clearly didn't reach the person (`refused`),
+ * whether Teams redelivering the activity could help (`retry`), and whether
+ * Teams throttled it (`throttled`). A send that may have arrived, such as a
+ * timeout, a reset connection or a Teams 5xx, is none of these.
  */
-function teamsSendFailure(error: unknown): { refused: boolean; retry: boolean } {
+function teamsSendFailure(error: unknown): {
+  refused: boolean;
+  retry: boolean;
+  throttled: boolean;
+} {
   const e = error as { response?: { status?: unknown }; code?: unknown } | null | undefined;
   const httpStatus = e?.response?.status;
   if (typeof httpStatus === "number")
-    return { refused: httpStatus >= 400 && httpStatus < 500, retry: httpStatus === 429 };
+    return {
+      refused: httpStatus >= 400 && httpStatus < 500,
+      retry: httpStatus === 429,
+      throttled: httpStatus === 429,
+    };
   const code = e?.code;
   // Thrown before any request, such as a rejected service URL.
-  if (typeof code !== "string") return { refused: true, retry: false };
+  if (typeof code !== "string") return { refused: true, retry: false, throttled: false };
   const unsent = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code);
-  return { refused: unsent, retry: unsent };
+  return { refused: unsent, retry: unsent, throttled: false };
 }
 /** What an organization that hasn't connected may have been sent. */
 const UNCONNECTED_DELIVERED: ReadonlySet<TeamsUnconnectedOutcome> = new Set([
