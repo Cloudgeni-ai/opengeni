@@ -814,6 +814,29 @@ export function isNewSessionDraftConflict(cause: unknown): boolean {
   );
 }
 
+/**
+ * The draft revision the server held when it refused a Send as a draft
+ * conflict, or undefined when the refusal does not say (an older server).
+ * Equal to the revision this Send just saved, it means nothing else changed
+ * the draft: the Send and its own draft disagree, and a retry cannot help.
+ */
+export function newSessionDraftConflictRevision(cause: unknown): number | undefined {
+  if (!isNewSessionDraftConflict(cause)) return undefined;
+  const error = cause as OpenGeniApiError;
+  const detailed = error.details?.["currentRevision"];
+  if (typeof detailed === "number") return detailed;
+  try {
+    const body = JSON.parse(error.body) as {
+      currentRevision?: unknown;
+      error?: { currentRevision?: unknown };
+    };
+    const revision = body.currentRevision ?? body.error?.currentRevision;
+    return typeof revision === "number" ? revision : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
