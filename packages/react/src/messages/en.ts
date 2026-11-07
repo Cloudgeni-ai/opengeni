@@ -2115,6 +2115,12 @@ export const englishMessages = {
     "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
   "lib.format.modelPolicyRefused":
     "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+  "lib.format.repositoryUnavailable":
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+  "lib.format.repositoriesUnavailable":
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+  "lib.format.someRepositoryUnavailable":
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
     "This model can't run at the selected speed. Choose another speed. Your message is saved.",

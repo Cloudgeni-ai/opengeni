@@ -170,6 +170,7 @@ import {
   databaseUnavailableHttpError,
   modelPolicyRefusedHttpError,
   modelUnavailableHttpError,
+  githubRepositoryUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
   missingPermissionHttpError,
@@ -2724,6 +2725,7 @@ export function createAppComposition(
             agentConfigHttpError(rawError) ??
             modelUnavailableHttpError(rawError) ??
             modelPolicyRefusedHttpError(rawError) ??
+            githubRepositoryUnavailableHttpError(rawError) ??
             connectionAccountSelectionHttpError(rawError) ??
             (rawError instanceof UnsupportedLatencyModeError
               ? new ApiHttpError(422, {

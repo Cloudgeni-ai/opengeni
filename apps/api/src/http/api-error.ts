@@ -8,6 +8,7 @@ import {
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
+  GitHubRepositoryUnavailableError,
   ModelPolicyRefusedError,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
@@ -414,6 +415,30 @@ export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
+  });
+}
+
+/**
+ * GitHub App repositories the workspace can no longer use. The same 422
+ * `validation_failed` with its historical message, plus
+ * `details.code: "github_repository_unavailable"` and the repositories, so
+ * clients can say which repository to remove or restore instead of "check
+ * your input".
+ */
+export function githubRepositoryUnavailableHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof GitHubRepositoryUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof GitHubRepositoryUnavailableError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, repositories: [...cause.repositories] },
   });
 }
 
