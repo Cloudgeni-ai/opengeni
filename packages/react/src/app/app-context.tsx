@@ -251,8 +251,8 @@ export type AppContextValue = {
       instructions?: string | undefined;
       /** Installed session-selected Skills to freeze onto this exact session. */
       installedSkillIds?: string[] | undefined;
-      /** Start the chat as a bot: its name, description and avatar, kept live. */
-      bot?: import("./lib/session-create").NewSessionBotProfile | undefined;
+      /** Start the chat with an agent: it follows the agent's Instructions and shows its icon. */
+      agent?: import("./lib/session-create").NewSessionAgent | undefined;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[] | undefined;
       newSessionDraftToolPolicy?:

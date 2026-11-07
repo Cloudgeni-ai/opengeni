@@ -91,7 +91,7 @@ function appContext(permissions: string[] = ["sessions:control"]) {
 
 const REFERENCE = "163bc913-264d-4d38-a0b5-2e4e955eecdb";
 const KEPT_ACTIVE_SENTENCE =
-  "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.";
+  "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.";
 function blocked(
   blockers: Array<{ kind: string; sessionId: string }>,
   message = KEPT_ACTIVE_SENTENCE,
@@ -431,7 +431,7 @@ test("Undo says so when Keep this chat active can't be turned back on", async ()
     [
       "warning",
       "Archive undone, but “Keep this chat active” is still off.",
-      "Turn it on in the chat's Agent tab.",
+      "Turn it on in the chat's Settings tab.",
     ],
   ]);
 });

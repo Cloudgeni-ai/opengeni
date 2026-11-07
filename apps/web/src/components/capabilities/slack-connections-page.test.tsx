@@ -22,7 +22,10 @@ const served: Record<string, unknown> = {
   connectTransport: () => ({}),
   listAvailableOpenGeniSlackBots: botLoads,
   listOpenGeniSlackAgents: async () => ({ agents: [], routingEnabled: true }),
+  listAgents: async () => agentsInSlack,
 };
+let agentsInSlack: unknown[] = [];
+const navigations: unknown[] = [];
 // Anything else the page asks for is refused, as a server without it would.
 const client = new Proxy(served, {
   get: (target, property) =>
@@ -58,7 +61,16 @@ mock.module("sonner", () => ({
   toast: Object.assign(() => undefined, { success: () => undefined, error: () => undefined }),
 }));
 
-const { SlackConnectionsPage } = await import("./slack-connections-page");
+// Keep every real export; only navigation is recorded.
+const navigation = await import("@opengeni/react/app/lib/navigation");
+mock.module("@opengeni/react/app/lib/navigation", () => ({
+  ...navigation,
+  useNavigate: () => async (options: unknown) => {
+    navigations.push(options);
+  },
+}));
+
+const { SlackConnectionsPage, SLACK_AGENTS_MOVED_HERE } = await import("./slack-connections-page");
 
 afterAll(() => {
   mock.restore();
@@ -78,36 +90,36 @@ function button(host: ParentNode, label: string) {
   return match;
 }
 
-test("after the Slack workspaces fail to load, Create agent opens a form that says why and retries", async () => {
-  const refresh = mock(async () => undefined);
+function renderPage(refresh: () => Promise<void>) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () =>
-    root.render(
-      <SlackConnectionsPage
-        workspaceId={WORKSPACE_ID}
-        items={[]}
-        connections={null}
-        connectionsLoadFailed
-        bindings={[]}
-        refresh={refresh}
-        onRuntimeChanged={() => undefined}
-        onBack={() => undefined}
-      />,
-    ),
+  const page = (
+    <SlackConnectionsPage
+      workspaceId={WORKSPACE_ID}
+      items={[]}
+      connections={null}
+      connectionsLoadFailed
+      bindings={[]}
+      refresh={refresh}
+      onRuntimeChanged={() => undefined}
+      onBack={() => undefined}
+    />
   );
+  return { host, root, page };
+}
+
+test("after the Slack workspaces fail to load, the page says why and Retry loads both again", async () => {
+  const refresh = mock(async () => undefined);
+  const { host, root, page } = renderPage(refresh);
+  await act(async () => root.render(page));
   await settle();
   // Not "Add a Slack workspace": nothing says there is none.
   expect(host.textContent).toContain("Couldn't load all Slack connections");
-  expect(host.textContent).not.toContain("Add a Slack workspace to create Slack agents.");
-
-  await act(async () => button(host, "Create agent").click());
-  await settle();
-  expect(host.textContent).toContain("New Slack agent");
-  expect(host.textContent).toContain("Couldn't load all Slack connections");
   expect(host.textContent).not.toContain("Add a Slack workspace");
-  expect(button(host, "Create agent").disabled).toBe(true);
+  // Slack agents moved to Agents; nothing here creates one.
+  expect(host.textContent).not.toContain("Create agent");
+  expect(host.textContent).not.toContain(SLACK_AGENTS_MOVED_HERE);
 
   // Retry loads both again: the shared bots and this workspace's connections.
   const loadsBefore = botLoads.mock.calls.length;
@@ -121,6 +133,20 @@ test("after the Slack workspaces fail to load, Create agent opens a form that sa
   await settle();
   expect(botLoads.mock.calls.length).toBe(loadsBefore + 1);
   expect(refresh).toHaveBeenCalledTimes(1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("when an agent is in Slack, a notice says Slack agents are now agents and opens Agents", async () => {
+  agentsInSlack = [{ id: "a1", name: "Release manager", slack: [{ handle: "releases" }] }];
+  const { host, root, page } = renderPage(async () => undefined);
+  await act(async () => root.render(page));
+  await settle();
+  expect(host.textContent).toContain(SLACK_AGENTS_MOVED_HERE);
+  await act(async () => button(host, "Open Agents").click());
+  expect(navigations).toEqual([
+    { to: "/workspaces/$workspaceId/agents", params: { workspaceId: WORKSPACE_ID } },
+  ]);
   await act(async () => root.unmount());
   host.remove();
 });

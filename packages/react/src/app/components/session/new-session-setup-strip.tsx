@@ -26,8 +26,8 @@ import { ProjectGlyph } from "../rail/project-glyph";
 import type { RunsOnChoices } from "./new-session-settings-menu";
 
 /*
- * The strip above a new chat's message: where the chat is filed (its project),
- * where it runs and who can see it. Each chip shows only when there is
+ * The strip above a new chat's message: who answers (Opengeni or an agent),
+ * where the chat is filed (its project), where it runs and who can see it. Each chip shows only when there is
  * something to choose, so the composer's footer stays an action row.
  */
 
@@ -49,11 +49,17 @@ export type SessionSetupSetting = {
 // per-chat settings live under “+” at every width.
 export function SessionSetupStrip({
   disabled,
+  agent,
+  agentError,
   project,
   runsOn,
   visibility,
 }: {
   disabled: boolean;
+  /** Who answers: the agent chip, first in the strip. */
+  agent?: ReactNode | undefined;
+  /** Why the chosen agent can't start this chat, under the chips. */
+  agentError?: string | null | undefined;
   project: {
     channels: Channel[];
     selectedChannelId: string | null;
@@ -71,6 +77,7 @@ export function SessionSetupStrip({
       // to a letter; one chip longer than the row still truncates.
       className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4"
     >
+      {agent}
       {project ? (
         <SessionFolderPicker
           channels={project.channels}
@@ -82,6 +89,15 @@ export function SessionSetupStrip({
       ) : null}
       {runsOn ? <SessionSetupChip setting={runsOn} /> : null}
       {visibility ? <SessionSetupChip setting={visibility} /> : null}
+      {agentError ? (
+        <p
+          role="alert"
+          className="m-0 basis-full text-xs leading-4 text-danger"
+          data-agent-error=""
+        >
+          {agentError}
+        </p>
+      ) : null}
     </div>
   );
 }

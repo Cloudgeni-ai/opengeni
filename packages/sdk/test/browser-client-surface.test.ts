@@ -192,20 +192,24 @@ const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 // browser consumer lands; the exact equality below enforces the handoff.
 const pendingBillingAlertMethods = ["listBillingCreditNotifications"];
 
-// The Agents API landed before its app UI (the Agents page and agent chats).
-// Remove each entry when its browser consumer lands (the equality below enforces it).
-const pendingAgentsMethods = [
-  "createAgent",
-  "deleteAgent",
-  "deleteAgentSlackAvailability",
-  "getAgent",
-  "listAgentChats",
-  "listAgentRevisions",
-  "listAgentSlackChannels",
-  "listAgentSlackInstalls",
-  "listAgents",
-  "postAgentSlackIntro",
-  "putAgentSlackAvailability",
+// The Agents page has no revision history view yet; agent revisions are read
+// by SDK callers. Remove the entry when a browser consumer lands.
+const pendingAgentsMethods = ["listAgentRevisions"];
+
+// The Agents page replaced the Bot templates and Slack agents screens, so the
+// web calls the /agents methods instead. The legacy methods stay on the SDK for
+// existing callers until the contract step removes them.
+const retiredLegacyAgentScreenMethods = [
+  "createBotTemplate",
+  "createOpenGeniSlackAgent",
+  "deleteBotTemplate",
+  "deleteOpenGeniSlackAgent",
+  "getBotTemplate",
+  "listBotTemplates",
+  "listOpenGeniSlackAgentChannels",
+  "postOpenGeniSlackAgentIntro",
+  "updateBotTemplate",
+  "updateOpenGeniSlackAgent",
 ];
 
 // Chat share links: the public share page reads a link without the SDK (no
@@ -296,6 +300,7 @@ describe("browser client runtime surface", () => {
         ...pendingModelAccountMethods,
         ...pendingBillingAlertMethods,
         ...pendingAgentsMethods,
+        ...retiredLegacyAgentScreenMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),

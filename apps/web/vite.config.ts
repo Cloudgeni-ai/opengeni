@@ -680,6 +680,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The meetings model and the on-screen meeting signal are read by
+              // the Meetings pages, the lazy command-menu actions and dictation
+              // settings, never by a direct session load. Entry-aware merging
+              // otherwise folds them in beside the session's archive helpers, so
+              // a direct session downloads them for nothing.
+              name: "meetings-model",
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings-model|meetings[\\/]meeting-on-screen)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.

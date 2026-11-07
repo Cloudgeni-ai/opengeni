@@ -1877,7 +1877,7 @@ navigation, including old Files, Skills, Memory and Documents links (a Documents
 home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
-chat's override in the session dock's Agent tab beside its identity and
+chat's override in the session dock's Settings tab beside its identity and
 capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
@@ -3247,6 +3247,7 @@ Topics: [`README.md`](README.md).
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
 | Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql` | [`agents.md`](agents.md) |
+| Agents in the app: Agents page, agent page and form, composer agent chip, chat header chip, Slack availability | `packages/react/src/app/components/agents/`, `packages/react/src/app/lib/agents.tsx`, `packages/react/src/app/lib/composer-agent.tsx`, `packages/react/src/app/lib/session-agent.ts`, `apps/web/src/routes/agents.tsx`, `apps/web/src/components/agents/` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |

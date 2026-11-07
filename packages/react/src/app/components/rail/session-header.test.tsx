@@ -4,6 +4,8 @@ import { act, type ReactNode } from "react";
 import { createRoot as createReactRoot } from "react-dom/client";
 
 import { AppContext, type AppContextValue } from "../../app-context";
+import { AppHostProvider, type AppHost } from "../../lib/app-host";
+import { useMemoryNavigation } from "../../embed/memory-navigation";
 import type { Session } from "../../types";
 
 import { SessionHeader } from "./session-header";
@@ -584,36 +586,80 @@ test("other payment rails keep the maker's logo and never show an account contro
   }
 });
 
-test("a chat started for a Slack agent names the agent beside its title", async () => {
+function MemoryHost({ children }: { children: ReactNode }) {
+  const navigation = useMemoryNavigation({
+    initialPath: "/workspaces/workspace-1/sessions/session-1",
+    consoleOrigin: "https://app.example.test",
+    handles: () => true,
+  });
+  return <AppHostProvider host={{ navigation } as unknown as AppHost}>{children}</AppHostProvider>;
+}
+
+const agentReads: string[] = [];
+const agentContext = {
+  accessContext: { subjectId: "user-me" },
+  client: {
+    getAgent: async (_workspaceId: string, agentId: string) => {
+      agentReads.push(agentId);
+      return { name: "Data desk", avatar: null };
+    },
+  },
+} as unknown as AppContextValue;
+
+test("a chat with an agent names it beside its title, says where it started, and links to it", async () => {
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
-  const render = (metadata: Record<string, unknown>) => (
-    <SessionHeader
-      session={{ ...session, metadata } as Session}
-      ancestors={[]}
-      connectionState="live"
-      status="idle"
-      keyAuthRequired={false}
-      onForgetAccessKey={() => undefined}
-      inspectorOpen={false}
-      onRename={async () => null}
-      onPin={async () => null}
-    />
+  const reads = agentReads;
+  const context = agentContext;
+  const root = createReactRoot(container);
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const render = (patch: Partial<Session> & { agentId?: string | null }) => (
+    <MemoryHost>
+      <AppContext.Provider value={context}>
+        <SessionHeader
+          session={{ ...session, ...patch } as Session}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onRename={async () => null}
+          onPin={async () => null}
+        />
+      </AppContext.Provider>
+    </MemoryHost>
   );
   try {
+    // A Slack chat: the chat's own record names the agent until it loads.
     await act(async () =>
       root.render(
         render({
-          slackAgent: { id: "11111111-1111-4111-8111-111111111111", name: "Data team" },
-        }),
+          agentId,
+          metadata: { slackAgent: { id: agentId, name: "Data team" } },
+          createdBy: { kind: "subject", subjectId: "user-kari", label: "Kari" },
+        } as Partial<Session>),
       ),
     );
-    const chip = container.querySelector("[data-session-slack-agent]");
-    expect(chip?.textContent).toBe("Slack agent: Data team");
+    const chip = container.querySelector("[data-session-agent]");
+    // No "Slack agent:" prefix: just the agent, by its current name.
+    expect(chip?.textContent).toBe("Data desk");
+    expect(reads).toEqual([agentId]);
+    expect(chip?.closest("a")?.getAttribute("href")).toContain(`/agents/${agentId}`);
     expect(chip?.closest("[data-session-title-row]")).not.toBeNull();
-    await act(async () => root.render(render({})));
-    expect(container.querySelector("[data-session-slack-agent]")).toBeNull();
+    expect(container.querySelector("[data-session-source]")?.textContent).toBe(
+      "Started in Slack by Kari",
+    );
+
+    // A chat started here with an agent: the chip, no source line.
+    await act(async () => root.render(render({ agentId, metadata: {} })));
+    expect(container.querySelector("[data-session-agent]")?.textContent).toBe("Data desk");
+    expect(container.querySelector("[data-session-source]")).toBeNull();
+
+    // An ordinary chat: neither.
+    await act(async () => root.render(render({ agentId: null, metadata: {} })));
+    expect(container.querySelector("[data-session-agent]")).toBeNull();
+    expect(container.querySelector("[data-session-source]")).toBeNull();
   } finally {
     await act(async () => root.unmount());
     container.remove();

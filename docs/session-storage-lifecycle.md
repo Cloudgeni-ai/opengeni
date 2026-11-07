@@ -296,7 +296,7 @@ session is archived.
   pointing at it; the composer is not shown. While a restore runs, the notice
   says the content is coming back, and the chat opens for new messages once
   it is live.
-- The chat's Agent tab has a "Keep this chat active" switch (keep-live) under
+- The chat's Settings tab has a "Keep this chat active" switch (keep-live) under
   Storage, shown only when the deployment archives idle sessions
   (`ClientConfig.sessionArchive`, present when archiving is enabled and object
   storage is configured).

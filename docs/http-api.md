@@ -102,7 +102,7 @@ limits like any goal (see [goals](goals.md#unattended-single-requests)). Pass
 Session reads include `unattended`, whether the next turns run unattended.
 `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` with
 `{ "unattended": true | false }` turns it on or off from the next turn (the
-chat's **Work without me** switch in the Agent tab uses the same call; SDK
+chat's **Work without me** switch in the Settings tab uses the same call; SDK
 `updateSessionUnattended`). The switch changes only whether a person is waited
 for: while it is on, a call that needs approval is refused as above, and a
 question or hand-off to a person returns at once with a result saying no one

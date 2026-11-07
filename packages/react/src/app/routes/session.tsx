@@ -159,12 +159,12 @@ import {
 import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
 import {
-  BotIcon,
   BugIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
+  SettingsIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -1389,7 +1389,7 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
-  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning;
+  // Composer + > Chat settings opens the dock's Settings tab at its Agent learning;
   // the header menu and the usage limit notice open it at Usage limit.
   const agentSettingsRequestSeq = useRef(0);
   const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
@@ -1596,7 +1596,7 @@ export function SessionRoute({
       onReloadSession={refreshSession}
       // A file link opens the session panel's Files tab; without the panel it is plain text.
       onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
-      // Both open the session panel's Agent tab; without the panel, neither shows.
+      // Both open the session panel's Settings tab; without the panel, neither shows.
       onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
       onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
       connectionState={connectionState}
@@ -1749,7 +1749,7 @@ type SessionDockProps = {
       }
     | null
     | undefined;
-  /** Open the Agent tab at Agent learning or Usage limit. A new requestId reopens it. */
+  /** Open the Settings tab at Agent learning or Usage limit. A new requestId reopens it. */
   openAgentSettingsRequest?:
     | { requestId: number; target: "learning" | "usage-limit" }
     | null
@@ -1930,10 +1930,10 @@ function SessionDockPanel(props: SessionDockProps) {
   if (props.session) {
     trailingTabs.push({
       id: "agent",
-      label: "Agent",
-      icon: <BotIcon />,
+      label: "Settings",
+      icon: <SettingsIcon />,
       content: (
-        <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
@@ -2242,9 +2242,9 @@ function SessionChatPane(props: {
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
-  /** Composer + > Chat settings: open this chat's Agent tab. */
+  /** Composer + > Chat settings: open this chat's Settings tab. */
   onOpenAgentSettings: (() => void) | undefined;
-  /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
+  /** The usage limit notice's Change limit: open the Settings tab at Usage limit. */
   onOpenUsageLimit: (() => void) | undefined;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
@@ -3416,7 +3416,7 @@ function SessionChatPane(props: {
     });
   }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
 
-  // The task's usage limit: one live read shared with the Agent tab, and the
+  // The task's usage limit: one live read shared with the Settings tab, and the
   // calm composer notice near and at the limit. Enforcement is server-side;
   // this only keeps the view fresh.
   const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);

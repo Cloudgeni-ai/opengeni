@@ -299,12 +299,12 @@ describe("auto-connect words", () => {
   });
 });
 
-describe("auto-connect on Connected agents", () => {
+describe("auto-connect on Connected apps", () => {
   test("members don't see it, and nothing is asked for", async () => {
     const { api, calls } = fakeAutoConnect([issuer()]);
     const view = await mount({ issuers: api, canManageAll: false });
     try {
-      expect(view.text()).toContain("Your agents");
+      expect(view.text()).toContain("Your apps");
       expect(view.text()).not.toContain("Auto-connect");
       expect(calls.some((call) => call.method === "list")).toBe(false);
     } finally {

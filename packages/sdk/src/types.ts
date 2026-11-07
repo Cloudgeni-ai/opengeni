@@ -4093,6 +4093,12 @@ export type CreateSessionRequest = {
    */
   unattended?: boolean | undefined;
   /**
+   * Start the chat with an agent the caller can use: it follows the agent's
+   * current Instructions. Its First message is not sent; the app puts it in
+   * the composer instead.
+   */
+  agentId?: string | undefined;
+  /**
    * The new chat's name, description and avatar, as if a person set them (a
    * bot started from a template, for example). Display metadata only; never
    * sent to the model.

@@ -266,6 +266,44 @@ own Knowledge collection and its chats may read its other shared chats
 - Make the old Slack agent `DELETE` turn Slack off instead of deleting the
   agent, once nothing older depends on it.
 
+## App
+
+The sidebar's **Agents** page (`/workspaces/:id/agents`) replaces **Bot
+templates** and the Slack agents list; `/bot-templates` redirects there.
+
+- Agents page: All / Yours, one row per agent (icon, name, what it helps with,
+  an Only me or Slack badge), **New agent** and **Import** (`.agent.json`, or an
+  older `.bot.json` whose setup instructions become the First message). Banners
+  say that templates and Slack agents became agents (shown when such agents
+  exist, dismissible per browser), and a notice suggests renaming when names
+  repeat.
+- Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
+  file with its name, icon, description, Instructions, First message and Memory
+  switch; no ids, chats, Memory contents or Slack), its chats (Yours /
+  Everyone's, each marked with where it started), Instructions, First message,
+  **Remember across chats**, who can use it, and **Available in**: the app
+  always, and one row per connected Slack workspace (`@Opengeni +handle`, open
+  use, **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`).
+  While an agent is on in one Slack workspace, the others' switches are off
+  with a reason (`agent_slack_single_install`). Controls follow the agent's
+  `viewer` access.
+- Form: only the name is required. Lengths are checked on save with a count
+  near each limit, never cut while typing. **Only me** is off with a reason
+  where Only me chats aren't available.
+- Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and
+  **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. A
+  chosen agent's First message fills the composer; the chat starts with
+  `agentId` (`app/lib/composer-agent.tsx`). Send waits while the agent loads;
+  an agent that failed to load, or an Only me agent where Only me chats aren't
+  available, shows why on the chip and blocks Send. An untouched First message
+  is not saved in the server-side draft, so another tab or device never sees
+  it without its agent. An Only me agent makes the chat Only me (Workspace is
+  off with a reason) and going back restores the earlier choice.
+- Agent chats show the agent's icon and name beside the title and a source
+  line such as "Started in Slack by Kari". **Make this an agent** in the chat
+  header's ⋯ menu opens a new agent prefilled from the chat's name, icon,
+  description and instructions.
+
 ## Release plan
 
 1. Expand: tables, session columns, backfill, sync triggers,
