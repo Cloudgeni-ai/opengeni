@@ -24,6 +24,7 @@ import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
   getActorNewSessionModelChoice,
+  getActorNewSessionStartChoices,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -618,8 +619,9 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
-    // Only the chosen model policy is reused by surfaces that start work
-    // without the composer; the draft's resources and tools are its own
+    // Surfaces that start work without the composer reuse the chosen model
+    // policy and the form's repositories (revoked ones already dropped, form
+    // order kept); the draft's other resources and tools are its own
     // narrowing and never leak into them.
     const choice = await getActorNewSessionModelChoice({ db, settings }, grant, workspaceId);
     expect(choice).toEqual({
@@ -627,12 +629,21 @@ describe("core new-session draft hydration", () => {
       reasoningEffort: "high",
       latencyMode: "fast",
     });
+    const start = await getActorNewSessionStartChoices({ db, settings }, grant, workspaceId);
+    expect(start).toEqual({ modelChoice: choice, repositories: [resources[0], resources[2]] });
     const other = await getActorNewSessionModelChoice(
       { db, settings },
       { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
       workspaceId,
     );
     expect(other).toEqual({});
+    expect(
+      await getActorNewSessionStartChoices(
+        { db, settings },
+        { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
+        workspaceId,
+      ),
+    ).toEqual({ modelChoice: {}, repositories: [] });
   }, 180_000);
 
   test("keeps an organization machine connected from another workspace", async () => {

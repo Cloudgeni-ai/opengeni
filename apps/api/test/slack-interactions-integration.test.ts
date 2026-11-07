@@ -7821,6 +7821,90 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     );
   });
 
+  test("an empty new-chat form starts a Slack task without repositories, whatever was used recently", async () => {
+    if (!available) return;
+    const value = await fixture({
+      ownerPermissions: ["sessions:create", "sessions:read", "sessions:control", "github:use"],
+    });
+    await bindExampleGitHubInstallation(value.owner, value.owner.subjectId, [42]);
+    const catalog = { calls: 0 };
+    (value.deps as { githubAppApi?: ApiRouteDeps["githubAppApi"] }).githubAppApi = {
+      getInstallation: async ({ installationId }) => ({
+        installationId,
+        accountId: 7100,
+        accountLogin: "example-owner",
+        accountType: "User",
+        suspended: false,
+      }),
+      listRepositories: async () => {
+        catalog.calls += 1;
+        return [
+          {
+            id: 42,
+            installationId: 71,
+            fullName: "example-owner/project",
+            name: "project",
+            private: true,
+            htmlUrl: "https://github.com/example-owner/project",
+            cloneUrl: "https://github.com/example-owner/project.git",
+            defaultBranch: "main",
+            accountLogin: "example-owner",
+            accountType: "User",
+          },
+        ];
+      },
+    };
+    // The person worked on this repository in the app just now, but their
+    // new-chat form is empty, as a new chat in the app would start.
+    const ownerGrant = await getWorkspaceGrant(
+      client.db,
+      value.owner.subjectId,
+      value.owner.workspaceId,
+    );
+    await seedRecentSession(value.deps, ownerGrant!, [appRepository(42, "project")], 0);
+    await withWorkspaceSubjectRls(client.db, value.owner.workspaceId, value.owner.subjectId, (db) =>
+      saveNewSessionDraftInTransaction(db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        subjectId: value.owner.subjectId,
+        expectedRevision: 0,
+        text: "",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: value.deps.settings.openaiModel,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        options: {},
+      }),
+    );
+    catalog.calls = 0;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_EMPTY_FORM_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_EMPTY_FORM",
+            ts: "1764100000.000002",
+            text: "Check the project build",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [interaction] = await interactions(value.owner.workspaceId);
+    expect(interaction?.session_id).toBeTruthy();
+    const [session] = await shared!.admin<{ resources: unknown[] }[]>`
+      select resources from sessions where id = ${interaction!.session_id}`;
+    // Recent use no longer counts: no repositories, and GitHub is never asked.
+    expect(session!.resources).toEqual([]);
+    expect(catalog.calls).toBe(0);
+  });
+
   test("a GitHub outage starts a Slack task without repositories instead of failing it", async () => {
     if (!available) return;
     const value = await fixture({

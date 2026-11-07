@@ -41,14 +41,14 @@ function positiveRepositoryId(value: unknown): number | null {
  * Pick a Slack task's repositories: the repositories in the person's new-chat
  * form, in form order, that the workspace GitHub App catalog offers them.
  *
- * `form` is a selection signal only. A
- * repository reaches the task only through its current catalog entry (the
- * same catalog and `github:use` permission as the website picker), on its
- * default branch, so a Slack task never reaches a repository the person could
- * not attach on the website today. Archived and
- * empty repositories are skipped when GitHub reported that, because a clone of
- * an empty repository has nothing to check out. Every returned resource is
- * best effort (`optional`): one failed clone warns instead of failing setup.
+ * `form` is a selection signal only. A repository reaches the task only
+ * through its current catalog entry (the same catalog and `github:use`
+ * permission as the website picker), on its default branch, so a Slack task
+ * never reaches a repository the person could not attach on the website today.
+ * Archived and empty repositories are skipped when GitHub reported that,
+ * because a clone of an empty repository has nothing to check out. Every
+ * returned resource is best effort (`optional`): one failed clone warns instead
+ * of failing setup.
  */
 export function selectFormRepositoryResources(
   form: readonly RepositoryResourceRef[],

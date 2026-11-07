@@ -5331,12 +5331,11 @@ type SlackNewSessionDefaults = {
  * What a new Slack task starts with.
  *
  * A Slack message is not the website composer, so the person's last composer
- * selection (an explicit connector list, a compute target) never narrows
- * it. Connectors, first-party tools, Sandbox Environment and compute are left
- * to session creation, which applies the
- * workspace defaults and freezes the person's own connections through the
- * ordinary delegation snapshot. Repositories are those in the person's
- * new-chat form, as a new chat in the
+ * selection (an explicit connector list, a compute target) never narrows it.
+ * Connectors, first-party tools, Sandbox Environment and compute are left to
+ * session creation, which applies the workspace defaults and freezes the
+ * person's own connections through the ordinary delegation snapshot.
+ * Repositories are those in the person's new-chat form, as a new chat in the
  * app would start with, limited to what the workspace GitHub App offers them
  * and attached best effort. The model carries over only when explicitly
  * chosen, because choosing a model narrows nothing.
