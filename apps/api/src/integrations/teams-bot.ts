@@ -516,7 +516,8 @@ async function sendReserved(
     await reply();
   } catch (error) {
     const failure = teamsSendFailure(error);
-    if (failure.refused && !failure.throttled)
+    // A duplicate delivery sent nothing; the first delivery keeps its own count.
+    if (error instanceof TeamsDuplicateReply || (failure.refused && !failure.throttled))
       await reservation.release().catch(() => {
         // The reservation then lapses with its window.
       });
@@ -772,7 +773,10 @@ type TeamsReplies = {
  * that get no reply write nothing. When nothing of the delivery reached the
  * person and Teams clearly refused the send, the claim is given back so a
  * redelivery can answer. If the claim can't be made, the reply goes out
- * anyway: a rare repeat is better than silence.
+ * anyway: a rare repeat is better than silence. Only
+ * `api.fromServiceUrl(...).conversations.createActivity`, the send path of
+ * every reply helper here, is claimed; a helper that sends another way must
+ * be covered here too.
  */
 function teamsReplies(
   deps: ApiRouteDeps,
