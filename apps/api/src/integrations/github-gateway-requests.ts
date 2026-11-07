@@ -89,16 +89,19 @@ export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | nul
   );
 }
 
-/** A force update or deletion of the ref at `refs/{refPath}`. */
+/**
+ * A force update or deletion of the ref at `refs/{refPath}`. Only a path
+ * under `heads/` can follow the person's policy; any other path asks.
+ */
 function refRewrite(title: string, refPath: string[]): GitHubGatewayAction {
-  const path = refPath.join("/").replace(/^refs\//u, "");
+  const path = refPath.join("/");
   const action: Extract<GitHubGatewayAction, { kind: "write" }> = {
     kind: "write",
     tools: ["ref_create"],
     alwaysAsk: true,
     title,
   };
-  if (path) {
+  if (refPath[0] === "heads") {
     action.refRewrites = {
       targets: [{ kind: "name", ref: `refs/${path}` }],
       alwaysAskOtherwise: false,
@@ -226,10 +229,12 @@ function classifyRepositoryWrite(
         return write(["ref_create"], "Create branch or tag");
       if (method === "DELETE") return refRewrite("Delete branch or tag", rest.slice(2));
       if (method === "PATCH") {
+        // `force` counts unless it is absent or exactly false.
         const force =
           body !== null &&
           typeof body === "object" &&
-          (body as Record<string, unknown>).force === true;
+          Object.hasOwn(body, "force") &&
+          (body as Record<string, unknown>).force !== false;
         return force ? refRewrite("Force-update branch", rest.slice(2)) : routine("Update branch");
       }
     }
@@ -491,6 +496,8 @@ type GraphqlOperation = {
   type: "query" | "mutation" | "subscription";
   name: string | null;
   selections: GraphqlSelection[];
+  /** Variable defaults, which GitHub applies to variables the request omits. */
+  variableDefaults: Record<string, GraphqlValue>;
 };
 
 type GraphqlDocument = {
@@ -622,7 +629,12 @@ class GraphqlParser {
     const fragments = new Map<string, GraphqlSelection[]>();
     while (this.peek()) {
       if (this.isPunct("{")) {
-        operations.push({ type: "query", name: null, selections: this.parseSelectionSet(0) });
+        operations.push({
+          type: "query",
+          name: null,
+          selections: this.parseSelectionSet(0),
+          variableDefaults: {},
+        });
         continue;
       }
       const keyword = this.expectName();
@@ -639,29 +651,47 @@ class GraphqlParser {
       }
       let name: string | null = null;
       if (this.peek()?.kind === "name") name = this.expectName();
-      if (this.isPunct("(")) this.skipVariableDefinitions();
+      const variableDefaults = this.isPunct("(") ? this.parseVariableDefinitions() : {};
       this.skipDirectives();
-      operations.push({ type: keyword, name, selections: this.parseSelectionSet(0) });
+      operations.push({
+        type: keyword,
+        name,
+        selections: this.parseSelectionSet(0),
+        variableDefaults,
+      });
     }
     return { operations, fragments };
   }
 
-  private skipVariableDefinitions(): void {
+  /** `($name: Type = default @directive, ...)`: the defaults by variable name. */
+  private parseVariableDefinitions(): Record<string, GraphqlValue> {
     this.expectPunct("(");
-    let depth = 1;
-    while (depth > 0) {
-      const token = this.next();
-      if (
-        token.kind === "punct" &&
-        (token.value === "(" || token.value === "[" || token.value === "{")
-      )
-        depth += 1;
-      if (
-        token.kind === "punct" &&
-        (token.value === ")" || token.value === "]" || token.value === "}")
-      )
-        depth -= 1;
+    const defaults: Record<string, GraphqlValue> = {};
+    while (!this.isPunct(")")) {
+      this.expectPunct("$");
+      const name = this.expectName();
+      this.expectPunct(":");
+      this.skipType(0);
+      if (this.isPunct("=")) {
+        this.next();
+        defaults[name] = this.parseValue(1);
+      }
+      this.skipDirectives();
     }
+    this.expectPunct(")");
+    return defaults;
+  }
+
+  private skipType(depth: number): void {
+    if (depth > GRAPHQL_MAX_DEPTH) throw new Error("GraphQL document is too deep");
+    if (this.isPunct("[")) {
+      this.next();
+      this.skipType(depth + 1);
+      this.expectPunct("]");
+    } else {
+      this.expectName();
+    }
+    if (this.isPunct("!")) this.next();
   }
 
   private skipDirectives(): void {
@@ -908,7 +938,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > GRAPHQL_QUERY_MAX_BYTES) {
     return unknown("Unrecognised GitHub GraphQL request");
   }
-  const variables =
+  const requestVariables =
     record.variables && typeof record.variables === "object" && !Array.isArray(record.variables)
       ? (record.variables as Record<string, unknown>)
       : {};
@@ -925,6 +955,11 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       ? document.operations[0]
       : undefined;
   if (!operation) return unknown("Unrecognised GitHub GraphQL request");
+  // GitHub uses a variable's default when the request omits it.
+  const variables: Record<string, unknown> = { ...requestVariables };
+  for (const [name, value] of Object.entries(operation.variableDefaults)) {
+    if (!Object.hasOwn(requestVariables, name)) variables[name] = resolveValue(value, {});
+  }
 
   const repositories: Array<{ owner: string | null; name: string }> = [];
   // `owner` is the login of an enclosing organization/user/repositoryOwner
@@ -1026,8 +1061,12 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       args.input !== null && typeof args.input === "object" && !Array.isArray(args.input)
         ? (args.input as Record<string, unknown>)
         : undefined;
+    // `force` counts unless it is exactly false, and an input the gateway
+    // can't read is treated as a rewrite it can't confirm.
+    const forced = (update: Record<string, unknown> | undefined) =>
+      update === undefined || (Object.hasOwn(update, "force") && update.force !== false);
     if (field.name === "deleteRef" || field.name === "updateRef") {
-      const rewrite = field.name === "deleteRef" || input?.force === true;
+      const rewrite = field.name === "deleteRef" || forced(input);
       if (rewrite) {
         if (typeof input?.refId === "string") {
           rewriteTargets.push({ kind: "node", refNodeId: input.refId });
@@ -1049,7 +1088,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       // A ref whose `afterOid` is all zeros is deleted.
       const deletes = (update: Record<string, unknown>) =>
         typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid);
-      const rewrites = records.filter((update) => deletes(update) || update.force === true);
+      const rewrites = records.filter((update) => deletes(update) || forced(update));
       for (const update of rewrites) {
         if (typeof update.name === "string" && typeof input?.repositoryId === "string") {
           rewriteTargets.push({

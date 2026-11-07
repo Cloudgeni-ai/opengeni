@@ -406,11 +406,12 @@ tools use, so one setting covers both:
   follows the person's `Create and update work` policy, so agents can rebase
   their own pull request branches and delete merged ones. The gateway reads
   the default branch with the person's token (REST `default_branch`, kept for
-  five minutes per connection and repository, or the GraphQL Ref and
-  Repository nodes); when it can't confirm every ref is such a branch, the
-  request asks.
+  a minute per connection and repository, so a just-changed default branch
+  can take that long to apply; or the GraphQL Ref and Repository nodes, which
+  must belong to a repository the request was checked against); when it
+  can't confirm every ref is such a branch, the request asks.
 - Destructive or hard-to-undo requests always ask: deleting or force-updating
-  the default branch, deleting or moving tags, deleting repositories,
+  the default branch, deleting or force-moving tags, deleting repositories,
   releases, comments or other data; repository settings, collaborators and
   teams, secrets and variables, webhooks and deploy keys, branch protection,
   transfer, archive and visibility, approving deployments or fork workflow

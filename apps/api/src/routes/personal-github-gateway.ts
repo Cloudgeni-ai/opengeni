@@ -101,10 +101,10 @@ export type PersonalGitHubGatewayServices = {
   defaultBranches?: DefaultBranchCache;
 };
 
-/** Default branch by connection and repository, kept for a few minutes. */
+/** Default branch by connection and repository, kept for a minute. */
 export type DefaultBranchCache = Map<string, { branch: string; expiresAt: number }>;
 
-const DEFAULT_BRANCH_TTL_MS = 5 * 60_000;
+const DEFAULT_BRANCH_TTL_MS = 60_000;
 const DEFAULT_BRANCH_CACHE_MAX = 1_000;
 
 export type GatewayRepositoryCheck = {
@@ -534,7 +534,7 @@ async function resolveNodeRepositories(
 
 /**
  * A repository's default branch, read with the person's token and kept for a
- * few minutes. Null when GitHub does not say.
+ * minute. Null when GitHub does not say.
  */
 export async function repositoryDefaultBranch(
   services: Pick<
@@ -577,8 +577,8 @@ export async function repositoryDefaultBranch(
 const REF_TARGETS_QUERY = `query OpengeniGatewayRefs($ids: [ID!]!) {
   nodes(ids: $ids) {
     __typename
-    ... on Ref { name prefix repository { defaultBranchRef { name } } }
-    ... on Repository { defaultBranchRef { name } }
+    ... on Ref { name prefix repository { nameWithOwner defaultBranchRef { name } } }
+    ... on Repository { nameWithOwner defaultBranchRef { name } }
   }
 }`;
 
@@ -644,14 +644,16 @@ function alwaysAsk(action: GitHubGatewayAction): GitHubGatewayAction {
 
 /**
  * A force update or deletion asks unless every ref it touches is a branch
- * other than its repository's default branch; then the person's policy
- * decides. Anything the gateway can't confirm keeps asking.
+ * other than its repository's default branch, in a repository the gateway
+ * has already checked; then the person's policy decides. Anything the
+ * gateway can't confirm keeps asking.
  */
 async function applyRefRewritePolicy(
   services: PersonalGitHubGatewayServices,
   authority: PersonalGitHubGatewayAuthority,
   action: GitHubGatewayAction,
   repository: GitHubGatewayRepositoryRef | null,
+  checks: GatewayRepositoryCheck[],
 ): Promise<GitHubGatewayAction> {
   if (action.kind !== "write" || !action.refRewrites) return action;
   const { targets, alwaysAskOtherwise } = action.refRewrites;
@@ -668,6 +670,15 @@ async function applyRefRewritePolicy(
   ];
   const nodes = await graphqlRefNodes(services, authority, nodeIds);
   if (!nodes) return action;
+  const checked = new Set(
+    checks.flatMap((check) =>
+      check.access === "write" && check.repository.kind === "name"
+        ? [`${check.repository.owner}/${check.repository.name}`.toLowerCase()]
+        : [],
+    ),
+  );
+  const isChecked = (node: Record<string, unknown>) =>
+    typeof node.nameWithOwner === "string" && checked.has(node.nameWithOwner.toLowerCase());
   for (const target of targets) {
     let ref: string | null = null;
     let defaultBranch: string | null = null;
@@ -678,7 +689,8 @@ async function applyRefRewritePolicy(
         typeof node.prefix === "string" &&
         typeof node.name === "string" &&
         node.repository !== null &&
-        typeof node.repository === "object"
+        typeof node.repository === "object" &&
+        isChecked(node.repository as Record<string, unknown>)
       ) {
         ref = `${node.prefix}${node.name}`;
         defaultBranch = defaultBranchRefName(
@@ -687,7 +699,7 @@ async function applyRefRewritePolicy(
       }
     } else if (target.repositoryNodeId) {
       const node = nodes.get(target.repositoryNodeId);
-      if (node?.__typename === "Repository") {
+      if (node?.__typename === "Repository" && isChecked(node)) {
         ref = target.ref;
         defaultBranch = defaultBranchRefName(node.defaultBranchRef);
       }
@@ -800,7 +812,7 @@ export async function handlePersonalGitHubGatewayRequest(
   } catch (error) {
     return authorityError(error);
   }
-  action = await applyRefRewritePolicy(services, authority, action, restRepository);
+  action = await applyRefRewritePolicy(services, authority, action, restRepository, checks);
 
   let requestId: string | null = null;
   if (action.kind === "write") {
