@@ -10881,7 +10881,12 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       // A draft that follows the chat's settings is submitted without them.
       .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
-        expectedDraftRevision: primitives.positiveInteger,
+        // The draft revision this message was composed from. The message is
+        // never refused over the draft; once it is accepted the draft is
+        // cleared only while it is still at this revision or holds exactly what
+        // was sent. At this revision a withdrawn queued message is replaced.
+        // 0 means the sender saw no saved draft.
+        expectedDraftRevision: primitives.nonnegativeInteger,
         clientEventId: SessionOperationKey,
         delivery: SessionPromptDelivery,
         controlEtag: z.string().min(1).optional(),
@@ -20695,11 +20700,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // creation of a brand-new session. Absent means no create-dedup (each call
         // is an independent create).
         idempotencyKey: z.string().min(1).max(200).optional(),
-        // The exact actor-private pre-session draft revision represented by this
-        // create. An ordinary create consumes only this revision. A realtime create
-        // preserves the editable draft and atomically updates only successful-create
-        // selection history. A newer sibling draft survives, while every failed
-        // pre-initialization create leaves the submitted draft intact.
+        // The caller's new-chat draft revision this create was composed from. The
+        // create carries its own content and is never refused over the draft.
+        // Once an ordinary create is accepted, the draft is cleared only while it
+        // is still at this revision or holds exactly what was sent; a newer draft
+        // saved on another device stays. A realtime create keeps the editable
+        // draft and updates only successful-create selection history. A failed
+        // create leaves the draft intact.
         expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
         agentLearning: AgentLearningOverrides.optional(),
         // A child may lower its inherited limit freely; an increase requires

@@ -6,6 +6,7 @@ import {
   type StreamConnectionState,
   type WorkspaceControlEvent,
   type WorkspaceInteractionRevisionEvent,
+  type WorkspaceDraftsChangedEvent,
   type WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -107,6 +108,14 @@ export function OpenGeniProvider({
     useState<WorkspaceInteractionRevisionEvent | null>(null);
   const [workspaceSessionListEvent, setWorkspaceSessionListEvent] =
     useState<WorkspaceSessionListEvent | null>(null);
+  const [workspaceDraftsEvent, setWorkspaceDraftsEvent] =
+    useState<WorkspaceDraftsChangedEvent | null>(null);
+  // A hint not yet rendered absorbs the next one, so a burst handled in one
+  // batch still names every changed draft.
+  const pendingDraftsEventRef = useRef<WorkspaceDraftsChangedEvent | null>(null);
+  useEffect(() => {
+    pendingDraftsEventRef.current = null;
+  }, [workspaceDraftsEvent]);
   const [workspaceInteractionConnectionState, setWorkspaceInteractionConnectionState] = useState<
     StreamConnectionState | "idle" | "error"
   >("idle");
@@ -200,6 +209,7 @@ export function OpenGeniProvider({
     setWorkspaceControlEvent(null);
     setWorkspaceInteractionEvent(null);
     setWorkspaceSessionListEvent(null);
+    setWorkspaceDraftsEvent(null);
     if (!pageLive) {
       setWorkspaceControlConnectionState("idle");
       setWorkspaceInteractionConnectionState("idle");
@@ -251,6 +261,20 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             interactionCallbackRef.current?.(event);
+          } else if (event.type === "workspace.drafts.changed") {
+            if (event.workspaceId === workspaceId) {
+              const pending = pendingDraftsEventRef.current;
+              const next =
+                pending && pending.workspaceId === event.workspaceId
+                  ? {
+                      ...event,
+                      sessionIds: [...new Set([...pending.sessionIds, ...event.sessionIds])],
+                      newSession: pending.newSession || event.newSession,
+                    }
+                  : event;
+              pendingDraftsEventRef.current = next;
+              setWorkspaceDraftsEvent(next);
+            }
           } else if (event.workspaceId === workspaceId) {
             setWorkspaceSessionListEvent(event);
           }
@@ -387,6 +411,7 @@ export function OpenGeniProvider({
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
       workspaceSessionListEvent,
+      workspaceDraftsEvent,
       registerSessionReconciler,
       reconcileSession,
     }),
@@ -398,6 +423,7 @@ export function OpenGeniProvider({
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
       workspaceSessionListEvent,
+      workspaceDraftsEvent,
       registerSessionReconciler,
       reconcileSession,
     ],

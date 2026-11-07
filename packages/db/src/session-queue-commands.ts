@@ -103,6 +103,7 @@ import {
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
 import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
+import { notifyActorDraftChanged } from "./session-list-notifications";
 import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -1395,6 +1396,11 @@ export async function saveComposerDraftInTransaction(
         .returning()
     : await db.insert(schema.composerDrafts).values(values).returning();
   if (!saved) throw new Error("Composer draft did not save");
+  await notifyActorDraftChanged(db, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    sessionId: input.sessionId,
+  });
   return saved;
 }
 
@@ -1818,6 +1824,11 @@ export async function editQueuedTurnInTransaction(
         .returning()
     : await db.insert(schema.composerDrafts).values(draftValues).returning();
   if (!draft) throw new Error("Queue Edit did not persist its draft");
+  await notifyActorDraftChanged(db as unknown as Database, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    sessionId: input.sessionId,
+  });
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
   await db
@@ -2563,7 +2574,11 @@ export async function submitHumanPromptInTransaction(
     );
   }
 
-  const draft =
+  // Send carries its own content and is never refused because of the draft.
+  // The draft only decides what happens to itself afterwards (see
+  // `draftHoldsSent`) and, at the revision the sender last saw, which queued
+  // message a resubmitted edit replaces.
+  const storedDraft =
     input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
       ? null
       : await getComposerDraftInTransaction(db, {
@@ -2572,6 +2587,10 @@ export async function submitHumanPromptInTransaction(
           subjectId: input.subjectId,
           lock: true,
         });
+  // The draft as the sender last saw it. A newer draft from another device is
+  // not what this Send was composed in, so it never turns this Send into an
+  // edit of a message that device withdrew.
+  const draft = storedDraft?.revision === input.expectedDraftRevision ? storedDraft : null;
   const isQueueEditSubmission = draft?.sourceTurnId !== null && draft?.sourceTurnId !== undefined;
 
   // Only its owner can start work on a personal machine. Another person's
@@ -2683,61 +2702,48 @@ export async function submitHumanPromptInTransaction(
           observedControlEtag: input.controlEtag ?? null,
           admission,
         });
-  if (input.expectedDraftRevision !== null && input.expectedDraftRevision !== undefined) {
-    const actualRevision = draft?.revision ?? 0;
-    if (actualRevision !== input.expectedDraftRevision) {
-      throw new QueueCommandConflictError("DRAFT_CHANGED", "Composer draft changed", {
-        queueVersion: session.queueVersion,
-        draftRevision: actualRevision,
-      });
-    }
-    if (
-      draft &&
-      canonicalSessionCommandHash({
-        text: draft.text,
-        annotations: DraftTimelineAnnotations.parse(draft.annotations),
-        resources: withCanonicalResourceMountPaths(draft.resources),
-        // A draft that follows the chat's settings holds the chat's current
-        // effective policy, which is what a Send without a model runs with.
-        ...(draft.policyFollowsSession
-          ? {
-              model: session.model,
-              reasoningEffort: session.reasoningEffort,
-              latencyMode: session.latencyMode,
-            }
-          : {
-              model: draft.model,
-              reasoningEffort: draft.reasoningEffort,
-              latencyMode: draft.latencyMode,
-            }),
-      }) !==
+  // After this Send is accepted, clear the draft only while it still holds
+  // what was sent: it is still at the revision the sender saw, or it holds
+  // exactly the sent content (and no other withdrawn message). Otherwise
+  // another device saved something newer, and that stays as the draft.
+  const draftHoldsSent =
+    storedDraft !== null &&
+    (draft !== null ||
+      (storedDraft.sourceTurnId === null &&
         canonicalSessionCommandHash({
-          text: input.text,
-          annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
-          resources: withCanonicalResourceMountPaths(
-            input.composerDraftResources ?? input.resources,
-          ),
-          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
-          reasoningEffort:
-            input.turnExecutionPolicy?.reasoningEffort ??
-            input.reasoningEffort ??
-            (session.reasoningEffort as ReasoningEffort),
-          latencyMode:
-            input.turnExecutionPolicy?.latencyMode ??
-            input.latencyMode ??
-            (session.latencyMode as LatencyMode),
-        })
-    ) {
-      throw new QueueCommandConflictError(
-        "DRAFT_CHANGED",
-        "Submitted content is not the saved draft",
-        {
-          queueVersion: session.queueVersion,
-          draftRevision: draft.revision,
-        },
-      );
-    }
-  }
+          text: storedDraft.text,
+          annotations: DraftTimelineAnnotations.parse(storedDraft.annotations),
+          resources: withCanonicalResourceMountPaths(storedDraft.resources),
+          // A draft that follows the chat's settings holds the chat's current
+          // effective policy, which is what a Send without a model runs with.
+          ...(storedDraft.policyFollowsSession
+            ? {
+                model: session.model,
+                reasoningEffort: session.reasoningEffort,
+                latencyMode: session.latencyMode,
+              }
+            : {
+                model: storedDraft.model,
+                reasoningEffort: storedDraft.reasoningEffort,
+                latencyMode: storedDraft.latencyMode,
+              }),
+        }) ===
+          canonicalSessionCommandHash({
+            text: input.text,
+            annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
+            resources: withCanonicalResourceMountPaths(
+              input.composerDraftResources ?? input.resources,
+            ),
+            model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+            reasoningEffort:
+              input.turnExecutionPolicy?.reasoningEffort ??
+              input.reasoningEffort ??
+              (session.reasoningEffort as ReasoningEffort),
+            latencyMode:
+              input.turnExecutionPolicy?.latencyMode ??
+              input.latencyMode ??
+              (session.latencyMode as LatencyMode),
+          })));
 
   let editedSourceTurn: QueuedTurnRow | undefined;
   let editedSourceModelContext: string | null | undefined;
@@ -3138,10 +3144,19 @@ export async function submitHumanPromptInTransaction(
   // their existing per-turn semantics. The boundary also prevents an older
   // accepted turn that starts later from restoring the previous policy.
   // A draft that follows the chat's settings made no choice, so its Send
-  // leaves them as they are (for example as the agent last set them).
+  // leaves them as they are (for example as the agent last set them). So does
+  // a Send that names no settings: it runs on the chat's current ones.
+  // (`turnExecutionPolicy` is always resolved for the turn, so it says nothing
+  // about whether the person picked a setting.)
+  const sendNamesPolicy =
+    (input.model ?? null) !== null ||
+    (input.reasoningEffort ?? null) !== null ||
+    (input.latencyMode ?? null) !== null;
   const composerPolicy =
-    draft &&
-    !draft.policyFollowsSession &&
+    storedDraft &&
+    draftHoldsSent &&
+    sendNamesPolicy &&
+    !storedDraft.policyFollowsSession &&
     (input.actor.type === "human" || input.actor.type === "operator")
       ? {
           model: turn.model,
@@ -3395,11 +3410,11 @@ export async function submitHumanPromptInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.sessionId));
-  const [nextDraft] = draft
+  const [nextDraft] = draftHoldsSent
     ? await db
         .update(schema.composerDrafts)
         .set({
-          revision: draft.revision + 1,
+          revision: storedDraft.revision + 1,
           text: "",
           annotations: [],
           resources: [],
@@ -3415,11 +3430,18 @@ export async function submitHumanPromptInTransaction(
           sourceTurnVersion: null,
           updatedAt: now,
         })
-        .where(eq(schema.composerDrafts.id, draft.id))
+        .where(eq(schema.composerDrafts.id, storedDraft.id))
         .returning()
     : [undefined];
-  if (draft && !nextDraft) {
+  if (draftHoldsSent && !nextDraft) {
     throw new SessionControlInvariantError("Accepted composer draft did not rotate");
+  }
+  if (nextDraft) {
+    await notifyActorDraftChanged(db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      sessionId: input.sessionId,
+    });
   }
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
@@ -3515,7 +3537,9 @@ export async function submitHumanPromptInTransaction(
     accepted,
     events,
     turn: mapSubmittedPromptTurn(committedTurn),
-    draft: nextDraft ?? null,
+    // The cleared draft, or the newer one another device saved, which stays
+    // (shown with the chat's current settings, as a read shows it).
+    draft: nextDraft ?? (await withEffectiveComposerDraftPolicy(db, storedDraft ?? null)),
     acceptedEventId,
     eventIds,
     turnId,

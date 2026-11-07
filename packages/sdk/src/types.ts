@@ -4180,8 +4180,10 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
-  // Exact actor-private pre-session draft revision represented by this create.
-  // The server consumes only this revision after durable initialization.
+  // The caller's new-chat draft revision this create was composed from. The
+  // create is never refused over it: once the session is accepted, the server
+  // clears that draft only while it is still at this revision or holds exactly
+  // what was sent, so a newer draft saved on another device stays.
   expectedNewSessionDraftRevision?: number | undefined;
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;

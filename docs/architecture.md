@@ -2227,10 +2227,17 @@ rules with MCP, workers and embedded hosts.
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
 event append, turn routing, receipt/replay behavior, and the response contract.
-Web Send rebases drafts (including unavailable files), aligns
-file-only text with create, freezes edits, preserves late voice transcripts
-(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/app/lib/use-new-session-draft.tsx`,
-`packages/react/src/app/routes/sessions-index.tsx`), and protects sibling drafts.
+Send wins over the saved draft: create and composer submit carry the content
+in the box and are never refused because the draft changed. The request's
+expected draft revision is only the basis for clearing the draft after
+acceptance, which happens only while the draft still holds what was sent, so a
+newer draft from another of the person's devices stays. Draft saves publish a
+content-free `workspace.drafts.changed` hint to the author's own workspace live
+stream; idle composers re-read and follow it, and autosave lands on top of a
+newer draft (latest typing wins). Web Send aligns file-only text with create,
+freezes edits and preserves late voice transcripts
+(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/hooks/use-new-session-draft.ts`,
+`packages/react/src/app/routes/sessions-index.tsx`).
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.

@@ -5696,7 +5696,7 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("autosave never overwrites another tab after a stale-revision conflict", async () => {
+  test("autosave after a stale-revision conflict saves the latest typing on top", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
@@ -5744,9 +5744,10 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
-    expect(hook.result.current.draft?.revision).toBe(1);
-    expect(saves).toBe(1);
+    // The latest typing wins: the save re-reads and lands on the newer revision.
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft).toMatchObject({ revision: 3, text: "mine remains" });
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 

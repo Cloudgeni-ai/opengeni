@@ -37485,6 +37485,7 @@
       "WorkspaceCredentialProvider": "type",
       "WorkspaceCreditGrant": "type",
       "WorkspaceDefaultExecutionTarget": "type",
+      "WorkspaceDraftsChangedEvent": "type",
       "WorkspaceGatewayCustomModel": "type",
       "WorkspaceGatewayCustomModelsResponse": "type",
       "WorkspaceInferenceControlResponse": "type",
