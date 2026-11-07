@@ -403,6 +403,7 @@ try {
       "packages/contracts",
       "packages/decisions",
       "packages/interaction",
+      "packages/jev",
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",
