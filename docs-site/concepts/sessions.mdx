@@ -32,7 +32,7 @@ A reload, a second client, or an audit all see the same history.
 - **Pause** and **Resume** hold and release the session.
 - **Cancel** stops the session and its children for good.
 
-A workspace admin can make the console's normal Send act as Steer while the agent is working (**Workspace settings → Chats**). Cmd/Ctrl+Enter then queues instead. Products that embed the session screen choose the same with the composer's `busySend` option.
+A workspace admin can make the console's normal Send act as Steer while the agent is working (**Workspace settings → Chats**). Cmd/Ctrl+Enter then queues instead. Products that embed the session screen choose the same with the composer's `busySend` option. In this mode the server, not the browser or app, decides at the moment the message arrives: if a turn is running or about to start, the message steers it; otherwise it starts a turn (or waits, if the chat is paused). API callers get the same choice by passing `delivery: "steer_or_send"` to `steerMessage` or to a draft submit.
 
 If the session is waiting on you for an approval or a question, Send replaces that wait with your new prompt.
 

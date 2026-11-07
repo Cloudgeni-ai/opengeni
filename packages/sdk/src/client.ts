@@ -3881,14 +3881,23 @@ export class OpenGeniClient {
   /**
    * Steer: atomically put this prompt at the head and supersede the current
    * inference. The client performs one request and renders server order.
+   *
+   * `options.delivery: "steer_or_send"` lets the server decide atomically
+   * with the session's turn state: it steers while a turn runs (or is about
+   * to start) and otherwise sends, so the message reaches a running turn
+   * however stale your view of the session is. The response's `routing` says
+   * which: `accepted_for_steering` for a Steer, otherwise a Send. Servers
+   * older than this option reject it with a 422 that names `delivery`.
    */
   async steerMessage(
     workspaceId: string,
     sessionId: string,
     message: string | SendMessageInput,
+    options: { delivery?: "steer" | "steer_or_send" | undefined } = {},
   ): Promise<SteerMessageResult> {
-    const input = typeof message === "string" ? { text: message } : message;
-    assertNoMessageTools(input);
+    const text = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(text);
+    const input = options.delivery === undefined ? text : { ...text, delivery: options.delivery };
     const path = `${sessionPath(workspaceId, sessionId)}/steer`;
     const { body, automatic } = withMessageTimeZone(input, this.options.messageTimeZone);
     try {

@@ -148,6 +148,12 @@ function initialComposerShadow(
 
 type PendingComposerOperation = {
   delivery: "send" | "steer";
+  /**
+   * Sent as `steer_or_send` (Send under `busySend: "steer"`): the server
+   * decides, atomically with the turn state, whether it steers or sends.
+   * Kept with the operation so a retry repeats the exact request.
+   */
+  steerOrSend?: boolean | undefined;
   input: SendMessageInput;
   draftAtSend: string;
   resourcesAtSend: ResourceRef[];
@@ -186,6 +192,8 @@ export type ComposerOptimisticMessage = {
 
 type OptimisticSendOperation = ComposerOptimisticMessage & {
   input: SendMessageInput;
+  /** As on `PendingComposerOperation`. */
+  steerOrSend?: boolean | undefined;
   draftPayload: SaveComposerDraftRequest | null;
   /** Latest unsent local draft that must survive this operation and remounts. */
   newerShadow: ComposerDraftShadow;
@@ -262,6 +270,7 @@ function restoreOptimisticSendOperations(
   return stored.map(({ hasMcpCredentialUpdates, ...operation }) => ({
     ...operation,
     delivery: "send",
+    steerOrSend: operation.steerOrSend === true,
     destination: operation.destination === "queue" ? "queue" : "chat",
     newerShadow: operation.newerShadow ?? { text: "", resources: [], annotations: [] },
     state:
@@ -296,6 +305,19 @@ function restoreOptimisticSendOperations(
 
 function restoredCorrelationId(value: unknown): string | undefined {
   return typeof value === "string" && /^[\w.:-]{1,128}$/u.test(value) ? value : undefined;
+}
+
+/**
+ * A server older than `steer_or_send` refuses it as an unknown request field
+ * or value, naming `delivery`, before accepting anything. The composer then
+ * falls back to choosing Send or Steer from its own view of the session.
+ */
+function rejectsSteerOrSend(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    (error.status === 400 || error.status === 422) &&
+    /\bdelivery\b/u.test(`${error.message}\n${error.body}`)
+  );
 }
 
 function restoredErrorReference(
@@ -440,6 +462,7 @@ function readStoredPendingComposerOperation(
     }
     return {
       ...(record as StoredPendingComposerOperation),
+      steerOrSend: record.steerOrSend === true,
       annotationsAtSend: timelineAnnotationList(record.annotationsAtSend)
         ? record.annotationsAtSend
         : [],
@@ -981,6 +1004,8 @@ export function useComposer(
   const busySend: ComposerBusySend = options.busySend ?? "queue";
   const busySendRef = useRef(busySend);
   busySendRef.current = busySend;
+  // Set once the server refuses `steer_or_send` (older than it).
+  const steerOrSendUnsupportedRef = useRef(false);
   const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
@@ -1976,57 +2001,90 @@ export function useComposer(
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
-        let acceptedResult: SubmitComposerDraftResponse | null = null;
-        let acceptedEvent: SessionEvent | null = null;
-        if (durableDrafts) {
-          if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
-          }
-          const result = await client
-            .submitComposerDraft(workspaceId, sessionId, {
-              text: operation.draftPayload.text,
-              annotations: operation.draftPayload.annotations,
-              resources: operation.draftPayload.resources,
-              // Absent while the draft follows the chat's settings.
-              ...(operation.draftPayload.model !== undefined
-                ? { model: operation.draftPayload.model }
-                : {}),
-              ...(operation.draftPayload.reasoningEffort !== undefined
-                ? { reasoningEffort: operation.draftPayload.reasoningEffort }
-                : {}),
-              ...(operation.draftPayload.latencyMode !== undefined
-                ? { latencyMode: operation.draftPayload.latencyMode }
-                : {}),
-              expectedDraftRevision,
-              clientEventId: operation.clientEventId,
-              delivery: "send",
-              ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
-              ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
-              ...(wireInput.mcpCredentialUpdates
-                ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
-                : {}),
-              ...(wireInput.connectionAccounts
-                ? { connectionAccounts: wireInput.connectionAccounts }
-                : {}),
+        // Assigned inside `submit`, so the declared types must not narrow.
+        let acceptedResult = null as Pick<
+          SubmitComposerDraftResponse,
+          "accepted" | "turn" | "receipt" | "routing"
+        > | null;
+        let acceptedEvent = null as SessionEvent | null;
+        // Under `busySend: "steer"` the server decides Steer or Send
+        // (`steer_or_send`); its `routing` places the message below.
+        let steerOrSend = operation.steerOrSend === true;
+        const submit = async (): Promise<void> => {
+          if (durableDrafts) {
+            if (!operation.draftPayload || expectedDraftRevision === undefined) {
+              throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
+            }
+            const result = await client
+              .submitComposerDraft(workspaceId, sessionId, {
+                text: operation.draftPayload.text,
+                annotations: operation.draftPayload.annotations,
+                resources: operation.draftPayload.resources,
+                // Absent while the draft follows the chat's settings.
+                ...(operation.draftPayload.model !== undefined
+                  ? { model: operation.draftPayload.model }
+                  : {}),
+                ...(operation.draftPayload.reasoningEffort !== undefined
+                  ? { reasoningEffort: operation.draftPayload.reasoningEffort }
+                  : {}),
+                ...(operation.draftPayload.latencyMode !== undefined
+                  ? { latencyMode: operation.draftPayload.latencyMode }
+                  : {}),
+                expectedDraftRevision,
+                clientEventId: operation.clientEventId,
+                delivery: steerOrSend ? "steer_or_send" : "send",
+                ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
+                ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
+                ...(wireInput.mcpCredentialUpdates
+                  ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
+                  : {}),
+                ...(wireInput.connectionAccounts
+                  ? { connectionAccounts: wireInput.connectionAccounts }
+                  : {}),
 
-              ...(wireInput.personalResourceAttachment
-                ? { personalResourceAttachment: wireInput.personalResourceAttachment }
-                : {}),
-            })
-            .catch((cause: unknown) => {
-              mutationFailureObserved = true;
-              throw cause;
-            });
-          acceptedResult = result;
-          adoptDraftBase(result.draft);
-          releaseDraftSlot?.();
-        } else {
-          acceptedEvent = await client
-            .sendMessage(workspaceId, sessionId, wireInput)
-            .catch((cause: unknown) => {
-              mutationFailureObserved = true;
-              throw cause;
-            });
+                ...(wireInput.personalResourceAttachment
+                  ? { personalResourceAttachment: wireInput.personalResourceAttachment }
+                  : {}),
+              })
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+            acceptedResult = result;
+            adoptDraftBase(result.draft);
+            releaseDraftSlot?.();
+          } else if (steerOrSend) {
+            acceptedResult = await client
+              .steerMessage(workspaceId, sessionId, wireInput, { delivery: "steer_or_send" })
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+          } else {
+            acceptedEvent = await client
+              .sendMessage(workspaceId, sessionId, wireInput)
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+          }
+        };
+        try {
+          await submit();
+        } catch (cause) {
+          // Refused before anything was accepted by a server older than
+          // `steer_or_send`: send as this view chose, as before it.
+          if (!steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
+          steerOrSendUnsupportedRef.current = true;
+          steerOrSend = false;
+          replaceOptimisticSends((current) =>
+            current.map((candidate) =>
+              candidate.clientEventId === operation.clientEventId
+                ? { ...candidate, steerOrSend: false }
+                : candidate,
+            ),
+          );
+          await submit();
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -2292,7 +2350,11 @@ export function useComposer(
   }, [client, durableDrafts, error, sessionId, targetKey, workspaceId]);
 
   const dispatch = useCallback(
-    async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
+    async (
+      delivery: "send" | "steer",
+      explicit?: string,
+      steerOrSend = false,
+    ): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
       const operationKey = pendingComposerOperationKey(workspaceId, sessionId);
@@ -2360,6 +2422,7 @@ export function useComposer(
       };
 
       const deliver = async (operation: PendingComposerOperation) => {
+        const wireDelivery = operation.steerOrSend ? "steer_or_send" : operation.delivery;
         if (durableDrafts) {
           const input = operation.input;
           if (input.expectedDraftRevision === undefined || input.clientEventId === undefined) {
@@ -2375,7 +2438,7 @@ export function useComposer(
             ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
             expectedDraftRevision: input.expectedDraftRevision,
             clientEventId: input.clientEventId,
-            delivery: operation.delivery,
+            delivery: wireDelivery,
             ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
             ...(input.modelContext ? { modelContext: input.modelContext } : {}),
             ...(input.mcpCredentialUpdates
@@ -2390,11 +2453,39 @@ export function useComposer(
           return result;
         }
         if (operation.delivery === "steer") {
-          return await client.steerMessage(workspaceId, sessionId, operation.input);
+          return await client.steerMessage(
+            workspaceId,
+            sessionId,
+            operation.input,
+            operation.steerOrSend ? { delivery: "steer_or_send" } : {},
+          );
         }
         await client.sendMessage(workspaceId, sessionId, operation.input);
         return null;
       };
+      // Before anything is accepted, a server without `steer_or_send` names it
+      // in its refusal; this composer then chooses from its own view instead.
+      const deliverOrFallBack = async (operation: PendingComposerOperation) => {
+        try {
+          return await deliver(operation);
+        } catch (cause) {
+          if (!operation.steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
+          steerOrSendUnsupportedRef.current = true;
+          const chosen = { ...operation, steerOrSend: false };
+          if (pendingOperationRef.current === operation) {
+            pendingOperationRef.current = chosen;
+            rememberPendingComposerOperation(operationKey, chosen);
+          }
+          return await deliver(chosen);
+        }
+      };
+      // A `steer_or_send` the server resolved to a Send is an ordinary message:
+      // it shows from the session's events, not as a Steer.
+      const steered = (
+        operation: PendingComposerOperation,
+        result: Awaited<ReturnType<typeof deliver>>,
+      ): result is NonNullable<typeof result> =>
+        result !== null && (!operation.steerOrSend || result.routing === "accepted_for_steering");
 
       if (delivery === "steer") {
         if (steeringRef.current?.clientEventId !== pending?.input.clientEventId) {
@@ -2474,8 +2565,8 @@ export function useComposer(
           }
           try {
             if (durableDrafts) releaseDraftSlot = await acquireDraftSlot();
-            const result = await deliver(pending);
-            if (pending.delivery === "steer" && result) {
+            const result = await deliverOrFallBack(pending);
+            if (pending.delivery === "steer" && steered(pending, result)) {
               keepSteering = true;
               setSteering({
                 phase: "accepted",
@@ -2486,6 +2577,8 @@ export function useComposer(
                 stoppingPreviousAttempt:
                   result.replay !== true && (result.interruptionCount ?? 0) > 0,
               });
+            } else {
+              keepSteering = false;
             }
           } catch (cause) {
             const problem = asError(cause);
@@ -2571,6 +2664,9 @@ export function useComposer(
         });
         const operation: PendingComposerOperation = {
           delivery,
+          ...(delivery === "steer" && steerOrSend && !steerOrSendUnsupportedRef.current
+            ? { steerOrSend: true }
+            : {}),
           input,
           draftAtSend,
           resourcesAtSend: [...restoredResources],
@@ -2596,8 +2692,8 @@ export function useComposer(
           });
         }
         try {
-          const result = await deliver(operation);
-          if (delivery === "steer" && result) {
+          const result = await deliverOrFallBack(operation);
+          if (delivery === "steer" && steered(operation, result)) {
             keepSteering = true;
             setSteering({
               phase: "accepted",
@@ -2678,7 +2774,7 @@ export function useComposer(
   );
 
   const sendToQueue = useCallback(
-    async (explicit?: string): Promise<boolean> => {
+    async (explicit?: string, steerOrSend = false): Promise<boolean> => {
       if (pendingOperationRef.current?.delivery === "send") {
         return await dispatch("send", explicit);
       }
@@ -2719,6 +2815,7 @@ export function useComposer(
       const operation: OptimisticSendOperation = {
         clientEventId,
         delivery: "send",
+        ...(steerOrSend && !steerOrSendUnsupportedRef.current ? { steerOrSend: true } : {}),
         destination:
           effectiveControl?.state === "paused" || hasEarlierUnsettledSend
             ? "queue"
@@ -2784,17 +2881,20 @@ export function useComposer(
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {
       // A retained uncertain Send keeps its own delivery; only fresh input
-      // follows the busy-send preference.
+      // follows the busy-send preference. Under `steer` the server makes the
+      // real choice (`steer_or_send`), atomically with the turn state: this
+      // view only picks how the message shows until it answers, so a stale
+      // view can never queue a message meant for the running turn.
       if (
         busySendRef.current === "steer" &&
         pendingOperationRef.current?.delivery !== "send" &&
         takesBusyPath()
       ) {
-        return await steer(explicit);
+        return await dispatch("steer", explicit, true);
       }
-      return await sendToQueue(explicit);
+      return await sendToQueue(explicit, busySendRef.current === "steer");
     },
-    [sendToQueue, steer, takesBusyPath],
+    [dispatch, sendToQueue, takesBusyPath],
   );
   const sendAlternate = useCallback(
     async (explicit?: string): Promise<boolean> =>

@@ -8204,7 +8204,12 @@ export type SaveComposerDraftRequest = Omit<
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;
   clientEventId: string;
-  delivery: "send" | "steer";
+  /**
+   * `steer_or_send` lets the server steer while a turn runs (or is about to
+   * start) and otherwise send; see `steerMessage`. `routing` in the
+   * response says which it chose.
+   */
+  delivery: "send" | "steer" | "steer_or_send";
   controlEtag?: string;
   modelContext?: string;
   /** IANA time zone of the sender; see `UserMessageEventInput`. */

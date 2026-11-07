@@ -1559,6 +1559,19 @@ keeps the earlier behaviour: it inserts the interruption row, moves the row to
 the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`
 option only choose which of the two an ordinary Send uses while a turn runs.
+Under `busySend: "steer"` the composer does not decide from its own copy of the
+session: it submits `delivery: "steer_or_send"` (on the Steer route or a draft
+submit), and `submitHumanPromptInTransaction` resolves it under the same branch
+and queue locks that start and settle turns. It becomes a Steer when the branch
+is active, not admission-blocked, the message is not waiting for a machine owner,
+and either a turn is active or a runnable queued turn is about to start; in that
+"just starting" case the Steer is ordered behind the first runnable turn (and any
+Steers already behind it) so that turn claims first and hands over at its first
+model step. Otherwise it is a plain Send: an idle session starts a turn and a
+paused one queues without being resumed. Only the resolved `steer` or `send` is
+recorded on the event, turn and routing; the request hash keeps `steer_or_send`,
+so an exact retry replays the first decision and the same key with another
+delivery is refused.
 
 Active compaction is the other exception: while a claimed standalone
 compaction is running, or an ordinary attempt's latest compaction landmark is
