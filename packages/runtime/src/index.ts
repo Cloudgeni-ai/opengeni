@@ -14787,6 +14787,70 @@ function gitConfigQuotedContent(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+/**
+ * Shell helpers for every write to the global Git config during repository
+ * preparation. Several preparations can run on one box at once (chats created
+ * together share their sandbox, and each clones its repositories in
+ * parallel), and they all write the same `$HOME/.gitconfig`. Git takes a
+ * `.gitconfig.lock` for each write and fails at once when another writer holds
+ * it, so:
+ *
+ * - `with_git_global_config_lock <command...>` runs a whole group of global
+ *   config reads and writes under one per-box mutex (flock on a file beside
+ *   the other Opengeni state), so concurrent preparations take turns and a
+ *   check-then-add never duplicates an entry. It is re-entrant, and it waits
+ *   at most GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS before running the group
+ *   anyway. Without flock (macOS) the group runs unserialised.
+ * - `git_global_config <git config args...>` is `git config --global` that
+ *   retries, within a bound, while the lock is held - by a writer outside the
+ *   mutex, such as the agent's own `git config --global`, or when the mutex is
+ *   unavailable. Any other failure returns at once with git's status.
+ */
+const GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS = 60;
+const GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS = 100;
+const GIT_GLOBAL_CONFIG_FUNCTION_LINES: readonly string[] = [
+  "git_global_config() {",
+  "  git_global_config_attempt=0",
+  "  while :; do",
+  '    if git_global_config_output="$(LC_ALL=C command git config --global "$@" 2>&1)"; then',
+  '      [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output"',
+  "      return 0",
+  "    else",
+  "      git_global_config_status=$?",
+  "    fi",
+  '    case "$git_global_config_output" in',
+  '      *"could not lock config file"*) ;;',
+  "      *)",
+  '        [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output" >&2',
+  '        return "$git_global_config_status"',
+  "        ;;",
+  "    esac",
+  "    git_global_config_attempt=$((git_global_config_attempt + 1))",
+  `    if [ "$git_global_config_attempt" -ge ${GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS} ]; then`,
+  "      printf '%s\\n' \"$git_global_config_output\" >&2",
+  '      return "$git_global_config_status"',
+  "    fi",
+  "    sleep 0.1 2>/dev/null || sleep 1",
+  "  done",
+  "}",
+  "with_git_global_config_lock() {",
+  '  if [ -n "${OPENGENI_GIT_GLOBAL_CONFIG_LOCKED:-}" ] || ! command -v flock >/dev/null 2>&1; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  '  git_global_config_lock_file="$HOME/.opengeni/git-global-config.lock"',
+  '  if ! { mkdir -p "$HOME/.opengeni" && : >>"$git_global_config_lock_file"; } 2>/dev/null; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  "  (",
+  `    flock -w ${GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS} 9 2>/dev/null || true`,
+  "    OPENGENI_GIT_GLOBAL_CONFIG_LOCKED=1",
+  '    "$@"',
+  '  ) 9>>"$git_global_config_lock_file"',
+  "}",
+];
+
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
   const rewrites = gitHttpBrokerRewrites(routes);
   const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
@@ -14818,8 +14882,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',
-    'git config --global --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
-    'git config --global --add include.path "$git_http_broker_config"',
+    "include_git_http_broker_config() {",
+    '  git_global_config --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
+    '  git_global_config --add include.path "$git_http_broker_config"',
+    "}",
+    "with_git_global_config_lock include_git_http_broker_config",
   ];
 }
 
@@ -15080,7 +15147,7 @@ export function repositoryIdentityCommandLines(
     '  if [ -n "$identity_dir" ]; then',
     '    command git -C "$identity_dir" config --local "$@"',
     "  else",
-    '    command git config --global "$@"',
+    '    git_global_config "$@"',
     "  fi",
     "}",
     "identity_value() {",
@@ -15159,9 +15226,10 @@ export function repositoryIdentityCommandLines(
     '  remove_managed_identity "$1"',
     "}",
     ...calls,
+    // The box-wide default goes to the shared global config: one locked unit.
     defaultIdentity
-      ? `apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
-      : "remove_managed_identity '' || true",
+      ? `with_git_global_config_lock apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
+      : "with_git_global_config_lock remove_managed_identity '' || true",
   ];
 }
 
@@ -15460,10 +15528,13 @@ function gitCredentialHelperCommandLines(
     // Empty helper resets lower-priority/system helpers; our exact path-aware
     // helper returns no credential for an unbound remote, so multi-binding
     // sessions fail closed instead of falling through to ambient credentials.
-    "git config --global --unset-all credential.helper >/dev/null 2>&1 || true",
-    "git config --global --add credential.helper ''",
-    'git config --global --add credential.helper "$git_credential_helper"',
-    "git config --global credential.useHttpPath true",
+    "install_git_credential_helper() {",
+    "  git_global_config --unset-all credential.helper >/dev/null 2>&1 || true",
+    "  git_global_config --add credential.helper ''",
+    '  git_global_config --add credential.helper "$git_credential_helper"',
+    "  git_global_config credential.useHttpPath true",
+    "}",
+    "with_git_global_config_lock install_git_credential_helper",
     ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
@@ -15896,20 +15967,18 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
   '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
   '    for trust_path in "$target" "$trust_resolved"; do',
-  '      if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$trust_path"; then continue; fi',
-  "      trust_attempt=0",
-  // Parallel clones share one global config file; retry its lock briefly.
-  '      until command git config --global --add safe.directory "$trust_path" 2>/dev/null; do',
-  "        trust_attempt=$((trust_attempt + 1))",
-  '        if [ "$trust_attempt" -ge 5 ]; then break; fi',
-  "        sleep 1",
-  "      done",
+  // Parallel clones share one global config file: check and add as one unit.
+  '      with_git_global_config_lock repository_trust_path "$trust_path" || true',
   "    done",
   '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
   '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
   "    else",
   '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
   "    fi",
+  "  }",
+  "  repository_trust_path() {",
+  '    if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$1"; then return 0; fi',
+  '    git_global_config --add safe.directory "$1" >/dev/null 2>&1',
   "  }",
   // Whether a readable work tree still serves the pinned commit. The clone
   // records the commit it materialized, so the agent's own commits, branches
@@ -16153,6 +16222,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
 function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
   const script = [
     "set -eu",
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
     ...cloneRepositoryFunctionLines,
     `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
     'clone_repository "$@"',
@@ -16229,6 +16299,7 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
     ...gitCredentialHelperCommandLines(
       resources,
       bindings,
