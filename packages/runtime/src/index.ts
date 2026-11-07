@@ -1337,7 +1337,12 @@ export type GenerateSessionTitleOptions = {
 };
 
 export const SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS = 4_000;
-/** Enough of the chat's instructions to show their language. */
+/**
+ * Enough of the chat's instructions to show their language. A sentence or two
+ * of prose identifies a language reliably; 500 characters still reaches that
+ * prose after a heading or a short preamble in another language, and costs
+ * at most about 150-250 input tokens, once per untitled chat.
+ */
 export const SESSION_TITLE_INSTRUCTIONS_EXCERPT_MAX_CHARACTERS = 500;
 // Reasoning models spend output tokens on reasoning before the visible title.
 // The budget leaves room for that; the title itself is bounded afterwards by

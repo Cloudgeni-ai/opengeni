@@ -11,11 +11,10 @@ excerpt, or English if there is none. When the chat has its own instructions
 the workspace identity, most specific first), the request's system text adds,
 after the unchanged fixed rules, one line naming the excerpt and at most 500
 characters of that text. Opengeni's built-in instructions are never part of
-it. The descriptions of the agent's `opengeni__set_session_title` tool and the
-first-party MCP `set_session_title` tool grow by 76 bytes each, so the cached
-tool list of a chat that has either tool changes once after the deploy. Nothing
-else in the instructions or tool list changes. Separately, and not
-model-facing: an automatic title longer than 10 words or 80 characters is now
+it. The agent's instructions and tool descriptions, including both
+`set_session_title` descriptions, are unchanged, so no chat's cached prefix
+changes. Separately, and not model-facing: an automatic title longer than 10
+words or 80 characters is now
 refused rather than cut at that bound, so a model's answer or an agent's goal
 no longer becomes a sentence-fragment title; the chat keeps its pending title
 and a later turn titles it.
@@ -26,8 +25,6 @@ and a later turn titles it.
   (title request, when the chat has its own instructions)
 + The chat's instructions excerpt, for its language only:
 + <first 500 characters of the chat's own instructions>
-- … topic label in the language the person writes in. …
-+ … topic label in the language the person writes in (your instructions' language when they have sent only a link, file or code). …
 ```
 
 The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in

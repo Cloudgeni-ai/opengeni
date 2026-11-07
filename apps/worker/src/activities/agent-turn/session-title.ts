@@ -29,7 +29,7 @@ import {
 export const SESSION_TITLE_MODEL_TOOL_NAME = "opengeni__set_session_title";
 
 const SESSION_TITLE_DESCRIPTION =
-  "Set this session's display title to a concise 3-7 word topic label in the language the person writes in (your instructions' language when they have sent only a link, file or code). Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once the session has a task, question or subject (not while it holds only a greeting or small talk), then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
+  "Set this session's display title to a concise 3-7 word topic label in the language the person writes in. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once the session has a task, question or subject (not while it holds only a greeting or small talk), then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
 
 /**
  * What a still-untitled session's automatic title is generated from: its
