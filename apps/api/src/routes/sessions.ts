@@ -454,6 +454,7 @@ import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { allSettledInOrder } from "../http/settled-in-order";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1247,17 +1248,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const commandActivity = await backgroundCommandActivityForSessions(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
-    });
-    const scheduleTargets = await sessionScheduleTargetsForGrant(
-      db,
-      grant,
-      workspaceId,
-      [...page.pinned, ...page.sessions].map((session) => session.id),
-    );
+    const pageSessionIds = [...page.pinned, ...page.sessions].map((session) => session.id);
+    // The decorations read independent facts about the same page, so they run
+    // together instead of adding one database round trip after another.
+    const [commandActivity, scheduleTargets, policy] = await allSettledInOrder([
+      backgroundCommandActivityForSessions(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionIds: pageSessionIds,
+      }),
+      sessionScheduleTargetsForGrant(db, grant, workspaceId, pageSessionIds),
+      // The compact projection carries no execution configuration to decorate.
+      "projection" in page
+        ? Promise.resolve(null)
+        : loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+            ...page.pinned,
+            ...page.sessions,
+          ]),
+    ] as const);
     if ("projection" in page) {
       const decorateEntry = (session: (typeof page.sessions)[number]) => ({
         ...session,
@@ -1275,10 +1283,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessions: page.sessions.map(decorateEntry),
       });
     }
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
-      ...page.pinned,
-      ...page.sessions,
-    ]);
+    if (!policy) throw new Error("Session list policy context was not loaded");
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
       const decorated = {
@@ -2639,7 +2644,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     };
     collect(lineage.children);
-    const targets = await sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds);
+    // Independent reads about the same sessions run together.
+    const [targets, policy] = await allSettledInOrder([
+      sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds),
+      loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, lineageSessions),
+    ] as const);
     const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
       nodes.map((node) => ({
         ...node,
@@ -2649,12 +2658,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         children: decorateNodes(node.children),
       }));
-    const policy = await loadEffectivePolicyContext(
-      deps,
-      workspaceId,
-      grant.subjectId,
-      lineageSessions,
-    );
     c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
