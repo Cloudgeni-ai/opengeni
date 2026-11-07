@@ -166,8 +166,6 @@ export async function createBotTemplateForViewer(input: {
   workspaceId: string;
   viewer: BotTemplateViewer;
   request: ParsedCreateBotTemplateRequest;
-  /** Standing Instructions, for `bot_template_save`; the endpoint has none. */
-  instructions?: string;
 }): Promise<WorkspaceBotTemplate> {
   const { db, request, viewer, workspaceId } = input;
   requireOwnerForPrivate(viewer, request.visibility);
@@ -181,7 +179,8 @@ export async function createBotTemplateForViewer(input: {
         name: request.name,
         description: request.description,
         avatar: request.avatar,
-        instructions: input.instructions ?? "",
+        // A bot template is text for the composer: a First message, no Instructions.
+        instructions: "",
         firstMessage: request.setupInstructions,
         memoryEnabled: false,
         origin: "bot_template",

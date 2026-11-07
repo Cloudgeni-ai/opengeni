@@ -87,7 +87,7 @@ function productionRoute() {
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
-      defaultAgentChatVisibility } = ports;
+      defaultAgentChatVisibility, prepareAgentChatCreate } = ports;
     ${code}
     return handler;
   `,
@@ -158,6 +158,7 @@ function routeFixture() {
     },
     // No agent in this payload: the Only me agent default changes nothing.
     defaultAgentChatVisibility: async () => {},
+    prepareAgentChatCreate: async () => undefined,
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;

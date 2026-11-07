@@ -11,7 +11,7 @@ import {
   slackAgentDescriptionSentence,
 } from "@opengeni/contracts";
 import { getWorkspace, listSlackAgentsForConnection, type SlackAgentRecord } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
 
 import type { SlackRoutingAgent } from "./slack-agent-address";
 import { escapeSlackMrkdwn } from "./slack-app-home";
@@ -133,6 +133,8 @@ export function slackAgentSessionInstructions(input: {
   handedOffBy: SlackAgentRecord | null;
   /** How the chat was reached; null when unknown. */
   source?: SlackAgentChatSource | null;
+  /** A private chat (a DM): it reads the agent's Memory but never writes to it. */
+  privateChat?: boolean;
 }): string {
   const { loaded, agent } = input;
   const lines: string[] = [];
@@ -143,12 +145,27 @@ export function slackAgentSessionInstructions(input: {
     );
     // The agent's own Instructions are a prompt layer of their own (the chat
     // is bound to the agent), never copied here.
-    const memory = agent.knowledgeCollectionId;
-    lines.push(
-      memory
-        ? `Your Memory is Knowledge collection ${memory}. When context is missing, search it with knowledge_search (groupId ${memory}) and check your recent chats with slack_agent_chats. Save lasting facts, decisions and preferences people share with knowledge_save (groupIds [${memory}], scope "workspace"), not passing chatter.`
-        : "When context is missing, check your recent chats with slack_agent_chats.",
+    // A Slack agent is always shared with its workspace, so a private chat
+    // (a DM) only reads its Memory and saves no Knowledge; the knowledge tools
+    // enforce that too.
+    const memory = agentMemoryGuidance(
+      agentMemoryAccess(
+        {
+          memoryEnabled: agent.memoryEnabled,
+          memoryCollectionId: agent.knowledgeCollectionId,
+          visibility: "workspace",
+          ownerSubjectId: null,
+        },
+        {
+          private: input.privateChat === true,
+          ownerSubjectId: null,
+          memoryOff: false,
+          // A Slack DM's session row is shared, so its saves would be workspace scope.
+          slackDm: input.privateChat === true,
+        },
+      ),
     );
+    if (memory) lines.push(memory);
     // The server refuses a hand-back, so the line only says who passed it on.
     if (input.handedOffBy) {
       lines.push(`${input.handedOffBy.name} passed this request on to you.`);

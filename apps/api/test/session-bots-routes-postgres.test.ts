@@ -7,7 +7,7 @@ import {
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSession,
-  listBotTemplates,
+  getAgent,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -467,21 +467,35 @@ describe("bots through the API (real PostgreSQL)", () => {
       ).isError,
     ).toBe(true);
 
+    // "Make this an agent": standing Instructions plus an optional First message.
     const saved = await callTool(server, "bot_template_save", {
       name: "Release owner",
       description: "Keeps the release checklist moving",
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
-      setupInstructions: "You own releases. Install the release Skill and ask about their cadence.",
+      instructions: "You own releases. Keep the checklist current.",
+      firstMessage: "Install the release Skill and ask about their cadence.",
     });
     expect(saved.isError).toBe(false);
-    expect(saved.body.template).toMatchObject({
+    expect(saved.body.agent).toMatchObject({
       name: "Release owner",
+      visibility: "workspace",
+      revision: 1,
+    });
+    const stored = await getAgent(client.db, workspace, saved.body.agent.id);
+    expect(stored).toMatchObject({
+      origin: "app",
       sourceSessionId: sessionId,
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
+      memoryEnabled: false,
+      content: {
+        instructions: "You own releases. Keep the checklist current.",
+        firstMessage: "Install the release Skill and ask about their cadence.",
+      },
     });
-    expect(saved.body.template.visibility).toBe("workspace");
-    const stored = await listBotTemplates(client.db, workspace.workspaceId, null);
-    expect(stored.map((template) => template.id)).toEqual([saved.body.template.id]);
+    // It needs something to say.
+    expect(
+      (await callTool(server, "bot_template_save", { name: "Empty", instructions: "  " })).isError,
+    ).toBe(true);
   }, 180_000);
 
   test("the agent in an Only me chat saves an Only me template", async () => {
@@ -517,19 +531,21 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "user_private",
     });
     const grant = { ...agentGrant({ accountId, workspaceId }, chat.id), subjectId };
+    // The older setupInstructions argument still works, as the First message.
     const saved = await callTool(buildOpenGeniMcpServer(deps, grant), "bot_template_save", {
       name: "My release owner",
       setupInstructions: "You own my releases.",
     });
     expect(saved.isError).toBe(false);
-    expect(saved.body.template).toMatchObject({
-      visibility: "private",
-      createdBySubjectId: subjectId,
-    });
-    expect(await listBotTemplates(client.db, workspaceId, "user:someone-else")).toEqual([]);
+    expect(saved.body.agent).toMatchObject({ visibility: "private" });
     expect(
-      (await listBotTemplates(client.db, workspaceId, subjectId)).map((row) => row.id),
-    ).toEqual([saved.body.template.id]);
+      await getAgent(client.db, { accountId, workspaceId }, saved.body.agent.id),
+    ).toMatchObject({
+      visibility: "private",
+      ownerSubjectId: subjectId,
+      createdBySubjectId: subjectId,
+      content: { instructions: "", firstMessage: "You own my releases." },
+    });
   }, 180_000);
 
   test("a bot's avatar picture is public at its signed link and nowhere else", async () => {

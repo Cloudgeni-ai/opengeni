@@ -31,20 +31,18 @@ its own chat and `set_other_session_title` for another, both of which now also
 take `description` and `avatar`. A rename through either tool is a deliberate
 name, like a person's: the title is cleaned like any model-written title, then
 kept, so automatic titling never replaces it. The tools tell the agent to keep
-a name a person or bot template chose unless the person asks for a new one.
+a name a person or agent chose unless the person asks for a new one.
 
 An image avatar must be a finished image in the workspace that the writer can
 open. In a chat shared with the workspace, and in any bot template, an Only me
-image is refused, because everyone else would see only initials; the agent is
-told to share the image first. Each viewer opens the image with their own
-access, and anyone who cannot sees the name's initials instead.
+image is refused, because everyone else would see only initials; the refusal
+tells the agent to share the image first. Each viewer opens the image with their
+own access, and anyone who cannot sees the name's initials instead.
 
 Avatars are mostly seen small: 16 pixels in the sidebar list and 20 in the
 chat header. Detailed pictures, such as characters told apart by a hat or a
-held object, all look alike at that size. The tools therefore ask the agent to
-make an image avatar a flat icon that fills the square: one bold symbol for the
-chat's job on a solid, strong colour that differs from other bots' avatars,
-with no frame, faces, fine detail or text.
+held object, all look alike at that size. The tools therefore ask the agent for
+one bold symbol on a solid colour, with no text or fine detail.
 
 Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
@@ -129,10 +127,11 @@ template above the composer with its setup instructions filled in; closing that
 strip (or leaving the page) takes the untouched instructions out again, so they
 never become an ordinary chat's first message by accident.
 
-The agent saves a template of itself with `bot_template_save` (capability
+The agent makes an agent of itself with `bot_template_save` (capability
 `subagents`, needs `sessions:create`), usually when the person asks. It writes
-the setup instructions from what the chat has established and leaves out
-one-off tasks, history, personal details and secrets.
+standing Instructions from what the chat has established, puts one-time setup
+in an optional First message, and leaves out one-off tasks, history, personal
+details and secrets ([agents](agents.md#compatibility)).
 
 ### Sharing a template as a file
 

@@ -1,3 +1,4 @@
+import { prepareAgentChatCreate } from "../agent-chats";
 import { readSessionResponsePair } from "./session-response-reads";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
@@ -920,8 +921,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sharedWithWorkspace: (payload as { visibility?: unknown }).visibility !== "private",
         });
       }
+      const agentChat = await prepareAgentChatCreate(deps, grant, workspaceId, payload);
       const create = () =>
-        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+        createSessionForRequest(deps, grant, workspaceId, payload, authorization, agentChat);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
         origin ? withSiteSessionOrigin(origin, create) : create(),
       );
