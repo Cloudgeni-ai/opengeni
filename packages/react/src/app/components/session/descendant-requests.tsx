@@ -13,6 +13,7 @@ import type {
   SessionSummary,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -280,7 +281,9 @@ function DescendantRequestItem({
         ...answer,
       });
     } catch (error) {
-      toast.error("Couldn't submit the decision", { description: userErrorText(error) });
+      // Already decided (elsewhere, or by an earlier Approve all): no news.
+      if (!(error instanceof OpenGeniApiError && error.status === 409))
+        toast.error("Couldn't submit the decision", { description: userErrorText(error) });
       throw error instanceof Error ? error : new Error(String(error));
     }
     // The sub-session resumes now; its other approvals stay decidable here.

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { act, createElement, useLayoutEffect, type ReactNode } from "react";
 import { ApprovalSurface } from "../src";
 import { OpenGeniApiError, type SessionEvent, type ToolActionReview } from "@opengeni/sdk";
@@ -8,7 +8,12 @@ import {
   projectPendingApprovals,
   type PendingApproval,
 } from "../src/approvals";
-import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import {
+  registerDom,
+  renderComponent,
+  withVirtualClock,
+  type RenderedComponent,
+} from "./render-hook";
 
 registerDom();
 
@@ -637,7 +642,7 @@ describe("ApprovalSurface: approve or decline all", () => {
     expect(buttonNamed("Approve all 3")).not.toBeUndefined();
     expect(buttonNamed("Decline all")).not.toBeUndefined();
     // The selected card and the bulk buttons share one read of each review.
-    expect(reads.toSorted()).toEqual(["a", "b", "c"]);
+    expect([...reads].sort()).toEqual(["a", "b", "c"]);
   });
 
   test("includes only actions this person may decide, each through its own decision", async () => {
@@ -690,8 +695,9 @@ describe("ApprovalSurface: approve or decline all", () => {
     expect(declined).toEqual([]);
     await act(async () => buttonNamed("Decline all")!.click());
     await settle();
-    // Decline reaches what each card can decline, never one it can't decide.
-    expect(declined).toEqual(["a", "owner", "question", "b"]);
+    // Decline reaches what each card can decline, never one it can't decide
+    // or one just approved.
+    expect(declined).toEqual(["owner", "question"]);
   });
 
   test("keeps going past a failure, which stays waiting, selected and named", async () => {
@@ -757,7 +763,110 @@ describe("ApprovalSurface: approve or decline all", () => {
     await settle();
     expect(sent).toEqual(["a", "d"]);
     expect(mounted.container.querySelector('[role="alert"]')).toBeNull();
-    expect(mounted.container.textContent).not.toContain("Approving");
+    expect(mounted.container.querySelector("[data-og-approval-bulk-progress]")).toBeNull();
+    // What changed or arrived is offered on its own afterwards.
+    expect(buttonNamed("Approve all 2")).not.toBeUndefined();
+  });
+
+  test("a decided action is never sent again while the host still lists it", async () => {
+    const sent: string[] = [];
+    const approvals = [item("a"), item("b")];
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals,
+        loadReview: async (value) => reviewOf(value.id),
+        // The host accepts each decision but has not removed it yet.
+        onApprove: (value) => {
+          sent.push(value.id);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => buttonNamed("Approve all 2")!.click());
+    await settle();
+    expect(sent).toEqual(["a", "b"]);
+    expect(buttonNamed("Approve all 2")).toBeUndefined();
+    expect(buttonNamed("Decline all")).toBeUndefined();
+    // Its card waits for the removal, as a single decision does.
+    const card = buttons().find((value) => value.textContent?.includes("Approving"));
+    expect(card?.hasAttribute("disabled")).toBe(true);
+    await act(async () => card?.click());
+    expect(sent).toEqual(["a", "b"]);
+  });
+
+  test("an unreadable review or lost arguments can be declined in bulk, never approved", async () => {
+    const approved: string[] = [];
+    const declined: string[] = [];
+    const lost: PendingApproval = { id: "lost", name: "projects.update" };
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [item("a"), item("unreadable"), lost, item("b")],
+        loadReview: async (value) => {
+          if (value.id === "unreadable") throw new OpenGeniApiError(503, "Unavailable");
+          if (value.id === "lost") throw new OpenGeniApiError(404, "Review not found");
+          return reviewOf(value.id);
+        },
+        onApprove: (value) => {
+          approved.push(value.id);
+        },
+        onReject: (value) => {
+          declined.push(value.id);
+        },
+      }),
+    );
+    await settle();
+    await act(async () => buttonNamed("Approve all 2")!.click());
+    await settle();
+    expect(approved).toEqual(["a", "b"]);
+    await mounted.rerender(
+      createElement(ApprovalSurface, {
+        approvals: [item("unreadable"), lost],
+        loadReview: async (value) => {
+          if (value.id === "unreadable") throw new OpenGeniApiError(503, "Unavailable");
+          throw new OpenGeniApiError(404, "Review not found");
+        },
+        onApprove: (value) => {
+          approved.push(value.id);
+        },
+        onReject: (value) => {
+          declined.push(value.id);
+        },
+      }),
+    );
+    await settle();
+    await act(async () => buttonNamed("Decline all")!.click());
+    await settle();
+    expect(declined).toEqual(["unreadable", "lost"]);
+    expect(approved).toEqual(["a", "b"]);
+  });
+
+  test("a waiting action read between states is read again, so the count catches up", async () => {
+    await withVirtualClock(async () => {
+      const reads: Record<string, number> = {};
+      mounted = await renderComponent(
+        createElement(ApprovalSurface, {
+          approvals: [item("a"), item("b"), item("c")],
+          loadReview: async (value) => {
+            reads[value.id] = (reads[value.id] ?? 0) + 1;
+            // b and c are first read while the chat moves between states.
+            return value.id !== "a" && reads[value.id] === 1
+              ? reviewOf(value.id, { availableActions: [] })
+              : reviewOf(value.id);
+          },
+          onApprove: noDecision,
+          onReject: noDecision,
+        }),
+      );
+      await settle();
+      expect(buttonNamed("Approve all 3")).toBeUndefined();
+      await act(async () => {
+        jest.advanceTimersByTime(1_000);
+      });
+      await settle();
+      expect(buttonNamed("Approve all 3")).not.toBeUndefined();
+      expect(reads).toEqual({ a: 1, b: 2, c: 2 });
+    });
   });
 
   test("leaving the chat stops a run", async () => {

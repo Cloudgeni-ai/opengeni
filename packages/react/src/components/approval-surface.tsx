@@ -267,12 +267,63 @@ export function ApprovalSurface({
       startRead(approval, loadReview);
     }
   }, [approvals, loadReview, startRead]);
+  // A read taken between states ("can't be decided yet") or one that failed is
+  // read again on the same backoff the selected card uses, so the bulk counts
+  // catch up. The selected card re-reads its own.
+  const rereadsRef = useRef(new Map<string, number>());
+  const visibleId = selectedApprovalId === undefined ? localSelectedId : selectedApprovalId;
+  useEffect(() => {
+    if (!loadReview || approvals.length < 2) return;
+    const shownId = (approvals.find((approval) => approval.id === visibleId) ?? approvals[0])!.id;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const approval of approvals) {
+      const settled = outcomes[approval.id];
+      if (
+        approval.id === shownId ||
+        !settled ||
+        settled.loader !== loadReview ||
+        !dequal(settled.approval, approval)
+      )
+        continue;
+      const again =
+        settled.outcome.kind === "failed" ||
+        (settled.outcome.kind === "review" && reviewUndecidable(settled.outcome.review));
+      if (!again) {
+        rereadsRef.current.delete(approval.id);
+        continue;
+      }
+      const attempt = rereadsRef.current.get(approval.id) ?? 0;
+      const limit = settled.outcome.kind === "failed" ? 1 : UNDECIDABLE_RETRY_DELAYS_MS.length;
+      if (attempt >= limit) continue;
+      timers.push(
+        setTimeout(() => {
+          rereadsRef.current.set(approval.id, attempt + 1);
+          startRead(approval, loadReview);
+        }, UNDECIDABLE_RETRY_DELAYS_MS[attempt]!),
+      );
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [approvals, loadReview, outcomes, startRead, visibleId]);
   const [bulk, setBulk] = useState<{
     decision: "approve" | "reject";
     index: number;
     length: number;
   } | null>(null);
   const bulkRef = useRef(false);
+  const bulkProgress = useRef<HTMLSpanElement>(null);
+  // Decided by a run and not yet gone from the list: never offered again, and
+  // their cards wait, as a single card's decision waits for its removal.
+  const [bulkDecided, setBulkDecided] = useState<
+    Record<string, { approval: PendingApproval; decision: "approve" | "reject" }>
+  >({});
+  useEffect(() => {
+    setBulkDecided((current) => {
+      const kept = Object.entries(current).filter(([id, entry]) =>
+        approvals.some((approval) => approval.id === id && dequal(approval, entry.approval)),
+      );
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+  }, [approvals]);
   const [bulkFailures, setBulkFailures] = useState<{
     decision: "approve" | "reject";
     items: BulkFailure[];
@@ -306,12 +357,16 @@ export function ApprovalSurface({
     approvals.findIndex((approval) => approval.id === selectedId),
   );
   const selected = approvals[selectedIndex]!;
+  const decidedBy = (approval: PendingApproval) => {
+    const entry = bulkDecided[approval.id];
+    return entry && dequal(entry.approval, approval) ? entry.decision : null;
+  };
   const decide = async (
     approval: PendingApproval,
     decision: "approve" | "reject",
     answer?: McpElicitationAnswer,
   ) => {
-    if (responding || pendingRef.current || bulkRef.current) return;
+    if (responding || pendingRef.current || bulkRef.current || decidedBy(approval)) return;
     pendingRef.current = approval.id;
     setPending({ id: approval.id, decision });
     setDecisionError(null);
@@ -334,6 +389,7 @@ export function ApprovalSurface({
     reject: [] as PendingApproval[],
   };
   for (const approval of approvals) {
+    if (decidedBy(approval)) continue;
     const read = outcomes[approval.id];
     const outcome =
       read && read.loader === loadReview && dequal(read.approval, approval)
@@ -367,20 +423,28 @@ export function ApprovalSurface({
     bulkRef.current = true;
     setDecisionError(null);
     setBulkFailures(null);
+    // Keep keyboard focus in the stack once the progress replaces the buttons.
+    const refocus = surface.current?.contains(document.activeElement) ?? false;
     const failures: BulkFailure[] = [];
     for (const [index, { approval, title }] of snapshot.entries()) {
       if (!mountedRef.current) break;
       const current = approvalsRef.current.find((candidate) => candidate.id === approval.id);
       if (!current || !dequal(current, approval)) continue;
       setBulk({ decision, index, length: snapshot.length });
+      if (refocus && index === 0)
+        requestAnimationFrame(() => bulkProgress.current?.focus({ preventScroll: true }));
       try {
         // Each action is its own decision through the host's ordinary path.
         await (decision === "approve" ? onApprove(current) : onReject(current));
       } catch (cause) {
         // Already decided elsewhere: nothing is left to do for it.
-        if (cause instanceof OpenGeniApiError && cause.status === 409) continue;
-        failures.push({ id: approval.id, title, cause });
+        if (!(cause instanceof OpenGeniApiError && cause.status === 409)) {
+          failures.push({ id: approval.id, title, cause });
+          continue;
+        }
       }
+      if (mountedRef.current)
+        setBulkDecided((decided) => ({ ...decided, [approval.id]: { approval, decision } }));
     }
     bulkRef.current = false;
     if (!mountedRef.current) return;
@@ -398,11 +462,15 @@ export function ApprovalSurface({
   const waitingIds = new Set(approvals.map((approval) => approval.id));
   const shownFailures = bulkFailures?.items.filter((item) => waitingIds.has(item.id)) ?? [];
   const bulkBusy = Boolean(responding || pending || bulk);
+  // The failure list names each failed action; the host's own error for the
+  // last of them would only repeat one line of it.
   const errorText = decisionError
     ? formatError(decisionError.cause)
-    : error instanceof Error
-      ? formatError(error)
-      : error;
+    : shownFailures.length
+      ? null
+      : error instanceof Error
+        ? formatError(error)
+        : error;
   return (
     <section
       ref={surface}
@@ -424,8 +492,10 @@ export function ApprovalSurface({
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {bulk ? (
               <span
+                ref={bulkProgress}
+                tabIndex={-1}
                 role="status"
-                className="inline-flex min-h-8 items-center gap-1.5 [@media(pointer:coarse)]:min-h-11"
+                className="inline-flex min-h-8 items-center gap-1.5 outline-hidden [@media(pointer:coarse)]:min-h-11"
                 data-og-approval-bulk-progress=""
               >
                 <LoaderCircleIcon aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
@@ -498,8 +568,8 @@ export function ApprovalSurface({
             messages={messages}
             custom={renderApproval?.(approval)}
             onViewDetails={onViewDetails}
-            submitting={pending?.id === approval.id ? pending.decision : null}
-            disabled={bulkBusy}
+            submitting={pending?.id === approval.id ? pending.decision : decidedBy(approval)}
+            disabled={bulkBusy || decidedBy(approval) !== null}
             onApprove={() => void decide(approval, "approve")}
             onAnswer={(content) =>
               approval.elicitation

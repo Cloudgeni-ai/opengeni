@@ -285,7 +285,15 @@ function Surface({
  * Decided actions leave, as the server's events remove them; `failing` ones
  * refuse their decision and stay waiting. Reset puts every action back.
  */
-function DecidingSurface({ scenes, failing = [] }: { scenes: Scene[]; failing?: string[] }) {
+const NONE_FAILING: readonly string[] = [];
+
+function DecidingSurface({
+  scenes,
+  failing = NONE_FAILING,
+}: {
+  scenes: Scene[];
+  failing?: readonly string[];
+}) {
   const [decided, setDecided] = useState<ReadonlySet<string>>(() => new Set());
   const decide = async (approval: PendingApproval) => {
     await wait(700);
