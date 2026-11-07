@@ -2834,6 +2834,9 @@ export const englishMessages = {
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",
+  "meetings.recorderPanel.microphoneDisconnected": "Microphone disconnected",
+  "meetings.recorderPanel.microphoneDisconnectedNothingIsRecorded":
+    "Nothing is being recorded. Recording continues by itself when a microphone is back.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",

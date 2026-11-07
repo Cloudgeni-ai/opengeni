@@ -1616,8 +1616,9 @@ export type RecorderSnapshot = {
   elapsedMilliseconds: number;
   /**
    * Why capture is paused: the person paused it, or the system took the
-   * microphone (a phone call, another app), in which case capture resumes by
-   * itself when it can. Null or absent while not paused.
+   * microphone (a phone call, another app) or it went away (unplugged, a
+   * headset switching profile), in which case capture resumes by itself when
+   * it can. Null or absent while not paused.
    */
   pauseReason?: "person" | "interruption" | null;
   tracks: Array<{
@@ -1983,15 +1984,57 @@ type TrackCapture = {
   stream: MediaStream;
   /** Ends a capture that stopping its tracks alone doesn't (the desktop app's). */
   release?: () => void;
+  /**
+   * Opens the source again after it went away (a microphone unplugged, a
+   * headset switched, the system handing the input to another device). Only
+   * a microphone can; a shared tab or screen ends because the person
+   * stopped sharing it.
+   */
+  reopen?: () => Promise<MediaStream>;
   recorder: MediaRecorder;
   analyser: AnalyserNode | null;
   nextChunk: number;
   chunkStartedAt: number;
   writes: Promise<void>;
+  /** When the recorder last handed over audio, for noticing one that went quiet. */
+  lastDataAt: number;
+  /** The source went away and this track records nothing until it is opened again. */
+  lost: boolean;
   /** The live transcript of this track, while `liveTranscript` is on. */
   live?: LiveTranscriber;
   pcm?: AudioWorkletNode;
 };
+
+/** How often a lost microphone is tried again when no device change says it may be back. */
+const MICROPHONE_REOPEN_RETRY_MILLISECONDS = 3_000;
+/**
+ * A microphone recorder that hands over no audio for this many timeslices has
+ * stopped capturing even though nothing said so; it is opened again.
+ */
+const CAPTURE_STALL_TIMESLICES = 6;
+/** A recorder that never says it stopped is given up on after this long. */
+const RECORDER_STOP_WAIT_MILLISECONDS = 2_000;
+
+type OpenedCapture = Omit<
+  TrackCapture,
+  "recorder" | "analyser" | "nextChunk" | "chunkStartedAt" | "writes" | "lastDataAt" | "lost"
+>;
+
+/** Resolves once a recorder has stopped and handed over its last audio, or after a bound. */
+function recorderStopped(recorder: MediaRecorder): Promise<void> {
+  if (recorder.state === "inactive") return Promise.resolve();
+  return new Promise<void>((done) => {
+    const timer = setTimeout(done, RECORDER_STOP_WAIT_MILLISECONDS);
+    recorder.addEventListener(
+      "stop",
+      () => {
+        clearTimeout(timer);
+        done();
+      },
+      { once: true },
+    );
+  });
+}
 
 /**
  * An audio worklet that hands the main thread a tenth of a second of 16-bit
@@ -2100,6 +2143,167 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     });
   };
 
+  // --- A source that goes away mid-recording ---------------------------------
+  // A microphone can end at any time: unplugged, a Bluetooth headset switching
+  // profile when a call starts, the system moving the input to another device.
+  // Its recorder then stops for good. Without this, the page went on showing a
+  // running clock while nothing was recorded.
+  let recorderMimeType: string | undefined;
+  let reopenTimer: ReturnType<typeof setTimeout> | null = null;
+  let reopening = false;
+  /** A device changed while an attempt was under way: try again as soon as it ends. */
+  let reopenAgain = false;
+  const timeslice = () => options.timesliceMilliseconds ?? 5_000;
+  const capturingRecording = (recordingId: string) =>
+    snapshot.recordingId === recordingId &&
+    (snapshot.state === "recording" || snapshot.state === "paused");
+
+  /**
+   * Pause the clock while no track records anything (pauseReason
+   * "interruption"), and start it again when one does. A person's own pause
+   * stays theirs.
+   */
+  const syncInterruption = () => {
+    const anyCapturing = captures.some((capture) => !capture.lost);
+    if (!anyCapturing && snapshot.state === "recording") {
+      pausedAt = performance.now();
+      for (const capture of captures) capture.live?.setPaused(true);
+      emit({ state: "paused", pauseReason: "interruption", elapsedMilliseconds: elapsed() });
+    } else if (
+      anyCapturing &&
+      snapshot.state === "paused" &&
+      snapshot.pauseReason === "interruption"
+    ) {
+      if (pausedAt !== null) pausedTotal += performance.now() - pausedAt;
+      pausedAt = null;
+      for (const capture of captures) capture.live?.setPaused(false);
+      emit({ state: "recording", pauseReason: null });
+    }
+  };
+
+  const scheduleReopen = (delay: number) => {
+    if (reopenTimer) clearTimeout(reopenTimer);
+    reopenTimer = setTimeout(() => {
+      reopenTimer = null;
+      void reopenLost();
+    }, delay);
+  };
+
+  /** A track's source went away, or its recorder stopped or went quiet on its own. */
+  const captureLost = (capture: TrackCapture, recorder: MediaRecorder) => {
+    // A listener of a recorder this track has since replaced, or capture is ending.
+    if (capture.recorder !== recorder || capture.lost) return;
+    const recordingId = snapshot.recordingId;
+    if (!recordingId || !capturingRecording(recordingId)) return;
+    capture.lost = true;
+    // Stopping hands over the audio recorded so far as the session's last chunk.
+    if (recorder.state !== "inactive") recorder.stop();
+    syncInterruption();
+    if (capture.reopen) scheduleReopen(0);
+  };
+
+  /** Record a track on its current stream, continuing its chunk numbering. */
+  const beginCapture = (capture: TrackCapture, recordingId: string) => {
+    const recorder = capture.recorder;
+    capture.lastDataAt = performance.now();
+    recorder.ondataavailable = (event) => {
+      capture.lastDataAt = performance.now();
+      // Chain writes so chunks of a track are stored in order.
+      capture.writes = capture.writes
+        .then(() => saveChunk(capture, event.data, recordingId))
+        .catch((error: unknown) => fail("capture_failed", errorMessage(error)));
+    };
+    recorder.addEventListener("error", () => captureLost(capture, recorder));
+    for (const track of capture.stream.getAudioTracks()) {
+      track.addEventListener("ended", () => captureLost(capture, recorder), { once: true });
+    }
+    recorder.start(timeslice());
+  };
+
+  /**
+   * Open every lost microphone again and go on recording it on the same
+   * track. Each reopening starts a new container in the track's chunks, which
+   * the server places at its own start time. Tried again until it works or
+   * the recording ends.
+   */
+  const reopenLost = async () => {
+    const recordingId = snapshot.recordingId;
+    if (!recordingId || !capturingRecording(recordingId)) return;
+    if (reopening) {
+      reopenAgain = true;
+      return;
+    }
+    reopening = true;
+    reopenAgain = false;
+    try {
+      for (const capture of captures) {
+        if (!capture.lost || !capture.reopen) continue;
+        // The old recorder's last chunk is stored before the new one's first.
+        await recorderStopped(capture.recorder);
+        await capture.writes;
+        let stream: MediaStream;
+        try {
+          stream = await capture.reopen();
+        } catch {
+          continue;
+        }
+        if (!capturingRecording(recordingId) || !capture.lost) {
+          for (const track of stream.getTracks()) track.stop();
+          continue;
+        }
+        for (const track of capture.stream.getTracks()) track.stop();
+        capture.stream = stream;
+        capture.label = stream.getAudioTracks()[0]?.label || capture.label;
+        capture.recorder = new MediaRecorder(stream, {
+          ...(recorderMimeType ? { mimeType: recorderMimeType } : {}),
+          audioBitsPerSecond: 32_000,
+        });
+        if (audioContext) {
+          if (capture.analyser)
+            audioContext.createMediaStreamSource(stream).connect(capture.analyser);
+          if (capture.pcm) audioContext.createMediaStreamSource(stream).connect(capture.pcm);
+        }
+        capture.lost = false;
+        // The clock runs again before the new session's start is read from it.
+        syncInterruption();
+        capture.chunkStartedAt = elapsed();
+        beginCapture(capture, recordingId);
+        if (snapshot.state === "paused") capture.recorder.pause();
+      }
+    } finally {
+      reopening = false;
+      if (
+        capturingRecording(recordingId) &&
+        captures.some((capture) => capture.lost && capture.reopen)
+      ) {
+        scheduleReopen(reopenAgain ? 0 : MICROPHONE_REOPEN_RETRY_MILLISECONDS);
+      }
+      reopenAgain = false;
+    }
+  };
+
+  /** A device was plugged in or the default changed: try a lost microphone now. */
+  const onDeviceChange = () => {
+    if (captures.some((capture) => capture.lost && capture.reopen)) scheduleReopen(0);
+  };
+
+  /** A microphone recorder that hands over nothing is lost even when no event said so. */
+  const checkStalled = () => {
+    if (snapshot.state !== "recording") return;
+    const now = performance.now();
+    const stallAfter = timeslice() * CAPTURE_STALL_TIMESLICES;
+    for (const capture of captures) {
+      if (
+        capture.reopen &&
+        !capture.lost &&
+        capture.recorder.state === "recording" &&
+        now - capture.lastDataAt > stallAfter
+      ) {
+        captureLost(capture, capture.recorder);
+      }
+    }
+  };
+
   const liveSnapshot = () =>
     captures.flatMap((capture) => (capture.live ? [capture.live.snapshot] : []));
 
@@ -2181,20 +2385,19 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     audioContext = null;
     if (ticker) clearInterval(ticker);
     ticker = null;
+    if (reopenTimer) clearTimeout(reopenTimer);
+    reopenTimer = null;
+    globalThis.navigator?.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
     globalThis.document?.removeEventListener("visibilitychange", onHidden);
     void wakeLock?.release().catch(() => undefined);
     wakeLock = null;
   };
 
-  const openStreams = async (): Promise<
-    Array<Omit<TrackCapture, "recorder" | "analyser" | "nextChunk" | "chunkStartedAt" | "writes">>
-  > => {
+  const openStreams = async (): Promise<OpenedCapture[]> => {
     const media = globalThis.navigator?.mediaDevices;
     if (!media?.getUserMedia)
       throw new RecorderCaptureError("unsupported", "This browser cannot record audio.");
-    const opened: Array<
-      Omit<TrackCapture, "recorder" | "analyser" | "nextChunk" | "chunkStartedAt" | "writes">
-    > = [];
+    const opened: OpenedCapture[] = [];
     try {
       if (options.microphone !== false) {
         const constraints: MediaTrackConstraints =
@@ -2224,6 +2427,16 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           source: "microphone",
           label: stream.getAudioTracks()[0]?.label || "Microphone",
           stream,
+          // The chosen microphone when it is back, else whichever is the default now.
+          reopen: async () => {
+            try {
+              return await media.getUserMedia({ audio: constraints });
+            } catch (error) {
+              if (constraints.deviceId === undefined) throw error;
+              const { deviceId: _gone, ...anyDevice } = constraints;
+              return await media.getUserMedia({ audio: anyDevice });
+            }
+          },
         });
       }
       if (options.systemAudio && options.purpose !== "dictation") {
@@ -2326,8 +2539,11 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           nextChunk: 0,
           chunkStartedAt: 0,
           writes: Promise.resolve(),
+          lastDataAt: 0,
+          lost: false,
         });
       }
+      recorderMimeType = mimeType;
       const recordedType = captures[0]!.recorder.mimeType || mimeType || "audio/webm";
       watchUploads();
       emit({ recordingId, title: options.title ?? null });
@@ -2357,21 +2573,8 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       startedAt = performance.now();
       pausedAt = null;
       pausedTotal = 0;
-      for (const capture of captures) {
-        capture.recorder.ondataavailable = (event) => {
-          // Chain writes so chunks of a track are stored in order.
-          capture.writes = capture.writes
-            .then(() => saveChunk(capture, event.data, recordingId))
-            .catch((error: unknown) => fail("capture_failed", errorMessage(error)));
-        };
-        for (const track of capture.stream.getAudioTracks()) {
-          track.addEventListener("ended", () => {
-            // The person stopped sharing, or the device went away: keep the other tracks.
-            if (capture.recorder.state !== "inactive") capture.recorder.stop();
-          });
-        }
-        capture.recorder.start(options.timesliceMilliseconds ?? 5_000);
-      }
+      for (const capture of captures) beginCapture(capture, recordingId);
+      globalThis.navigator?.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
       globalThis.document?.addEventListener("visibilitychange", onHidden);
       if (options.keepAwake !== false) {
         const wake = (
@@ -2388,7 +2591,10 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           })
           .catch(() => undefined);
       }
-      ticker = setInterval(() => emit({ elapsedMilliseconds: elapsed() }), 250);
+      ticker = setInterval(() => {
+        checkStalled();
+        emit({ elapsedMilliseconds: elapsed() });
+      }, 250);
       emit({
         state: "recording",
         recordingId,
@@ -2402,6 +2608,12 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     },
 
     pause() {
+      // Lost audio already stopped the clock; the person's pause now holds it
+      // even when the microphone comes back.
+      if (snapshot.state === "paused" && snapshot.pauseReason === "interruption") {
+        emit({ pauseReason: "person" });
+        return;
+      }
       if (snapshot.state !== "recording") return;
       for (const capture of captures)
         if (capture.recorder.state === "recording") capture.recorder.pause();
@@ -2416,12 +2628,22 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
 
     resume() {
       if (snapshot.state !== "paused") return;
+      if (snapshot.pauseReason === "interruption") {
+        // Nothing can record yet; try the microphone again now.
+        onDeviceChange();
+        return;
+      }
       if (pausedAt !== null) pausedTotal += performance.now() - pausedAt;
       pausedAt = null;
-      for (const capture of captures)
+      const now = performance.now();
+      for (const capture of captures) {
         if (capture.recorder.state === "paused") capture.recorder.resume();
+        capture.lastDataAt = now;
+      }
       for (const capture of captures) capture.live?.setPaused(false);
       emit({ state: "recording", pauseReason: null });
+      // Every source went away while paused: the clock stops again until one is back.
+      syncInterruption();
     },
 
     async stop(stopOptions = {}) {

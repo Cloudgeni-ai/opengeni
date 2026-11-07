@@ -166,7 +166,14 @@ Products do not need to implement the capture contract by hand.
   can share it (Chromium on desktop), a tab's or the system's audio, each as
   its own track, with `MediaRecorder` chunks every 5 seconds, input levels for
   a meter, pause and resume, a screen wake lock on phones and an extra flush
-  when the page is hidden.
+  when the page is hidden. When the microphone goes away mid-recording
+  (unplugged, a headset switching profile when a call starts), it opens the
+  microphone again, the chosen one if it is back, else the current default,
+  and continues the same track as a new capture session. While no track can
+  record, the clock stops and the snapshot reads `paused` with
+  `pauseReason: "interruption"`; it retries on every device change and every
+  few seconds and records again by itself. A microphone recorder that hands
+  over no audio for six timeslices counts as gone too.
 
 `@opengeni/react/recordings` builds on it with hooks: `useRecorder` (capture
 plus background upload; recovers leftovers on mount), `useRecordings` (list
