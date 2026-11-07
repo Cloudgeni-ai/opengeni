@@ -394,7 +394,16 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         setSaving(true);
         // A newer draft saved on another device is saved over: this composer
         // saves only what is being typed in it, so the latest typing wins.
-        let expectedRevision = current.revision;
+        // An autosave of a box holding no message has no typing to keep, so
+        // it never lands on another device's message this form never showed:
+        // a save base the form never showed is checked first, and a newer
+        // draft it meets is read before anything is saved on top of it.
+        const emptyAutosave = onlyIfCurrent && !holdsMessage(snapshot);
+        let expectedRevision =
+          emptyAutosave && sendBasisRef.current !== null && sendBasisRef.current < current.revision
+            ? sendBasisRef.current
+            : current.revision;
+        const newer: { message: ValidatedRemoteDraft | null } = { message: null };
         try {
           const save = async (): Promise<NewSessionDraft> => {
             for (let attempt = 0; ; attempt += 1) {
@@ -405,15 +414,31 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
                 });
               } catch (cause) {
                 const currentRevision = newSessionDraftConflictRevision(cause);
-                // A save that was superseded meanwhile (another target, or
-                // Send taking over the draft) is dropped, never rebased.
-                if (
-                  !rebase ||
-                  currentRevision === undefined ||
+                const superseded =
                   attempt >= 2 ||
                   generation !== targetGeneration.current ||
-                  epoch !== persistenceEpoch.current
-                ) {
+                  epoch !== persistenceEpoch.current;
+                if (emptyAutosave && !superseded && isNewSessionDraftConflict(cause)) {
+                  const remote = await readRemote();
+                  if (
+                    !remote ||
+                    generation !== targetGeneration.current ||
+                    epoch !== persistenceEpoch.current
+                  ) {
+                    throw cause;
+                  }
+                  // Another device's message is kept and followed; picks over
+                  // a draft holding no message still save on top of it.
+                  if (holdsMessage(remote.editable)) {
+                    newer.message = remote;
+                    throw cause;
+                  }
+                  expectedRevision = remote.draft.revision;
+                  continue;
+                }
+                // A save that was superseded meanwhile (another target, or
+                // Send taking over the draft) is dropped, never rebased.
+                if (!rebase || currentRevision === undefined || superseded) {
                   throw cause;
                 }
                 expectedRevision = currentRevision;
@@ -448,6 +473,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
             return null;
           }
+          if (newer.message) {
+            // The form follows the other device's message while its box
+            // still holds none; typing since then saves on top of it.
+            if (!holdsMessage(valueRef.current)) applyRemote(newer.message);
+            setCurrentConflict(null);
+            setError(null);
+            return null;
+          }
           const problem = asError(cause);
           if (isNewSessionDraftConflict(cause)) setCurrentConflict(problem);
           setError(problem);
@@ -465,7 +498,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return operation;
     },
-    [client, retryDelaysMs, setCurrentConflict, setError, workspaceId],
+    [applyRemote, client, readRemote, retryDelaysMs, setCurrentConflict, setError, workspaceId],
   );
 
   const valueSignature = draftSignature(options.value);
