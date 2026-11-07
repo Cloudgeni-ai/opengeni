@@ -106,7 +106,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       },
     );
     const debitInputs: Array<Record<string, any>> = [];
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(
       async (_db, input) => {
         debitInputs.push(input);
         return {
@@ -116,7 +116,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
             currency: "usd",
             updatedAt: new Date().toISOString(),
           },
-          debitedMicros: input.requestedAmountMicros,
+          debitedMicros: input.amountMicros,
         };
       },
     );
@@ -150,7 +150,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 4 });
       expect(debitInputs).toHaveLength(1);
       expect(debitInputs[0]).toMatchObject({
-        requestedAmountMicros: 4,
+        amountMicros: 4,
         metadata: { gatewayProvider: "baseten", cachedTokens: 3 },
       });
       expect(billing).toMatchObject({
@@ -166,7 +166,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
 
   test("managed Gateway rejects an unapproved reported provider before recording usage", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue(
       undefined as never,
     );
     try {
@@ -202,7 +202,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
 
   test("uses a database-resolved Gateway model's route policy and pricing", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
       balance: {
         accountId: ACCOUNT,
         balanceMicros: 1_000_000,
@@ -266,11 +266,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         recorded.push({ eventType: input.eventType, quantity: input.quantity, unit: input.unit });
       },
     );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for a codex turn");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("credits must NOT be debited for a codex turn");
+    });
     try {
       await recordModelUsageAndDebitCredits(billedSettings(), db, {
         accountId: ACCOUNT,
@@ -300,7 +298,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         recorded.push({ eventType: input.eventType, quantity: input.quantity });
       },
     );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue(
       undefined as never,
     );
     try {
@@ -335,11 +333,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         recorded.push({ eventType: input.eventType, quantity: input.quantity });
       },
     );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("free turns must not debit credits");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("free turns must not debit credits");
+    });
     try {
       const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
         accountId: ACCOUNT,
@@ -368,11 +364,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
 
   test("malformed token counts cannot create token, cost, or debit quantities", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("malformed usage must not debit credits");
-      },
-    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async () => {
+      throw new Error("malformed usage must not debit credits");
+    });
     try {
       const malformedUsages = [
         {
@@ -423,7 +417,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       },
     );
     const debitInputs: Array<Record<string, any>> = [];
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(
       async (_db, input) => {
         debitInputs.push(input);
         return {
@@ -433,7 +427,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
             currency: "usd",
             updatedAt: new Date().toISOString(),
           },
-          debitedMicros: input.requestedAmountMicros,
+          debitedMicros: input.amountMicros,
         };
       },
     );
@@ -508,7 +502,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       },
     );
     const debitInputs: Array<Record<string, any>> = [];
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(
       async (_db, input) => {
         debitInputs.push(input);
         return {
@@ -518,7 +512,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
             currency: "usd",
             updatedAt: new Date().toISOString(),
           },
-          debitedMicros: input.requestedAmountMicros,
+          debitedMicros: input.amountMicros,
         };
       },
     );

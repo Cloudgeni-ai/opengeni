@@ -1,38 +1,56 @@
 import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
+import type { FileSink } from "bun";
+import {
+  RECORDING_MAX_DURATION_MILLISECONDS,
+  recordingAudioContainer,
+  type RecordingAudioContainer,
+} from "@opengeni/contracts";
 import { pcmWavPiece, readPcmWav } from "./dictation-pieces";
 import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
 
 /**
- * Decode audio on its container timeline. A capture can leave small holes in
- * its timestamps (a desktop's system audio did: 436 holes, 33 s in under
- * 8 minutes). A plain decode closes them up, so everything timed on the
- * decoded audio (words, speaker turns, pieces) runs early against the
- * player. This fills each hole with silence instead, from time zero.
+ * Decode audio on its container timeline. A capture can leave holes in its
+ * timestamps (a desktop's system audio did: 436 holes, 33 s in under
+ * 8 minutes; a browser track fed by an audio graph that stops or is
+ * suspended leaves one as long as the quiet). A plain decode closes them up,
+ * so everything timed on the decoded audio (words, speaker turns, pieces)
+ * runs early against the player. This fills each hole with silence instead,
+ * from time zero.
+ *
+ * The filter fills a hole in one go and holds that stretch of silence in
+ * memory, so it is only used on files the worker prepared itself, whose holes
+ * are already filled. Uploaded audio is put on its timeline by
+ * `prepareRecordingTrackAudio`, which makes the same corrections while it
+ * streams, writing silence in fixed-size pieces.
  */
 export const RECORDING_TIMELINE_FILTER = "aresample=async=1:first_pts=0";
 
 /**
- * The longest hole in a run's timestamps the timeline filter is trusted to
- * fill, counting from time zero to the run's first packet. The filter fills
- * a hole in one go and holds that stretch of silence in memory, so a hole
- * is bounded by this fixed limit rather than by durations the uploader
- * declared. A capture's own holes are far shorter.
- */
-export const RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS = 60_000;
-
-/**
- * The longest audio accepted for a declared duration. Chunk durations are
- * measured on the recording device's clock and container timestamps on the
- * audio clock, so a long capture can drift a little past what it declared;
- * five seconds and 1% leave room for that.
+ * The longest audio accepted for a declared duration.
+ *
+ * A browser's MediaRecorder stamps its packets on the same monotonic clock
+ * the recorder measures chunk durations on, so its timeline follows what
+ * it declared however it went quiet: captures with 130 s of silence, a
+ * 130 s pause or a 130 s hole in their timestamps all ended within 0.15 s of
+ * what they declared, all but one short of it. A phone counts its
+ * durations in the samples it encoded. Only a capture timed by its samples
+ * against a declared wall-clock length, such as the desktop app's audio of
+ * other apps, can run longer: by its audio device's clock error, a fraction
+ * of a percent on real hardware, plus what the platform still had buffered
+ * after the app last padded a stall with silence, which is seconds at most
+ * and does not add up over stalls. Five seconds and 1% leave a wide margin
+ * over both.
+ *
+ * A run that declared no length, such as a file brought in whose length the
+ * app could not read, may be as long as a recording can be.
  */
 export function recordingDurationLimitMilliseconds(declaredMilliseconds: number): number {
-  const declared = Math.max(0, declaredMilliseconds);
+  const declared =
+    declaredMilliseconds > 0 ? declaredMilliseconds : RECORDING_MAX_DURATION_MILLISECONDS;
   return Math.ceil(declared + 5_000 + declared / 100);
 }
 
@@ -215,17 +233,26 @@ export class RecordingAudioError extends Error {
 
 const FFMPEG_TIMEOUT_MS = 30 * 60 * 1_000;
 
+type FfmpegStreams = {
+  /** Reads ffmpeg's output as it is written; throwing stops ffmpeg with that error. */
+  stdout?: (stdout: ReadableStream<Uint8Array>) => Promise<void>;
+  /**
+   * Writes ffmpeg's input, which ends when this settles. When it throws,
+   * ffmpeg's own failure is reported if it has one, otherwise that error.
+   */
+  stdin?: (stdin: FileSink) => Promise<void>;
+};
+
 async function runFfmpeg(
   ffmpegPath: string,
   args: string[],
   signal?: AbortSignal,
   stderrBytes = 16_384,
-  /** Reads ffmpeg's output as it is written; throwing stops ffmpeg with that error. */
-  readStdout?: (stdout: ReadableStream<Uint8Array>) => Promise<void>,
+  streams: FfmpegStreams = {},
 ): Promise<{ stderr: string }> {
   const child = Bun.spawn([ffmpegPath, ...args], {
-    stdin: "ignore",
-    stdout: readStdout ? "pipe" : "ignore",
+    stdin: streams.stdin ? "pipe" : "ignore",
+    stdout: streams.stdout ? "pipe" : "ignore",
     stderr: "pipe",
   });
   trackRecordingProcesses([child]);
@@ -236,16 +263,37 @@ async function runFfmpeg(
     hung = true;
     abort();
   }, FFMPEG_TIMEOUT_MS);
+  let writeFailure: { error: unknown } | null = null;
+  const writing = streams.stdin
+    ? (async () => {
+        const sink = child.stdin as FileSink;
+        try {
+          await streams.stdin!(sink);
+        } catch (error) {
+          writeFailure = { error };
+        }
+        try {
+          await sink.end();
+        } catch {
+          // ffmpeg already closed its input.
+        }
+      })()
+    : undefined;
   try {
     const [code, stderr] = await Promise.all([
       child.exited,
       readTail(child.stderr, stderrBytes),
-      readStdout?.(child.stdout as ReadableStream<Uint8Array>).catch((error: unknown) => {
+      streams.stdout?.(child.stdout as ReadableStream<Uint8Array>).catch((error: unknown) => {
         abort();
         throw error;
       }),
+      writing,
     ]);
-    if (code === 0) return { stderr };
+    if (code === 0) {
+      // ffmpeg finished what it was given, but its input was cut short.
+      if (writeFailure) throw (writeFailure as { error: unknown }).error;
+      return { stderr };
+    }
     const detail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`;
     if (hung) {
       throw new RecordingAudioError(`ffmpeg hung preparing the audio: ${detail}`, "ffmpeg_failed");
@@ -269,22 +317,58 @@ export function ffmpegReportedMilliseconds(stderr: string): number | null {
 }
 
 /**
- * Read a run's packet timestamps without decoding it, and refuse the run
- * before the timeline filter sees it when a hole (from time zero to the
- * first packet, or between packets) is longer than
- * `RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS`, or when its timeline runs past
- * the length its chunks declared. Packets are read as ffmpeg writes them,
- * and the first one out of bounds stops it.
+ * The PCM the worker streams between ffmpeg processes while it puts a run on
+ * its timeline: 16-bit little-endian mono at 48 kHz, as runs were mixed at.
  */
-async function assertRunTimeline(
+const TIMELINE_SAMPLE_RATE = 48_000;
+const TIMELINE_BYTES_PER_SAMPLE = 2;
+const TIMELINE_PCM_ARGS = ["-f", "s16le", "-ar", String(TIMELINE_SAMPLE_RATE), "-ac", "1"];
+
+/**
+ * How far a run's audio may drift from its timestamps before it is put back
+ * on them, as `RECORDING_TIMELINE_FILTER` does: from time zero to the first
+ * packet, and between packets after it.
+ */
+const TIMELINE_FIRST_DRIFT_MILLISECONDS = 1;
+const TIMELINE_DRIFT_MILLISECONDS = 100;
+
+/** Silence is written in pieces of this size, so a hole of any length takes the same memory. */
+const SILENCE = new Uint8Array(64 * 1_024);
+
+/**
+ * Where a run's decoded audio is put back on its timestamps: at a byte of the
+ * decoded PCM, a number of bytes of silence put in (positive) or of audio
+ * left out (negative). Every change is at least the drift the timeline
+ * allows, and the timeline is bounded, so there are few of them.
+ */
+type RunTimeline = { at: number[]; bytes: number[] };
+
+function timelineBytes(milliseconds: number): number {
+  return Math.round((milliseconds * TIMELINE_SAMPLE_RATE) / 1_000) * TIMELINE_BYTES_PER_SAMPLE;
+}
+
+/**
+ * Read a run's packet timestamps without decoding it, and work out where its
+ * decoded audio must be moved to stay on them: a hole (from time zero to the
+ * first packet, or between packets) is filled with silence, and audio that
+ * overlaps what came before is left out. A run whose timeline, or the audio
+ * its packets hold, runs past the length its chunks declared is refused
+ * before anything is decoded. Packets are read as ffmpeg writes them, and
+ * the first one out of bounds stops it.
+ */
+async function scanRunTimeline(
   ffmpegPath: string,
   path: string,
   declaredMilliseconds: number,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<RunTimeline> {
   const limit = recordingDurationLimitMilliseconds(declaredMilliseconds);
+  const timeline: RunTimeline = { at: [], bytes: [] };
   let millisecondsPerTick: number | null = null;
-  let end = 0;
+  // The audio decoded so far, and where its end sits on the timeline.
+  let decoded = 0;
+  let placed = 0;
+  let first = true;
   const packet = (line: string) => {
     const timebase = /^#tb 0: (\d+)\/(\d+)$/u.exec(line);
     if (timebase) {
@@ -299,15 +383,22 @@ async function assertRunTimeline(
     }
     if (pts === undefined || !Number.isFinite(pts)) return;
     const start = pts * millisecondsPerTick;
-    if (start - end > RECORDING_TIMELINE_MAX_HOLE_MILLISECONDS) {
-      throw new RecordingAudioError(
-        "The audio has a gap too long to be a recording",
-        "invalid_audio",
-      );
+    const drift = start - placed;
+    if (
+      Math.abs(drift) > (first ? TIMELINE_FIRST_DRIFT_MILLISECONDS : TIMELINE_DRIFT_MILLISECONDS)
+    ) {
+      const bytes = timelineBytes(start) - timelineBytes(placed);
+      if (bytes !== 0) {
+        timeline.at.push(timelineBytes(decoded));
+        timeline.bytes.push(bytes);
+      }
+      placed = start;
     }
+    first = false;
     const length = duration !== undefined && duration > 0 ? duration * millisecondsPerTick : 0;
-    end = Math.max(end, start + length);
-    if (end > limit) {
+    decoded += length;
+    placed += length;
+    if (placed > limit || decoded > limit) {
       throw new RecordingAudioError("The audio runs past its declared length", "invalid_audio");
     }
   };
@@ -332,17 +423,218 @@ async function assertRunTimeline(
     ],
     signal,
     16_384,
-    async (stdout) => {
-      const decoder = new TextDecoder();
-      let rest = "";
-      for await (const bytes of stdout) {
-        const lines = (rest + decoder.decode(bytes, { stream: true })).split("\n");
-        rest = lines.pop() ?? "";
-        for (const line of lines) packet(line.trim());
-      }
-      packet((rest + decoder.decode()).trim());
+    {
+      stdout: async (stdout) => {
+        const decoder = new TextDecoder();
+        let rest = "";
+        for await (const bytes of stdout) {
+          const lines = (rest + decoder.decode(bytes, { stream: true })).split("\n");
+          rest = lines.pop() ?? "";
+          for (const line of lines) packet(line.trim());
+        }
+        packet((rest + decoder.decode()).trim());
+      },
     },
   );
+  return timeline;
+}
+
+function* silent(bytes: number): Generator<Uint8Array> {
+  for (let left = bytes; left > 0; left -= SILENCE.byteLength) {
+    yield SILENCE.subarray(0, Math.min(left, SILENCE.byteLength));
+  }
+}
+
+/** Decoded PCM with a run's timeline changes made as it streams past. */
+async function* onTimeline(
+  pcm: AsyncIterable<Uint8Array>,
+  timeline: RunTimeline,
+): AsyncGenerator<Uint8Array> {
+  let position = 0;
+  let next = 0;
+  let dropping = 0;
+  const due = function* () {
+    while (next < timeline.at.length && timeline.at[next]! <= position) {
+      const bytes = timeline.bytes[next]!;
+      next += 1;
+      if (bytes > 0) yield* silent(bytes);
+      else dropping -= bytes;
+    }
+  };
+  for await (const piece of pcm) {
+    let offset = 0;
+    while (offset < piece.byteLength) {
+      yield* due();
+      const until = next < timeline.at.length ? timeline.at[next]! : Number.POSITIVE_INFINITY;
+      const take = Math.min(piece.byteLength - offset, until - position);
+      const dropped = Math.min(dropping, take);
+      dropping -= dropped;
+      if (take > dropped) yield piece.subarray(offset + dropped, offset + take);
+      offset += take;
+      position += take;
+    }
+  }
+  // Holes after the last decoded audio: the decoder gave less than the packets said.
+  for (; next < timeline.at.length; next += 1) {
+    if (timeline.bytes[next]! > 0) yield* silent(timeline.bytes[next]!);
+  }
+}
+
+const STOPPED_READING = new Error("The decoded audio was no longer needed");
+
+/**
+ * Decode one run and put it on its timeline as it streams, in
+ * `TIMELINE_PCM_ARGS`. ffmpeg decodes it plainly, holes closed up, and the
+ * timeline's changes are made on the way past: however long a hole is, it
+ * takes no more memory than any other stretch.
+ */
+async function* decodeRunOnTimeline(
+  ffmpegPath: string,
+  path: string,
+  timeline: RunTimeline,
+  signal?: AbortSignal,
+): AsyncGenerator<Uint8Array> {
+  let handOut!: (stdout: ReadableStream<Uint8Array>) => void;
+  let release!: (stopped?: Error) => void;
+  const output = new Promise<ReadableStream<Uint8Array>>((resolve) => {
+    handOut = resolve;
+  });
+  const released = new Promise<void>((resolve, reject) => {
+    release = (stopped) => (stopped ? reject(stopped) : resolve());
+  });
+  const decoding = runFfmpeg(
+    ffmpegPath,
+    [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      path,
+      "-vn",
+      "-map",
+      "0:a:0",
+      ...TIMELINE_PCM_ARGS,
+      "-",
+    ],
+    signal,
+    16_384,
+    {
+      stdout: async (stdout) => {
+        handOut(stdout);
+        await released;
+      },
+    },
+  );
+  // Observed when the run is done; a decoder that never starts is reported here.
+  const started = Promise.race([
+    output,
+    decoding.then(() => {
+      throw new RecordingAudioError("ffmpeg gave no decoded audio", "ffmpeg_failed");
+    }),
+  ]);
+  let complete = false;
+  try {
+    yield* onTimeline(await started, timeline);
+    complete = true;
+  } finally {
+    if (complete) {
+      release();
+      await decoding;
+    } else {
+      release(STOPPED_READING);
+      await decoding.catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Runs placed at their offsets (in bytes of `TIMELINE_PCM_ARGS`) and summed
+ * where they overlap, as one stream. A run is decoded only once the mix
+ * reaches it, and the gaps before runs are written as silence in pieces.
+ */
+async function* mixRuns(
+  runs: ReadonlyArray<{ offset: number; pcm: () => AsyncGenerator<Uint8Array> }>,
+): AsyncGenerator<Uint8Array> {
+  const ordered = [...runs].sort((left, right) => left.offset - right.offset);
+  if (ordered.length === 1 && ordered[0]!.offset === 0) {
+    yield* ordered[0]!.pcm();
+    return;
+  }
+  // A second at a time; runs are summed sample by sample.
+  const blockBytes = TIMELINE_SAMPLE_RATE * TIMELINE_BYTES_PER_SAMPLE;
+  type Playing = {
+    pcm: AsyncGenerator<Uint8Array>;
+    position: number;
+    piece: Uint8Array;
+    offset: number;
+    done: boolean;
+  };
+  let playing: Playing[] = [];
+  let next = 0;
+  let position = 0;
+  const scratch = new Uint8Array(blockBytes);
+  try {
+    for (;;) {
+      while (next < ordered.length && ordered[next]!.offset < position + blockBytes) {
+        const run = ordered[next]!;
+        playing.push({
+          pcm: run.pcm(),
+          position: Math.max(position, run.offset),
+          piece: new Uint8Array(0),
+          offset: 0,
+          done: false,
+        });
+        next += 1;
+      }
+      if (playing.length === 0) {
+        if (next >= ordered.length) return;
+        yield* silent(ordered[next]!.offset - position);
+        position = ordered[next]!.offset;
+        continue;
+      }
+      const end = position + blockBytes;
+      const block = new Uint8Array(blockBytes);
+      const mixed = new Int16Array(block.buffer);
+      const adding = new Int16Array(scratch.buffer);
+      let reached = position;
+      for (const [index, run] of playing.entries()) {
+        // The first run is written as it is; the others are added to it.
+        const target = index === 0 ? block : scratch;
+        if (index > 0) scratch.fill(0);
+        const from = run.position - position;
+        while (run.position < end && !run.done) {
+          if (run.offset >= run.piece.byteLength) {
+            const read = await run.pcm.next();
+            if (read.done) run.done = true;
+            else {
+              run.piece = read.value;
+              run.offset = 0;
+            }
+            continue;
+          }
+          const take = Math.min(run.piece.byteLength - run.offset, end - run.position);
+          target.set(run.piece.subarray(run.offset, run.offset + take), run.position - position);
+          run.offset += take;
+          run.position += take;
+        }
+        if (index > 0) {
+          const last = Math.ceil((run.position - position) / TIMELINE_BYTES_PER_SAMPLE);
+          for (let sample = Math.floor(from / TIMELINE_BYTES_PER_SAMPLE); sample < last; sample++) {
+            mixed[sample] = Math.max(-32_768, Math.min(32_767, mixed[sample]! + adding[sample]!));
+          }
+        }
+        reached = Math.max(reached, run.position);
+      }
+      playing = playing.filter((run) => !run.done);
+      if (reached > position) {
+        yield block.subarray(0, reached - position);
+        position = reached;
+      }
+    }
+  } finally {
+    for (const run of playing) await run.pcm.return(undefined);
+  }
 }
 
 export type PreparedRecordingAudio = {
@@ -483,13 +775,16 @@ export async function prepareRecordingTrackAudio(input: {
     } finally {
       await handle?.close();
     }
-    // Every run's timestamps are checked before the timeline filter fills their holes.
+    // Every run's timestamps are read, and checked against what it declared, before any is decoded.
+    const timelines: RunTimeline[] = [];
     for (const run of runs) {
-      await assertRunTimeline(
-        input.ffmpegPath,
-        run.path,
-        run.endMilliseconds - run.startMilliseconds,
-        input.signal,
+      timelines.push(
+        await scanRunTimeline(
+          input.ffmpegPath,
+          run.path,
+          run.endMilliseconds - run.startMilliseconds,
+          input.signal,
+        ),
       );
     }
     const trackStart = runs[0]!.startMilliseconds;
@@ -497,72 +792,52 @@ export async function prepareRecordingTrackAudio(input: {
     const declared =
       runs.reduce((end, run) => Math.max(end, run.endMilliseconds), trackStart) - trackStart;
     const output = join(directory, `prepared.${format.extension}`);
-    const base = [
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "info",
-      "-stats",
-      "-stats_period",
-      "30",
-      "-y",
-    ];
-    let result: { stderr: string };
-    if (runs.length === 1) {
-      // Re-encoded through the timeline filter rather than copied: a copy keeps
-      // the capture's holes, and a model that decodes the file itself would
-      // close them up and time its words early against our speaker turns and
-      // the player.
-      result = await runFfmpeg(
-        input.ffmpegPath,
-        [
-          ...base,
-          "-i",
-          runs[0]!.path,
-          "-vn",
-          "-map",
-          "0:a:0",
-          "-af",
-          RECORDING_TIMELINE_FILTER,
-          "-c:a",
-          format.codec,
-          ...format.encoderArgs,
-          "-f",
-          format.muxer,
-          output,
-        ],
-        input.signal,
-      );
-    } else {
-      const inputs = runs.flatMap((run) => ["-i", run.path]);
-      const delayed = runs
-        .map((run, index) => {
-          const delay = Math.max(0, run.startMilliseconds - trackStart);
-          return `[${index}:a:0]${RECORDING_TIMELINE_FILTER},aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
-        })
-        .join(";");
-      const mix = `${runs.map((_, index) => `[a${index}]`).join("")}amix=inputs=${runs.length}:normalize=0:dropout_transition=0[out]`;
-      result = await runFfmpeg(
-        input.ffmpegPath,
-        [
-          ...base,
-          ...inputs,
-          "-filter_complex",
-          `${delayed};${mix}`,
-          "-map",
-          "[out]",
-          "-c:a",
-          format.codec,
-          ...format.encoderArgs,
-          "-ac",
-          "1",
-          "-f",
-          format.muxer,
-          output,
-        ],
-        input.signal,
-      );
-    }
+    // Re-encoded on the timeline rather than copied, even for one run: a copy
+    // keeps the capture's holes, and a model that decodes the file itself
+    // would close them up and time its words early against our speaker turns
+    // and the player. Each run is decoded, put on its timeline as it streams,
+    // placed at its start time and mixed with the others, then encoded once.
+    let writtenBytes = 0;
+    const result = await runFfmpeg(
+      input.ffmpegPath,
+      [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-stats",
+        "-stats_period",
+        "30",
+        "-y",
+        ...TIMELINE_PCM_ARGS,
+        "-i",
+        "pipe:0",
+        "-c:a",
+        format.codec,
+        ...format.encoderArgs,
+        "-f",
+        format.muxer,
+        output,
+      ],
+      input.signal,
+      16_384,
+      {
+        stdin: async (stdin) => {
+          const mixed = mixRuns(
+            runs.map((run, index) => ({
+              offset: timelineBytes(Math.max(0, run.startMilliseconds - trackStart)),
+              pcm: () =>
+                decodeRunOnTimeline(input.ffmpegPath, run.path, timelines[index]!, input.signal),
+            })),
+          );
+          for await (const piece of mixed) {
+            stdin.write(piece);
+            await stdin.flush();
+            writtenBytes += piece.byteLength;
+          }
+        },
+      },
+    );
     input.onProgress?.();
     const size = (await stat(output)).size;
     if (size === 0) throw new RecordingAudioError("The prepared audio is empty", "invalid_audio");
@@ -576,7 +851,9 @@ export async function prepareRecordingTrackAudio(input: {
       bytes: new Uint8Array(await readFile(output)),
       mimeType: format.mimeType,
       extension: format.extension,
-      durationMilliseconds: reported ?? Math.max(0, declared),
+      durationMilliseconds:
+        reported ??
+        Math.round((writtenBytes / TIMELINE_BYTES_PER_SAMPLE / TIMELINE_SAMPLE_RATE) * 1_000),
       offsetMilliseconds: trackStart,
     };
   } finally {

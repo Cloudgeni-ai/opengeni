@@ -9,15 +9,6 @@ import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
 
-// Backend-first automatic top-ups ship before their separately owned billing UI.
-// Remove each exact classification when its browser consumer lands; the equality
-// check below still rejects unclassified additions and stale unused entries.
-const pendingBillingAutoTopUpMethods = [
-  "getBillingAutoTopUp",
-  "updateBillingAutoTopUp",
-  "createBillingAutoTopUpSetupSession",
-];
-
 // These methods predate the browser-specific entry. Keep the list explicit so
 // removing legacy surface tightens the boundary, while adding a browser-unused
 // method to the eager client fails review until it moves to a focused subpath.
@@ -199,11 +190,26 @@ const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 // Organization credit alerts land as a backend/SDK slice before the separately
 // owned billing settings and inbox UI. Remove each classification when that
 // browser consumer lands; the exact equality below enforces the handoff.
-const pendingBillingAlertMethods = [
-  "getBillingAlertSettings",
-  "updateBillingAlertSettings",
-  "listBillingCreditNotifications",
-  "markBillingCreditNotificationRead",
+const pendingBillingAlertMethods = ["listBillingCreditNotifications"];
+
+// The Agents page has no revision history view yet; agent revisions are read
+// by SDK callers. Remove the entry when a browser consumer lands.
+const pendingAgentsMethods = ["listAgentRevisions"];
+
+// The Agents page replaced the Bot templates and Slack agents screens, so the
+// web calls the /agents methods instead. The legacy methods stay on the SDK for
+// existing callers until the contract step removes them.
+const retiredLegacyAgentScreenMethods = [
+  "createBotTemplate",
+  "createOpenGeniSlackAgent",
+  "deleteBotTemplate",
+  "deleteOpenGeniSlackAgent",
+  "getBotTemplate",
+  "listBotTemplates",
+  "listOpenGeniSlackAgentChannels",
+  "postOpenGeniSlackAgentIntro",
+  "updateBotTemplate",
+  "updateOpenGeniSlackAgent",
 ];
 
 // Chat share links: the public share page reads a link without the SDK (no
@@ -292,8 +298,9 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
-        ...pendingBillingAutoTopUpMethods,
         ...pendingBillingAlertMethods,
+        ...pendingAgentsMethods,
+        ...retiredLegacyAgentScreenMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),

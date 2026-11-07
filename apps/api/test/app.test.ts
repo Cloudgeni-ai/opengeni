@@ -4,6 +4,7 @@ import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client
 import { HTTPException } from "hono/http-exception";
 import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
+import { OPENGENI_BROWSER_REQUEST_HEADERS } from "@opengeni/sdk/browser";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
@@ -543,6 +544,13 @@ describe("API helpers", () => {
     );
     // A conversation scopes media and Site reads to its session for proxies.
     expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Session-Id");
+    // Every header the SDK's browser clients may send passes the preflight.
+    const allowedHeaders = (external.headers.get("access-control-allow-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_REQUEST_HEADERS.filter((name) => !allowedHeaders.includes(name)),
+    ).toEqual([]);
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },

@@ -102,10 +102,19 @@ async function fixture() {
     payload: { text: "Please investigate the project" },
   };
   const messages: string[] = [];
-  const deliveries: Array<{ text: string; ai: boolean }> = [];
-  const send = async (_m: unknown, text: string, options?: { ai?: boolean }) => {
+  const deliveries: Array<{ text: string; ai: boolean; link?: { title: string; url: string } }> =
+    [];
+  const send = async (
+    _m: unknown,
+    text: string,
+    options?: { ai?: boolean; link?: { title: string; url: string } },
+  ) => {
     messages.push(text);
-    deliveries.push({ text, ai: options?.ai === true });
+    deliveries.push({
+      text,
+      ai: options?.ai === true,
+      ...(options?.link ? { link: options.link } : {}),
+    });
     return `sent-${messages.length}`;
   };
   const tick = async (sender = send) => {
@@ -135,9 +144,28 @@ test("a linked person's 1:1 chat lands in their own Personal workspace; channels
   expect(session!.workspace_id).toBe(f.personal);
   expect(session!.visibility).toBe("user_private");
   expect(session!.owner_subject_id).toBe(f.subject);
-  expect(f.messages).toEqual([
-    `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`,
+  // The session is a labelled button on a notice card, not a URL in the text.
+  expect(f.deliveries).toEqual([
+    {
+      text: "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}`,
+      },
+    },
   ]);
+  // The stored text still writes the URL out: a replica from before notice
+  // cards sends that text during a rolling deploy, so the session stays
+  // reachable from Teams.
+  const [started] =
+    await shared.admin`select o.payload from teams_bot_outbox o join teams_bot_routes r on r.route_id=o.route_id where r.session_id=${session!.id} and o.source_sequence=0`;
+  expect(started!.payload).toEqual({
+    text: `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`,
+    link: "session",
+    cardText:
+      "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+  });
   const [shared0] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(shared0!.n).toBe(0);
@@ -255,7 +283,8 @@ test("duplicate channel delivery creates one native session, acknowledges, and p
     await shared.admin`select session_id,session_bound from teams_bot_routes where route_id=${f.input.routeId}`;
   expect(route!.session_bound).toBe(true);
   expect(f.messages).toHaveLength(1);
-  expect(f.messages[0]).toContain(route!.session_id);
+  expect(f.deliveries[0]!.link?.url).toContain(route!.session_id);
+  expect(f.messages[0]).not.toContain("https:");
   const [count] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(count!.n).toBe(1);
@@ -266,6 +295,36 @@ test("duplicate channel delivery creates one native session, acknowledges, and p
   expect(f.messages).toEqual([f.messages[0]!, "The completed answer"]);
   await f.tick();
   expect(f.messages).toHaveLength(2);
+  // Notices about the session are cards with a button; the answer is the
+  // agent's text with the AI label and no button.
+  expect(f.deliveries.map(({ ai, link }) => ({ ai, title: link?.title }))).toEqual([
+    { ai: false, title: "Open in Opengeni" },
+    { ai: true, title: undefined },
+  ]);
+  await appendSessionEvents(client.db, f.i.workspace_id, route!.session_id, [
+    { type: "session.requiresAction", payload: { approvals: [{ id: "tool-call-1" }] } },
+    { type: "turn.failed", payload: { error: "expected test failure" } },
+  ]);
+  await f.tick();
+  await f.tick();
+  expect(f.deliveries.slice(2)).toEqual([
+    {
+      text: "Your task needs your input or approval in the secure Opengeni chat.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.i.workspace_id}/sessions/${route!.session_id}`,
+      },
+    },
+    {
+      text: "The task could not finish. The details are in Opengeni.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.i.workspace_id}/sessions/${route!.session_id}`,
+      },
+    },
+  ]);
 });
 test("a channel thread mention sees the unmentioned messages before it, and a follow-up only the new ones", async () => {
   const f = await fixture();
@@ -594,7 +653,10 @@ test("personal admission refusal delivers durable generic guidance without creat
   await f.tick();
   expect(f.messages).toHaveLength(1);
   expect(f.messages[0]).toContain("could not start");
-  expect(f.messages[0]).toContain(`/workspaces/${f.i.workspace_id}/plugins`);
+  expect(f.deliveries[0]!.link).toEqual({
+    title: "Open Opengeni",
+    url: `https://app.example.test/workspaces/${f.i.workspace_id}/plugins`,
+  });
   const [count] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(count!.n).toBe(0);
@@ -720,9 +782,9 @@ test("each refused input gets one actionable notice while provider replay stays 
   await enqueueTeamsMessage(client.db, f.i, second);
   await f.tick();
   expect(f.messages).toHaveLength(2);
-  expect(f.messages.every((text) => text.includes(`/workspaces/${f.i.workspace_id}/plugins`))).toBe(
-    true,
-  );
+  expect(
+    f.deliveries.every((d) => d.link?.url.includes(`/workspaces/${f.i.workspace_id}/plugins`)),
+  ).toBe(true);
 });
 
 test("an immediate native completion wakes the reserved route before inbox binding", async () => {

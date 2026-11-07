@@ -220,6 +220,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const outcome = await createSlackAgent(deps, {
       grant,
       request: payload,
+      origin: "app",
       memoryContext: () => knowledgeContextForAccess(deps, access, "documents:manage"),
     });
     if (outcome.kind === "workspace_not_found") {
@@ -239,6 +240,14 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     if (outcome.kind === "name_taken") throw nameTaken();
+    if (outcome.kind === "limit_reached") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "This workspace keeps the most agents it can. Delete one to make another.",
+        retryable: false,
+        details: { code: "agent_limit_reached" },
+      });
+    }
     const { agent, installation } = outcome;
     const target = { name: outcome.targetWorkspaceName };
     return c.json(
@@ -287,7 +296,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   app.patch(`${base}/:agentId`, async (c) => {
-    const { agent } = await requireManagedAgent(c);
+    const { grant, agent } = await requireManagedAgent(c);
     const payload = UpdateSlackAgentRequest.parse(
       await parseRequestJson(c, UpdateSlackAgentRequest),
     );
@@ -317,6 +326,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         agentId: agent.id,
         expectedVersion: payload.expectedVersion,
+        actorSubjectId: grant.subjectId,
         patch: {
           ...(payload.name !== undefined
             ? { name: payload.name, nameKey: slackAgentNameKey(payload.name) }
@@ -361,138 +371,159 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ deleted });
   });
 
-  /**
-   * Channels an intro may go to: ones the app is in, not shared outside the
-   * Slack workspace. Private channels only for admins of the installation's
-   * own workspace, since an agent's admin may not be in them.
-   */
-  const introChannels = async (
-    grant: AccessGrant,
-    agent: SlackAgentRecord,
-    cursor: string | null,
-  ) => {
-    const client = await createOpenGeniSlackBotInteractionClient(deps, {
-      accountId: agent.accountId,
-      workspaceId: agent.workspaceId,
-      connectionId: agent.connectionId,
-      subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
-    });
-    const includePrivate = (await readerAccess(deps, grant, agent.workspaceId)).admin;
-    const result = await client.listChannels({ limit: 200, ...(cursor ? { cursor } : {}) });
-    return {
-      client,
-      channels: result.channels.filter(
-        (channel) =>
-          channel.isMember &&
-          !channel.isArchived &&
-          !channel.isShared &&
-          !channel.isExternallyShared &&
-          !channel.isOrgShared &&
-          (includePrivate || !channel.isPrivate),
-      ),
-      nextCursor: result.nextCursor || null,
-    };
-  };
-
   app.get(`${base}/:agentId/channels`, async (c) => {
     const { grant, agent } = await requireManagedAgent(c);
     c.header("cache-control", "private, no-store");
     const cursor = z.string().max(1_024).safeParse(c.req.query("cursor"));
-    const result = await introChannels(grant, agent, cursor.success ? cursor.data || null : null);
-    const introduced = new Set(
-      await listSlackAgentIntroChannelIds(
-        deps.db,
-        { accountId: agent.accountId, workspaceId: agent.workspaceId },
-        { slackAgentId: agent.id },
-      ),
-    );
     return c.json(
-      SlackAgentChannelListResponse.parse({
-        channels: result.channels.slice(0, 200).map((channel) => ({
-          id: channel.id,
-          name: channel.name || null,
-          isPrivate: channel.isPrivate,
-          introduced: introduced.has(channel.id),
-        })),
-        nextCursor: result.nextCursor,
-      }),
+      await slackAgentChannelList(deps, grant, agent, cursor.success ? cursor.data || null : null),
     );
   });
 
   app.post(`${base}/:agentId/intro`, async (c) => {
     const { grant, agent } = await requireManagedAgent(c);
     const payload = await parseRequestJson(c, SlackAgentIntroRequest);
-    const home = { accountId: agent.accountId, workspaceId: agent.workspaceId };
-    const binding = (await listSlackInstallationBindings(deps.db, home)).find(
-      (candidate) => candidate.connectionId === agent.connectionId,
-    );
-    // Only channels the admin could have picked from the list above.
-    const requested = new Set(payload.channelIds);
-    const allowed = new Set<string>();
-    let cursor: string | null = null;
-    let client: Awaited<ReturnType<typeof introChannels>>["client"] | null = null;
-    for (let page = 0; page < 10 && [...requested].some((id) => !allowed.has(id)); page += 1) {
-      const result = await introChannels(grant, agent, cursor);
-      client = result.client;
-      for (const channel of result.channels) allowed.add(channel.id);
-      cursor = result.nextCursor;
-      if (!cursor) break;
-    }
-    client ??= await createOpenGeniSlackBotInteractionClient(deps, {
-      ...home,
-      connectionId: agent.connectionId,
-      subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
-    });
-    const addedBy = await findSlackBotUserLinkForSubject(deps.db, home, {
-      connectionId: agent.connectionId,
-      subjectId: grant.subjectId,
-    }).catch(() => null);
-    const text = slackAgentIntroText(agent, {
-      botUserId: binding?.botUserId ?? null,
-      addedBySlackUserId: addedBy?.slackUserId ?? null,
-    });
-    const identity = client.postIdentity(agent.targetWorkspaceId, {
-      title: agent.name,
-      avatar: agent.avatar,
-    });
-    const results: SlackAgentIntroResponse["results"] = [];
-    for (const channelId of requested) {
-      if (!allowed.has(channelId)) {
-        results.push({ channelId, status: "not_in_channel" });
-        continue;
-      }
-      try {
-        await client.postMessage({
-          // One intro per channel per version of the agent and admin, so a
-          // retried request never posts twice.
-          operationId: deterministicUuid(
-            `slack-agent-intro:v2:${agent.id}:${agent.version}:${channelId}:${grant.subjectId}`,
-          ),
-          channelId,
-          text,
-          blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-          requireActiveNonSharedChannel: true,
-          identity,
-        });
-        results.push({ channelId, status: "posted" });
-      } catch (error) {
-        results.push({ channelId, status: slackAgentIntroFailureStatus(error) });
-        continue;
-      }
-      await recordSlackAgentIntroPost(deps.db, home, {
-        connectionId: agent.connectionId,
-        slackAgentId: agent.id,
-        slackChannelId: channelId,
-        postedBySubjectId: grant.subjectId,
-      }).catch((error: unknown) => {
-        console.warn("[slack-agent-intro] could not record the post", {
-          agentId: agent.id,
-          error: error instanceof Error ? error.name : "unknown",
-        });
-      });
-    }
-    return c.json(SlackAgentIntroResponse.parse({ results }));
+    return c.json(await postSlackAgentIntro(deps, grant, agent, payload));
   });
+}
+
+/**
+ * Channels an intro may go to: ones the app is in, not shared outside the
+ * Slack workspace. Private channels only for admins of the installation's
+ * own workspace, since an agent's admin may not be in them.
+ */
+async function introChannels(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  agent: SlackAgentRecord,
+  cursor: string | null,
+) {
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: agent.accountId,
+    workspaceId: agent.workspaceId,
+    connectionId: agent.connectionId,
+    subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
+  });
+  const includePrivate = (await readerAccess(deps, grant, agent.workspaceId)).admin;
+  const result = await client.listChannels({ limit: 200, ...(cursor ? { cursor } : {}) });
+  return {
+    client,
+    channels: result.channels.filter(
+      (channel) =>
+        channel.isMember &&
+        !channel.isArchived &&
+        !channel.isShared &&
+        !channel.isExternallyShared &&
+        !channel.isOrgShared &&
+        (includePrivate || !channel.isPrivate),
+    ),
+    nextCursor: result.nextCursor || null,
+  };
+}
+
+/** The channels an agent's intro may go to, marking those it was introduced in. */
+export async function slackAgentChannelList(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  agent: SlackAgentRecord,
+  cursor: string | null,
+): Promise<SlackAgentChannelListResponse> {
+  const result = await introChannels(deps, grant, agent, cursor);
+  const introduced = new Set(
+    await listSlackAgentIntroChannelIds(
+      deps.db,
+      { accountId: agent.accountId, workspaceId: agent.workspaceId },
+      { slackAgentId: agent.id },
+    ),
+  );
+  return SlackAgentChannelListResponse.parse({
+    channels: result.channels.slice(0, 200).map((channel) => ({
+      id: channel.id,
+      name: channel.name || null,
+      isPrivate: channel.isPrivate,
+      introduced: introduced.has(channel.id),
+    })),
+    nextCursor: result.nextCursor,
+  });
+}
+
+/** Post an agent's intro in channels an admin picked, under the agent's name. */
+export async function postSlackAgentIntro(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  agent: SlackAgentRecord,
+  payload: SlackAgentIntroRequest,
+): Promise<SlackAgentIntroResponse> {
+  const home = { accountId: agent.accountId, workspaceId: agent.workspaceId };
+  const binding = (await listSlackInstallationBindings(deps.db, home)).find(
+    (candidate) => candidate.connectionId === agent.connectionId,
+  );
+  // Only channels the admin could have picked from the list.
+  const requested = new Set(payload.channelIds);
+  const allowed = new Set<string>();
+  let cursor: string | null = null;
+  let client: Awaited<ReturnType<typeof introChannels>>["client"] | null = null;
+  for (let page = 0; page < 10 && [...requested].some((id) => !allowed.has(id)); page += 1) {
+    const result = await introChannels(deps, grant, agent, cursor);
+    client = result.client;
+    for (const channel of result.channels) allowed.add(channel.id);
+    cursor = result.nextCursor;
+    if (!cursor) break;
+  }
+  client ??= await createOpenGeniSlackBotInteractionClient(deps, {
+    ...home,
+    connectionId: agent.connectionId,
+    subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
+  });
+  const addedBy = await findSlackBotUserLinkForSubject(deps.db, home, {
+    connectionId: agent.connectionId,
+    subjectId: grant.subjectId,
+  }).catch(() => null);
+  const text = slackAgentIntroText(agent, {
+    botUserId: binding?.botUserId ?? null,
+    addedBySlackUserId: addedBy?.slackUserId ?? null,
+  });
+  const identity = client.postIdentity(agent.targetWorkspaceId, {
+    title: agent.name,
+    avatar: agent.avatar,
+  });
+  const results: SlackAgentIntroResponse["results"] = [];
+  for (const channelId of requested) {
+    if (!allowed.has(channelId)) {
+      results.push({ channelId, status: "not_in_channel" });
+      continue;
+    }
+    try {
+      await client.postMessage({
+        // One intro per channel per version of the agent and admin, so a
+        // retried request never posts twice.
+        operationId: deterministicUuid(
+          `slack-agent-intro:v2:${agent.id}:${agent.version}:${channelId}:${grant.subjectId}`,
+        ),
+        channelId,
+        text,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        requireActiveNonSharedChannel: true,
+        identity,
+      });
+      results.push({ channelId, status: "posted" });
+    } catch (error) {
+      results.push({ channelId, status: slackAgentIntroFailureStatus(error) });
+      continue;
+    }
+    await recordSlackAgentIntroPost(deps.db, home, {
+      connectionId: agent.connectionId,
+      slackAgentId: agent.id,
+      slackChannelId: channelId,
+      postedBySubjectId: grant.subjectId,
+    }).catch((error: unknown) => {
+      console.warn("[slack-agent-intro] could not record the post", {
+        agentId: agent.id,
+        error: error instanceof Error ? error.name : "unknown",
+      });
+    });
+  }
+  return SlackAgentIntroResponse.parse({ results });
 }
 
 /** Slack refuses these posts for reasons a retry won't change. */

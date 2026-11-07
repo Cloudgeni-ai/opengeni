@@ -264,7 +264,7 @@ import {
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
-import { managedSignUpBrowserMiddleware } from "./auth/managed-sign-up-browser";
+import { startBillingAutoTopUpMaintenance } from "./billing-auto-top-up-maintenance";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -380,6 +380,10 @@ import {
   isPersonalGitHubGitBrokerRequest,
   registerPersonalGitHubGitBrokerRoutes,
 } from "./routes/personal-github-git-broker";
+import {
+  isPersonalGitHubGatewayRequest,
+  registerPersonalGitHubGatewayRoutes,
+} from "./routes/personal-github-gateway";
 import { registerDesktopDistributionRoutes } from "./routes/desktop-distribution";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
@@ -392,6 +396,7 @@ import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
 import { registerAutomationTemplateRoutes } from "./routes/automation-templates";
+import { registerAgentRoutes } from "./routes/agents";
 import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -540,12 +545,22 @@ function signedStateSecret(
   return resolved.secret;
 }
 
-export function createAppComposition(deps: AppDependencies): {
+export function createAppComposition(
+  deps: AppDependencies,
+  lifecycle: {
+    /** A router alone cannot own a background charge loop. Only opt in when
+     * the host will call stopBillingAutoTopUps before closing its database. */
+    startBillingAutoTopUps?: boolean;
+  } = {},
+): {
   app: Hono;
   routeDeps: ApiRouteDeps;
   /** One pass renewing the holds of the browsers agent sessions hold; the
    * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
   renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
+  /** Stop admission synchronously, then drain the current top-up pass before
+   * closing the database. Embedded composition owners must call this too. */
+  stopBillingAutoTopUps: () => Promise<void>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -996,7 +1011,10 @@ export function createAppComposition(deps: AppDependencies): {
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
     const pathname = new URL(c.req.url).pathname;
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, pathname)) {
+    if (
+      isPersonalGitHubGitBrokerRequest(c.req.method, pathname) ||
+      isPersonalGitHubGatewayRequest(pathname)
+    ) {
       await next();
       return;
     }
@@ -1159,7 +1177,11 @@ export function createAppComposition(deps: AppDependencies): {
     // Git's credential helper supplies the exact encrypted broker bearer in
     // Authorization. It cannot also supply the deployment access key, and the
     // route performs its own attempt-bound authorization before every use.
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+    const pathname = new URL(c.req.url).pathname;
+    if (
+      isPersonalGitHubGitBrokerRequest(c.req.method, pathname) ||
+      isPersonalGitHubGatewayRequest(pathname)
+    ) {
       await next();
       return;
     }
@@ -1288,9 +1310,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
-    // Email verification keeps only a password chosen in the verifying browser.
-    app.use("/v1/auth/sign-up/email", managedSignUpBrowserMiddleware(deps.settings));
-    app.use("/v1/auth/verify-email", managedSignUpBrowserMiddleware(deps.settings));
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
@@ -2587,6 +2606,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
+  registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
@@ -2623,6 +2643,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEventSourceRoutes(app, routeDeps);
   registerAutomationTemplateRoutes(app, routeDeps);
   registerBotTemplateRoutes(app, routeDeps);
+  registerAgentRoutes(app, routeDeps);
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
@@ -2751,7 +2772,15 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
+  const billingAutoTopUps = lifecycle.startBillingAutoTopUps
+    ? startBillingAutoTopUpMaintenance(routeDeps)
+    : null;
+  return {
+    app,
+    routeDeps,
+    renewBrowserHolds: browserSessionRoutes.renewBrowserHolds,
+    stopBillingAutoTopUps: () => billingAutoTopUps?.stop() ?? Promise.resolve(),
+  };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {

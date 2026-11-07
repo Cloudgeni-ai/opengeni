@@ -461,6 +461,26 @@ describe("personal GitHub OAuth", () => {
       repositories: [{ repositoryId: "987654321", selectedAccess: "write" }],
     });
 
+    // All my repositories waits for the deployment to allow it.
+    const status = await app.request(`/v1/workspaces/${workspace.workspaceId}/connections/github`, {
+      headers,
+    });
+    expect(
+      ((await status.json()) as { allRepositoriesAvailable?: boolean }).allRepositoriesAvailable,
+    ).toBe(false);
+    const allRepositories = await app.request(basePath, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: selection.selectionGeneration,
+        idempotencyKey: "all-repositories-unavailable",
+        repositories: [],
+        allRepositoriesAccess: "write",
+      }),
+    });
+    expect(allRepositories.status).toBe(409);
+
     const replay = await app.request(basePath, {
       method: "PUT",
       headers,

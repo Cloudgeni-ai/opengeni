@@ -62,8 +62,8 @@ describe("recording usage", () => {
     );
     expect(generated.exitCode).toBe(0);
     const prepare = usage.stages().get("prepare")!;
-    // The run's timestamp check, then the encode.
-    expect(prepare.processes).toBe(2);
+    // The run's timestamp check, then its decoder and the encoder.
+    expect(prepare.processes).toBe(3);
     expect(prepare.cpuSeconds).toBeGreaterThan(0);
     expect(prepare.wallSeconds).toBeGreaterThan(0);
     const segment = usage.stages().get("segment")!;

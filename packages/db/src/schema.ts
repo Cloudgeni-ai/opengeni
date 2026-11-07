@@ -2130,6 +2130,9 @@ export const personalGitHubRepositorySelectionHeads = pgTable(
       mode: "number",
     }).notNull(),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    /** "All my repositories": null, or the access every repository the person can reach gets. */
+    allRepositoriesAccess: text("all_repositories_access"),
+    allRepositoriesGeneration: bigint("all_repositories_generation", { mode: "number" }),
     updatedBySubjectId: text("updated_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2149,6 +2152,10 @@ export const personalGitHubRepositorySelectionHeads = pgTable(
     generationValid: check(
       "personal_github_repository_selection_heads_generation_chk",
       sql`${table.connectionAuthorityGeneration} > 0 and ${table.generation} > 0`,
+    ),
+    allAccessValid: check(
+      "personal_github_repository_selection_heads_all_access_chk",
+      sql`${table.allRepositoriesAccess} is null or ${table.allRepositoriesAccess} in ('read', 'write')`,
     ),
   }),
 );
@@ -6921,6 +6928,42 @@ export const imageGenerationOperations = pgTable(
             or octet_length(${table.creditUsageModelId}) between 1 and 256)
           and ((${table.creditState} = 'pending' and ${table.status} <> 'completed')
             or (${table.creditState} = 'debited' and ${table.status} = 'completed')))`,
+    ),
+  }),
+);
+
+/**
+ * The maximum priced cost of a stateless Opengeni-credit model call that is
+ * still in its provider request, reserved at admission and deleted when the
+ * call settles or fails. An expired hold (its process stopped mid-call) no
+ * longer counts.
+ */
+export const modelCallCreditHolds = pgTable(
+  "model_call_credit_holds",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    /** The call's server-generated request id. */
+    requestId: uuid("request_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`statement_timestamp()`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.requestId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "model_call_credit_holds_workspace_account_fk",
+    }).onDelete("cascade"),
+    amountValid: check("model_call_credit_holds_amount_chk", sql`${table.amountMicros} > 0`),
+    expiryValid: check(
+      "model_call_credit_holds_expiry_chk",
+      sql`${table.expiresAt} > ${table.createdAt}`,
     ),
   }),
 );
@@ -13048,6 +13091,50 @@ export const githubInstallationRepositories = pgTable(
       foreignColumns: [githubInstallations.workspaceId, githubInstallations.installationId],
       name: "github_installation_repositories_installation_fk",
     }).onDelete("cascade"),
+  }),
+);
+
+/**
+ * Repositories GitHub recently reported removed from a bound installation.
+ * GitHub's list can lag its webhook: a list read within the hold window never
+ * adds such a repository back (migration 1293).
+ */
+export const githubInstallationRepositoryRemovals = pgTable(
+  "github_installation_repository_removals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: integer("installation_id").notNull(),
+    repositoryId: bigint("repository_id", { mode: "number" }).notNull(),
+    removedAt: timestamp("removed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    repository: uniqueIndex("github_installation_repository_removals_repo_uq").on(
+      table.workspaceId,
+      table.installationId,
+      table.repositoryId,
+    ),
+    account: index("github_installation_repository_removals_account_idx").on(table.accountId),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "github_installation_repository_removals_workspace_account_fk",
+    }).onDelete("cascade"),
+    installationBinding: foreignKey({
+      columns: [table.workspaceId, table.installationId],
+      foreignColumns: [githubInstallations.workspaceId, githubInstallations.installationId],
+      name: "github_installation_repository_removals_installation_fk",
+    }).onDelete("cascade"),
+    ids: check(
+      "github_installation_repository_removals_ids_check",
+      sql`${table.installationId} > 0 AND ${table.repositoryId} > 0`,
+    ),
   }),
 );
 

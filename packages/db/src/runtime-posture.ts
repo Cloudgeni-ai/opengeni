@@ -2069,6 +2069,7 @@ export const FORCE_RLS_TABLES = [
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
@@ -2151,6 +2152,7 @@ export const FORCE_RLS_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2423,9 +2425,11 @@ export const FORCE_RLS_TABLES = [
   "teams_bot_inbox",
   "teams_bot_installations",
   "teams_bot_links",
+  "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
   "teams_bot_routes",
+  "teams_bot_welcomes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -2590,6 +2594,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "host_mcp_bindings",
   "host_mcp_delegations",
@@ -2619,6 +2624,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  // 1295_model_call_credit_holds: in-flight model call holds, deleted at settlement.
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2785,9 +2792,13 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_inbox",
   "teams_bot_installations",
   "teams_bot_links",
+  // 1300_teams_bot_onboarding_limits: onboarding reply limits across replicas.
+  "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
   "teams_bot_routes",
+  // 1294_teams_bot_welcomes: install welcomes claimed once across replicas.
+  "teams_bot_welcomes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -3286,6 +3297,12 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
+  /**
+   * Only for checking a database migrated to an earlier point of the migration ledger, such as a
+   * migration test's predecessor state. Contract tables named here may be absent because a later
+   * migration creates them; when one is present it is checked like every other contract table.
+   */
+  tablesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4371,14 +4388,15 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
+  const notYetCreatedTables = new Set(options.tablesCreatedByLaterMigrations ?? []);
   const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
   const missingTables = difference(protectedTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);

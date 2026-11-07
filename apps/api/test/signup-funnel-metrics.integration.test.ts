@@ -163,11 +163,17 @@ describe("managed sign-up funnel metrics", () => {
     ).toBe(0);
     expect(await authSessionIds(email)).toEqual([]);
 
-    // A duplicate sign-up for the same address creates no second user.
+    // A duplicate sign-up for the same address creates no second user. Like
+    // the web client, it asks to land on the same attributed page.
     const duplicate = await app.request("/v1/auth/sign-up/email", {
       method: "POST",
       headers: requestHeaders(),
-      body: JSON.stringify({ name: "Funnel Human", email, password }),
+      body: JSON.stringify({
+        name: "Funnel Human",
+        email,
+        password,
+        callbackURL: "/?auth_event=email_verified&utm_source=producthunt",
+      }),
     });
     expect(duplicate.status).toBeLessThan(300);
     expect(
@@ -178,7 +184,8 @@ describe("managed sign-up funnel metrics", () => {
     ).toBe(1);
     expect(await authSessionIds(email)).toEqual([]);
 
-    const verification = messages.find((message) => message.kind === "email_verification");
+    // Only the newest sign-up's link verifies the address.
+    const verification = messages.findLast((message) => message.kind === "email_verification");
     const link = verification?.text.match(/https?:\/\/\S+/)?.[0];
     expect(link).toBeDefined();
     const verificationUrl = new URL(link!);
@@ -186,10 +193,7 @@ describe("managed sign-up funnel metrics", () => {
       "/?auth_event=email_verified&utm_source=producthunt",
     );
     const verificationPath = `${verificationUrl.pathname}${verificationUrl.search}`;
-    // Followed in the browser that signed up, so its password stays usable.
-    const verified = await app.request(verificationPath, {
-      headers: requestHeaders(cookiePairs(signUp)),
-    });
+    const verified = await app.request(verificationPath, { headers: requestHeaders() });
     expect(verified.status).toBeLessThan(400);
     expect(
       await counter(observability, "opengeni_auth_events_total", {

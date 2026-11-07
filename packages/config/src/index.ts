@@ -2271,6 +2271,12 @@ const SettingsSchema = z.object({
   /** Default-off rollout for the in-process GitHub repository API tool surface. */
   githubRestMcpEnabled: EnvBoolean.default(false),
   githubPersonalOauthEnabled: EnvBoolean.default(false),
+  /**
+   * Lets people choose "All my repositories" for Your GitHub. Default off
+   * until every API and worker runs a release that reads that delegation
+   * shape; turning it on is a rollout step, not a permission.
+   */
+  githubPersonalAllRepositoriesEnabled: EnvBoolean.default(false),
   githubPersonalOauthClientId: z.string().optional(),
   githubPersonalOauthClientSecret: z.string().optional(),
   githubAppSlug: z.string().optional(),
@@ -6454,6 +6460,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
     githubRestMcpEnabled: optional("OPENGENI_GITHUB_REST_MCP_ENABLED"),
     githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
+    githubPersonalAllRepositoriesEnabled: optional(
+      "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+    ),
     githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
     githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
@@ -12268,11 +12277,13 @@ const LOCAL_SANDBOX_API_ROUTES: readonly RegExp[] = [
   /^\/v1\/workspaces\/[^/]+\/mcp(?:\/|$)/u,
   // The personal GitHub HTTPS smart-Git broker.
   /^\/v1\/git\/personal\/[A-Za-z0-9_-]{43}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/u,
+  // The personal GitHub gateway `gh` uses as the person.
+  /^\/v1\/github\/personal\/gateway\/(?:api|uploads|git)(?:\/|$)/u,
 ];
 
 /**
  * Local development only: whether a normalized API path is one a sandbox calls
- * (Codemode, first-party MCP, and the personal Git broker). The Linux Docker
+ * (Codemode, first-party MCP, the personal Git broker and GitHub gateway). The Linux Docker
  * sandbox route relays only these, and the local API serves only these on the
  * addresses that only sandboxes use (see `apps/api/src/http/local-browser-boundary.ts`).
  */

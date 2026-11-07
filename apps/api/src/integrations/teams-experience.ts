@@ -22,6 +22,17 @@ export type TeamsExperienceState = {
    * for Opengeni. Only then does help in a 1:1 chat mention them.
    */
   sharedConversations?: boolean;
+  /**
+   * How an organization that isn't connected can connect: "connect" when its
+   * Microsoft 365 or Teams admin can connect it from Teams, "work_account"
+   * when the person uses a personal Microsoft account, which can't.
+   */
+  setup?: "connect" | "work_account";
+  /**
+   * The operator's support address, for an organization that isn't connected
+   * when there is no other way forward.
+   */
+  supportEmail?: string;
 };
 
 /** One deterministic reply: Teams Markdown text and an optional card button. */
@@ -59,22 +70,68 @@ const LIMITS = [
   "Approvals and requests for private information open Opengeni in your web browser.",
 ];
 
+/** How an organization that isn't connected yet connects. Plain text. */
+export const TEAMS_CONNECT_TEXT =
+  "Your organization hasn't connected Opengeni yet. A Microsoft 365 Global Administrator or Teams Administrator connects it once for everyone. If that's you, select Connect your organization. Otherwise, ask your admin to message Opengeni in Teams and connect it.";
+/** For a person signed in to Teams with a personal Microsoft account. Plain text. */
+export const TEAMS_WORK_ACCOUNT_TEXT =
+  "Opengeni needs a Microsoft 365 work or school account. You're using Teams with a personal Microsoft account, which can't connect to Opengeni. Sign in to Teams with your work or school account to use Opengeni.";
+/** A short reminder once the Connect your organization cards are used up. */
+export const TEAMS_CONNECT_REMINDER_TEXT =
+  "Your organization hasn't connected Opengeni yet. Send **help** to see how to connect it.";
+/** For a group chat or channel in an organization that isn't connected. */
+export const TEAMS_SHARED_CONNECT_TEXT =
+  "Your organization hasn't connected Opengeni yet. Send me a direct message to see how to connect it.";
+/** For a mention in a group chat or channel Opengeni isn't turned on in. */
+export const TEAMS_CONVERSATION_OFF_TEXT =
+  "Opengeni isn't turned on in this conversation. Send me a direct message to give me a task instead.";
+/** For a linked person whose account can't start chats in the connected workspace. */
+export const TEAMS_CANNOT_START_TEXT =
+  "Your Opengeni account can't start chats in the workspace your organization connected to Microsoft Teams. Ask an admin of that workspace to give you access to start chats, then message me again.";
+/** The same, in a group chat or channel, without naming one person's access there. */
+export const TEAMS_SHARED_CANNOT_START_TEXT =
+  "I can't start a task for you here. Send me a direct message to see why.";
+/** For a 1:1 message with a file or image, or with no text. */
+export const TEAMS_UNREADABLE_MESSAGE_TEXT =
+  "I can only read text messages. Files and images sent in Teams aren't supported yet, so send your request as text.";
+
+type NextStep = { text: string; action?: TeamsExperienceReply["action"] };
+
 /**
  * The person's next step. A help reply links straight to account linking; a
  * welcome, which may be read long after it was sent, offers a button that
- * asks for a fresh link instead.
+ * asks for a fresh link instead. In an organization that isn't connected,
+ * the step is how to connect it.
  */
-function nextStep(
-  state: TeamsExperienceState,
-  reply: "welcome" | "help",
-): TeamsExperienceReply["action"] | string | null {
-  if (state.installation !== "active") return null;
-  if (state.linked) return state.personal ? "Send a message to start a task." : null;
+function nextStep(state: TeamsExperienceState, reply: "welcome" | "help"): NextStep | null {
+  if (state.installation !== "active") {
+    if (!state.personal) return { text: TEAMS_SHARED_CONNECT_TEXT };
+    if (state.setup === "connect")
+      return reply === "welcome"
+        ? { text: TEAMS_CONNECT_REMINDER_TEXT }
+        : {
+            text: TEAMS_CONNECT_TEXT,
+            action: { kind: "link", title: "Connect your organization" },
+          };
+    if (state.setup === "work_account") return { text: TEAMS_WORK_ACCOUNT_TEXT };
+    return state.supportEmail
+      ? {
+          text: `To get Opengeni for your organization, your Microsoft 365 or Teams admin can contact ${state.supportEmail}.`,
+        }
+      : null;
+  }
+  if (state.linked) return state.personal ? { text: "Send a message to start a task." } : null;
   if (!state.personal)
-    return "Send me a direct message to link your Opengeni account, then mention me here again.";
-  return reply === "welcome"
-    ? { kind: "command", title: "Link account", command: "link" }
-    : { kind: "link", title: "Link account" };
+    return {
+      text: "Send me a direct message to link your Opengeni account, then mention me here again.",
+    };
+  return {
+    text: "Link your Opengeni account to start.",
+    action:
+      reply === "welcome"
+        ? { kind: "command", title: "Link account", command: "link" }
+        : { kind: "link", title: "Link account" },
+  };
 }
 
 function withNextStep(
@@ -84,19 +141,20 @@ function withNextStep(
 ): TeamsExperienceReply {
   const step = nextStep(state, reply);
   if (!step) return { text };
-  if (typeof step === "string") return { text: `${text}\n\n${step}` };
-  return { text: `${text}\n\nLink your Opengeni account to start.`, action: step };
+  return { text: `${text}\n\n${step.text}`, ...(step.action ? { action: step.action } : {}) };
 }
 
 /** Sent once when someone adds the bot for themselves. */
 export function teamsWelcome(state: TeamsExperienceState): TeamsExperienceReply {
   return withNextStep(
-    [
-      "**Welcome to Opengeni**",
-      ABOUT,
-      LIMITS.map((line) => `- ${line}`).join("\n"),
-      "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
-    ].join("\n\n"),
+    teamsMarkdown(
+      [
+        "**Welcome to Opengeni**",
+        ABOUT,
+        LIMITS.map((line) => `- ${line}`).join("\n"),
+        "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
+      ].join("\n\n"),
+    ),
     state,
     "welcome",
   );
@@ -123,12 +181,14 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
     "Use the thumbs up or down on a reply to tell us how it went.",
   ];
   return withNextStep(
-    [
-      "**Opengeni help**",
-      `${ABOUT} Describe what you need and I'll reply here when the task is done.`,
-      `**Commands**\n${commands.join("\n")}`,
-      `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
-    ].join("\n\n"),
+    teamsMarkdown(
+      [
+        "**Opengeni help**",
+        `${ABOUT} Describe what you need and I'll reply here when the task is done.`,
+        `**Commands**\n${commands.join("\n")}`,
+        `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
+      ].join("\n\n"),
+    ),
     state,
     "help",
   );
@@ -161,6 +221,14 @@ export function teamsAccountReply(
   }
 }
 
+/**
+ * The reply to unlink from someone who isn't linked: that, and how to link
+ * the account, or to connect the organization first.
+ */
+export function teamsNotLinkedReply(state: TeamsExperienceState): TeamsExperienceReply {
+  return withNextStep(teamsAccountReply("not_linked").text, { ...state, linked: false }, "help");
+}
+
 /** The schema.org message entity that shows Teams' "AI generated" label. */
 export function teamsAiGeneratedEntity() {
   return {
@@ -169,6 +237,30 @@ export function teamsAiGeneratedEntity() {
     "@context": "https://schema.org" as const,
     "@id": "" as const,
     additionalType: ["AIGeneratedContent"],
+  };
+}
+
+/** A link shown as a button under a notice instead of a bare URL in its text. */
+export type TeamsNoticeLink = { title: string; url: string };
+
+/**
+ * A notice from Opengeni itself, such as "Started", as an Adaptive Card: its
+ * paragraphs and a button that opens the link. In a channel thread Teams
+ * starts a new message header after a card, so the agent's answer that
+ * follows gets its own header and AI label instead of being grouped under the
+ * notice.
+ */
+export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
+  return {
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json" as const,
+    type: "AdaptiveCard" as const,
+    version: "1.2" as const,
+    body: text
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean)
+      .map((paragraph) => ({ type: "TextBlock" as const, text: paragraph, wrap: true })),
+    actions: [{ type: "Action.OpenUrl" as const, title: link.title, url: link.url }],
   };
 }
 
@@ -254,6 +346,61 @@ function heading(line: string): { level: number; text: string } | null {
   if (end < text.length && (end === 0 || text[end - 1] === " " || text[end - 1] === "\t"))
     text = text.slice(0, end).trimEnd();
   return { level: match[1]!.length, text };
+}
+
+/**
+ * A line that is bold and nothing else, such as `**Next steps**` or
+ * `**Risks:**`: agents use it as a heading. Bounded and linear: the bold text
+ * can't contain the delimiter character.
+ */
+function boldHeading(line: string): boolean {
+  return (
+    line.length <= 300 &&
+    (/^ {0,3}\*\*(?=\S)[^*\n]*[^*\s]\*\*:?[ \t]*$/.test(line) ||
+      /^ {0,3}__(?=\S)[^_\n]*[^_\s]__:?[ \t]*$/.test(line))
+  );
+}
+
+/** Ordinary paragraph text: not a list, quote, heading, code, fence or spacer. */
+function paragraphLine(line: string): boolean {
+  return (
+    Boolean(line.trim()) &&
+    !/^[ \t]/.test(line) &&
+    !/^(?:(?:[-*+]|\d{1,9}[.)]|#{1,6})(?:[ \t]|$)|>|`{3,}|~{3,}|<br>$)/.test(line) &&
+    !boldHeading(line)
+  );
+}
+
+/**
+ * Teams shows paragraphs with no gap between them, so a heading right after
+ * a paragraph would sit directly under it. An empty `<br>` paragraph before
+ * the heading gives it the gap a heading needs. Lists, quotes and code
+ * already have a gap after them, and the first line needs none.
+ */
+const HEADING_GAP = "<br>";
+function gapBeforeHeading(out: string[]): void {
+  let previous = out.length - 1;
+  while (previous >= 0 && !out[previous]!.trim()) previous -= 1;
+  if (previous < 0 || !paragraphLine(out[previous]!)) return;
+  if (out.at(-1)!.trim()) out.push("");
+  out.push(HEADING_GAP, "");
+}
+
+/**
+ * One table row as list items. Teams can't show tables in text messages, and
+ * cells joined on one line run together, so a row becomes a bullet led by its
+ * first cell with every other cell on its own line beneath it.
+ */
+function tableRowItems(header: string[], cells: string[]): string[] {
+  const lead = cells[0] ?? "";
+  const rest = cells.slice(1).flatMap((cell, column) => {
+    if (!cell) return [];
+    const title = header[column + 1];
+    return [title ? `${title}: ${cell}` : cell];
+  });
+  if (!lead) return rest.length ? [`- ${rest[0]}`, ...rest.slice(1).map((x) => `  - ${x}`)] : [];
+  const bold = header.length > 1 && !lead.includes("**") ? `**${lead}**` : lead;
+  return [`- ${bold}`, ...rest.map((item) => `  - ${item}`)];
 }
 
 /**
@@ -369,8 +516,11 @@ function escapeTags(line: string, images = false): string {
  * bold, italics, strikethrough, links, lists, quotes, code and headings up to
  * level three; tables, images and horizontal rules show as raw characters,
  * and text that looks like an HTML tag disappears. Tables become one list
- * item per row, deeper headings become bold lines, images become links, rules
- * are dropped and tag-like text is escaped. Code blocks are left as written.
+ * item per row with its other cells beneath it, deeper headings become bold
+ * lines, images become links, rules are dropped and tag-like text is escaped.
+ * Teams leaves no gap between paragraphs, so a heading or a bold heading line
+ * after a paragraph gets an empty paragraph before it, and a bold heading
+ * line is kept on its own line. Code blocks are left as written.
  */
 export function teamsMarkdown(input: string): string {
   const lines = input.replace(/\r\n?/g, "\n").split("\n");
@@ -422,12 +572,7 @@ export function teamsMarkdown(input: string): string {
         while (index + 1 < lines.length && tableRow(lines[index + 1]!)) {
           const cells = tableCells(lines[index + 1]!);
           index += 1;
-          const pairs = cells.flatMap((cell, column) => {
-            if (!cell) return [];
-            const title = header[column];
-            return [title ? `**${title}:** ${cell}` : cell];
-          });
-          if (pairs.length) rows.push(escapeTags(`- ${pairs.join("; ")}`));
+          for (const item of tableRowItems(header, cells)) rows.push(escapeTags(item));
         }
         out.push(...(rows.length ? rows : [escapeTags(header.filter(Boolean).join(" · "))]));
         continue;
@@ -435,6 +580,7 @@ export function teamsMarkdown(input: string): string {
     }
     const title = heading(line);
     if (title) {
+      gapBeforeHeading(out);
       out.push(
         escapeTags(
           title.level <= 3 ? `${"#".repeat(title.level)} ${title.text}` : `**${title.text}**`,
@@ -450,11 +596,32 @@ export function teamsMarkdown(input: string): string {
       plainLine === index - 1 &&
       previous.trim()
     ) {
-      out[out.length - 1] = `${line.trim()[0] === "=" ? "#" : "##"} ${out.at(-1)!.trim()}`;
+      const text = out.pop()!.trim();
+      gapBeforeHeading(out);
+      out.push(`${line.trim()[0] === "=" ? "#" : "##"} ${text}`);
       continue;
     }
     if (/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
       out.push("");
+      continue;
+    }
+    const underline = lines[index + 1];
+    if (
+      boldHeading(line) &&
+      // An indented bold line inside a list item stays part of the item.
+      !(inList && /^[ \t]/.test(line)) &&
+      // A bold line with = or - under it is a setext heading, handled below.
+      !(underline !== undefined && /^ {0,3}(?:=+|-+)[ \t]*$/.test(underline))
+    ) {
+      // A heading line that continues a paragraph starts its own instead.
+      if (out.length && out.at(-1)!.trim() && paragraphLine(out.at(-1)!)) out.push("");
+      gapBeforeHeading(out);
+      out.push(escapeTags(line.trim()));
+      // The next line, text or another bold line, would otherwise join it on
+      // the same line.
+      const next = lines[index + 1];
+      if (next !== undefined && next.trim() && (paragraphLine(next) || boldHeading(next)))
+        out.push("");
       continue;
     }
     if (line.trim() && !/^ {0,3}(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^(?: {4}|\t)/.test(line))
@@ -508,6 +675,8 @@ export function teamsMarkdownParts(text: string, maxBytes = TEAMS_PART_BYTES): s
   const reopened = () => fence?.reopen ?? "";
   const flush = () => {
     if (!part || part === reopened()) return;
+    // The gap before a heading that starts the next part isn't needed here.
+    if (!fence) part = part.replace(/\n\n<br>\n\n?$/, "\n");
     if (fence?.reopen) part += part.endsWith("\n") ? fence.close : `\n${fence.close}`;
     parts.push(part);
     part = reopened();

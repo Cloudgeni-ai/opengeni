@@ -99,6 +99,8 @@ import {
   getSlackInteractionInboxByProviderEvent,
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
+  getSessionAgentMemoryState,
+  SessionAgentNotFoundError,
   listSlackAgentChats,
   listSlackAgentsForConnection,
   recordSlackInteractionInbound,
@@ -169,6 +171,7 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  agentMemoryAccess,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   getActorNewSessionModelChoice,
@@ -3462,74 +3465,96 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       preparedAttachments,
       preparedModelContext,
     );
-    session = await createSessionForRequest(
-      await withCatalogSettings(deps, grant),
-      grant,
-      interaction.workspaceId,
-      {
-        ...defaults,
-        requestedSessionId: interaction.sessionReservationId,
-        initialMessage: prepared.entry.text,
-        ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
-        instructions: openAgent
-          ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
-              openAgent,
-              slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
-            )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-          : slackAgents.records.length > 0
-            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
-                loaded: slackAgents,
-                agent: routedAgent,
-                source: resolution.source,
-                handedOffBy:
-                  slackAgents.records.find(
-                    (agent) => agent.id === interaction.handoffFromSlackAgentId,
-                  ) ?? null,
-              })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-            : SLACK_SESSION_INSTRUCTIONS,
-        ...(routedAgent
-          ? {
-              metadata: {
-                [SESSION_SLACK_AGENT_METADATA_KEY]: { id: routedAgent.id, name: routedAgent.name },
-              },
-              profile: { avatar: routedAgent.avatar },
-            }
-          : {}),
-        // The session follows the workspace's built-in defaults, including
-        // tools added later, with the Slack read tools guaranteed on top. Only
-        // a retried create of a shell that pinned an exact list replays it.
-        firstPartyMcpTools:
-          defaults.firstPartyMcpTools !== undefined
-            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
-            : undefined,
-        resources: [...defaults.resources, ...preparedAttachments.resources],
-        ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
-        ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
-        idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
-        clientEventId: `slack:${entry.providerEventId}`,
-      },
-      undefined,
-      {
-        surface: "slack",
-        ...(defaults.firstPartyMcpTools === undefined && !openAgent
-          ? {
-              firstPartyMcpToolAdditions:
-                slackAgents.records.length > 0
-                  ? [
-                      ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                      ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
-                    ]
-                  : deps.settings.slackWorkspaceRoutingEnabled &&
-                      slackRequestMentionsAgents(entry.text)
+    // The chat runs on the agent's own Instructions (a prompt layer of its
+    // own); a chat for an agent deleted meanwhile starts as a plain chat.
+    const boundAgent = openAgent ?? routedAgent;
+    const createSlackSession = async (agentId: string | null) =>
+      createSessionForRequest(
+        await withCatalogSettings(deps, grant),
+        grant,
+        interaction.workspaceId,
+        {
+          ...defaults,
+          requestedSessionId: interaction.sessionReservationId,
+          ...(agentId ? { agentId } : {}),
+          initialMessage: prepared.entry.text,
+          ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
+          instructions: openAgent
+            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
+                openAgent,
+                slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
+              )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+            : slackAgents.records.length > 0
+              ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
+                  loaded: slackAgents,
+                  agent: routedAgent,
+                  source: resolution.source,
+                  privateChat: interaction.visibility === "private",
+                  handedOffBy:
+                    slackAgents.records.find(
+                      (agent) => agent.id === interaction.handoffFromSlackAgentId,
+                    ) ?? null,
+                })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+              : SLACK_SESSION_INSTRUCTIONS,
+          ...(routedAgent
+            ? {
+                metadata: {
+                  [SESSION_SLACK_AGENT_METADATA_KEY]: {
+                    id: routedAgent.id,
+                    name: routedAgent.name,
+                  },
+                },
+                profile: { avatar: routedAgent.avatar },
+              }
+            : {}),
+          // The session follows the workspace's built-in defaults, including
+          // tools added later, with the Slack read tools guaranteed on top. Only
+          // a retried create of a shell that pinned an exact list replays it.
+          firstPartyMcpTools:
+            defaults.firstPartyMcpTools !== undefined
+              ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
+              : undefined,
+          resources: [...defaults.resources, ...preparedAttachments.resources],
+          ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
+          ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
+          idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
+          clientEventId: `slack:${entry.providerEventId}`,
+        },
+        undefined,
+        {
+          surface: "slack",
+          ...(defaults.firstPartyMcpTools === undefined && !openAgent
+            ? {
+                firstPartyMcpToolAdditions:
+                  slackAgents.records.length > 0
                     ? [
                         ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                        ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
                       ]
-                    : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-            }
-          : {}),
-      },
-    );
+                    : deps.settings.slackWorkspaceRoutingEnabled &&
+                        slackRequestMentionsAgents(entry.text)
+                      ? [
+                          ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+                          ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ]
+                      : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+              }
+            : {}),
+        },
+      );
+    session = await createSlackSession(boundAgent?.id ?? null).catch(async (error: unknown) => {
+      if (boundAgent && error instanceof SessionAgentNotFoundError) {
+        // The agent went away between routing and create: answer as a plain
+        // chat, without its Instructions.
+        console.warn("[slack-interactions] bound agent unavailable; starting a plain chat", {
+          interactionId: interaction.id,
+          agentId: boundAgent.id,
+          reason: error.reason,
+        });
+        return await createSlackSession(null);
+      }
+      throw error;
+    });
   } catch (error) {
     if (error instanceof HTTPException) {
       await withSlackPreviousContinuationCopy(
@@ -4196,22 +4221,42 @@ function boundedSlackInboxText(text: string): string {
   return bounded;
 }
 
-/** The same Slack agent's other recent chats, for the `slack_agent_chats` tool. */
+/**
+ * The same agent's other recent shared chats, for the `slack_agent_chats`
+ * tool (app and Slack chats alike). Reading other chats is part of Memory:
+ * with Memory off the agent reads none. Private chats are never listed.
+ */
 export async function listSlackAgentChatsForSession(
   deps: ApiRouteDeps,
   input: { grant: AccessGrant; sessionId: string; limit?: number | undefined },
 ) {
-  const interaction = await getSlackInteractionForSession(deps.db, {
-    accountId: input.grant.accountId,
+  const state = await getSessionAgentMemoryState(deps.db, {
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId,
   });
-  if (!interaction?.slackAgentId) {
-    return { chats: [], message: "This chat is not a Slack agent's chat." };
+  if (!state?.agentChat) {
+    return { chats: [], message: "This chat is not an agent's chat." };
+  }
+  const agentId = state.agent?.id ?? null;
+  if (!state.agent || !agentId) {
+    return { chats: [], message: "This chat's agent was deleted." };
+  }
+  if (!state.agent.memoryEnabled) {
+    return {
+      chats: [],
+      message: "Memory is off for this agent, so it does not read its other chats.",
+    };
+  }
+  if (!agentMemoryAccess(state.agent, state.chat).listChats) {
+    return {
+      chats: [],
+      message: "This Only me agent reads its other chats only in its owner's Only me chats.",
+    };
   }
   const chats = await listSlackAgentChats(deps.db, {
+    accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
-    slackAgentId: interaction.slackAgentId,
+    slackAgentId: agentId,
     excludeSessionId: input.sessionId,
     limit: input.limit ?? 10,
   });

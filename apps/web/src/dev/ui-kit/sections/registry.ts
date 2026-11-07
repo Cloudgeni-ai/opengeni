@@ -1009,10 +1009,10 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-connected-agents",
     group: "Pages",
-    title: "Connected agents",
+    title: "Connected apps",
     purpose:
       "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
-    usedOn: "Organization settings > Connected agents, agent sign-in",
+    usedOn: "Organization settings > Connected apps, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
   {

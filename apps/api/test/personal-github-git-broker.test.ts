@@ -35,6 +35,7 @@ import {
   registerPersonalGitHubGitBrokerRoutes,
   type PersonalGitHubGitBrokerServices,
 } from "../src/routes/personal-github-git-broker";
+import { inspectPersonalGitHubPush } from "../src/routes/personal-github-gateway-policy";
 import { isApiContractProtectedMutation, routeLabel } from "../src/app";
 
 const routeId = "r".repeat(43);
@@ -657,6 +658,183 @@ describe("personal GitHub Git broker", () => {
     }
   }, 30_000);
 
+  test("a force push or branch deletion waits for approval; ordinary pushes do not", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-personal-git-push-policy-"));
+    let server: ReturnType<typeof Bun.serve> | null = null;
+    try {
+      const projectRoot = join(root, "provider");
+      const bareRepository = join(projectRoot, "Cloudgeni-ai", "opengeni.git");
+      const client = join(root, "client");
+      const home = join(root, "home");
+      mkdirSync(dirname(bareRepository), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      execFileSync("git", ["init", "--bare", "--initial-branch=main", bareRepository]);
+      execFileSync("git", ["-C", bareRepository, "config", "http.receivepack", "true"]);
+      const decisions: string[] = [];
+      let answer: "wait" | "allow" = "wait";
+      const completed: string[] = [];
+      const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://api.github.com/user") return liveUserResponse();
+        if (url.startsWith("https://api.github.com/repositories/")) return liveRepositoryResponse();
+        if (url.startsWith("https://api.github.com/repos/")) {
+          // compare/{base}...{head}: answer from the provider repository.
+          const [base, head] = decodeURIComponent(url.split("/compare/")[1]!.split("?")[0]!).split(
+            "...",
+          ) as [string, string];
+          let status = "diverged";
+          try {
+            execFileSync("git", ["-C", bareRepository, "merge-base", "--is-ancestor", base, head]);
+            status = "ahead";
+          } catch {}
+          return Response.json({ status });
+        }
+        return await gitHttpBackendFetch(projectRoot, input, init);
+      }) as typeof fetch;
+      const brokerServices: PersonalGitHubGitBrokerServices = {
+        openClaims: (token) => (token === "broker-secret" ? claims : null),
+        resolveAuthority: async () => ({
+          claims,
+          repository,
+          providerPrincipalId: "9876543210987654321",
+          identity: {
+            claims,
+            initiator: { kind: "human", subjectId: "user-1" },
+            unattended: false,
+          },
+        }),
+        authorizeProviderRequest: async () => "Bearer provider-secret",
+        inspectPush: async (authority, body, gzip) =>
+          await inspectPersonalGitHubPush({
+            body,
+            gzip,
+            repositoryFullName: authority.repository.fullName,
+            identity: authority.identity!,
+            isAncestor: async (base, head) => {
+              const response = await providerFetch(
+                `https://api.github.com/repos/x/y/compare/${base}...${head}`,
+              );
+              const payload = (await response.json()) as { status: string };
+              return payload.status === "ahead" || payload.status === "identical";
+            },
+            decide: async (_identity, input) => {
+              decisions.push(input.title);
+              return answer === "allow"
+                ? { kind: "run", requestId: `request-${decisions.length}` }
+                : {
+                    kind: "refuse",
+                    status: 403,
+                    waiting: true,
+                    message: `Waiting for approval: ${input.title}.`,
+                  };
+            },
+          }),
+        completePush: async (_authority, requestId, outcome) => {
+          completed.push(`${requestId}:${outcome}`);
+        },
+        fetch: providerFetch,
+      };
+      server = Bun.serve({
+        port: 0,
+        fetch: async (request) => {
+          const url = new URL(request.url);
+          const match = url.pathname.match(
+            /^\/v1\/git\/personal\/([^/]+)\/(info\/refs|git-upload-pack|git-receive-pack)$/u,
+          );
+          if (!match) return new Response("not found", { status: 404 });
+          const operation =
+            match[2] === "info/refs"
+              ? "info_refs"
+              : match[2] === "git-upload-pack"
+                ? "upload_pack"
+                : "receive_pack";
+          return await handlePersonalGitHubGitBrokerRequest(
+            request,
+            match[1]!,
+            operation,
+            brokerServices,
+          );
+        },
+      });
+      const brokerBase = `http://127.0.0.1:${server.port}/v1/git/personal/${routeId}`;
+      const gitEnvironment = {
+        ...process.env,
+        HOME: home,
+        GIT_CONFIG_GLOBAL: join(root, "gitconfig"),
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_AUTHOR_NAME: "Client",
+        GIT_AUTHOR_EMAIL: "c@example.test",
+        GIT_COMMITTER_NAME: "Client",
+        GIT_COMMITTER_EMAIL: "c@example.test",
+      };
+      writeFileSync(
+        join(root, "helper"),
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 0\nprintf 'username=x\\npassword=broker-secret\\n'\n",
+        { mode: 0o700 },
+      );
+      await runGitCommand(
+        ["config", "--global", "credential.helper", join(root, "helper")],
+        gitEnvironment,
+      );
+      await runGitCommand(["init", "--initial-branch=main", client], gitEnvironment);
+      await runGitCommand(["-C", client, "remote", "add", "origin", brokerBase], gitEnvironment);
+      const commit = async (text: string) => {
+        writeFileSync(join(client, "file.txt"), text);
+        await runGitCommand(["-C", client, "add", "file.txt"], gitEnvironment);
+        await runGitCommand(["-C", client, "commit", "-m", text], gitEnvironment);
+      };
+      const push = async (args: string[]) => {
+        const child = Bun.spawn(["git", "-C", client, "push", "origin", ...args], {
+          env: gitEnvironment,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stderr, exitCode] = await Promise.all([
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stderr, exitCode };
+      };
+
+      await commit("one");
+      expect((await push(["main", "main:topic"])).exitCode).toBe(0);
+      await commit("two");
+      expect((await push(["main"])).exitCode).toBe(0);
+      expect(decisions).toEqual([]);
+
+      await runGitCommand(
+        ["-C", client, "commit", "--amend", "-m", "two rewritten"],
+        gitEnvironment,
+      );
+      const forced = await push(["--force", "main"]);
+      expect(forced.exitCode).not.toBe(0);
+      expect(forced.stderr).toContain("waiting for approval");
+      expect(forced.stderr).toContain("Force-push main on Cloudgeni-ai/opengeni");
+      const deleted = await push([":topic"]);
+      expect(deleted.exitCode).not.toBe(0);
+      expect(decisions).toEqual([
+        "Force-push main on Cloudgeni-ai/opengeni",
+        "Delete topic on Cloudgeni-ai/opengeni",
+      ]);
+
+      answer = "allow";
+      expect((await push(["--force", "main"])).exitCode).toBe(0);
+      expect((await push([":topic"])).exitCode).toBe(0);
+      expect(completed).toEqual(["request-3:completed", "request-4:completed"]);
+      expect(
+        execFileSync(
+          "git",
+          ["-C", bareRepository, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+          { encoding: "utf8" },
+        ).trim(),
+      ).toBe("main");
+    } finally {
+      server?.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("closes the protocol paths and keeps route identifiers out of telemetry labels", () => {
     const infoPath = `/v1/git/personal/${routeId}/info/refs`;
     const uploadPath = `/v1/git/personal/${routeId}/git-upload-pack`;
@@ -678,7 +856,9 @@ describe("personal GitHub Git broker", () => {
    * `refresh` stores an expired token whose refresh GitHub answers with that
    * OAuth error in an HTTP 200, the way github.com reports refresh errors.
    */
-  async function acceptedPersonalBrokerFixture(options: { refresh?: string } = {}) {
+  async function acceptedPersonalBrokerFixture(
+    options: { refresh?: string; allRepositories?: "read" | "write" } = {},
+  ) {
     if (!shared || !dbClient) throw new Error("PostgreSQL test database unavailable");
     const client = dbClient;
     const userId = `git-broker-${crypto.randomUUID()}`;
@@ -786,6 +966,7 @@ describe("personal GitHub Git broker", () => {
       expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
       expectedSelectionGeneration: 0,
       idempotencyKey: crypto.randomUUID(),
+      ...(options.allRepositories ? { allRepositoriesAccess: options.allRepositories } : {}),
       repositories: [
         {
           repositoryId: repository.repositoryId,
@@ -825,6 +1006,7 @@ describe("personal GitHub Git broker", () => {
           credentialBindingId,
           connectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
           selectionGeneration: selected.selectionGeneration,
+          ...(options.allRepositories ? { allRepositoriesAccess: options.allRepositories } : {}),
           repositories: [frozenRepository],
         },
       },
@@ -1126,6 +1308,119 @@ describe("personal GitHub Git broker", () => {
 
     // The turns keep their older snapshots and routes, but the next request
     // for the removed repository fails before any provider call.
+    for (const route of [parentRoute, childRoute]) {
+      const refused = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).toContain("This repository was removed from this chat.");
+      const push = await app.request(
+        route.brokerUrl.replace("service=git-upload-pack", "service=git-receive-pack"),
+        { headers: { authorization: basic(route.brokerBearer) } },
+      );
+      expect(push.status).toBe(403);
+    }
+    expect(fixture.counter.providerCalls).toBe(providerCallsBeforeRemoval);
+  }, 120_000);
+
+  test("All my repositories keeps Git working across selection edits until the mode is turned off", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ allRepositories: "write" });
+    const { app, session, originGrant, connection, emptySelection, subjectId } = fixture;
+    const route = await fixture.brokerFor(session);
+    const first = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(first.status).toBe(200);
+
+    // Editing the explicit list bumps the generation; the mode stays on.
+    const edited = await replacePersonalGitHubRepositorySelections(dbClient.db, {
+      accountId: originGrant.accountId,
+      originWorkspaceId: originGrant.workspaceId,
+      subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: fixture.selected.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      repositories: [],
+    });
+    expect(edited.allRepositoriesAccess).toBe("write");
+    const afterEdit = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(afterEdit.status).toBe(200);
+
+    await replacePersonalGitHubRepositorySelections(dbClient.db, {
+      accountId: originGrant.accountId,
+      originWorkspaceId: originGrant.workspaceId,
+      subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: edited.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      allRepositoriesAccess: null,
+      repositories: [],
+    });
+    const providerCallsBeforeOff = fixture.counter.providerCalls;
+    const afterOff = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(afterOff.status).toBe(401);
+    expect(fixture.counter.providerCalls).toBe(providerCallsBeforeOff);
+  }, 120_000);
+
+  test("All my repositories still refuses a repository removed from the chat, including in a child chat", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ allRepositories: "write" });
+    const { app, session, target, subjectId, originGrant, frozen } = fixture;
+    const child = await createSession(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      parentSessionId: session.id,
+      initialMessage: "child uses personal GitHub",
+      resources: session.resources,
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      subjectId,
+      personalConnectionDelegations: frozen,
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const parentRoute = await fixture.brokerFor(session);
+    const childRoute = await fixture.brokerFor(child);
+    for (const route of [parentRoute, childRoute]) {
+      const accepted = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(accepted.status).toBe(200);
+    }
+    const providerCallsBeforeRemoval = fixture.counter.providerCalls;
+
+    await removeSessionResources(
+      { db: dbClient.db, bus: new MemoryEventBus() },
+      {
+        accountId: originGrant.accountId,
+        workspaceId: target.id,
+        subjectId,
+        permissions: ["sessions:read", "sessions:control"],
+        principalKind: "human_session",
+      },
+      session.id,
+      { resources: [{ kind: "repository", uri: repository.canonicalUrl }] },
+    );
+
+    // The mode reaches every repository the person can use, but not one a
+    // person removed from this chat (or its parent chat).
     for (const route of [parentRoute, childRoute]) {
       const refused = await app.request(route.brokerUrl, {
         headers: { authorization: basic(route.brokerBearer) },

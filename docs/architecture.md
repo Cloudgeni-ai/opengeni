@@ -1877,7 +1877,7 @@ navigation, including old Files, Skills, Memory and Documents links (a Documents
 home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
-chat's override in the session dock's Agent tab beside its identity and
+chat's override in the session dock's Settings tab beside its identity and
 capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
@@ -1929,6 +1929,15 @@ because a recipient is a workspace administrator. See
 [credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
 API/SDK and the transaction-compatible top-up enqueue seam.
 
+Opt-in automatic credit top-ups use the API's
+`apps/api/src/billing-auto-top-up-maintenance.ts` keyset discovery loop and the
+tagged billing webhook handlers. Both construct the same durable payment service
+with `packages/db/src/billing-auto-top-up-notifications.ts` as the shared outbox
+adapter. Fresh-charge activation is independent of recovery: reserved payments
+and undelivered terminal notifications continue reconciling while the feature is
+off. See [automatic credit top-ups](automatic-credit-top-ups.md) for consent,
+canonical PaymentIntent recovery, tax-inclusive caps and the invoice boundary.
+
 Connected subscriptions serve app-origin work on qualifying paid plans, with
 no usage fee. API-origin work refuses them at admission and before model calls;
 omitted API models skip subscription defaults. Origin is inherited by children,
@@ -1941,10 +1950,14 @@ Model-scoped promotions retain offer identity and initial eligibility on each gr
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
 new scoped grants without a restart. Each paid call retains its admitted revision
 for settlement; the next call reads current policy. `packages/db/src/credit-balances.ts` owns the general/promotional split and
-eligible balance calculation. Model settlement serializes by account, consumes
-eligible grants before general credits, and inserts `credit_debit_allocations`
-with the idempotent debit in one transaction. A settled zero-cost receipt cannot
-be charged later on retry. Non-model resources spend general credits only.
+eligible balance calculation. Model settlement charges the response's full price
+after use (`applyCreditDebitAfterUse`), like other Opengeni-funded resources: it
+serializes by account, consumes eligible grants before general credits, and
+inserts `credit_debit_allocations` with the idempotent debit in one transaction.
+Whatever grants do not cover is taken from general credit, which may go below
+zero; later grants and top-ups net against it. A retry never charges a settled
+response again, including a zero-cost or capped receipt from earlier releases.
+Non-model resources spend general credits only.
 Legacy grants remain unrestricted. Stripe checkout metadata records scoped status and initial eligibility
 before the customer confirms; webhook and status recovery share fulfillment.
 Deployment policy, activation order and customer flow: [scoped promotional
@@ -2449,6 +2462,16 @@ Apps. Independent write/review/merge policies use DB rows and accepted snapshots
 Canonical: `packages/core/src/domain/github-action-policies.ts`,
 `apps/api/src/routes/github.ts`, and
 `apps/web/src/components/capabilities/use-github-integration.tsx`.
+
+Repositories mounted as the person (Your GitHub) reach GitHub through the API:
+Git through the personal smart-HTTP broker, and `gh` in managed sandboxes
+through the personal GitHub gateway, which adds the person's token per request
+and maps each REST or GraphQL request (and each push that deletes or rewrites a
+ref) to the same `github_personal` action policy, recording asks in
+`connector_action_requests`. Canonical: `apps/api/src/routes/personal-github-git-broker.ts`,
+`apps/api/src/routes/personal-github-gateway.ts`,
+`apps/api/src/integrations/github-gateway-requests.ts`, and the `gh` wrapper in
+`packages/runtime/src/index.ts`; see [`personal-github.md`](personal-github.md).
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
@@ -3241,6 +3264,7 @@ Topics: [`README.md`](README.md).
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
 | Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql` | [`agents.md`](agents.md) |
+| Agents in the app: Agents page, agent page and form, composer agent chip, chat header chip, Slack availability | `packages/react/src/app/components/agents/`, `packages/react/src/app/lib/agents.tsx`, `packages/react/src/app/lib/composer-agent.tsx`, `packages/react/src/app/lib/session-agent.ts`, `apps/web/src/routes/agents.tsx`, `apps/web/src/components/agents/` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |

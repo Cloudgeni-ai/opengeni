@@ -594,6 +594,21 @@ export type UnavailableMcpConnector = {
   reason: UnavailableMcpConnectorReason;
 };
 
+/**
+ * A connector's account that was connected but stopped working: its provider
+ * rejected the saved sign-in, so nothing can use it until it is reconnected.
+ */
+export type McpConnectorAccountNeedingReconnect = {
+  /** The connector it belongs to, as configured for this chat. */
+  connector: { id: string; name?: string | undefined };
+  account: string;
+  ownership: "personal" | "workspace";
+  /** The day it stopped working, YYYY-MM-DD. */
+  stoppedWorkingOn: string;
+  /** Added in this workspace, so a card in this chat can reconnect it. */
+  reconnectHere: boolean;
+};
+
 /** Connectors listed by name in the notice; the rest are counted. */
 const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
 const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
@@ -641,6 +656,48 @@ function displayConnector(connector: UnavailableMcpConnector): string {
 export function unavailableMcpOperationalContext(input: {
   connectors: readonly UnavailableMcpConnector[];
   /** Further unavailable connectors the bounded policy projection did not name. */
+  omittedCount?: number;
+  /** Accounts of this chat's connectors that stopped working and need reconnecting. */
+  needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
+}): string | undefined {
+  const unavailable = unavailableMcpConnectorsNotice(input);
+  const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
+  return unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+}
+
+/**
+ * Name each account of this chat's connectors that stopped working, with the
+ * day, so the model can tell the person what happened instead of offering a
+ * first-time Connect, and knows the card that reconnects that same account.
+ */
+function mcpAccountsNeedingReconnectNotice(
+  accounts: readonly McpConnectorAccountNeedingReconnect[],
+): string | undefined {
+  if (accounts.length === 0) return undefined;
+  const listed = accounts.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = accounts.length - listed.length;
+  const lines = listed.map((account) => {
+    const owner = account.ownership === "personal" ? "the person's account" : "the shared account";
+    // Provider-supplied text: one bounded line, never instructions.
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    const clean = account.account.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ");
+    const label = JSON.stringify(clean.trim().slice(0, 180));
+    return `- ${displayConnector({ ...account.connector, reason: "no_account" })}: ${owner} ${label} stopped working on ${account.stoppedWorkingOn}.${
+      account.reconnectHere
+        ? ""
+        : " It was added in another workspace, so the person reconnects it from Connections there."
+    }`;
+  });
+  if (more > 0) lines.push(`- ${more} more account${more === 1 ? "" : "s"} stopped working too.`);
+  return [
+    "Accounts that need reconnecting: these accounts were connected for this chat's connectors but stopped working (their sign-in expired or was revoked), so their tools cannot use them until they are reconnected.",
+    ...lines,
+    "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when. To offer the fix, capability_catalog_search lists it under setup.reconnect and capability_authorization_request posts a card that reconnects that same account; a new Connect cannot replace it.",
+  ].join("\n");
+}
+
+function unavailableMcpConnectorsNotice(input: {
+  connectors: readonly UnavailableMcpConnector[];
   omittedCount?: number;
 }): string | undefined {
   const omitted = Math.max(0, input.omittedCount ?? 0);

@@ -6,20 +6,25 @@ import {
   isPersonalGitHubConnection,
   personalGitHubConnectionNeedsReconnect,
   type PersonalGitHubRepositoryPermissions,
+  type PersonalGitHubRepositorySelectionState,
 } from "@opengeni/contracts/personal-github";
 import {
   resourcesIncludeRepository,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { personalGitHubRepositoryAuthority, type ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
+  type ConnectorActionAttemptIdentity,
   getPersonalGitHubRepositorySelectionState,
   getSessionAuthorityProjection,
+  getSessionGitHubGatewayState,
+  getSessionRepositoryMembershipForAuthority,
   getSessionResourcesForAuthority,
   getSessionTurnForAttempt,
   resolveAcceptedConnectionUse,
+  sessionRepositoryRemoved,
 } from "@opengeni/db";
 import {
   openPersonalGitHubGitBrokerClaims,
@@ -31,6 +36,13 @@ import { readResponseTextBounded } from "@opengeni/network";
 import type { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import JSONBig from "json-bigint";
+import {
+  databaseGatewayCompleter,
+  databaseGatewayDecider,
+  inspectPersonalGitHubPush,
+  type GatewayDecisionIdentity,
+  type PushInspection,
+} from "./personal-github-gateway-policy";
 
 const PERSONAL_GITHUB_SERVER_ID = "github:personal";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -40,18 +52,24 @@ const GIT_BROKER_AUTHORIZATION_MAX_BYTES = 8 * 1024;
 
 export const PERSONAL_GITHUB_GIT_BROKER_PATH_PREFIX = "/v1/git/personal/";
 
-type BrokerOperation = "info_refs" | "upload_pack" | "receive_pack";
+export type BrokerOperation = "info_refs" | "upload_pack" | "receive_pack";
 
-type BrokerRepository = Omit<PersonalGitHubGitBrokerRepositoryClaim, "routeId">;
+export type BrokerRepository = Omit<PersonalGitHubGitBrokerRepositoryClaim, "routeId">;
 
-type BrokerAuthority = {
+export type BrokerAuthority = {
   claims: PersonalGitHubGitBrokerClaims;
   repository: BrokerRepository;
   providerPrincipalId: string;
+  /** Who decides pushes that need the person's approval. */
+  identity?: GatewayDecisionIdentity;
+  /** The accepted work had All my repositories at this access. */
+  allRepositoriesAccess?: "read" | "write" | undefined;
 };
 
 export type PersonalGitHubGitBrokerServices = {
   openClaims: (token: string) => PersonalGitHubGitBrokerClaims | null;
+  /** Whether a route key has the shape this service resolves; default a broker route id. */
+  validRouteKey?: (routeKey: string) => boolean;
   resolveAuthority: (
     claims: PersonalGitHubGitBrokerClaims,
     routeId: string,
@@ -61,6 +79,20 @@ export type PersonalGitHubGitBrokerServices = {
     destinationUrl: string,
     operation: "identity_verify" | "repository_verify" | BrokerOperation,
   ) => Promise<string>;
+  /**
+   * Hold a force push or a ref deletion for the person's approval. Other
+   * pushes are forwarded unchanged.
+   */
+  inspectPush?: (
+    authority: BrokerAuthority,
+    body: ReadableStream<Uint8Array> | null,
+    gzip: boolean,
+  ) => Promise<PushInspection>;
+  completePush?: (
+    authority: BrokerAuthority,
+    requestId: string,
+    outcome: "completed" | "uncertain",
+  ) => Promise<void>;
   fetch: typeof fetch;
   idleTimeoutMs?: number;
 };
@@ -123,7 +155,9 @@ export async function handlePersonalGitHubGitBrokerRequest(
   operation: BrokerOperation,
   services: PersonalGitHubGitBrokerServices,
 ): Promise<Response> {
-  if (!/^[A-Za-z0-9_-]{43}$/u.test(routeId) || !validGitRequestShape(request, operation)) {
+  const validRouteKey =
+    services.validRouteKey ?? ((key: string) => /^[A-Za-z0-9_-]{43}$/u.test(key));
+  if (!validRouteKey(routeId) || !validGitRequestShape(request, operation)) {
     return brokerError(404, "Git repository route not found.");
   }
   const token = brokerBearer(request.headers.get("authorization"));
@@ -202,17 +236,56 @@ export async function handlePersonalGitHubGitBrokerRequest(
     return brokerError(401, "Git broker authorization is unavailable.");
   }
 
+  let body: ReadableStream<Uint8Array> | Uint8Array | null | undefined =
+    operation === "info_refs" ? undefined : request.body;
+  let pushRequestId: string | null = null;
   const controller = new AbortController();
   const deadline = idleDeadline(controller, services.idleTimeoutMs ?? GIT_BROKER_IDLE_TIMEOUT_MS);
-  const body = operation === "info_refs" ? undefined : request.body;
-  const streamedBody = body
-    ? streamWithActivity(
-        body,
-        deadline.activity,
-        () => undefined,
-        () => controller.abort(),
-      )
-    : undefined;
+  if (operation === "receive_pack" && services.inspectPush) {
+    let inspection: PushInspection;
+    try {
+      // The idle deadline covers reading the push for inspection too.
+      const inspected = request.body
+        ? streamWithActivity(
+            abortableStream(request.body, controller.signal),
+            deadline.activity,
+            () => undefined,
+            () => controller.abort(),
+          )
+        : null;
+      inspection = await services.inspectPush(
+        authority,
+        inspected,
+        request.headers.get("content-encoding")?.trim().toLowerCase() === "gzip",
+      );
+    } catch (error) {
+      deadline.clear();
+      if (controller.signal.aborted) return brokerError(502, "The Git client stopped sending.");
+      return brokerAuthorityError(error);
+    }
+    if (inspection.kind === "respond") {
+      deadline.clear();
+      return inspection.response;
+    }
+    body = inspection.body instanceof Uint8Array ? bytesStream(inspection.body) : inspection.body;
+    pushRequestId = inspection.requestId;
+  }
+  const completePush = async (outcome: "completed" | "uncertain") => {
+    if (!pushRequestId || !services.completePush) return;
+    const requestId = pushRequestId;
+    pushRequestId = null;
+    await services.completePush(authority, requestId, outcome).catch(() => undefined);
+  };
+
+  const streamedBody =
+    body instanceof ReadableStream
+      ? streamWithActivity(
+          body,
+          deadline.activity,
+          () => undefined,
+          () => controller.abort(),
+        )
+      : undefined;
   try {
     const headers = upstreamRequestHeaders(request, operation, providerToken);
     const init: RequestInit & { duplex?: "half" } = {
@@ -231,6 +304,7 @@ export async function handlePersonalGitHubGitBrokerRequest(
     ) {
       await upstream.body?.cancel().catch(() => undefined);
       deadline.clear();
+      await completePush("uncertain");
       return brokerError(
         502,
         operation === "receive_pack"
@@ -238,6 +312,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
           : "GitHub Git transport is unavailable.",
       );
     }
+    // GitHub accepted the push request; per-ref results follow in the body.
+    await completePush("completed");
     const responseBody = streamWithActivity(upstream.body, deadline.activity, deadline.clear);
     return new Response(responseBody, {
       status: upstream.status,
@@ -245,6 +321,7 @@ export async function handlePersonalGitHubGitBrokerRequest(
     });
   } catch {
     deadline.clear();
+    await completePush("uncertain");
     return brokerError(
       502,
       operation === "receive_pack"
@@ -269,31 +346,80 @@ function personalGitHubGitBrokerServices(deps: ApiRouteDeps): PersonalGitHubGitB
     },
     authorizeProviderRequest: async (authority, destinationUrl, operation) =>
       await authorizeBrokerProviderRequest(deps, authority, destinationUrl, operation),
+    ...personalGitHubPushPolicyServices(deps, (authority, url) =>
+      authorizeBrokerProviderRequest(deps, authority, url, "repository_verify"),
+    ),
     fetch: deps.githubPersonalFetch ?? fetch,
   };
 }
 
-class BrokerRepositoryRemovedError extends Error {
+/**
+ * Push approvals for a Git route: force pushes and ref deletions ask the
+ * person (Block in their GitHub settings still wins).
+ */
+export function personalGitHubPushPolicyServices(
+  deps: ApiRouteDeps,
+  authorize: (authority: BrokerAuthority, destinationUrl: string) => Promise<string>,
+): Pick<PersonalGitHubGitBrokerServices, "inspectPush" | "completePush"> {
+  const fetchImpl = deps.githubPersonalFetch ?? fetch;
+  const decide = databaseGatewayDecider(deps.db);
+  const complete = databaseGatewayCompleter(deps.db);
+  return {
+    inspectPush: async (authority, body, gzip) => {
+      const identity = authority.identity;
+      if (!identity) throw new Error("personal GitHub push identity is unavailable");
+      return await inspectPersonalGitHubPush({
+        body,
+        gzip,
+        repositoryFullName: authority.repository.fullName,
+        identity,
+        decide,
+        isAncestor: async (base, head) => {
+          const url = new URL(
+            `/repos/${authority.repository.fullName}/compare/${base}...${head}`,
+            PERSONAL_GITHUB_API_ORIGIN,
+          );
+          url.searchParams.set("per_page", "1");
+          const authorization = await authorize(authority, url.toString());
+          const payload = await fetchLiveGitHubJson(fetchImpl, url, authorization, 1024 * 1024);
+          if (!payload || typeof payload.status !== "string") return null;
+          if (payload.status === "ahead" || payload.status === "identical") return true;
+          if (payload.status === "behind" || payload.status === "diverged") return false;
+          return null;
+        },
+      });
+    },
+    completePush: async (authority, requestId, outcome) => {
+      if (authority.identity) await complete(authority.identity, requestId, outcome);
+    },
+  };
+}
+
+/** Refused for a reason Git should show as is. */
+export class BrokerForbiddenError extends Error {}
+
+export class BrokerRepositoryRemovedError extends Error {
   constructor() {
     super("personal GitHub repository was removed from the session");
   }
 }
 
 /** GitHub refused the stored grant; only the person reconnecting fixes it. */
-class BrokerReconnectRequiredError extends Error {
+export class BrokerReconnectRequiredError extends Error {
   constructor() {
     super("personal GitHub connection must be reconnected");
   }
 }
 
 /** The token refresh failed for a passing reason (GitHub 5xx, timeout). */
-class BrokerProviderUnavailableError extends Error {
+export class BrokerProviderUnavailableError extends Error {
   constructor() {
     super("personal GitHub token refresh is temporarily unavailable");
   }
 }
 
 function brokerAuthorityError(error: unknown): Response {
+  if (error instanceof BrokerForbiddenError) return brokerError(403, error.message);
   if (error instanceof BrokerRepositoryRemovedError) {
     return brokerError(403, "This repository was removed from this chat.");
   }
@@ -312,6 +438,36 @@ async function resolveBrokerAuthority(
   claims: PersonalGitHubGitBrokerClaims,
   routeId: string,
 ): Promise<BrokerAuthority> {
+  const { delegation, initiator } = await resolvePersonalGitHubPassTurn(deps, claims);
+  const repository = exactRouteRepository(secret, claims, delegation, routeId);
+  const allRepositoriesAccess = delegation.personalGitHubRepositorySelection?.allRepositoriesAccess;
+  const providerIdentity = await assertCurrentConnectionAndSelection(
+    deps,
+    claims,
+    repository,
+    allRepositoriesAccess,
+  );
+  const session = await getSessionGitHubGatewayState(deps.db, claims.workspaceId, claims.sessionId);
+  return {
+    claims,
+    repository,
+    allRepositoriesAccess,
+    ...providerIdentity,
+    identity: { claims, initiator, unattended: session?.unattended ?? false },
+  };
+}
+
+/**
+ * The accepted turn and personal GitHub delegation a broker pass was minted
+ * for, when they are still current. Throws otherwise.
+ */
+export async function resolvePersonalGitHubPassTurn(
+  deps: ApiRouteDeps,
+  claims: PersonalGitHubGitBrokerClaims,
+): Promise<{
+  delegation: McpPersonalConnectionDelegation;
+  initiator: ConnectorActionAttemptIdentity["initiator"];
+}> {
   const turn = await getSessionTurnForAttempt(
     deps.db,
     claims.workspaceId,
@@ -334,9 +490,10 @@ async function resolveBrokerAuthority(
     throw new Error("accepted Git broker attempt is no longer current");
   }
   const delegation = exactDelegation(turn.personalConnectionDelegations, claims);
-  const repository = exactRouteRepository(secret, claims, delegation, routeId);
-  const providerIdentity = await assertCurrentConnectionAndSelection(deps, claims, repository);
-  return { claims, repository, ...providerIdentity };
+  return {
+    delegation,
+    initiator: { kind: turn.initiator.kind, subjectId: turn.initiator.subjectId },
+  };
 }
 
 async function authorizeBrokerProviderRequest(
@@ -345,12 +502,39 @@ async function authorizeBrokerProviderRequest(
   destinationUrl: string,
   operation: "identity_verify" | "repository_verify" | BrokerOperation,
 ): Promise<string> {
-  const { claims, repository } = authority;
-  // Re-read every mutable connection/repository fence before this physical
-  // provider request. A previous request's successful check grants nothing to
-  // this one.
-  const currentIdentity = await assertCurrentConnectionAndSelection(deps, claims, repository);
-  if (currentIdentity.providerPrincipalId !== authority.providerPrincipalId) {
+  const { claims, repository, allRepositoriesAccess } = authority;
+  return await authorizePersonalGitHubProviderRequest(deps, {
+    claims,
+    providerPrincipalId: authority.providerPrincipalId,
+    destinationUrl,
+    toolName: `git_${operation}`,
+    // Re-read every mutable connection/repository fence before this physical
+    // provider request. A previous request's successful check grants nothing to
+    // this one.
+    recheck: async () =>
+      await assertCurrentConnectionAndSelection(deps, claims, repository, allRepositoriesAccess),
+  });
+}
+
+/**
+ * The `Authorization` header for one physical GitHub request with the
+ * person's token, after `recheck` confirmed the caller's authority is still
+ * current (before and after token resolution). The token never leaves the
+ * API process.
+ */
+export async function authorizePersonalGitHubProviderRequest(
+  deps: ApiRouteDeps,
+  input: {
+    claims: PersonalGitHubGitBrokerClaims;
+    providerPrincipalId: string;
+    destinationUrl: string;
+    toolName: string;
+    recheck: () => Promise<{ providerPrincipalId: string }>;
+  },
+): Promise<string> {
+  const { claims } = input;
+  const currentIdentity = await input.recheck();
+  if (currentIdentity.providerPrincipalId !== input.providerPrincipalId) {
     throw new Error("personal GitHub provider identity changed");
   }
   const resolver = buildConnectionTokenResolver(deps.db, deps.settings, undefined, {
@@ -362,7 +546,7 @@ async function authorizeBrokerProviderRequest(
     workspaceId: claims.workspaceId,
     subjectId: claims.ownerSubjectId,
     serverId: PERSONAL_GITHUB_SERVER_ID,
-    toolName: `git_${operation}`,
+    toolName: input.toolName,
     connectionRef: {
       connectionId: claims.connectionId,
       provider: "github",
@@ -371,7 +555,7 @@ async function authorizeBrokerProviderRequest(
       subjectScope: "subject",
       scopes: ["repo"],
     },
-    destinationUrl,
+    destinationUrl: input.destinationUrl,
     credentialTarget: "http_api",
     connectionUseContext: {
       accountId: claims.accountId,
@@ -393,7 +577,7 @@ async function authorizeBrokerProviderRequest(
     credential.connectionUseAttribution.workspaceId !== claims.workspaceId
   ) {
     // A refused refresh has just moved the connection to needs_reauth; say so.
-    await assertCurrentConnectionAndSelection(deps, claims, repository);
+    await input.recheck();
     // Still current and active: the refresh failed for a passing reason, so
     // Git hears "try again", not that its authorization ended.
     if (credential.status !== "ok" && credential.reason === "refresh_failed") {
@@ -401,7 +585,7 @@ async function authorizeBrokerProviderRequest(
     }
     throw new Error("personal GitHub credential resolution was denied");
   }
-  await assertCurrentConnectionAndSelection(deps, claims, repository);
+  await input.recheck();
   const providerRequest = await resolveAcceptedConnectionUse(deps.db, {
     accountId: claims.accountId,
     workspaceId: claims.workspaceId,
@@ -483,18 +667,87 @@ async function assertCurrentConnectionAndSelection(
   deps: ApiRouteDeps,
   claims: PersonalGitHubGitBrokerClaims,
   repository: BrokerRepository,
+  allRepositoriesAccess?: "read" | "write" | undefined,
 ): Promise<{ providerPrincipalId: string }> {
   // Session membership is live authority: a repository removed from the chat
   // (or from the parent chat of this child) stops on its next Git request,
   // even for a turn or goal continuation that captured an older snapshot.
-  const sessionResources = await getSessionResourcesForAuthority(
-    deps.db,
-    claims.workspaceId,
-    claims.sessionId,
-  );
-  if (!sessionResources || !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)) {
-    throw new BrokerRepositoryRemovedError();
+  // All my repositories reaches every repository the person can use, so
+  // there the chat's list does not limit it, but a repository a person
+  // removed from the chat stays refused.
+  if (allRepositoriesAccess) {
+    const membership = await getSessionRepositoryMembershipForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !membership ||
+      sessionRepositoryRemoved(membership, {
+        uris: [repository.canonicalUrl, `https://github.com/${repository.fullName}`],
+        githubRepositoryId: repository.repositoryId,
+      })
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
+  } else {
+    const sessionResources = await getSessionResourcesForAuthority(
+      deps.db,
+      claims.workspaceId,
+      claims.sessionId,
+    );
+    if (
+      !sessionResources ||
+      !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)
+    ) {
+      throw new BrokerRepositoryRemovedError();
+    }
   }
+  const { selection, metadata } = await assertCurrentPersonalGitHubConnection(deps, claims);
+  // The shared Your GitHub allowlist decision. In All my repositories the
+  // per-request live GitHub repository check in the handler confirms the
+  // person's own permission.
+  const decision = personalGitHubRepositoryAuthority({
+    current: { ...selection, allRepositoriesAccess: selection.allRepositoriesAccess ?? null },
+    metadata,
+    accepted: {
+      credentialBindingId: claims.credentialBindingId,
+      connectionAuthorityGeneration: claims.connectionAuthorityGeneration,
+      selectionGeneration: claims.selectionGeneration,
+      ...(allRepositoriesAccess ? { allRepositoriesAccess } : {}),
+      repositories: [repository],
+    },
+    repository: { repositoryId: repository.repositoryId, fullName: repository.fullName },
+    access: repository.access,
+  });
+  if (
+    !decision.allowed ||
+    (decision.mode === "selected" &&
+      (decision.selected.fullName !== repository.fullName ||
+        decision.selected.canonicalUrl !== repository.canonicalUrl ||
+        decision.selected.selectionGeneration !== repository.selectionGeneration))
+  ) {
+    throw new Error("personal GitHub repository selection changed");
+  }
+  return {
+    providerPrincipalId: metadata.providerPrincipalId,
+  };
+}
+
+/**
+ * The person's GitHub connection and live repository selection behind a
+ * broker pass, when the connection is still the active one the pass was
+ * minted for. Throws {@link BrokerReconnectRequiredError} when GitHub refused
+ * the stored grant.
+ */
+export async function assertCurrentPersonalGitHubConnection(
+  deps: ApiRouteDeps,
+  claims: PersonalGitHubGitBrokerClaims,
+): Promise<{
+  providerPrincipalId: string;
+  metadata: PersonalGitHubConnectionMetadata;
+  selection: PersonalGitHubRepositorySelectionState;
+}> {
   const connection = await getConnectionMetadata(
     deps.db,
     claims.originWorkspaceId,
@@ -537,33 +790,19 @@ async function assertCurrentConnectionAndSelection(
     subjectId: claims.ownerSubjectId,
     connectionId: claims.connectionId,
   });
-  const current = selection?.repositories.find(
-    (candidate) => candidate.repositoryId === repository.repositoryId,
-  );
   if (
     !selection ||
     selection.connectionAuthorityGeneration !== claims.connectionAuthorityGeneration ||
     selection.credentialBindingId !== claims.credentialBindingId ||
     selection.credentialBindingId !== metadata.credentialBindingId ||
-    selection.providerPrincipalId !== metadata.providerPrincipalId ||
-    selection.selectionGeneration !== claims.selectionGeneration ||
-    !current ||
-    current.fullName !== repository.fullName ||
-    current.canonicalUrl !== repository.canonicalUrl ||
-    current.selectionGeneration !== repository.selectionGeneration ||
-    current.disabled ||
-    !canRead(current.permissions) ||
-    (repository.access === "write" &&
-      (current.selectedAccess !== "write" || current.archived || !canWrite(current.permissions)))
+    selection.providerPrincipalId !== metadata.providerPrincipalId
   ) {
     throw new Error("personal GitHub repository selection changed");
   }
   if (metadata.githubUserId !== metadata.providerPrincipalId) {
     throw new Error("personal GitHub provider identity changed");
   }
-  return {
-    providerPrincipalId: metadata.providerPrincipalId,
-  };
+  return { providerPrincipalId: metadata.providerPrincipalId, metadata, selection };
 }
 
 async function fetchLiveRepository(
@@ -604,10 +843,11 @@ async function fetchLiveProviderUser(
   );
 }
 
-async function fetchLiveGitHubJson(
+export async function fetchLiveGitHubJson(
   fetchImpl: typeof fetch,
   url: URL,
   authorization: string,
+  maxBytes = GITHUB_API_RESPONSE_MAX_BYTES,
 ): Promise<Record<string, unknown> | null> {
   let response: Response;
   try {
@@ -631,7 +871,7 @@ async function fetchLiveGitHubJson(
   }
   try {
     return providerJson.parse(
-      await readResponseTextBounded(response, GITHUB_API_RESPONSE_MAX_BYTES, "GitHub response"),
+      await readResponseTextBounded(response, maxBytes, "GitHub response"),
     ) as Record<string, unknown>;
   } catch {
     return null;
@@ -787,6 +1027,35 @@ function bearerToken(authorization: string): string | null {
     : null;
 }
 
+/** `source`, ending with an error once `signal` aborts (a stalled client). */
+function abortableStream(
+  source: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  const aborted = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("Git client stopped sending"));
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+  aborted.catch(() => undefined);
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await Promise.race([reader.read(), aborted]);
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
+
 function idleDeadline(
   controller: AbortController,
   timeoutMs: number,
@@ -833,6 +1102,15 @@ function streamWithActivity(
     async cancel(reason) {
       fail();
       await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
+
+function bytesStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (bytes.byteLength > 0) controller.enqueue(bytes);
+      controller.close();
     },
   });
 }

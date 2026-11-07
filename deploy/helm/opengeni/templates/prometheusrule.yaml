@@ -13,6 +13,7 @@
 {{- $providerTtftRegressionFloorSeconds := float64 (default 5 ((.Values.observability).prometheusRule).providerTtftRegressionFloorSeconds) }}
 {{- $providerTtftRecentMinSamples := int (default 30 ((.Values.observability).prometheusRule).providerTtftRecentMinSamples) }}
 {{- $providerTtftBaselineMinSamples := int (default 200 ((.Values.observability).prometheusRule).providerTtftBaselineMinSamples) }}
+{{- $sessionEventMinSamples := int (default 100 ((.Values.observability).prometheusRule).sessionEventMinSamples) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
@@ -25,6 +26,9 @@
 {{- end }}
 {{- if or (le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds) (le $modelRequestPreDispatchP95Seconds 0.0) (le $modelRequestMinSamples 0) (le $providerTtftRegressionRatio 1.0) (le $providerTtftRegressionFloorSeconds 0.0) (le $providerTtftRecentMinSamples 0) (le $providerTtftBaselineMinSamples 0) }}
 {{- fail "observability.prometheusRule latency alerts: the critical provider-dispatch p95 must exceed the warning p95, the pre-dispatch threshold, floor and minimum samples must be positive, and the provider TTFT regression ratio must exceed 1" }}
+{{- end }}
+{{- if le $sessionEventMinSamples 0 }}
+{{- fail "observability.prometheusRule.sessionEventMinSamples must be positive" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -1669,10 +1673,14 @@ spec:
             and
             opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
             unless on()
-            histogram_quantile(
-              0.95,
-              sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
-            ) > {{ $modelRequestPreDispatchP95Seconds }}
+            (
+              histogram_quantile(
+                0.95,
+                sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
+              ) > {{ $modelRequestPreDispatchP95Seconds }}
+              and on()
+              sum(increase(opengeni_model_request_pre_dispatch_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])) >= {{ $modelRequestMinSamples }}
+            )
           for: 15m
           labels:
             severity: warning
@@ -1683,11 +1691,19 @@ spec:
             value: 'p90 first token {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users on this model wait noticeably longer before replies start.'
             next_step: 'Check the provider''s status; usually recovers on its own; if it persists, steer users to another model.'
-            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds, so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
             action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # A p99 means something only with at least 100 observations: below
+        # that, the 99th-percentile rank lies above every observation but the
+        # slowest, so one slow write decides the whole p99. Each streaming p99
+        # alert therefore needs sessionEventMinSamples observations in its own
+        # window, like the other latency alerts' volume guards.
         - alert: OpenGeniEventAppendLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
+            and on()
+            sum(increase(opengeni_session_event_append_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= {{ $sessionEventMinSamples }}
           for: 10m
           labels:
             severity: warning
@@ -1697,9 +1713,12 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent output appears in the app with a delay and everything feels sluggish.'
             next_step: 'Check Postgres CPU, connections and slow queries.'
-            description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
+            description: appendSessionEvents p99 is above 1s for 10m, with at least {{ $sessionEventMinSamples }} appends in the window — Postgres is the streaming bottleneck, not the model or NATS.
         - alert: OpenGeniEventAppendLatencyCritical
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
+            and on()
+            sum(increase(opengeni_session_event_append_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m])) >= {{ $sessionEventMinSamples }}
           for: 5m
           labels:
             severity: critical
@@ -1709,10 +1728,13 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent replies stream slowly or stall, and the app may time out.'
             next_step: 'Check Postgres CPU, active sessions and hot queries now; adding API or worker pods will not help.'
-            description: The durable Postgres write path is critically saturated. Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
+            description: The durable Postgres write path is critically saturated (p99 above 2s with at least {{ $sessionEventMinSamples }} appends in 5m). Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniEventPublishLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
+            and on()
+            sum(increase(opengeni_session_event_publish_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= {{ $sessionEventMinSamples }}
           for: 10m
           labels:
             severity: warning
@@ -1722,7 +1744,7 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Streaming output appears late or in bursts; nothing is lost and it catches up.'
             next_step: 'Check NATS health and load; usually clears on its own.'
-            description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+            description: The best-effort NATS live fan-out p99 is above 500ms for 10m, with at least {{ $sessionEventMinSamples }} publishes in the window — live delivery is degraded (events stay durable and reconcile on stream replay).
         - alert: OpenGeniNatsSubscriptionTerminated
           expr: |
             sum by (kind, recovery) (increase(opengeni_nats_subscription_terminations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0

@@ -219,7 +219,7 @@ function credentialSourceText(route: PrivacyFactsRoute): string {
   if (!source) return "Unknown.";
   switch (source.kind) {
     case "deployment":
-      return "This Opengeni deployment's own account with the provider.";
+      return "This deployment's own account with the provider.";
     case "connected_subscription": {
       const name =
         source.provider === "codex"
@@ -266,10 +266,10 @@ function policyLines(
     `- Trains on the data: ${policy.training}`,
     `- Keeps the data: ${policy.retention}`,
     `- Where it processes: ${policy.location}`,
-    ...(opengeni ? [`- Opengeni's requests: ${opengeni}`] : []),
+    ...(opengeni ? [`- Request settings: ${opengeni}`] : []),
     policy.sources.length > 0
       ? `- Sources (checked ${policy.checkedOn}): ${policy.sources.join(" ; ")}`
-      : "- Sources: none; this provider is not in Opengeni's reviewed table.",
+      : "- Sources: none; this provider is not in the reviewed provider table.",
   ];
 }
 
@@ -330,7 +330,7 @@ export function renderPrivacyFacts(input: {
     ? `${oneLine(route.modelLabel)} (${oneLine(route.modelId ?? "unknown id")})`
     : oneLine(route.modelId ?? "unknown");
   const lines: string[] = [
-    "Privacy facts for this chat, from this Opengeni deployment's configuration. Answer only from these facts, say plainly what is unknown, and link the policies below.",
+    "Privacy facts for this chat, from this deployment's configuration. Answer only from these facts, say plainly what is unknown, and link the policies below.",
     "",
     `Model: ${modelName}`,
     // Like list_models, never upstream ids or URLs: they can name internal deployments.
@@ -359,13 +359,13 @@ export function renderPrivacyFacts(input: {
   }
   lines.push(
     "",
-    "Opengeni (this deployment and workspace):",
-    "- The Opengeni software does not train models on chat content.",
+    "This deployment and workspace:",
+    "- The software running this deployment does not train models on chat content.",
     deployment.dataHostingLocation
       ? `- App data (database, files, backups) is hosted in: ${oneLine(deployment.dataHostingLocation)} (the operator's declaration).`
       : "- Where app data (database, files, backups) is hosted: not declared in this deployment's configuration (unknown).",
     `- ${sandboxSentence(deployment.sandboxes)} Other chats in the workspace may use a different sandbox.`,
-    "- Chats, files and Knowledge stay in the workspace until someone deletes them; Opengeni does not delete them by age.",
+    "- Chats, files and Knowledge stay in the workspace until someone deletes them; they are not deleted by age.",
     `- Exception: images kept from tool results in chats (screenshots and images the agent viewed) are deleted ${RETAINED_IMAGE_DAYS} days after they are stored, and the oldest go sooner when the workspace's storage limit for them is reached.`,
     deployment.sessionArchiveIdleDays !== null
       ? `- Chats idle for ${deployment.sessionArchiveIdleDays} days, unless marked to stay live, become read-only and move to long-term storage; they are not deleted.`

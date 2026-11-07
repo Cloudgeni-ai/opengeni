@@ -3,6 +3,7 @@ import { stableJson } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   resolveAcceptedConnectionUse,
+  type ConnectionTokenResolverOptions,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -21,6 +22,8 @@ type TurnConnectionInput = {
   /** Policy identities before account expansion; never used to select credentials. */
   canonicalMcpServerIds?: readonly string[];
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
+  /** Told once when a use finds the provider rejected a connection's grant. */
+  onConnectionNeedsReauth?: ConnectionTokenResolverOptions["onConnectionNeedsReauth"];
 };
 
 type CredentialResolver = (
@@ -30,7 +33,14 @@ type CredentialResolver = (
 export function connectionTokenResolverForTurn(input: TurnConnectionInput): CredentialResolver {
   return bindNativeConnectionCredentialsToTurn(
     input,
-    buildConnectionTokenResolver(input.db, input.settings),
+    buildConnectionTokenResolver(
+      input.db,
+      input.settings,
+      undefined,
+      input.onConnectionNeedsReauth
+        ? { onConnectionNeedsReauth: input.onConnectionNeedsReauth }
+        : {},
+    ),
   );
 }
 

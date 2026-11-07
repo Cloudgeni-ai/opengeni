@@ -212,6 +212,7 @@ export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
+export * from "./agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
@@ -6403,6 +6404,13 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
           credentialBindingId: primitives.uuid,
           connectionAuthorityGeneration: primitives.positiveInteger,
           selectionGeneration: primitives.positiveInteger,
+          /**
+           * "All my repositories" was on when this work was accepted: any
+           * repository the person can access on GitHub, up to this access,
+           * rechecked live (mode and GitHub permission) on every use. The
+           * listed repositories are the ones attached to the work.
+           */
+          allRepositoriesAccess: GitRepositoryAccess.optional(),
           repositories: z
             .array(
               z
@@ -6416,7 +6424,6 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
                 })
                 .strict(),
             )
-            .min(1)
             .max(100),
         })
         .strict()
@@ -6463,6 +6470,16 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
         });
       }
       const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+      if (
+        repositories.length === 0 &&
+        delegation.personalGitHubRepositorySelection?.allRepositoriesAccess === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories"],
+          message: "personal GitHub delegation requires a repository or All my repositories",
+        });
+      }
       const repositoryIds = new Set<string>();
       const canonicalUrls = new Set<string>();
       repositories.forEach((repository, index) => {
@@ -6842,6 +6859,11 @@ export type GitHubAppApiPort = {
    * only on `installationIds` (one GitHub instance per port): the API caches
    * it briefly per installation set and shares it across workspaces, which
    * apply their own bindings and allowlists to it on every read.
+   *
+   * Workspace allowlists follow this list, so it must be the installations'
+   * live, uncached list from GitHub, and a failure must throw rather than
+   * return an empty list (which would read as "the installation shares
+   * nothing").
    */
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
   /**
@@ -16740,6 +16762,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     description: primitives.nullableString.default(null),
     /** Avatar shown with the title; display metadata, never sent to the model. */
     avatar: SessionAvatar.nullable().default(null),
+    /**
+     * The agent this chat was started with (see `./agents`); null for an
+     * ordinary chat. Fixed at create. Omitted by older servers.
+     */
+    agentId: primitives.uuid.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -20523,6 +20550,12 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
          * inherited by child sessions; a fork reads as attended.
          */
         unattended: primitives.optionalBoolean,
+        /**
+         * Start the chat with an agent the caller can use: it follows the
+         * agent's current Instructions (and later edits). The agent's First
+         * message is not sent; the app puts it in the composer instead.
+         */
+        agentId: primitives.optionalUuid,
         /** The new chat's name, description and avatar, as if a person set them
          * (a bot started from a template, for example). Display metadata only;
          * never sent to the model. */

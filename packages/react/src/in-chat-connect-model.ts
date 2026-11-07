@@ -51,6 +51,7 @@ export { useConnect } from "./hooks/use-connect";
 export { connectionCardSubtitle, showsMcpServerLabel } from "./components/mcp-server-label";
 export {
   authNeededPresentation,
+  capabilityReconnectConnectionId,
   providerLabel,
   type AuthNeededPresentation,
 } from "./auth-needed-presentation";

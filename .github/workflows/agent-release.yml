@@ -135,8 +135,7 @@ jobs:
           OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
         run: |
           set -euo pipefail
-          pip install ziglang
-          cargo install --locked cargo-zigbuild
+          bash ../scripts/install-agent-build-tools.sh zigbuild
           # computer-native loads the session's libpipewire at runtime for GNOME
           # Wayland screen capture, which a static musl binary cannot do, so it
           # is glibc-dynamic like browserd.
@@ -381,6 +380,18 @@ jobs:
           echo "::error::OPENGENI_AGENT_MINISIGN_KEY is required; refusing to publish an uninstallable agent release" >&2
           exit 1
 
+      # The signers install here at their pinned versions, in a step without
+      # any signing credential; the signing steps below only run them.
+      - name: Install the pinned signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools=(rsign)
+          if [ "${{ matrix.kind }}" = macos ] && [ "${{ steps.creds.outputs.has_macos }}" = true ]; then
+            tools+=(rcodesign)
+          fi
+          bash scripts/install-agent-build-tools.sh "${tools[@]}"
+
       # ---- macOS Developer ID codesign + notarize (CATEGORY-4, guarded). ----
       # Skips cleanly when the cert/ASC creds are absent; until they land, macOS
       # binaries ship unsigned-but-minisign-attested (a Gatekeeper warning on a
@@ -397,8 +408,8 @@ jobs:
           set -euo pipefail
           echo "Apple Developer ID present — signing + notarizing ${{ matrix.asset }}"
           # rcodesign (pure-Rust apple-codesign) signs + notarizes from a .p12 + ASC
-          # key without a Mac keychain. Authored as the creds-drop-in.
-          cargo install --locked apple-codesign
+          # key without a Mac keychain. Authored as the creds-drop-in; installed
+          # at its pinned version above.
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
             --code-signature-flags runtime --binary-identifier ai.opengeni.agent "${{ matrix.asset }}"
@@ -466,8 +477,6 @@ jobs:
           </dict>
           </plist>
           PLIST
-          # rcodesign is installed by the prior codesign step; ensure it regardless.
-          cargo install --locked apple-codesign
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           # Sign the WHOLE bundle with the hardened runtime + the stable identifier.
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
@@ -573,10 +582,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Install rsign2 (pure-Rust minisign-compatible signer) so the runner needs
-          # no system minisign. It signs in the SAME prehashed-ED form the installer
-          # + self-update verify expects.
-          cargo install --locked rsign2
+          # rsign2 (pure-Rust minisign-compatible signer, installed at its pinned
+          # version above) needs no system minisign. It signs in the SAME
+          # prehashed-ED form the installer + self-update verify expects.
           printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
           # The release key is passwordless (generated with -W); sign with -W so
           # rsign never blocks on a TTY password prompt. Detached sig: <asset>.minisig.
@@ -677,6 +685,10 @@ jobs:
           echo "::error::OPENGENI_AGENT_MINISIGN_KEY is required; refusing to publish an unverifiable release" >&2
           exit 1
 
+      - name: Install the pinned signing tool
+        shell: bash
+        run: bash scripts/install-agent-build-tools.sh rsign
+
       - name: Sign SHA256SUMS (if the key is present)
         if: steps.creds.outputs.has_minisign == 'true'
         env:
@@ -684,7 +696,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo install --locked rsign2
           printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
           rsign sign -W -s /tmp/minisign.key -x dist/SHA256SUMS.minisig dist/SHA256SUMS
           rm -f /tmp/minisign.key
@@ -731,7 +742,6 @@ jobs:
             --argjson signed_at_ms "$signed_at_ms" \
             '{channel:$channel,version:$version,min_supported:$min_supported,rollout_percent:$rollout_percent,cohort_salt:$cohort_salt,artifacts:$artifacts,notes_url:$notes_url,signed_at_ms:$signed_at_ms,force:false}' \
             > dist/manifest.json
-          cargo install --locked rsign2
           printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
           rsign sign -W -s /tmp/minisign.key -x dist/manifest.json.minisig dist/manifest.json
           rm -f /tmp/minisign.key

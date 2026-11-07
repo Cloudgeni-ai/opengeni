@@ -526,6 +526,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     githubClientSecret: undefined,
     githubRestMcpEnabled: false,
     githubPersonalOauthEnabled: false,
+    githubPersonalAllRepositoriesEnabled: false,
     githubPersonalOauthClientId: undefined,
     githubPersonalOauthClientSecret: undefined,
     githubAppSlug: undefined,

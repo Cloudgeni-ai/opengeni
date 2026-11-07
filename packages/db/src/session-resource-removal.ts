@@ -77,6 +77,75 @@ export async function getSessionResourcesForAuthority(
   });
 }
 
+/** A session's live repository membership: what it attaches and what a person removed. */
+export type SessionRepositoryMembership = {
+  resources: ResourceRef[];
+  removedRepositories: SessionRemovedRepository[];
+};
+
+/**
+ * The session's current resources and removal records, read live for an
+ * authority check, or null when the session is not visible in the workspace.
+ * All my repositories does not limit a chat to its attached repositories,
+ * but a repository a person removed from the chat (or from a parent chat,
+ * which records the removal on its descendants) stays refused there.
+ */
+export async function getSessionRepositoryMembershipForAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionRepositoryMembership | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        resources: schema.sessions.resources,
+        removedRepositories: schema.sessions.removedRepositories,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    const resources = ResourceRef.array().safeParse(row.resources);
+    return {
+      resources: resources.success ? resources.data : [],
+      removedRepositories: parseSessionRemovedRepositories(row.removedRepositories),
+    };
+  });
+}
+
+/** The GitHub repository id a github.com repository resource carries, if any. */
+function githubRepositoryIdOf(resource: ResourceRef): string | null {
+  if (resource.kind !== "repository") return null;
+  if (!repositoryMembershipKey(resource.uri)?.startsWith("https://github.com/")) return null;
+  const id = resource.repositoryId ?? resource.githubRepositoryId;
+  return id === undefined ? null : String(id);
+}
+
+/**
+ * Whether a person removed the repository (at any of `uris`, or with this
+ * GitHub repository id, so a rename or transfer does not undo the removal)
+ * from the session and it is not attached again. A removal record that
+ * outlived a re-attach never refuses a repository the session attaches.
+ */
+export function sessionRepositoryRemoved(
+  membership: SessionRepositoryMembership,
+  repository: { uris: readonly string[]; githubRepositoryId?: string | undefined },
+): boolean {
+  const id = repository.githubRepositoryId;
+  const matches = (resource: ResourceRef) =>
+    (resource.kind === "repository" &&
+      repository.uris.some(
+        (uri) =>
+          repositoryMembershipKey(uri) !== null &&
+          repositoryMembershipKey(uri) === repositoryMembershipKey(resource.uri),
+      )) ||
+    (id !== undefined && githubRepositoryIdOf(resource) === id);
+  return (
+    membership.removedRepositories.some((entry) => matches(entry.resource)) &&
+    !membership.resources.some(matches)
+  );
+}
+
 /**
  * Every live descendant of a session (children, their children, ...),
  * shallower first. Imported read-only sessions are skipped; the walk still

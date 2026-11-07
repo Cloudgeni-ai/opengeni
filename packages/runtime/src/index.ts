@@ -2416,6 +2416,14 @@ export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /**
+   * Called when a tool search's decision model fails or misses its deadline
+   * and the search falls back to keywords: the search result says only that
+   * it fell back.
+   */
+  onToolSelectionError?:
+    | ((failure: import("./tool-discovery-decision").ToolSelectionFailure) => void)
+    | undefined;
+  /**
    * Ranks tools by meaning alongside keywords in tool search; the caller owns
    * its route checks. Absent means keyword ranking alone.
    */
@@ -3456,7 +3464,7 @@ export function secretApprovalQuestionRejection(input: RequestHumanInputToolInpu
   ) {
     return null;
   }
-  return "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
+  return "Nothing was asked. The person was already asked, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
 }
 
 /**
@@ -4266,7 +4274,10 @@ function maybeInstallLazyToolTransport(
       return names;
     },
     options.toolSearchDecisionModel
-      ? createToolSelector(options.toolSearchDecisionModel)
+      ? createToolSelector(
+          options.toolSearchDecisionModel,
+          options.onToolSelectionError ? { onError: options.onToolSelectionError } : {},
+        )
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
@@ -12242,6 +12253,7 @@ export { connectableIntegrationsNamedIn } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
+  ToolSelectionFailure,
   ToolSelector,
   ToolDecisionInput,
   ToolDecisionCandidate,
@@ -14111,16 +14123,24 @@ async function stageGitHttpBrokerBindingSeeds(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
   runAs?: string,
+  options: { ghGatewayKit?: boolean } = {},
 ): Promise<{
   editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
   staged: StagedGitCredentialBindingSeed[];
+  /** Staged GH_GATEWAY_KIT_SCRIPT, or null when not requested or not delivered. */
+  ghGatewayKit: string | null;
 }> {
   const brokered = bindings.filter((binding) => binding.transport?.kind === "http_broker");
-  if (brokered.length === 0) return { editor: null, staged: [] };
+  if (brokered.length === 0) return { editor: null, staged: [], ghGatewayKit: null };
   const editor = session.createEditor?.(runAs);
   if (!editor) {
     throw new Error("Sandbox does not support private Git broker credential delivery");
   }
+  // The kit is static and optional: it is written alongside the seeds, and a
+  // failed write only leaves `gh` without the gateway for this turn.
+  const ghGatewayKit = options.ghGatewayKit
+    ? stageGhGatewayKit(editor)
+    : Promise.resolve<string | null>(null);
   const staged: StagedGitCredentialBindingSeed[] = [];
   const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
   try {
@@ -14139,26 +14159,55 @@ async function stageGitHttpBrokerBindingSeeds(
       await editor.createFile({ type: "create_file", path, diff });
       staged.push(candidate);
     }
-    return { editor, staged };
+    return { editor, staged, ghGatewayKit: await ghGatewayKit };
   } catch {
-    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible);
+    const kit = await ghGatewayKit;
+    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible, kit);
     throw new Error("Sandbox could not receive the Git broker credential");
+  }
+}
+
+const GIT_BROKER_SEED_ROOT = "/workspace/.opengeni/git-broker-seeds";
+
+async function stageGhGatewayKit(
+  editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
+): Promise<string | null> {
+  const path = `${GIT_BROKER_SEED_ROOT}/${randomUUID()}`;
+  const diff = GH_GATEWAY_KIT_SCRIPT.split("\n")
+    .map((line) => `+${line}`)
+    .join("\n");
+  try {
+    await editor.createFile({ type: "create_file", path, diff });
+    return path;
+  } catch (error) {
+    console.warn("[sandbox] gh gateway kit was not delivered", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      await editor.deleteFile({ type: "delete_file", path });
+    } catch {
+      // Best effort: the random path holds no credential.
+    }
+    return null;
   }
 }
 
 async function cleanupStagedGitCredentialSeeds(
   editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
   staged: StagedGitCredentialBindingSeed[],
+  ghGatewayKit: string | null = null,
 ): Promise<void> {
   await Promise.all(
-    staged.map(async ({ path }) => {
-      try {
-        await editor.deleteFile({ type: "delete_file", path });
-      } catch {
-        // Cleanup is best effort. The staged path is random, excluded from
-        // workspace capture, and the broker bearer expires within five minutes.
-      }
-    }),
+    [...staged.map(({ path }) => path), ...(ghGatewayKit ? [ghGatewayKit] : [])].map(
+      async (path) => {
+        try {
+          await editor.deleteFile({ type: "delete_file", path });
+        } catch {
+          // Cleanup is best effort. The staged path is random, excluded from
+          // workspace capture, and the broker bearer expires within five minutes.
+        }
+      },
+    ),
   );
 }
 
@@ -14439,6 +14488,116 @@ function gitCredentialHelperBindingCaseLines(
     });
 }
 
+const PERSONAL_GIT_BROKER_PATH = "/v1/git/personal/";
+const PERSONAL_GITHUB_GATEWAY_PATH = "/v1/github/personal/gateway";
+
+/**
+ * Where `gh` reaches GitHub as the person: the Opengeni API that serves the
+ * session's personal GitHub broker routes. Its pass (the broker token file)
+ * is the only credential in the sandbox. Null without exactly one personal
+ * GitHub broker binding.
+ */
+function personalGitHubGatewayDescriptor(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): { base: string; bindingHash: string; host: string; gitPath: string } | null {
+  const github = routes.filter(
+    (route) => route.provider === "github" && route.brokerUri.includes(PERSONAL_GIT_BROKER_PATH),
+  );
+  const hashes = new Set(github.map((route) => route.bindingHash));
+  const route = github[0];
+  if (!route || hashes.size !== 1) return null;
+  const base = route.brokerUri.slice(0, route.brokerUri.indexOf(PERSONAL_GIT_BROKER_PATH));
+  if (
+    github.some(
+      (candidate) => !candidate.brokerUri.startsWith(`${base}${PERSONAL_GIT_BROKER_PATH}`),
+    )
+  ) {
+    return null;
+  }
+  const basePath = new URL(base).pathname.replace(/^\/+|\/+$/g, "");
+  return {
+    base,
+    bindingHash: route.bindingHash,
+    host: route.host,
+    gitPath: `${basePath ? `${basePath}/` : ""}${PERSONAL_GITHUB_GATEWAY_PATH.slice(1)}/git/`,
+  };
+}
+
+/**
+ * Local proxy `gh` talks to over a Unix socket (`http_unix_socket`). GitHub
+ * API and upload requests go to the Opengeni gateway with the session's pass
+ * instead of a GitHub token; any other host (a log or archive download that
+ * GitHub redirected to) is fetched directly without credentials.
+ */
+export const GH_GATEWAY_PROXY_SCRIPT = String.raw`"use strict";
+const http = require("node:http");
+const https = require("node:https");
+const fs = require("node:fs");
+const [socketPath, gatewayBase, passFile] = process.argv.slice(2);
+const base = new URL(gatewayBase);
+const basePath = base.pathname.replace(/\/+$/, "");
+const routes = {
+  "api.github.com": "/v1/github/personal/gateway/api",
+  "uploads.github.com": "/v1/github/personal/gateway/uploads",
+};
+const dropped = new Set([
+  "authorization", "connection", "host", "keep-alive", "proxy-authorization",
+  "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+]);
+function forwardHeaders(source) {
+  const headers = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value !== undefined && !dropped.has(name.toLowerCase())) headers[name] = value;
+  }
+  return headers;
+}
+function fail(res, status, message) {
+  if (!res.headersSent) res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ message }));
+}
+const parent = process.ppid;
+setInterval(() => {
+  if (process.ppid !== parent) process.exit(0);
+}, 1000).unref();
+try { fs.unlinkSync(socketPath); } catch {}
+http.createServer((req, res) => {
+  const hostHeader = String(req.headers.host || "");
+  const host = hostHeader.toLowerCase().replace(/:\d+$/, "");
+  const route = routes[host];
+  let target;
+  const headers = forwardHeaders(req.headers);
+  if (route) {
+    let pass = "";
+    try { pass = fs.readFileSync(passFile, "utf8").trim(); } catch {}
+    if (!pass) {
+      fail(res, 401, "GitHub access is unavailable for this session. Run the command again in a new message.");
+      req.resume();
+      return;
+    }
+    target = new URL(base.origin + basePath + route + req.url);
+    headers.authorization = "Bearer " + pass;
+    headers["accept-encoding"] = "identity";
+  } else {
+    target = new URL("https://" + hostHeader + req.url);
+    delete headers.cookie;
+  }
+  const upstream = (target.protocol === "http:" ? http : https).request(
+    target,
+    { method: req.method, headers },
+    (upstreamRes) => {
+      const responseHeaders = {};
+      for (const [name, value] of Object.entries(upstreamRes.headers)) {
+        if (value !== undefined && !dropped.has(name.toLowerCase())) responseHeaders[name] = value;
+      }
+      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage, responseHeaders);
+      upstreamRes.pipe(res);
+    },
+  );
+  upstream.on("error", () => fail(res, 502, "The GitHub gateway is unreachable. Try again."));
+  req.pipe(upstream);
+}).listen(socketPath);
+`;
+
 function gitCredentialHelperBrokerCaseLines(
   routes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
@@ -14711,7 +14870,7 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
  * than spinning. Only repository selecting global options (`-C`,
  * `--git-dir`, `--work-tree`) are replayed for the identity lookup.
  */
-export const GIT_COMMAND_WRAPPER_SCRIPT = [
+const GIT_COMMAND_WRAPPER_HEAD_LINES = [
   "#!/bin/sh",
   "# Opengeni git wrapper: per-repository commit identity.",
   '[ "${OPENGENI_GIT_WRAPPER_PID:-}" = "$$" ] || OPENGENI_GIT_WRAPPERS_SEEN=',
@@ -14771,13 +14930,77 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    fi",
   "  fi",
   "fi",
+];
+
+// Part of the gh gateway kit (GH_GATEWAY_KIT_SCRIPT), which the git wrapper
+// sources only while it runs under `gh` as the person.
+const GIT_COMMAND_WRAPPER_GATEWAY_LINES = [
+  // Under `gh` as the person: gh reads `git remote -v` to find the GitHub
+  // repository, so it sees the configured github.com URLs rather than the
+  // Opengeni Git routes they are rewritten to; a clone keeps the rewrite.
+  'if [ -n "${OPENGENI_GH_GATEWAY_GIT:-}" ]; then',
+  '  if [ "$#" -eq 2 ] && [ "$1" = remote ] && [ "$2" = -v ]; then',
+  "    \"$real_git\" config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | while read -r remote_key remote_url; do",
+  '      remote_name="${remote_key#remote.}"',
+  '      remote_name="${remote_name%.url}"',
+  '      remote_push="$("$real_git" config --get "remote.$remote_name.pushurl" 2>/dev/null || printf \'%s\' "$remote_url")"',
+  '      printf \'%s\\t%s (fetch)\\n%s\\t%s (push)\\n\' "$remote_name" "$remote_url" "$remote_name" "$remote_push"',
+  "    done",
+  "    exit 0",
+  "  fi",
+  "  gateway_expect=",
+  "  gateway_clone=",
+  '  for arg in "$@"; do',
+  '    if [ -n "$gateway_expect" ]; then gateway_expect=; continue; fi',
+  '    case "$arg" in',
+  "      -c|-C|--git-dir|--work-tree|--namespace|--config-env) gateway_expect=1 ;;",
+  "      -*) ;;",
+  "      clone) gateway_clone=1; break ;;",
+  "      *) break ;;",
+  "    esac",
+  "  done",
+  '  if [ -n "$gateway_clone" ]; then',
+  "    gateway_expect=",
+  "    gateway_done=",
+  '    for arg in "$@"; do',
+  "      shift",
+  '      set -- "$@" "$arg"',
+  '      if [ -n "$gateway_done" ]; then continue; fi',
+  '      if [ -n "$gateway_expect" ]; then gateway_expect=; continue; fi',
+  '      case "$arg" in',
+  "        -c|-C|--git-dir|--work-tree|--namespace|--config-env) gateway_expect=1 ;;",
+  '        clone) set -- "$@" -c "url.$OPENGENI_GH_GATEWAY_GIT/.insteadOf=https://github.com/"; gateway_done=1 ;;',
+  "      esac",
+  "    done",
+  "  fi",
+  "fi",
+];
+
+const GIT_COMMAND_WRAPPER_TAIL_LINES = [
   'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
   "OPENGENI_GIT_WRAPPER_PID=$$",
   "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
   'exec "$real_git" "$@"',
-].join("\n");
+];
 
-function gitCommandWrapperCommandLines(): string[] {
+function gitCommandWrapperScript(ghGateway: boolean): string {
+  return [
+    ...GIT_COMMAND_WRAPPER_HEAD_LINES,
+    ...(ghGateway
+      ? [
+          'if [ -n "${OPENGENI_GH_GATEWAY_GIT:-}" ] && [ -r "${OPENGENI_GH_GATEWAY_KIT:-}" ]; then',
+          "  opengeni_gh_gateway_role=git",
+          '  . "$OPENGENI_GH_GATEWAY_KIT"',
+          "fi",
+        ]
+      : []),
+    ...GIT_COMMAND_WRAPPER_TAIL_LINES,
+  ].join("\n");
+}
+
+export const GIT_COMMAND_WRAPPER_SCRIPT = gitCommandWrapperScript(false);
+
+function gitCommandWrapperCommandLines(ghGateway = false): string[] {
   return [
     // Record the box's creation-time env identity (if any) so the wrapper can
     // tell it apart from an identity a command sets on purpose.
@@ -14792,7 +15015,7 @@ function gitCommandWrapperCommandLines(): string[] {
     'git_wrapper="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/git"',
     'mkdir -p "$(dirname "$git_wrapper")"',
     "cat > \"$git_wrapper.tmp.$$\" <<'GIT_WRAPPER_EOF'",
-    GIT_COMMAND_WRAPPER_SCRIPT,
+    gitCommandWrapperScript(ghGateway),
     "GIT_WRAPPER_EOF",
     'chmod 0755 "$git_wrapper.tmp.$$"',
     'mv -f "$git_wrapper.tmp.$$" "$git_wrapper"',
@@ -14963,16 +15186,135 @@ export function repositoryIdentityCommandLines(
   ];
 }
 
+/**
+ * `gh` as the person: when the session has a personal GitHub connection and
+ * no attached App credential is selected (by OPENGENI_GIT_BINDING or the
+ * repository's origin), run the real `gh` against a per-command local proxy
+ * to the Opengeni gateway. Its Git operations use the gateway's Git routes.
+ */
+const GH_GATEWAY_WRAPPER_LINES = [
+  "real_tool_path() {",
+  '  gw_self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
+  '  gw_old_ifs="$IFS"',
+  "  IFS=:",
+  "  for gw_path_dir in $PATH; do",
+  '    [ -n "$gw_path_dir" ] || gw_path_dir=.',
+  '    gw_candidate="$gw_path_dir/$tool"',
+  '    [ -x "$gw_candidate" ] || continue',
+  '    gw_candidate_real="$(readlink -f "$gw_candidate" 2>/dev/null || printf \'%s\\n\' "$gw_candidate")"',
+  '    [ "$gw_candidate_real" = "$gw_self_real" ] && continue',
+  '    IFS="$gw_old_ifs"',
+  "    printf '%s\\n' \"$gw_candidate\"",
+  "    return 0",
+  "  done",
+  '  IFS="$gw_old_ifs"',
+  "  return 1",
+  "}",
+  "run_gh_gateway() {",
+  '  gw_gh="$(real_tool_path)" || { printf \'%s\\n\' "gh: real command not found on PATH" >&2; return 127; }',
+  "  if command -v node >/dev/null 2>&1; then gw_js=node",
+  "  elif command -v bun >/dev/null 2>&1; then gw_js=bun",
+  "  else printf '%s\\n' 'gh: Node.js or Bun is needed to use gh as you' >&2; return 127",
+  "  fi",
+  '  gw_pass="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$gh_gateway_binding-token"',
+  '  gw_dir="$(mktemp -d "${TMPDIR:-/tmp}/opengeni-gh.XXXXXX")"',
+  '  gw_sock="$gw_dir/gateway.sock"',
+  "  cat > \"$gw_dir/proxy.cjs\" <<'GH_GATEWAY_PROXY_EOF'",
+  GH_GATEWAY_PROXY_SCRIPT,
+  "GH_GATEWAY_PROXY_EOF",
+  '  printf \'git_protocol: https\\nprompt: disabled\\nhttp_unix_socket: %s\\n\' "$gw_sock" > "$gw_dir/config.yml"',
+  '  "$gw_js" "$gw_dir/proxy.cjs" "$gw_sock" "$gh_gateway_base" "$gw_pass" </dev/null >/dev/null 2>"$gw_dir/proxy.log" &',
+  "  gw_pid=$!",
+  '  trap \'kill "$gw_pid" 2>/dev/null || true; rm -rf "$gw_dir"\' EXIT',
+  "  trap 'exit 130' INT",
+  "  trap 'exit 143' TERM",
+  "  gw_wait=0",
+  '  while [ ! -S "$gw_sock" ]; do',
+  '    if ! kill -0 "$gw_pid" 2>/dev/null || [ "$gw_wait" -ge 200 ]; then',
+  '      cat "$gw_dir/proxy.log" >&2 2>/dev/null || true',
+  "      printf '%s\\n' \"gh: the GitHub gateway proxy did not start\" >&2",
+  "      return 1",
+  "    fi",
+  "    gw_wait=$((gw_wait + 1))",
+  "    sleep 0.05",
+  "  done",
+  '  gw_git="$gh_gateway_base/v1/github/personal/gateway/git"',
+  '  gw_count="${GIT_CONFIG_COUNT:-0}"',
+  '  case "$gw_count" in ""|*[!0-9]*) gw_count=0 ;; esac',
+  '  eval "GIT_CONFIG_KEY_$gw_count=\\"url.\\$gw_git/.insteadOf\\"; GIT_CONFIG_VALUE_$gw_count=https://github.com/; export GIT_CONFIG_KEY_$gw_count GIT_CONFIG_VALUE_$gw_count"',
+  "  GIT_CONFIG_COUNT=$((gw_count + 1))",
+  "  unset GH_HOST GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN",
+  '  GH_CONFIG_DIR="$gw_dir"',
+  "  GH_TOKEN=opengeni-gateway",
+  "  GH_PROMPT_DISABLED=1",
+  "  GH_NO_UPDATE_NOTIFIER=1",
+  "  GH_NO_EXTENSION_UPDATE_NOTIFIER=1",
+  '  OPENGENI_GH_GATEWAY_GIT="$gw_git"',
+  '  OPENGENI_GH_GATEWAY_KIT="$gh_gateway_kit"',
+  "  export GIT_CONFIG_COUNT GH_CONFIG_DIR GH_TOKEN GH_PROMPT_DISABLED GH_NO_UPDATE_NOTIFIER GH_NO_EXTENSION_UPDATE_NOTIFIER OPENGENI_GH_GATEWAY_GIT OPENGENI_GH_GATEWAY_KIT",
+  "  gw_status=0",
+  '  "$gw_gh" "$@" || gw_status=$?',
+  '  return "$gw_status"',
+  "}",
+  'if [ "$provider" = github ] && [ -n "$gh_gateway_binding" ]; then',
+  "  gh_gateway=",
+  '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
+  '    [ "$(hash_binding_id "$OPENGENI_GIT_BINDING")" != "$gh_gateway_binding" ] || gh_gateway=1',
+  "  else",
+  '    gw_origin="$(git config --get remote.origin.url 2>/dev/null || true)"',
+  '    if [ -z "$gw_origin" ] || origin_is_brokered "$gw_origin" || ! binding_hash_for_origin "$gw_origin" >/dev/null 2>&1; then',
+  "      gh_gateway=1",
+  "    fi",
+  "  fi",
+  '  if [ -n "$gh_gateway" ]; then',
+  "    gh_gateway_status=0",
+  '    run_gh_gateway "$@" || gh_gateway_status=$?',
+  '    exit "$gh_gateway_status"',
+  "  fi",
+  "fi",
+];
+
+/**
+ * The static part of `gh` as the person, as one shell file the gh and git
+ * wrappers source. It reaches the box through the same private file ingress
+ * as the broker pass, under a content-addressed name, so the per-turn setup
+ * program only carries the session's gateway address and binding and stays
+ * small enough to run in one command.
+ */
+export const GH_GATEWAY_KIT_SCRIPT = [
+  "# Opengeni: gh as the person. Sourced by the gh and git wrappers.",
+  'if [ "${opengeni_gh_gateway_role:-}" = git ]; then',
+  ...GIT_COMMAND_WRAPPER_GATEWAY_LINES,
+  "else",
+  ...GH_GATEWAY_WRAPPER_LINES,
+  "fi",
+  "",
+].join("\n");
+
+export const GH_GATEWAY_KIT_FILE_NAME = `gh-gateway-${createHash("sha256")
+  .update(GH_GATEWAY_KIT_SCRIPT, "utf8")
+  .digest("hex")
+  .slice(0, 16)}.sh`;
+
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  ghGatewayKitSeed: string | null = null,
 ): string[] {
   const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
+  const personalGateway = personalGitHubGatewayDescriptor(brokerRoutes);
   const bindingCases = [
     ...gitCredentialHelperBindingCaseLines(resources, bindings),
     ...gitCredentialHelperBrokerCaseLines(brokerRoutes),
+    // Repositories `gh` clones as the person go through the gateway's Git
+    // routes with the same pass.
+    ...(personalGateway
+      ? [
+          `  ${shellQuote(`https|${personalGateway.host}|${personalGateway.gitPath}`)}*) username=opengeni; token_file="$credential_dir/${personalGateway.bindingHash}-token" ;;`,
+        ]
+      : []),
   ];
   const descriptors = runtimeGitBindingDescriptors(resources);
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
@@ -15146,6 +15488,24 @@ function gitCredentialHelperCommandLines(
     ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
+    // The gh gateway kit arrives as a staged private file. Without it (the
+    // ingress failed) a kit an earlier turn installed under the same name
+    // still serves, and otherwise `gh` keeps its non-gateway behaviour.
+    ...(personalGateway && ghGatewayKitSeed
+      ? [
+          `gh_gateway_kit_seed=${shellQuote(ghGatewayKitSeed)}`,
+          `gh_gateway_kit_file="$wrapper_dir/"${shellQuote(GH_GATEWAY_KIT_FILE_NAME)}`,
+          'if [ -f "$gh_gateway_kit_seed" ]; then',
+          '  if mv -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$" && chmod 0644 "$gh_gateway_kit_file.tmp.$$" && mv -f "$gh_gateway_kit_file.tmp.$$" "$gh_gateway_kit_file"; then',
+          // Kits of earlier releases go once a day old, so a gh command
+          // still running from an earlier turn keeps the kit it sourced.
+          `    find "$wrapper_dir" -maxdepth 1 -type f -name 'gh-gateway-*.sh' ! -name ${shellQuote(GH_GATEWAY_KIT_FILE_NAME)} -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
+          "  else",
+          '    rm -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$"',
+          "  fi",
+          "fi",
+        ]
+      : []),
     "for opengeni_git_cli_tool in gh glab az; do",
     '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
     "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
@@ -15211,6 +15571,15 @@ function gitCredentialHelperCommandLines(
     "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
+    // `gh` as the person, only when this session has a personal GitHub gateway.
+    ...(personalGateway
+      ? [
+          `gh_gateway_base=${shellQuote(personalGateway.base)}`,
+          `gh_gateway_binding=${shellQuote(personalGateway.bindingHash)}`,
+          `gh_gateway_kit="\${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/"${shellQuote(GH_GATEWAY_KIT_FILE_NAME)}`,
+          'if [ "$provider" = github ] && [ -r "$gh_gateway_kit" ]; then . "$gh_gateway_kit"; fi',
+        ]
+      : []),
     'if [ -n "$provider" ]; then',
     "  binding_hash=",
     '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
@@ -15282,7 +15651,7 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
-    ...gitCommandWrapperCommandLines(),
+    ...gitCommandWrapperCommandLines(personalGateway !== null),
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
@@ -15476,7 +15845,7 @@ function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
 export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
   if (folders.length === 0) return "";
   return [
-    "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+    "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
     ...folders.map(
       (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
     ),
@@ -15836,7 +16205,11 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
-  options: { optionalCloneTimeoutSeconds?: number } = {},
+  options: {
+    optionalCloneTimeoutSeconds?: number;
+    /** Staged private file holding GH_GATEWAY_KIT_SCRIPT, if any. */
+    ghGatewayKitSeed?: string | null;
+  } = {},
 ): string {
   // Shallow clones are network- and filesystem-bound, not CPU-bound: nine
   // repositories in one sandbox finished in ~11 s all at once versus ~28 s in
@@ -15877,7 +16250,12 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
-    ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
+    ...gitCredentialHelperCommandLines(
+      resources,
+      bindings,
+      stagedSeeds,
+      options.ghGatewayKitSeed ?? null,
+    ),
     ...cloneRepositoryFunctionLines,
     ...(resources.some((resource) => resource.optional === true)
       ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds)
@@ -16685,6 +17063,7 @@ export async function runRepositoryCloneHook(
   let stagedBrokerSeeds: Awaited<ReturnType<typeof stageGitHttpBrokerBindingSeeds>> = {
     editor: null,
     staged: [],
+    ghGatewayKit: null,
   };
   let stagedCloneScript: string | null = null;
   // A successful program has moved every staged broker seed into its token file.
@@ -16704,6 +17083,12 @@ export async function runRepositoryCloneHook(
       session,
       gitCredentialBindings,
       context.runAs,
+      {
+        ghGatewayKit:
+          personalGitHubGatewayDescriptor(
+            runtimeGitHttpBrokerRouteDescriptors(resources, gitCredentialBindings),
+          ) !== null,
+      },
     );
     // Per run, inline with the seeds, so the staged program stays reusable.
     const noticeToken = repositoryRecoveryNoticeToken();
@@ -16718,7 +17103,7 @@ export async function runRepositoryCloneHook(
       resources,
       gitCredentialBindings,
       stagedBrokerSeeds.staged,
-      options,
+      { ...options, ghGatewayKitSeed: stagedBrokerSeeds.ghGatewayKit },
     );
     const runClone = (cmd: string) =>
       runSandboxLifecycleCommand(
@@ -16867,7 +17252,11 @@ export async function runRepositoryCloneHook(
       ).catch(() => undefined);
     }
     if (stagedBrokerSeeds.editor && !brokerSeedsConsumed) {
-      await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
+      await cleanupStagedGitCredentialSeeds(
+        stagedBrokerSeeds.editor,
+        stagedBrokerSeeds.staged,
+        stagedBrokerSeeds.ghGatewayKit,
+      );
     }
   }
 }

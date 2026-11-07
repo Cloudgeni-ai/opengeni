@@ -260,6 +260,10 @@ import {
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
   suggestCapabilityCatalogItems,
+  connectionReconnectDay,
+  connectionsNeedingReconnectFor,
+  listConnectionsNeedingReconnect,
+  type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import {
@@ -451,6 +455,7 @@ import {
 } from "../integrations/slack-interactions";
 import {
   proposeSlackAgentFromChat,
+  CARD_INSTRUCTIONS_MAX_CHARS,
   SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
 } from "../integrations/slack-agent-proposals";
 import {
@@ -1377,7 +1382,7 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // A bot saves itself as a template people can start new bots from.
+  // A chat makes itself an agent people can start new chats with.
   if (sessionId !== null) {
     registerBotTemplateTools({
       server,
@@ -2959,7 +2964,7 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass this Slack request to the agent the person asked for by name; it answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4
@@ -2981,7 +2986,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
+        "After answering yourself, name the agent that handles requests like this one; a button to ask it is added under your answer. Don't mention the suggestion.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2995,11 +3000,11 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
+        "List this agent's other recent shared chats, newest first. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
-      if (!sessionId) throw new Error("Listing agent chats requires a chat started from Slack");
+      if (!sessionId) throw new Error("Listing agent chats requires an agent's chat");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       return json(await listSlackAgentChatsForSession(deps, { grant, sessionId, limit }));
     },
@@ -3012,7 +3017,7 @@ function registerSlackBotTools(
       inputSchema: {
         name: z4.string().min(1).max(80),
         description: z4.string().min(1).max(200),
-        instructions: z4.string().max(8000).optional(),
+        instructions: z4.string().max(CARD_INSTRUCTIONS_MAX_CHARS).optional(),
         workspace: z4.string().min(1).max(200).optional(),
         avatar: AvatarInput.unwrap().unwrap(),
       },
@@ -3700,7 +3705,7 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the Opengeni runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
+        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
         evidence: z4
           .string()
@@ -4997,7 +5002,9 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the " +
+        browserExtension(deps.settings).name +
+        " extension (" +
         browserExtension(deps.settings).installUrl +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
@@ -5029,7 +5036,9 @@ function registerConnectedMachineTools(
     "connected_machine_enable_screen_control",
     {
       description:
-        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the " +
+        browserExtension(deps.settings).name +
+        " extension (" +
         browserExtension(deps.settings).installUrl +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
@@ -7442,6 +7451,82 @@ type CapabilitySetupProjection =
     }
   | { status: "unavailable"; action: null; detail: string };
 
+/** One account of a catalog entry that stopped working, as the agent reads it. */
+type CapabilityReconnectAccount = {
+  connectionId: string;
+  account: string;
+  ownership: "personal" | "workspace";
+  stoppedWorkingOn: string;
+  /** A card in this chat can reconnect it (it was added in this workspace). */
+  reconnectHere: boolean;
+};
+
+/**
+ * The person's own and the workspace's accounts for this entry that stopped
+ * working (the provider rejected the saved sign-in). Matched by provider and
+ * MCP endpoint. Entries this deployment cannot connect have none to offer.
+ */
+function capabilityReconnectCandidates(
+  item: CapabilityCatalogItem,
+  inventory: readonly ConnectionNeedingReconnect[],
+): ConnectionNeedingReconnect[] {
+  if (inventory.length === 0 || item.kind !== "mcp" || deploymentCannotConnect(item)) return [];
+  return connectionsNeedingReconnectFor(inventory, {
+    providerDomain: item.connectionRef?.providerDomain ?? capabilityProviderDomain(item),
+    mcpUrl: item.mcpUrl ?? item.endpointUrl,
+  });
+}
+
+function capabilityReconnectAccountLabel(
+  item: Pick<CapabilityCatalogItem, "name">,
+  candidate: ConnectionNeedingReconnect,
+): string {
+  return candidate.ownership === "personal"
+    ? `the person's ${item.name} account ${candidate.account}`
+    : `the workspace's shared ${item.name} account ${candidate.account}`;
+}
+
+/**
+ * Name the accounts that stopped working in the entry's setup, so the agent
+ * can tell the person what happened and offer the card that reconnects that
+ * same account, instead of a first-time Connect that cannot fix it.
+ */
+function withCapabilityReconnectSetup(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+  candidates: readonly ConnectionNeedingReconnect[],
+): CapabilitySetupProjection & { reconnect?: CapabilityReconnectAccount[] } {
+  if (candidates.length === 0) return setup;
+  const here = candidates.filter((candidate) => candidate.addedHere);
+  const lines = candidates.map((candidate) => {
+    const label = capabilityReconnectAccountLabel(item, candidate);
+    const stopped = `${label.charAt(0).toUpperCase()}${label.slice(1)} was connected but stopped working on ${connectionReconnectDay(candidate.since)}: its sign-in expired or was revoked, so it needs reconnecting.`;
+    return candidate.addedHere
+      ? stopped
+      : `${stopped} It was added in another workspace, so a card here can't reconnect it; the person reconnects it from Connections in the workspace where it was added.`;
+  });
+  const guidance =
+    here.length === 0
+      ? "Tell the person plainly that it stopped working and where to reconnect it."
+      : `Tell the person plainly that it was connected and stopped working. capability_authorization_request posts a card that reconnects that same account${
+          here.length > 1 ? "; pass the connectionId of the one the task needs" : ""
+        }. Once reconnected, it works from the person's next message.`;
+  const reconnectText = `${lines.join(" ")} ${guidance}`;
+  return {
+    ...setup,
+    // Once the account is known to be broken, that is the whole story unless
+    // another account is ready; then both are true.
+    detail: setup.status === "ready" ? `${setup.detail} ${reconnectText}` : reconnectText,
+    reconnect: candidates.map((candidate) => ({
+      connectionId: candidate.connectionId,
+      account: candidate.account,
+      ownership: candidate.ownership,
+      stoppedWorkingOn: connectionReconnectDay(candidate.since),
+      reconnectHere: candidate.addedHere,
+    })),
+  };
+}
+
 function registerCapabilityDiscoveryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -7472,6 +7557,29 @@ function registerCapabilityDiscoveryTools(
     });
   // Indexed marketplace plugins: a person installs one from its card.
   const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
+  // Connections that exist but stopped working: the workspace's shared ones
+  // and those of the person this agent acts for. Read only for MCP entries and
+  // never used to select credentials; a failed read just names none.
+  const reconnectInventory = async (
+    items: readonly CapabilityCatalogItem[],
+  ): Promise<ConnectionNeedingReconnect[]> => {
+    if (!items.some((item) => item.kind === "mcp")) return [];
+    try {
+      const subjectId = exactAgentAttemptClaims(grant)
+        ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+            .initiatingHumanSubjectId
+        : grant.principalKind === "service" || grant.principalKind === "api_key"
+          ? null
+          : grant.subjectId;
+      return await listConnectionsNeedingReconnect(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: subjectId ?? null,
+      });
+    } catch {
+      return [];
+    }
+  };
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -7584,7 +7692,10 @@ function registerCapabilityDiscoveryTools(
                   .map((item) => [item.id, item] as const),
               ).values(),
             ];
-      const projected = await setupProjections([...ranked.map(({ item }) => item), ...connections]);
+      const [projected, inventory] = await Promise.all([
+        setupProjections([...ranked.map(({ item }) => item), ...connections]),
+        reconnectInventory(ranked.map(({ item }) => item)),
+      ]);
       const setups = projected.slice(0, ranked.length);
       const usableConnections = connections.filter(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
@@ -7601,28 +7712,36 @@ function registerCapabilityDiscoveryTools(
             .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
         );
       }
-      const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
-        capabilityId: item.id,
-        name: item.name,
-        description: item.description,
-        kind: item.kind,
-        source: item.source,
-        category: item.category,
-        tags: item.tags.slice(0, 16),
-        providerDomain: item.providerDomain,
-        authKind: item.authKind,
-        tier: item.tier,
-        matchedOn,
-        approximate,
-        setup: {
-          ...setups[index]!,
-          requiredVariables: capabilityRequiredVariables(item),
-          nextAction:
-            setups[index]!.status === "authorization_required"
-              ? { toolName: "capability_authorization_request", capabilityId: item.id }
-              : null,
-        },
-      }));
+      const matches = ranked.map(({ item, matchedOn, approximate }, index) => {
+        const setup = withCapabilityReconnectSetup(
+          item,
+          setups[index]!,
+          capabilityReconnectCandidates(item, inventory),
+        );
+        return {
+          capabilityId: item.id,
+          name: item.name,
+          description: item.description,
+          kind: item.kind,
+          source: item.source,
+          category: item.category,
+          tags: item.tags.slice(0, 16),
+          providerDomain: item.providerDomain,
+          authKind: item.authKind,
+          tier: item.tier,
+          matchedOn,
+          approximate,
+          setup: {
+            ...setup,
+            requiredVariables: capabilityRequiredVariables(item),
+            nextAction:
+              setup.status === "authorization_required" ||
+              setup.reconnect?.some((account) => account.reconnectHere)
+                ? { toolName: "capability_authorization_request", capabilityId: item.id }
+                : null,
+          },
+        };
+      });
       // A miss must not read as "this integration does not exist" while the
       // workspace catalog has entries: return the closest names, clearly
       // labelled as suggestions rather than matches.
@@ -7655,17 +7774,28 @@ function registerCapabilityDiscoveryTools(
     {
       description:
         (deps.settings.githubPersonalOauthEnabled
-          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself."
-          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself.") +
+          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+            browserExtension(deps.settings).name +
+            " Chrome extension link; never paste an enroll token into the chat yourself."
+          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+            browserExtension(deps.settings).name +
+            " Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
+        connectionId: z4
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
+          ),
       },
     },
-    async ({ capabilityId, rationale }) => {
+    async ({ capabilityId, rationale, connectionId }) => {
       await authorize();
       const current = await catalog();
       const item =
@@ -7675,8 +7805,35 @@ function registerCapabilityDiscoveryTools(
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
-      const [setup] = await setupProjections([item]);
+      const [[setup], inventory] = await Promise.all([
+        setupProjections([item]),
+        reconnectInventory([item]),
+      ]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
+      // An account of this entry that stopped working is reconnected in place:
+      // a first-time Connect cannot replace it. The agent names the one the
+      // task needs; without a name, the only one here is used while no
+      // account is ready for this turn.
+      const candidates = capabilityReconnectCandidates(item, inventory);
+      let reconnect: ConnectionNeedingReconnect | undefined;
+      if (connectionId !== undefined) {
+        reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
+        if (!reconnect)
+          throw new Error(
+            `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
+          );
+      } else if (setup.status !== "ready") {
+        const here = candidates.filter((candidate) => candidate.addedHere);
+        if (here.length > 1)
+          throw new Error(
+            `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
+          );
+        reconnect = here[0];
+      }
+      if (reconnect && !reconnect.addedHere)
+        throw new Error(
+          `${reconnect.account} was added in another workspace, so a card here can't reconnect it. Tell the person to reconnect it from Connections in the workspace where it was added.`,
+        );
       // GitHub is the one capability whose card stays useful once connected:
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
@@ -7687,14 +7844,14 @@ function registerCapabilityDiscoveryTools(
       // chat" and can connect another, so it is shown when machines exist too.
       const machineCardWhenReady =
         setup.status === "ready" && item.id === CONNECTED_MACHINE_CAPABILITY_ID;
-      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady) {
+      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady && !reconnect) {
         return json({
           capabilityId: item.id,
           status: "ready",
           message: setup.detail,
         });
       }
-      if (setup.status === "unavailable") {
+      if (setup.status === "unavailable" && !reconnect) {
         return json({
           capabilityId: item.id,
           status: "unavailable",
@@ -7723,9 +7880,22 @@ function registerCapabilityDiscoveryTools(
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
-        action: setup.action ?? "connect",
+        action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
+        ...(reconnect ? { reconnect } : {}),
       });
+      if (reconnect) {
+        return json({
+          capabilityId: item.id,
+          status: "authorization_requested",
+          action: "connect",
+          connectionId: reconnect.connectionId,
+          eventId,
+          message: personCannotConnect
+            ? `The card was posted, but this person can't reconnect ${item.name} from here: their access doesn't allow it, and the card tells them so. Tell them ${reconnect.account} stopped working on ${connectionReconnectDay(reconnect.since)} and that whoever manages this app has to reconnect it. Nothing is reconnected.`
+            : `The card to reconnect ${capabilityReconnectAccountLabel(item, reconnect)} was posted. It signs in again to that same account, which stopped working on ${connectionReconnectDay(reconnect.since)}; nothing is reconnected yet. Tell the person plainly that it stopped working and that the card reconnects it. It works from their next message after reconnecting.`,
+        });
+      }
       if (machineCardWhenReady) {
         return json({
           capabilityId: item.id,
@@ -7741,7 +7911,7 @@ function registerCapabilityDiscoveryTools(
           eventId,
           message:
             item.id === PERSONAL_GITHUB_CAPABILITY_ID
-              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories Opengeni may use as them.`
+              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories the agent may use as them.`
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
@@ -8123,6 +8293,8 @@ async function appendCapabilityCardEvent(
     action: "connect" | "add_credentials" | "enable";
     rationale: string;
     toolName?: string;
+    /** The account that stopped working which this card reconnects. */
+    reconnect?: ConnectionNeedingReconnect;
   },
 ): Promise<string | null> {
   const { item } = input;
@@ -8151,13 +8323,23 @@ function capabilityCardPayload(
     action: "connect" | "add_credentials" | "enable";
     rationale: string;
     toolName?: string;
+    reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
     serverId: item.runtime.mcpServerId ?? "opengeni",
     toolName: input.toolName ?? "capability_authorization_request",
     providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
+    // A card for an account that stopped working reconnects that exact
+    // connection; every other card is a first connection.
+    ...(input.reconnect
+      ? {
+          reason: "refresh_failed",
+          connectionId: input.reconnect.connectionId,
+          connectionSubjectScope:
+            input.reconnect.ownership === "personal" ? "subject" : "workspace",
+        }
+      : { reason: "missing_connection" }),
     capability: {
       id: item.id,
       name: item.name,
@@ -8263,7 +8445,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description: deps.settings.githubPersonalOauthEnabled
-        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories mounted in a managed sandbox, git and gh act as the person; elsewhere use github_personal__* tools. Never returns tokens.`
         : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },

@@ -16,8 +16,8 @@ afterEach(() => {
 
 function observeBilling() {
   const usage = spyOn(db, "recordUsageEvent").mockResolvedValue(undefined);
-  const debit = spyOn(db, "applyCreditDebitUpToBalance").mockImplementation(async (_, input) => ({
-    debitedMicros: input.requestedAmountMicros,
+  const debit = spyOn(db, "applyCreditDebitAfterUse").mockImplementation(async (_, input) => ({
+    debitedMicros: input.amountMicros,
     balance: {
       accountId: "account",
       balanceMicros: 100_000_000,
@@ -68,7 +68,7 @@ test.each([0, 4, undefined])(
     await settleAggregate({ revisions: [revision], lastAdmittedRevision: 9 });
     expect(debit).toHaveBeenCalledTimes(1);
     expect(debit.mock.calls[0]?.[1]).toMatchObject({
-      modelId: "gpt-5.6-sol",
+      usage: "gpt-5.6-sol",
       creditPolicyRevision: revision,
     });
   },

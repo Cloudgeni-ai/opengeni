@@ -199,7 +199,7 @@ export function SessionDefaultsPage({
             availability={availability}
             disabled={!canManage}
             startingPointLabel="What agents can do"
-            startingPointDescription="People can change this for one chat in the composer or in the chat's Agent tab."
+            startingPointDescription="People can change this for one chat in the composer or in the chat's Settings tab."
             learning={
               learningDraft ? { modes: learningDraft, onChange: setLearningDraft } : undefined
             }

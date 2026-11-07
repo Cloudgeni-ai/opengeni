@@ -613,7 +613,7 @@ function personInputLine(targets: readonly ComputerTextTarget[]): string | null 
   )?.personInputSecondsAgo;
   return seconds === undefined
     ? null
-    : `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
+    : `Someone else used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
 }
 
 /** Fixed text, so a listing renders identically for the same targets. */

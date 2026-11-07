@@ -1095,10 +1095,10 @@ unchanged.
   every attempt of a turn builds the same system prompt even after an
   earlier attempt's compaction folded a newer revision. The agent and its
   revisions are read as the system, not as the turn's person: binding the
-  chat to the agent is the authorization, so an Only me agent keeps its layer
-  in turns that act for nobody or for another person. It is composed as the
-  `agent_instructions` layer under a short preamble: the agent's editors
-  wrote these instructions, they refine default behavior, and they grant no
+  chat to the agent is the authorization. An Only me agent's layer applies
+  only while the chat is its owner's Only me chat; otherwise the chat runs as
+  a plain chat. It is composed as the `agent_instructions` layer under a short
+  preamble: they take precedence over default behavior and grant no
   additional authority. With an agent configuration it follows the Codemode
   and code-search directives and precedes Git bindings, Skills, governance,
   memory and session instructions.

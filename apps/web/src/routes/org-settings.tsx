@@ -183,6 +183,7 @@ export function OrgSettingsRoute({
     organizationAdministratorSession,
     canReadBilling,
     canManageBilling,
+    canManageAutomaticTopUp,
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
@@ -703,6 +704,7 @@ export function OrgSettingsRoute({
                 identity={adminIdentity}
                 canReadBilling={canReadBilling}
                 canManageBilling={canManageBilling}
+                canManageAutomaticTopUp={canManageAutomaticTopUp}
                 budgetWorkspaceId={workspace}
               />
             </BillingSection>

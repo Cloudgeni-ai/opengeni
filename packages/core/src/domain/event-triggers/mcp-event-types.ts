@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { stableJson, type EventTypeDescriptor } from "@opengeni/contracts";
-import type { EventSourceRecord, EventStatusReason } from "@opengeni/db";
+import type {
+  EventSourceRecord,
+  EventStatusReason,
+  McpEventSubscriptionPollReason,
+} from "@opengeni/db";
 import { inputSchemaArgumentIssues, formatToolGatewayInputIssues } from "@opengeni/tool-gateway";
 import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
 import {
@@ -20,18 +24,25 @@ import { inboundWebhookBaseUrl } from "./webhook-url";
  */
 
 const TYPE_CACHE_MS = 10 * 60_000;
+/**
+ * How long a kept session trusts the event types it read. A server that
+ * starts offering a type or a delivery mode (webhook) says so only in
+ * `events/list`, so a long-lived session reads it again this often.
+ */
+const SESSION_TYPES_MS = 60 * 60_000;
 const typeCache = new Map<string, { expiresAt: number; types: McpEventType[] }>();
 /** Bumped when a source's types are forgotten, which outdates every memo of them. */
 const typeGenerations = new Map<string, number>();
 
 /**
  * The event types one kept MCP session read: a session reads them once, and
- * again only after they are forgotten. Steps that ask at the same time share
- * one read.
+ * again after they are forgotten or an hour has passed. Steps that ask at the
+ * same time share one read.
  */
 export type McpEventTypesMemo = {
   read: Promise<McpEventType[]> | null;
   generation: number | null;
+  readAt?: number;
 };
 
 export class McpServerWithoutEventsError extends EventSourceBlockedError {
@@ -43,7 +54,7 @@ export class McpServerWithoutEventsError extends EventSourceBlockedError {
 
 /**
  * The event types a source's server offers, re-read at most every ten
- * minutes, or once per kept session when the caller gives its `memo`.
+ * minutes, or once an hour per kept session when the caller gives its `memo`.
  */
 export async function mcpSourceEventTypes(
   client: McpStreamableHttpClient,
@@ -54,7 +65,14 @@ export async function mcpSourceEventTypes(
   const now = options.now ?? Date.now();
   const generation = typeGenerations.get(source.id) ?? 0;
   const memo = options.memo;
-  if (!options.fresh && memo?.read && memo.generation === generation) return await memo.read;
+  if (
+    !options.fresh &&
+    memo?.read &&
+    memo.generation === generation &&
+    now - (memo.readAt ?? now) < SESSION_TYPES_MS
+  ) {
+    return await memo.read;
+  }
   const cached = typeCache.get(source.id);
   if (!options.fresh && !memo && cached && cached.expiresAt > now) return cached.types;
   const read = (async () => {
@@ -69,6 +87,7 @@ export async function mcpSourceEventTypes(
   if (memo) {
     memo.read = read;
     memo.generation = generation;
+    memo.readAt = now;
     read.catch(() => {
       if (memo.read === read) memo.read = null;
     });
@@ -96,21 +115,39 @@ export function mcpWebhookBaseUrl(
 }
 
 /**
+ * How long a subscription that polls because its webhook failed (the server
+ * could not reach our address, or would not deliver to it) waits before it
+ * tries the webhook again.
+ */
+export const MCP_WEBHOOK_RETRY_AFTER_FAILURE_MS = 24 * 60 * 60_000;
+
+/**
  * Webhook when the server offers it and this deployment has a public https
- * address (no polling, events arrive at once), else poll. A subscription
- * stays on poll once it is there, for example after the server could not
- * reach our webhook address. Push needs a held-open connection per
- * subscription, which Opengeni does not keep.
+ * address (no polling, events arrive at once), else poll. A polling
+ * subscription moves to webhook once that is possible, unless it polls
+ * because a webhook failed less than {@link MCP_WEBHOOK_RETRY_AFTER_FAILURE_MS}
+ * ago. Push needs a held-open connection per subscription, which Opengeni
+ * does not keep.
  */
 export function mcpDeliveryModeFor(
   type: Pick<McpEventType, "delivery">,
-  options: { webhookAvailable: boolean; current: "poll" | "webhook" | null },
+  options: {
+    webhookAvailable: boolean;
+    current: "poll" | "webhook" | null;
+    /** Why a polling subscription polls; null when unknown (an older release moved it). */
+    pollReason?: { reason: McpEventSubscriptionPollReason; since: Date } | null;
+    now?: Date;
+  },
 ): "poll" | "webhook" | null {
   const offers = (mode: McpEventDeliveryMode) => type.delivery.includes(mode);
   const webhook = offers("webhook") && options.webhookAvailable;
-  if (options.current === "poll" && offers("poll")) return "poll";
-  if (webhook) return "webhook";
-  return offers("poll") ? "poll" : null;
+  if (!webhook) return offers("poll") ? "poll" : null;
+  const failed = options.pollReason?.reason === "callback_failed" ? options.pollReason.since : null;
+  const recentlyFailed =
+    failed !== null &&
+    (options.now ?? new Date()).getTime() - failed.getTime() < MCP_WEBHOOK_RETRY_AFTER_FAILURE_MS;
+  if (options.current === "poll" && recentlyFailed && offers("poll")) return "poll";
+  return "webhook";
 }
 
 /** Why Opengeni can't receive an event type it is offered; null when it can. */

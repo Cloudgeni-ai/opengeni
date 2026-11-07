@@ -11,7 +11,7 @@ import {
   slackAgentDescriptionSentence,
 } from "@opengeni/contracts";
 import { getWorkspace, listSlackAgentsForConnection, type SlackAgentRecord } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
 
 import type { SlackRoutingAgent } from "./slack-agent-address";
 import { escapeSlackMrkdwn } from "./slack-app-home";
@@ -116,9 +116,9 @@ function slackAgentHandoffRule(input: {
   return [
     ...(how ? [how] : []),
     "Answer yourself by default.",
-    'Call slack_agent_handoff only when the person asks for one of the agents below by name (typos and a dropped word like "team" are fine); if it returns passed_on, make your entire final response exactly NO_REPLY.',
+    'Call slack_agent_handoff only when the person asks for one of the agents below by name, even misspelled or without a word like "team"; if it returns passed_on, make your entire final response exactly NO_REPLY.',
     "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or words that merely match an agent's name.",
-    "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name; don't mention the suggestion.",
+    "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name.",
   ].join(" ");
 }
 
@@ -133,24 +133,39 @@ export function slackAgentSessionInstructions(input: {
   handedOffBy: SlackAgentRecord | null;
   /** How the chat was reached; null when unknown. */
   source?: SlackAgentChatSource | null;
+  /** A private chat (a DM): it reads the agent's Memory but never writes to it. */
+  privateChat?: boolean;
 }): string {
   const { loaded, agent } = input;
   const lines: string[] = [];
   if (agent) {
     const description = slackAgentDescriptionSentence(agent.description);
     lines.push(
-      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}", and your Slack messages post as ${agent.name}. You may be in several chats at once; keep your answers consistent across them.`,
+      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}"; your messages post as ${agent.name}.`,
     );
-    const adminInstructions = agent.instructions.trim();
-    if (adminInstructions.length > 0) {
-      lines.push(`Instructions for ${agent.name}:\n${adminInstructions}`);
-    }
-    const memory = agent.knowledgeCollectionId;
-    lines.push(
-      memory
-        ? `Your Memory is Knowledge collection ${memory}. When context is missing, search it with knowledge_search (groupId ${memory}) and check your recent chats with slack_agent_chats. Save lasting facts, decisions and preferences people share with knowledge_save (groupIds [${memory}], scope "workspace"), not passing chatter.`
-        : "When context is missing, check your recent chats with slack_agent_chats.",
+    // The agent's own Instructions are a prompt layer of their own (the chat
+    // is bound to the agent), never copied here.
+    // A Slack agent is always shared with its workspace, so a private chat
+    // (a DM) only reads its Memory and saves no Knowledge; the knowledge tools
+    // enforce that too.
+    const memory = agentMemoryGuidance(
+      agentMemoryAccess(
+        {
+          memoryEnabled: agent.memoryEnabled,
+          memoryCollectionId: agent.knowledgeCollectionId,
+          visibility: "workspace",
+          ownerSubjectId: null,
+        },
+        {
+          private: input.privateChat === true,
+          ownerSubjectId: null,
+          memoryOff: false,
+          // A Slack DM's session row is shared, so its saves would be workspace scope.
+          slackDm: input.privateChat === true,
+        },
+      ),
     );
+    if (memory) lines.push(memory);
     // The server refuses a hand-back, so the line only says who passed it on.
     if (input.handedOffBy) {
       lines.push(`${input.handedOffBy.name} passed this request on to you.`);

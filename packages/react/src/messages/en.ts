@@ -4815,6 +4815,9 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.connectsYourOwnAccountOnly":
     "Connects your own account. Only work you start can use it.",
   "sessionMcpCapabilityCard.continueToName": "Continue to {name}",
+  "sessionMcpCapabilityCard.reconnectName": "Reconnect {name}",
+  "sessionMcpCapabilityCard.reconnectsTheSameAccount":
+    "Signs in again to the same account. Its settings stay as they were.",
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
@@ -6086,8 +6089,8 @@ export const englishMessages = {
   "timeline.toolStep.runCommand.running": "Running a command",
   "timeline.toolStep.runSchedule.done": "Ran an automation",
   "timeline.toolStep.runSchedule.running": "Running an automation",
-  "timeline.toolStep.saveBotTemplate.done": "Saved a bot template",
-  "timeline.toolStep.saveBotTemplate.running": "Saving a bot template",
+  "timeline.toolStep.saveBotTemplate.done": "Made an agent",
+  "timeline.toolStep.saveBotTemplate.running": "Making an agent",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

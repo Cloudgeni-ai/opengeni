@@ -198,7 +198,7 @@ test("someone who uses Opengeni through another product gets that refusal first,
     expect(refused.isError).toBe(true);
     const text = (refused.content[0] as { text: string }).text;
     expect(text).toStartWith(
-      "Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace",
+      "Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace",
     );
     expect(text).toContain("billing");
     expect(text).not.toBe(PLAIN_REFUSAL);

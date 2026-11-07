@@ -575,11 +575,11 @@ headings. Inside a section, pages fall into at most two groups set apart by spac
 second level of labels: Workspace = its settings and dashboards, then its runtime (Secrets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
 Workspaces, Organization identity), then what it provides, pays for and protects (Models,
-Integrations, Connected agents, Billing & usage, Developer, Security & data). Typing in the search
+Integrations, Connected apps, Billing & usage, Developer, Security & data). Typing in the search
 field replaces the sections with matching pages and the settings inside them (each with where it
 lives, "Workspace · General"), indexed from the rail itself so it never offers a page the person
 can't use (`components/settings/settings-search.ts`); Enter opens the first, arrows move through
-them, Escape clears. Connected agents is every signed-in member's page: how to add the Opengeni
+them, Escape clears. Connected apps is every signed-in member's page: how to add the Opengeni
 MCP server to each client, then their agents. Models is an Organization page only:
 every model setting, each workspace's included, lives there (section 7), and a workspace's old
 Models URL opens that workspace's page in it. Sections are split by one hairline.

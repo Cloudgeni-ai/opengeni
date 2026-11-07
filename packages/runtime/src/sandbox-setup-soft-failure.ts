@@ -38,11 +38,11 @@ export type SoftSetupFailureCause =
  * rig author's own script and is not one of them. */
 const SOFT_FAILABLE_HOOKS: Record<string, { what: string; after: string }> = {
   "codemode-client": {
-    what: "Opengeni tools in the shell (ogtool and the Codemode client) were not installed",
+    what: "The workspace tools in the shell (ogtool and the Codemode client) were not installed",
     after: "they are installed again at the start of the next turn",
   },
   "codemode-token": {
-    what: "The Opengeni tools sign-in for the shell was not saved, so ogtool calls can fail",
+    what: "The workspace tools sign-in for the shell was not saved, so ogtool calls can fail",
     after: "it is saved again at the start of the next turn",
   },
   "repository-clone": {

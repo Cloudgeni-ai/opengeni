@@ -738,31 +738,6 @@ function allocateToCoveringGrants(
   return allocations;
 }
 
-export function planCreditDebit(
-  balance: BillingBalance,
-  requestedMicros: number,
-  usage?: CreditUsage,
-  origin: BillingOrigin = "app",
-) {
-  if (!Number.isSafeInteger(requestedMicros) || requestedMicros <= 0) {
-    throw new Error("credit debit requires a positive, safe integer micro amount");
-  }
-  const debitedMicros = Math.min(requestedMicros, spendableCreditMicros(balance, usage, origin));
-  // API work spends credits only: no plan allowance and no promotional grant.
-  if (origin === "api") return { debitedMicros, allocations: [] };
-  // Existing general-credit debt can leave less spendable general funding than
-  // the derived allowance. Prepaid admission must never mint spendable credit
-  // by repeatedly preserving promotional grants while overdrawing general.
-  const planBudget = Math.min(
-    balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
-    Math.max(0, appGeneralMicros(balance)),
-  );
-  return {
-    debitedMicros,
-    allocations: allocateToCoveringGrants(balance, debitedMicros, usage, planBudget),
-  };
-}
-
 /**
  * Allocations for an already-consumed charge of the full amount: the monthly
  * plan pays first, covering grants pay beyond it, and other general credit

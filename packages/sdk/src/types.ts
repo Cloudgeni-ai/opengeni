@@ -1,4 +1,5 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { BillingCreditNotification } from "@opengeni/contracts/billing-credit-notifications";
 import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
 export type {
   SessionUsageLimit,
@@ -1211,6 +1212,8 @@ export type PersonalGitHubConnectionStatusResponse = {
   enabled: boolean;
   connection: ConnectionMetadata | null;
   reviewUrl: string | null;
+  /** "All my repositories" can be turned on. Absent from older servers. */
+  allRepositoriesAvailable?: boolean | undefined;
 };
 
 export type PersonalGitHubDisconnectRequest = {
@@ -1252,16 +1255,31 @@ export type PersonalGitHubRepositorySelectionState = {
   credentialBindingId: string;
   providerPrincipalId: string;
   selectionGeneration: number;
+  /**
+   * "All my repositories": every repository the person can access on GitHub,
+   * up to this access. Null (or absent from older servers) means only
+   * `repositories`, which are kept while the mode is on.
+   */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
   repositories: PersonalGitHubSelectedRepository[];
 };
 
 export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
+  /** The saved per-repository choice. */
   selectedAccess: PersonalGitHubRepositoryAccess | null;
+  /**
+   * The access Opengeni may use now: the saved choice, or in "All my
+   * repositories" that mode's access lowered to GitHub's permission. Null
+   * when not usable; absent from older servers, where `selectedAccess` is it.
+   */
+  effectiveAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesOptions = {
   cursor?: number | undefined;
   limit?: number | undefined;
+  /** Find repositories by `owner/name` across everything the person can access (not paged). */
+  query?: string | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesResponse = {
@@ -1281,6 +1299,8 @@ export type ReplacePersonalGitHubRepositorySelectionsRequest = {
   expectedSelectionGeneration: number;
   idempotencyKey: string;
   repositories: PersonalGitHubRepositorySelectionInput[];
+  /** Turn "All my repositories" on with this access, or off with null. Omitted keeps it. */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type VerifyPersonalGitHubRepositorySelectionsRequest = {
@@ -4073,6 +4093,12 @@ export type CreateSessionRequest = {
    */
   unattended?: boolean | undefined;
   /**
+   * Start the chat with an agent the caller can use: it follows the agent's
+   * current Instructions. Its First message is not sent; the app puts it in
+   * the composer instead.
+   */
+  agentId?: string | undefined;
+  /**
    * The new chat's name, description and avatar, as if a person set them (a
    * bot started from a template, for example). Display metadata only; never
    * sent to the model.
@@ -5871,6 +5897,36 @@ export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
+/**
+ * The installed SDK version, sent on every request for server diagnostics. It never
+ * changes authorization or compatibility admission.
+ */
+export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
+
+/**
+ * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
+ * A host that serves the Opengeni API or its session proxy from a different origin
+ * than its web app must allow all of them in `Access-Control-Allow-Headers`;
+ * otherwise browser preflights fail and nothing loads. Headers your app adds itself
+ * (through the client's `headers` option) need allowing too. The `asUser` and
+ * `asService` attribution headers are server-only and deliberately absent.
+ */
+export const OPENGENI_BROWSER_REQUEST_HEADERS = [
+  "accept",
+  "authorization",
+  "content-type",
+  "range",
+  // Deployment-key auth mode (`ClientAuth`).
+  "x-opengeni-access-key",
+  // Browser account session-set mutations.
+  "x-opengeni-actor-epoch",
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  "x-opengeni-session-csrf",
+  // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
+  "x-opengeni-session-id",
+] as const;
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
@@ -7234,6 +7290,8 @@ export type InboxItemServerQuestion = {
 
 export type ListInboxResponse = {
   items: InboxItem[];
+  /** Organization billing notices for the recipient; not workspace inbox items. */
+  billingNotifications?: BillingCreditNotification[];
   /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */
   needsYouCount: number;
   /** Open, unsnoozed, unread items of any kind. */
