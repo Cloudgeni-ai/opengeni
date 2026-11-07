@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./machine-access": {
+      "types": "./src/machine-access.ts",
+      "default": "./src/machine-access.ts"
+    },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
       "default": "./src/billing-credit-notifications.ts"

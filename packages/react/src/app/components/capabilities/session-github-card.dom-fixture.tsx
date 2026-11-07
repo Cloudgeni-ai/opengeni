@@ -235,7 +235,7 @@ describe("GitHub conversation card", () => {
   test("a chat that cannot take a Send says why and sends nothing", async () => {
     context.githubRepos = [repo(101, "acme/api")];
     const h = await render([], () => ({
-      blocked: "This chat has ended. Start a new chat to use a repository.",
+      blocked: "This chat has ended. Start a new chat.",
       awaitingHuman: false,
       extras: {},
     }));

@@ -21,7 +21,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
-import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
+import {
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -766,6 +769,39 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     await expect(agentRequest()).rejects.toThrow();
   }, 60_000);
 
+  test("an agent moving onto a machine whose approval ended this turn gets machine access needed, not a raw error", async () => {
+    if (!available) return;
+    const { targetWorkspaceId, machine, ctx, services, allowThisChat, revokeThisChat } =
+      await seedPersonalMachineChat("none");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The owner withdraws this chat's approval while the turn runs. Admission
+    // already holds this turn's authorization for the machine, so only the
+    // check right before use can refuse the agent's next move onto it.
+    await revokeThisChat();
+    const before = await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId);
+    const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(refused).toMatchObject({
+      swapped: false,
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+      code: "machine_access_required",
+    });
+    expect(refused.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+    expect(refused.reason).not.toContain("Failed query");
+    expect(refused.reason).not.toContain("no longer live");
+    expect(await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId)).toEqual(before);
+    const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(refusedRun).toMatchObject({
+      ok: false,
+      code: "machine_access_required",
+    });
+    expect(refusedRun.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+  }, 60_000);
+
   // The interaction tools move the chat and list its machines through the
   // API with the agent's attempt token. Like sandbox_swap and sandboxes_list,
   // they act for the person who started the turn, so that person's Only me
@@ -929,15 +965,23 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("a machine-home session without a managed sandbox stays on its machine instead of swapping back", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "selfhosted" });
+    const { ctx, services, sandbox } = await seedFleet({
+      sandboxBackend: "selfhosted",
+    });
     const machineOnly = {
       ...services,
-      settings: testSettings({ ...services.settings, sandboxBackend: "selfhosted" }),
+      settings: testSettings({
+        ...services.settings,
+        sandboxBackend: "selfhosted",
+      }),
     };
     expect((await swapActiveSandbox(machineOnly, ctx, sandbox.id)).swapped).toBe(true);
     for (const target of ["session", "default"]) {
       const back = await swapActiveSandbox(machineOnly, ctx, target);
-      expect(back).toMatchObject({ swapped: false, code: "unsupported_backend_context" });
+      expect(back).toMatchObject({
+        swapped: false,
+        code: "unsupported_backend_context",
+      });
       expect(back.reason).toBe(
         "This deployment has no managed session sandbox, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
       );
@@ -1369,7 +1413,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("run_on appends positive cleanup evidence without contaminating command output", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({ backgroundChildrenStopped: true });
+    const { ctx, services, sandbox } = await seedFleet({
+      backgroundChildrenStopped: true,
+    });
     const result = await runOnSandbox(services, ctx, sandbox.id, {
       kind: "exec",
       cmd: "sleep 60 & printf done",

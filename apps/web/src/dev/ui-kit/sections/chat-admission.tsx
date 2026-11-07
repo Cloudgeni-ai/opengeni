@@ -2,6 +2,7 @@ import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
 import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/react/session-ui";
 import { Button } from "@opengeni/react/ui/button";
 import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
+import { ENDED_CHAT_SEND_BLOCKED } from "@opengeni/react/app/lib/chat-send-blocked";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { showPart } from "./chat-shared";
@@ -120,9 +121,21 @@ const MACHINE_ACCESS_FAILURE = {
   failedAt: "2026-10-28T11:52:00Z",
   consecutiveRecoveryCount: null,
 };
-const MACHINE_ACCESS_FAILED: { part: string; label: string; owner: boolean }[] = [
+const MACHINE_ACCESS_FAILED: {
+  part: string;
+  label: string;
+  owner: boolean;
+  /** What Allow answers when clicked; null continues the chat. */
+  allowRefusal?: string;
+}[] = [
   { part: "machine-access-owner", label: "Your machine, not allowed here", owner: true },
   { part: "machine-access-member", label: "Someone else's machine", owner: false },
+  {
+    part: "machine-access-ended",
+    label: "Allow, after the chat has ended",
+    owner: true,
+    allowRefusal: ENDED_CHAT_SEND_BLOCKED,
+  },
 ];
 
 export default function ChatAdmissionSection() {
@@ -197,7 +210,9 @@ export default function ChatAdmissionSection() {
                 failure={MACHINE_ACCESS_FAILURE}
                 actions={{ onRetry: async () => true, retryBlocker: null }}
                 allowMachine={
-                  state.owner ? { machineName: "Laptop", onAllow: async () => null } : undefined
+                  state.owner
+                    ? { machineName: "Laptop", onAllow: async () => state.allowRefusal ?? null }
+                    : undefined
                 }
               />
             </StateCell>

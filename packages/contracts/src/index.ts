@@ -9,6 +9,7 @@ export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
+export * from "./machine-access";
 export * from "./no-reply";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
@@ -22856,6 +22857,7 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "concurrent_swap",
         "personal_machine_permission_required",
         "personal_machine_not_permitted",
+        "machine_access_required",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",
