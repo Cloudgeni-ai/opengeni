@@ -110,7 +110,6 @@ import {
   repositoryUsesSandboxClone,
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
   SESSION_TITLE_GENERATION_INSTRUCTIONS,
-  sessionTitleGenerationUserContent,
   mcpToolErrorOutput,
   mcpUnavailableReason,
   modelCallUsageTelemetry,
@@ -6214,12 +6213,7 @@ describe("runtime event normalization", () => {
       {
         role: "user",
         content: [
-          {
-            type: "input_text",
-            text: sessionTitleGenerationUserContent(
-              "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS),
-            ),
-          },
+          { type: "input_text", text: "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS) },
         ],
       },
     ]);

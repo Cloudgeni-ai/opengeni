@@ -663,6 +663,31 @@ describe("sessionTitleGenerationOptions", () => {
     });
     expect(unresolved).toEqual({ modelName: "scripted-model", signal });
   });
+
+  test("carries the host's title instructions only when set", () => {
+    expect(
+      sessionTitleGenerationOptions({
+        resolvedModel: null,
+        modelName: "scripted-model",
+        serviceTier: null,
+        titleInstructions: "Write titles in Norwegian bokmål.",
+        signal,
+      }),
+    ).toEqual({
+      modelName: "scripted-model",
+      titleInstructions: "Write titles in Norwegian bokmål.",
+      signal,
+    });
+    expect(
+      sessionTitleGenerationOptions({
+        resolvedModel: null,
+        modelName: "scripted-model",
+        serviceTier: null,
+        titleInstructions: undefined,
+        signal,
+      }),
+    ).toEqual({ modelName: "scripted-model", signal });
+  });
 });
 
 describe("sessionTitleRoute", () => {

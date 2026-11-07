@@ -2289,6 +2289,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnTools,
               generateSessionTitleInParallel,
               sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
+              sessionTitleInstructions: session.agent?.titleInstructions,
               compactSummarizer,
               settleDeferredSteerAfterCompaction,
               compactionModelHistoryProjector,

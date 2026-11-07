@@ -1,30 +1,5 @@
 # Modular prompt changelog
 
-The automatic title request (a separate single call outside the agent's
-conversation) frames its user turn as the titling task. Before, the person's
-messages were sent raw as the only user message, so a request such as
-"validate this calculation" read as a request to the title model, which
-answered it, and the first words of that answer became the title. The user
-turn now says to title the conversation and quotes the messages inside
-`<messages>` tags (79 bytes around the messages). The fixed rules
-(`SESSION_TITLE_GENERATION_INSTRUCTIONS`) change only in the existing
-`NO_TITLE` clause, 57 bytes longer: a message that is only a link, file or code
-without words of the person's own has nothing to name yet, like a greeting.
-Before, the model guessed a language for such a title. The chat now stays
-untitled and the title request on the next turn with a message from the person
-titles it. The agent's instructions and tool descriptions are unchanged.
-
-```diff
-- …(only a greeting, thanks or small talk), return exactly NO_TITLE.
-+ …(only a greeting, thanks or small talk, or only a link, file or code without words of their own), return exactly NO_TITLE.
-  (user turn)
-- <the person's messages>
-+ Title this conversation. The person's messages, quoted:
-+ <messages>
-+ <the person's messages>
-+ </messages>
-```
-
 The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
 chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
 keeps its meaning: precedence over the default behavior, no extra authority,

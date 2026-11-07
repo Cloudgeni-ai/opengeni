@@ -7,7 +7,6 @@ import {
   SESSION_TITLE_GENERATION_INSTRUCTIONS,
   SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
   SESSION_TITLE_NOT_YET,
-  sessionTitleGenerationUserContent,
 } from "../src/index";
 import { buildProviderClient } from "../src/model-provider-client";
 import { buildModelInstance } from "../src/model-provider-routing";
@@ -73,21 +72,24 @@ function chatCompletion(content: string | null, finishReason: string) {
 
 async function generateThroughResolvedChatModel(
   respond: (request: CapturedRequest) => Response,
-  options: { reasoningEffort?: "low" } = {},
-  prompt = "My pod keeps crashing in Kubernetes, can you help me debug it?",
+  options: { reasoningEffort?: "low"; titleInstructions?: string } = {},
 ) {
   const upstream = providerServer(respond);
   const settings = testSettings({ sandboxBackend: "none" });
   const resolved = provider(upstream.baseUrl, { api: "chat" });
   const modelName = "nvidia/nemotron-3-super-120b-a12b:free";
   const client = buildProviderClient(resolved, settings);
-  const result = await generateSessionTitle(settings, prompt, {
-    client,
-    provider: resolved,
-    model: buildModelInstance(resolved, client, modelName),
-    modelName,
-    ...options,
-  });
+  const result = await generateSessionTitle(
+    settings,
+    "My pod keeps crashing in Kubernetes, can you help me debug it?",
+    {
+      client,
+      provider: resolved,
+      model: buildModelInstance(resolved, client, modelName),
+      modelName,
+      ...options,
+    },
+  );
   return { result, requests: upstream.requests };
 }
 
@@ -111,9 +113,7 @@ describe("session title generation", () => {
         { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
         {
           role: "user",
-          content: sessionTitleGenerationUserContent(
-            "My pod keeps crashing in Kubernetes, can you help me debug it?",
-          ),
+          content: "My pod keeps crashing in Kubernetes, can you help me debug it?",
         },
       ],
     });
@@ -142,41 +142,28 @@ describe("session title generation", () => {
       "Write the title in the language the person writes in.",
     );
     expect(SESSION_TITLE_GENERATION_INSTRUCTIONS).toContain(
-      `(only a greeting, thanks or small talk, or only a link, file or code without words of their own), return exactly ${SESSION_TITLE_NOT_YET}.`,
+      `(only a greeting, thanks or small talk), return exactly ${SESSION_TITLE_NOT_YET}.`,
     );
   });
 
-  test("the user turn is the titling task, with the person's messages quoted inside it", async () => {
-    const messages = "Validate this calculation: 12 m² × 450 kr = 5 400 kr";
+  test("the host's title instructions follow the unchanged fixed rules", async () => {
+    const titleInstructions =
+      "If the messages have no clear language, write the title in Norwegian bokmål.";
     const { requests } = await generateThroughResolvedChatModel(
-      () => chatCompletion("Calculation check", "stop"),
-      {},
-      messages,
+      () => chatCompletion("Kubernetes-pod krasjer", "stop"),
+      { titleInstructions },
     );
 
-    const sent = requests[0]!.body.messages as Array<{ role: string; content: string }>;
-    expect(sent).toEqual([
-      { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+    expect(requests[0]!.body.messages).toEqual([
+      {
+        role: "system",
+        content: `${SESSION_TITLE_GENERATION_INSTRUCTIONS}\n\n${titleInstructions}`,
+      },
       {
         role: "user",
-        content: `Title this conversation. The person's messages, quoted:\n<messages>\n${messages}\n</messages>`,
+        content: "My pod keeps crashing in Kubernetes, can you help me debug it?",
       },
     ]);
-    // The person's request is never the user turn itself.
-    expect(sent[1]!.content.startsWith("Title this conversation.")).toBe(true);
-  });
-
-  test("a link-only opener answered with the no-title rule saves no title", async () => {
-    const { result, requests } = await generateThroughResolvedChatModel(
-      () => chatCompletion(SESSION_TITLE_NOT_YET, "stop"),
-      {},
-      "https://example.test/products/123",
-    );
-
-    expect(result.title).toBeNull();
-    expect((requests[0]!.body.messages as Array<{ content: string }>)[1]!.content).toBe(
-      sessionTitleGenerationUserContent("https://example.test/products/123"),
-    );
   });
 
   for (const answer of [
