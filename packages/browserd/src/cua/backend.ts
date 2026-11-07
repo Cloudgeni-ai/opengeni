@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   ComputerBackendError,
+  ComputerHelperStoppedError,
   type ComputerBackend,
   type ComputerBackendTarget,
   type ComputerBackendObservation,
@@ -818,7 +819,11 @@ export class CuaComputerBackend implements ComputerBackend {
     try {
       await callDesktop(this.runtime, operation!.name, operation!.args, "caller-settles");
     } catch (error) {
-      if (error instanceof ComputerBackendError && !error.dispatched) throw error;
+      if (
+        (error instanceof ComputerBackendError && !error.dispatched) ||
+        error instanceof ComputerHelperStoppedError
+      )
+        throw error;
       throw new ComputerBackendError(
         "outcome_unknown",
         "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
@@ -1030,9 +1035,14 @@ export class CuaComputerBackend implements ComputerBackend {
     this.closing = true;
     this.closePromise = this.tail.then(async () => {
       try {
-        if (this.nativeSessionStarted)
-          await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
-        await callDesktop(this.runtime, "end_session", { session: this.session });
+        try {
+          if (this.nativeSessionStarted)
+            await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
+          await callDesktop(this.runtime, "end_session", { session: this.session });
+        } catch (error) {
+          // A worker that is gone took its sessions with it.
+          if (!(error instanceof ComputerHelperStoppedError)) throw error;
+        }
       } finally {
         this.observations.clear();
         this.frames.clear();

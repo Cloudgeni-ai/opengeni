@@ -12,9 +12,10 @@ import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
-import type {
-  ComputerBackendActionCommand,
-  ComputerBackendObservation,
+import {
+  ComputerHelperStoppedError,
+  type ComputerBackendActionCommand,
+  type ComputerBackendObservation,
 } from "../src/computer-backend";
 
 function result(data: Record<string, unknown>, isError = false): ToolResult {
@@ -1452,6 +1453,35 @@ describe("CUA desktop boundary", () => {
       retryable: false,
       message:
         "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
+  test("a call to a CUA worker that is gone says the helper stopped, not that input may have run", async () => {
+    // As CUA's SDK reports them once its private worker exited.
+    const failing = (error: unknown): CuaDesktopRuntime => ({
+      callTool: async () => {
+        throw error;
+      },
+      shutdown: async () => undefined,
+    });
+    const shutdown = Object.assign(new Error("DriverError.Shutdown"), { tag: "Shutdown" });
+    const interrupted = Object.assign(new Error("DriverError.ActionInterrupted"), {
+      tag: "ActionInterrupted",
+      inner: { completion: 0, reason: "private worker exited before the request was written" },
+    });
+    for (const error of [shutdown, interrupted])
+      for (const mutation of [false, true])
+        await expect(callDesktop(failing(error), "click", {}, mutation)).rejects.toBeInstanceOf(
+          ComputerHelperStoppedError,
+        );
+    // A worker that stopped while it ran the call may have acted.
+    const during = Object.assign(new Error("DriverError.ActionInterrupted"), {
+      tag: "ActionInterrupted",
+      inner: { completion: 0, reason: "private worker exited while handling the request" },
+    });
+    await expect(callDesktop(failing(during), "click", {}, true)).rejects.toMatchObject({
+      code: "outcome_unknown",
+      dispatched: true,
     });
   });
 
