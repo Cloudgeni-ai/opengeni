@@ -910,7 +910,7 @@ describe("agent configuration reaches the production model request", () => {
         agentPrompt: { ...prompt, instructions: "Agent rule: answer as a pirate." },
       });
       expect(bound.request.systemInstructions).toContain(
-        "# Instructions for this agent\n\nThe agent's editors wrote these.",
+        "# Instructions for this agent\n\nThese take precedence over the default behavior above;",
       );
       expect(bound.request.systemInstructions).toContain("Agent rule: answer as a pirate.");
       expect(bound.agentInstructionChecks).toEqual([

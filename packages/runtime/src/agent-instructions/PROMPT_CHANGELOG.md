@@ -1,5 +1,17 @@
 # Modular prompt changelog
 
+The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
+chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
+keeps its meaning: precedence over the default behavior, no extra authority,
+and a later developer message may replace it. Plain chats are unchanged; a
+chat bound to an agent gets the new bytes from its next turn. The
+developer-message texts and their legacy parse forms are unchanged.
+
+```text
+- The agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.
++ These take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.
+```
+
 Agent text is shorter again, with the same rules. A Slack agent's identity
 line drops "keep your answers consistent across chats". The hand-off rule
 keeps a short typo hint and drops "don't mention the suggestion" (the
