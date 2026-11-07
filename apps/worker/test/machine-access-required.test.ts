@@ -49,17 +49,17 @@ describe("a turn whose personal machine isn't allowed", () => {
   });
 
   test("other refusals keep their own classification", () => {
-    expect(
-      isPersonalMachineAccessRefusal(databaseRefusal("42501", "attempt is not current")),
-    ).toBe(false);
+    expect(isPersonalMachineAccessRefusal(databaseRefusal("42501", "attempt is not current"))).toBe(
+      false,
+    );
     expect(
       isPersonalMachineAccessRefusal(
         databaseRefusal("40001", "personal machine authority is no longer live"),
       ),
     ).toBe(false);
-    expect(isPersonalMachineAccessRefusal(new Error("personal machine use requires explicit grant"))).toBe(
-      false,
-    );
+    expect(
+      isPersonalMachineAccessRefusal(new Error("personal machine use requires explicit grant")),
+    ).toBe(false);
   });
 
   test("ends the turn with machine access needed, not a database error", async () => {
