@@ -132,7 +132,7 @@ import {
 } from "../lib/session-usage-limit";
 import { SessionUsageLimitNotice } from "../../usage";
 import { isSessionUsageLimitSubmissionError } from "../../lib/format";
-import { OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
 import { SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON } from "@opengeni/sdk/session-usage-limits";
 import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
@@ -1698,9 +1698,11 @@ export function SessionRoute({
         ...answer,
       });
     } catch (error) {
-      toast.error("Couldn't submit the decision", {
-        description: userErrorText(error),
-      });
+      // Already decided (elsewhere, or by an earlier Approve all): no news.
+      if (!(error instanceof OpenGeniApiError && error.status === 409))
+        toast.error("Couldn't submit the decision", {
+          description: userErrorText(error),
+        });
       throw error instanceof Error ? error : new Error(String(error));
     }
   }

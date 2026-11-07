@@ -120,6 +120,7 @@ export type {
 } from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
