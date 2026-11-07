@@ -33,14 +33,14 @@
     "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*"
+  },
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "@opengeni/contracts": "workspace:*"
   }
 }
