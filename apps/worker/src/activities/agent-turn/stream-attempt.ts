@@ -359,6 +359,8 @@ export type TurnStreamAttemptDeps = {
   turnTools: ReturnType<typeof withFirstPartyTools>;
   generateSessionTitleInParallel: boolean;
   sessionTitlePrompt: string;
+  /** The start of the chat's own instructions, a language sample for the title. */
+  sessionTitleInstructionsExcerpt: string | undefined;
   compactSummarizer: CompactionSummarizer;
   settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
@@ -511,6 +513,7 @@ export async function runTurnStreamAttempt(
     turnTools,
     generateSessionTitleInParallel,
     sessionTitlePrompt,
+    sessionTitleInstructionsExcerpt,
     compactSummarizer,
     settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
@@ -2884,6 +2887,7 @@ export async function runTurnStreamAttempt(
             route: titleRoute,
             policy: turnExecutionPolicy,
             prompt: sessionTitlePrompt,
+            instructionsExcerpt: sessionTitleInstructionsExcerpt,
             subscriptionConnectionId: subscription?.connectionId ?? null,
             subscriptionProvider: providerTurn.codexSubscriptionCore
               ? "codex"
@@ -2918,6 +2922,7 @@ export async function runTurnStreamAttempt(
                 resolvedModel: titleRoute.resolvedModel,
                 modelName: titleRoute.modelName,
                 serviceTier,
+                instructionsExcerpt: sessionTitleInstructionsExcerpt,
                 signal,
               }),
             ),

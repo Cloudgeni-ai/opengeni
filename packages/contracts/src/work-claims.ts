@@ -55,7 +55,8 @@ export function normalizeWorkClaimCanonicalKey(value: string): string {
 }
 
 export function normalizeWorkClaimDisplayLabel(value: string): string | null {
-  const normalized = normalizeAutomaticSessionTitle(value);
+  // A display label is shortened to the title bound rather than refused.
+  const normalized = normalizeAutomaticSessionTitle(value, { shorten: true });
   if (!normalized || utf8Bytes(normalized) > WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES) return null;
   return normalized;
 }

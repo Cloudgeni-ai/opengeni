@@ -316,16 +316,40 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Coffee ☕️ rollout")).toBe("Coffee ☕️ rollout");
   });
 
-  test("bounds long output at words and complete Unicode graphemes without truncation markers", () => {
+  test("rejects prose longer than a title instead of cutting it into a fragment", () => {
+    // A title model that answered the person instead of naming the chat.
+    expect(
+      normalizeAutomaticSessionTitle(
+        "I can't perform the validation because no calculation tools are available here.",
+      ),
+    ).toBeNull();
+    expect(
+      normalizeAutomaticSessionTitle(
+        "Investigate automatic conversation title generation across retries recovery providers interfaces dashboards integrations and notifications",
+      ),
+    ).toBeNull();
+    expect(normalizeAutomaticSessionTitle(`Review ${"👩🏽‍💻".repeat(100)} deployment`)).toBeNull();
+    // At the bound, a title is kept whole.
+    const tenWords = "One two three four five six seven eight nine ten";
+    expect(normalizeAutomaticSessionTitle(tenWords)).toBe(tenWords);
+    expect(normalizeAutomaticSessionTitle(`${tenWords} eleven`)).toBeNull();
+    // Only the title itself counts: a label prefix or boilerplate is removed first.
+    expect(normalizeAutomaticSessionTitle(`Title: ${tenWords}`)).toBe(tenWords);
+  });
+
+  test("shortens a long label at words and complete Unicode graphemes only when asked", () => {
     const longWords = normalizeAutomaticSessionTitle(
       "Investigate automatic conversation title generation across retries recovery providers interfaces dashboards integrations and notifications",
+      { shorten: true },
     );
     expect(longWords).toBe(
       "Investigate automatic conversation title generation across retries recovery",
     );
     expect(longWords).not.toContain("…");
 
-    const unicode = normalizeAutomaticSessionTitle(`Review ${"👩🏽‍💻".repeat(100)} deployment`);
+    const unicode = normalizeAutomaticSessionTitle(`Review ${"👩🏽‍💻".repeat(100)} deployment`, {
+      shorten: true,
+    });
     expect(unicode).not.toBeNull();
     expect(graphemeCount(unicode!)).toBeLessThanOrEqual(AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES);
     expect(unicode).not.toContain("�");

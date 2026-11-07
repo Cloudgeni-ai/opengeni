@@ -10,6 +10,7 @@ import type {
   GenerateSessionTitleOptions,
   OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { SESSION_TITLE_INSTRUCTIONS_EXCERPT_MAX_CHARACTERS } from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -28,7 +29,7 @@ import {
 export const SESSION_TITLE_MODEL_TOOL_NAME = "opengeni__set_session_title";
 
 const SESSION_TITLE_DESCRIPTION =
-  "Set this session's display title to a concise 3-7 word topic label in the language the person writes in. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once the session has a task, question or subject (not while it holds only a greeting or small talk), then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
+  "Set this session's display title to a concise 3-7 word topic label in the language the person writes in (your instructions' language when they have sent only a link, file or code). Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once the session has a task, question or subject (not while it holds only a greeting or small talk), then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
 
 /**
  * What a still-untitled session's automatic title is generated from: its
@@ -43,6 +44,25 @@ export function sessionTitlePromptFor(initialMessage: string, turnPrompt: string
   if (!opener) return turnPrompt;
   if (!latest || latest.includes(opener)) return initialMessage;
   return `${opener}\n\n${latest}`;
+}
+
+/**
+ * The start of the chat's own instructions, most specific layer first
+ * (session instructions, the agent revision's instructions, the agent's
+ * identity, the workspace identity). The title request uses it only for its
+ * language, when the person's messages have none of their own (only a link,
+ * file or code). Opengeni's built-in instructions are never part of it, so a
+ * chat without its own instructions gets no excerpt.
+ */
+export function sessionTitleInstructionsExcerpt(
+  layers: readonly (string | null | undefined)[],
+): string | undefined {
+  for (const layer of layers) {
+    const text = layer?.replace(/\s+/gu, " ").trim();
+    if (!text) continue;
+    return Array.from(text).slice(0, SESSION_TITLE_INSTRUCTIONS_EXCERPT_MAX_CHARACTERS).join("");
+  }
+  return undefined;
 }
 
 export function shouldRequestMissingSessionTitle(input: {
@@ -217,6 +237,7 @@ export function sessionTitleGenerationOptions(input: {
   resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
   modelName: string;
   serviceTier: GenerateSessionTitleOptions["serviceTier"] | null | undefined;
+  instructionsExcerpt?: string | undefined;
   signal: AbortSignal;
 }): GenerateSessionTitleOptions {
   const { resolvedModel, serviceTier } = input;
@@ -232,6 +253,7 @@ export function sessionTitleGenerationOptions(input: {
     modelName: input.modelName,
     ...(serviceTier ? { serviceTier } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(input.instructionsExcerpt ? { instructionsExcerpt: input.instructionsExcerpt } : {}),
     signal: input.signal,
   };
 }

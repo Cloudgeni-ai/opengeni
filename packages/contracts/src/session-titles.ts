@@ -9,6 +9,12 @@ export const SESSION_TITLE_MAX_CHARACTERS = 200;
 export const AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES = 80;
 
 /**
+ * Automatic titles are short labels. A candidate with more words than this is
+ * prose (a sentence, a reply or a prompt), not a title.
+ */
+export const AUTOMATIC_SESSION_TITLE_MAX_WORDS = 10;
+
+/**
  * Safe durable title used until semantic generation succeeds. It contains no
  * user prompt bytes, so provider failure/offline operation cannot leak a
  * credential or leave a raw prompt prefix in navigation surfaces.
@@ -362,7 +368,10 @@ export function cleanStoredSessionTitle(
 /** Bound an already-normalized automatic-title candidate without splitting graphemes. */
 export function boundAutomaticSessionTitle(value: string): string {
   const words = value.split(/\s+/u);
-  const wordBounded = words.length > 10 ? words.slice(0, 10).join(" ") : value;
+  const wordBounded =
+    words.length > AUTOMATIC_SESSION_TITLE_MAX_WORDS
+      ? words.slice(0, AUTOMATIC_SESSION_TITLE_MAX_WORDS).join(" ")
+      : value;
   const graphemes = automaticTitleGraphemes(wordBounded);
   if (graphemes.length <= AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES) return wordBounded;
 
@@ -371,15 +380,32 @@ export function boundAutomaticSessionTitle(value: string): string {
   return (lastWhitespace >= 16 ? prefix.slice(0, lastWhitespace) : prefix).trimEnd();
 }
 
+function exceedsAutomaticTitleBound(value: string): boolean {
+  return (
+    value.split(/\s+/u).length > AUTOMATIC_SESSION_TITLE_MAX_WORDS ||
+    automaticTitleGraphemes(value).length > AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES
+  );
+}
+
 /**
  * Normalize a model/system-authored title before it reaches durable session
  * metadata. Human renames intentionally do not use this path.
  *
- * Returns null when the candidate is empty, only boilerplate, or appears to
- * contain a credential/opaque prompt value. Callers should retain the current
- * title (normally {@link AUTOMATIC_SESSION_TITLE_FALLBACK}) in that case.
+ * Returns null when the candidate is empty, only boilerplate, appears to
+ * contain a credential/opaque prompt value, or is longer than a title
+ * ({@link AUTOMATIC_SESSION_TITLE_MAX_WORDS} words or
+ * {@link AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES} graphemes). A long candidate
+ * is prose, such as a model answering the messages instead of naming them or
+ * an agent's goal or message, and cutting it would leave a sentence fragment.
+ * Callers should retain the current title (normally
+ * {@link AUTOMATIC_SESSION_TITLE_FALLBACK}) in that case. A caller naming
+ * something after a label it may shorten passes `{ shorten: true }`, which
+ * cuts a long candidate at the bound instead.
  */
-export function normalizeAutomaticSessionTitle(value: string): string | null {
+export function normalizeAutomaticSessionTitle(
+  value: string,
+  options: { shorten?: boolean } = {},
+): string | null {
   const firstLine = withoutModelControlTokens(value)
     .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, "\n")
     .split(/\n+/u)
@@ -403,6 +429,8 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
   ) {
     return null;
   }
+  if (!exceedsAutomaticTitleBound(title)) return title;
+  if (!options.shorten) return null;
 
   title = trimAutomaticTitleEnd(boundAutomaticSessionTitle(title));
   if (!title || !hasVisibleAutomaticTitleContent(title)) return null;

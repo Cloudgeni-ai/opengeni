@@ -54,7 +54,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
-import { sessionTitlePromptFor } from "./session-title";
+import { sessionTitleInstructionsExcerpt, sessionTitlePromptFor } from "./session-title";
 import { createCodexCreditGuard } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -2289,6 +2289,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnTools,
               generateSessionTitleInParallel,
               sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
+              sessionTitleInstructionsExcerpt: sessionTitleInstructionsExcerpt([
+                session.instructions,
+                agentPrompt?.instructions,
+                session.agent?.identity,
+                workspaceAgentIdentity,
+              ]),
               compactSummarizer,
               settleDeferredSteerAfterCompaction,
               compactionModelHistoryProjector,
