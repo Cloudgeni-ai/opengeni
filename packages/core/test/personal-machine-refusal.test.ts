@@ -22,7 +22,7 @@ describe("an agent's move onto a personal machine its turn may no longer use", (
     ["42501", "personal machine authority is no longer live"],
     ["OG002", "matching personal-resource grant required"],
   ])(
-    "the check right before use (%s %s) says machine access is needed, never a database error",
+    "a pre-use or grant-carry refusal (%s %s) says machine access is needed, never a database error",
     (code, message) => {
       const refusal = personalMachineRefusal(
         databaseRefusal("assert_session_attempt_personal_machine", code, message),
