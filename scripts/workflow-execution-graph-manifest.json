@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "91fb0610858f1d26d3865915ce01739a825b82e91ac68b17031b5e7024389e93"
+      "sha256": "ac39cf2fa8bba5de65f99aae32d7396c9619db41e5a1b3c62ee961728b1afa44"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1084,6 +1084,12 @@
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
+      "step": "a host reset during its startup install comes back whole (host-startup.sh and install.sh)",
+      "sha256": "278655dacef98ac5d74edb15c1d633cbc35f5667fb6598dbe1d2573528c009b9"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
       "step": "e2e environment and suite",
       "sha256": "3042fdd873932bb7c19240386b1d3704f1ce90ae10a9fa88f6fce2cc9280a6ec"
     },
@@ -1103,7 +1109,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "shellcheck",
-      "sha256": "59b9b9ce327e3d853d81444df0c14b73ce68067fb4a41a8f224f8b99156d0392"
+      "sha256": "45649d8c3e82e0bb4ea97802233cada1411f2a8d818a1854f030fd008b51ff53"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
