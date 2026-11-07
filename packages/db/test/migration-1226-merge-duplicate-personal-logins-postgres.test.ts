@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import postgres from "postgres";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -35,6 +38,10 @@ const LINEAR = "https://linear.example.test/mcp";
 
 let owned: OwnerMigratedTestDatabase | null = null;
 let ownerSql: postgres.Sql | null = null;
+let prefix: string | null = null;
+// 1281 to 1292 detach and drop the retired Knowledge sync tables this merge
+// still touched, so replay it against the schema as it stood before them.
+const firstDropMigration = "1281_detach_knowledge_sync_from_managed_accounts.sql";
 
 beforeAll(async () => {
   owned = await acquireOwnerMigratedTestDatabase("merge-duplicate-personal-logins");
@@ -42,14 +49,22 @@ beforeAll(async () => {
     if (requireRealDatabase) throw new Error("login merge PostgreSQL fixture is unavailable");
     return;
   }
+  prefix = await mkdtemp(join(tmpdir(), "opengeni-before-knowledge-sync-drop-"));
+  const source = join(import.meta.dir, "../drizzle");
+  for (const name of await readdir(source)) {
+    if (name.endsWith(".sql") && name < firstDropMigration) {
+      await copyFile(join(source, name), join(prefix, name));
+    }
+  }
   // The NOSUPERUSER NOBYPASSRLS owner, exactly like production.
-  await migrate(owned.ownerUrl);
+  await migrate(owned.ownerUrl, undefined, { migrationsDirectory: prefix });
   ownerSql = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
 }, 900_000);
 
 afterAll(async () => {
   await ownerSql?.end().catch(() => undefined);
   await owned?.release();
+  if (prefix) await rm(prefix, { recursive: true, force: true });
 }, 180_000);
 
 async function runMerge() {
