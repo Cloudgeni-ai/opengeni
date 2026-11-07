@@ -114,6 +114,7 @@ import {
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   settleConnectedCommandOutputRetry,
+  type ConnectedCommandOutputExpiry,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
@@ -2215,17 +2216,23 @@ type ConnectedOutputReleaseLookups = {
   modes: Map<string, Promise<ConnectedRunnerReleaseMode | null>>;
 };
 
-/** A runner keeps a completed operation's output only for a bounded time
- * (an hour by default, and a bounded number of operations), so output not
- * captured a day after its command exited can no longer be collected: it is
- * recorded unavailable instead of being retried forever. */
-export const CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS = 24 * 60 * 60_000;
+/** When output a runner never handed over stops being retried. A live runner
+ * reports the completed operations it still retains, and that report collects
+ * their output, so output still uncaptured a day after its command exited,
+ * from a runner seen alive at least an hour after the exit, is no longer
+ * retained there. A runner that is not seen again keeps it retried, backing
+ * off, for a week. */
+export const CONNECTED_OUTPUT_CAPTURE_EXPIRY: ConnectedCommandOutputExpiry = {
+  afterRunnerSeenMs: 24 * 60 * 60_000,
+  runnerSeenMarginMs: 60 * 60_000,
+  abandonAfterMs: 7 * 24 * 60 * 60_000,
+};
 
 const CONNECTED_OUTPUT_RETRY_MAX_MS = 5 * 60_000;
 /** A runner that reports its own inventory collects its output itself while
- * it talks; the database recheck only notices that it retired, so it backs
- * off further. */
-const CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS = 60 * 60_000;
+ * it talks; the database recheck only notices that it retired or that its
+ * output expired, so it backs off further. */
+const CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS = 6 * 60 * 60_000;
 
 export function connectedOutputRetryMs(
   settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
@@ -2281,7 +2288,7 @@ export async function releaseClaimedConnectedCommandOutput(
           claim,
           CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS,
         ),
-        uncapturedOutputExpiresAfterMs: CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+        uncapturedOutputExpiry: CONNECTED_OUTPUT_CAPTURE_EXPIRY,
       }).catch(() => null);
       recordConnectedCommandReconciliation(
         observability,
@@ -2404,16 +2411,16 @@ export async function releaseClaimedConnectedCommandOutput(
     const recorded = await settleConnectedCommandOutputRetry(db, {
       claim,
       retryAfterMs: connectedOutputRetryMs(settings, claim),
-      uncapturedOutputExpiresAfterMs: CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+      uncapturedOutputExpiry: CONNECTED_OUTPUT_CAPTURE_EXPIRY,
     }).catch(() => null);
-    if (recorded === "unavailable") {
+    if (recorded === "unavailable")
       recordConnectedCommandReconciliation(observability, "output_expired");
-      return;
-    }
-    observability.warn("sandbox reaper: connected-command output release deferred", {
-      commandId: claim.commandId,
-      error: errorMessage(error),
-    });
+    observability.warn(
+      recorded === "unavailable"
+        ? "sandbox reaper: connected-command output expired uncaptured"
+        : "sandbox reaper: connected-command output release deferred",
+      { commandId: claim.commandId, error: errorMessage(error) },
+    );
   }
 }
 

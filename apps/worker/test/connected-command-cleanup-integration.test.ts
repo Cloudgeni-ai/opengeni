@@ -30,6 +30,7 @@ import {
   claimConnectedCommandOutputReleases,
   requestSessionBackgroundCommandCancellation,
   settleConnectedCommandOutputReleaseClaim,
+  settleConnectedCommandOutputRetry,
 } from "@opengeni/db/session-background-commands";
 import type { OpStreamConnection } from "@opengeni/events";
 import {
@@ -45,7 +46,7 @@ import {
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
-  CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+  CONNECTED_OUTPUT_CAPTURE_EXPIRY,
   connectedOutputRetryMs,
   reconcileConnectedMachineBackgroundCommands as reconcile,
   reconcileConnectedCommandOutputReleases as releaseOutput,
@@ -1261,17 +1262,23 @@ test("the reaper sends nothing to a runner that reports its own inventory, in an
   }
 });
 
-test("output never captured a day after its command exited is recorded unavailable, not retried forever", async () => {
+test("uncaptured output stops being retried once its runner can no longer hold it", async () => {
   // An inventory runner (compute sandbox) is never contacted; a legacy
-  // Connected Machine is tried and does not answer. Either way, uncaptured
-  // output past the runner's retention stops being swept, while captured
-  // output and fresh output keep their retry.
-  for (const [kind, age, captured] of [
-    ["sandbox", "expired", false],
-    ["sandbox", "fresh", false],
-    ["sandbox", "expired", true],
-    ["machine", "expired", false],
-    ["machine", "fresh", false],
+  // Connected Machine is tried and does not answer. Uncaptured output is
+  // recorded unavailable a day after its command exited when its runner was
+  // seen alive well after the exit (its report would have collected it), or
+  // after a week regardless. Captured output and younger output keep retrying.
+  const hour = 60 * 60_000;
+  const day = 24 * hour;
+  for (const [kind, settledAgoMs, runnerSeen, captured, expired] of [
+    ["sandbox", day + hour, true, false, true],
+    ["sandbox", day + hour, false, false, false],
+    ["sandbox", day - hour, true, false, false],
+    ["sandbox", 8 * day, false, false, true],
+    ["sandbox", 8 * day, true, true, false],
+    ["machine", day + hour, true, false, true],
+    ["machine", day - hour, true, false, false],
+    ["machine", 8 * day, true, true, false],
   ] as const) {
     const fixture = await terminalOutputFixture({ kind });
     try {
@@ -1281,27 +1288,33 @@ test("output never captured a day after its command exited is recorded unavailab
           receipt: { exitSeq: "2", attachGeneration: "1" },
           exitCode: 0,
         });
-      const settledAt =
-        age === "expired"
-          ? new Date(Date.now() - CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS - 60_000)
-          : new Date(Date.now() - CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS + 60 * 60_000);
+      const settledAt = new Date(Date.now() - settledAgoMs);
+      const lastSeenAt = new Date(settledAt.getTime() + (runnerSeen ? 2 * hour : -60_000));
       await shared.admin`update session_background_commands set settled_at=${settledAt} where id=${fixture.identity.commandId}`;
+      await shared.admin`update enrollments set last_seen_at=${lastSeenAt} where id=${fixture.identity.enrollmentId}`;
       await fixture.due();
       const rpc = kind === "machine" ? noRunnerRpc() : fixture.rpc;
       await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
       const row = await fixture.stored();
-      expect(row.reconcile_claim_id).toBeNull();
+      const label = `${kind} ${settledAgoMs / hour}h seen=${runnerSeen} captured=${captured}`;
+      expect({ label, claim: row.reconcile_claim_id }).toEqual({ label, claim: null });
       expect(row.output_release_observed_at).toBeNull();
-      if (age === "expired" && !captured) {
-        expect(row.output_unavailable_at).toBeInstanceOf(Date);
+      if (expired) {
+        expect({ label, unavailable: row.output_unavailable_at instanceof Date }).toEqual({
+          label,
+          unavailable: true,
+        });
         expect(row.output_consumed_at).toBeNull();
         expect(row.last_reconcile_outcome).toBe("output_unavailable");
         // No longer an obligation: a later pass does not claim it again.
-        await shared.admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z' where id=${fixture.identity.commandId}`;
+        await fixture.due();
         await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
         expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
       } else {
-        expect(row.output_unavailable_at).toBeNull();
+        expect({ label, unavailable: row.output_unavailable_at }).toEqual({
+          label,
+          unavailable: null,
+        });
         expect(row.last_reconcile_outcome).toBe("output_retry");
         expect(row.reconcile_after.getTime()).toBeGreaterThan(Date.now());
         expect(row.output_consumed_at === null).toBe(!captured);
@@ -1313,20 +1326,58 @@ test("output never captured a day after its command exited is recorded unavailab
   }
 });
 
-test("an inventory runner's output recheck backs off to an hour; a legacy runner keeps its schedule", async () => {
+test("an expired retry is fenced by its exact claim", async () => {
   const fixture = await terminalOutputFixture({ kind: "sandbox" });
   try {
-    await shared.admin`update session_background_commands set reconcile_attempts=20 where id=${fixture.identity.commandId}`;
-    await fixture.due();
-    const before = Date.now();
-    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
-    const row = await fixture.stored();
-    expect(row.last_reconcile_outcome).toBe("output_retry");
-    const delay = row.reconcile_after.getTime() - before;
-    expect(delay).toBeGreaterThan(59 * 60_000);
-    expect(delay).toBeLessThan(61 * 60_000);
+    await shared.admin`update session_background_commands set settled_at=now()-interval '8 days' where id=${fixture.identity.commandId}`;
+    const [claim] = await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 1,
+      claimTtlMs: 60_000,
+    });
+    expect(claim?.commandId).toBe(fixture.identity.commandId);
+    const before = await fixture.stored();
+    expect(
+      await settleConnectedCommandOutputRetry(client.db, {
+        claim: { ...claim!, claimId: crypto.randomUUID() },
+        retryAfterMs: 60_000,
+        uncapturedOutputExpiry: CONNECTED_OUTPUT_CAPTURE_EXPIRY,
+      }),
+    ).toBeNull();
+    const untouched = await fixture.stored();
+    expect(untouched.output_unavailable_at).toBeNull();
+    expect(untouched.reconcile_claim_id).toBe(before.reconcile_claim_id);
+    expect(untouched.last_reconcile_outcome).toBe(before.last_reconcile_outcome);
+    expect(
+      await settleConnectedCommandOutputRetry(client.db, {
+        claim: claim!,
+        retryAfterMs: 60_000,
+        uncapturedOutputExpiry: CONNECTED_OUTPUT_CAPTURE_EXPIRY,
+      }),
+    ).toBe("unavailable");
   } finally {
     await parkSession(fixture.identity.sessionId);
+  }
+});
+
+test("an inventory runner's output recheck backs off to six hours; a legacy runner keeps its schedule", async () => {
+  for (const kind of ["sandbox", "machine"] as const) {
+    const fixture = await terminalOutputFixture({ kind });
+    try {
+      await shared.admin`update session_background_commands set reconcile_attempts=20 where id=${fixture.identity.commandId}`;
+      await fixture.due();
+      const before = Date.now();
+      const rpc = kind === "machine" ? noRunnerRpc() : fixture.rpc;
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+      const row = await fixture.stored();
+      expect(row.last_reconcile_outcome).toBe("output_retry");
+      const delay = row.reconcile_after.getTime() - before;
+      const expected = kind === "sandbox" ? 6 * 60 * 60_000 : 5 * 60_000;
+      expect(delay).toBeGreaterThan(expected - 60_000);
+      expect(delay).toBeLessThan(expected + 60_000);
+    } finally {
+      await parkSession(fixture.identity.sessionId);
+    }
   }
   // The legacy schedule is unchanged: 30 s doubling to five minutes.
   const reaper = { sandboxLeaseReaperPeriodMs: 30_000 };
@@ -1336,10 +1387,10 @@ test("an inventory runner's output recheck backs off to an hour; a legacy runner
     ),
   ).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 300_000, 300_000]);
   expect(
-    [1, 4, 7, 8, 9, 1244].map((attempts) =>
-      connectedOutputRetryMs(reaper, { reconcileAttempts: attempts }, 60 * 60_000),
+    [1, 4, 8, 9, 10, 11, 1244].map((attempts) =>
+      connectedOutputRetryMs(reaper, { reconcileAttempts: attempts }, 6 * 60 * 60_000),
     ),
-  ).toEqual([30_000, 240_000, 1_920_000, 3_600_000, 3_600_000, 3_600_000]);
+  ).toEqual([30_000, 240_000, 3_840_000, 7_680_000, 15_360_000, 21_600_000, 21_600_000]);
 });
 
 test("a retired compute sandbox's output obligation settles once, with no request", async () => {
