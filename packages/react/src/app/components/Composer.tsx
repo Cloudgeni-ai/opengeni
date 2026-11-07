@@ -132,9 +132,6 @@ export function ConsoleComposer(props: {
         actionsStart={props.actions}
         transcriptionSuppressed={props.transcriptionSuppressed === true}
         {...(transcription ? { transcription } : {})}
-        // Each pasted, dropped or attached image gets an `[Image N]` tag where
-        // the person was writing, so their words stay next to the image.
-        imageTags
       />
     </div>
   );
