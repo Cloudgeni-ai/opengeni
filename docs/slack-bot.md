@@ -469,7 +469,7 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 
 ### Data
 
-A Slack agent is an agent with an `agent_slack_installs` row per Slack installation it answers in (keyed by its connection, home-owned, recording the installation's own workspace), and the columns below reference that row (`agent_id`, `connection_id`); see [agents.md](agents.md#contract). The legacy `slack_agents` table, one row per agent in one installation under the installation's home tenancy, is no longer read or written (leftover rows are only deleted); it stays only until the legacy drop.
+A Slack agent is an agent with an `agent_slack_installs` row per Slack installation it answers in ([agents.md](agents.md)), each recording the installation's own workspace, the handle's `name_key` (lower-cased with spaces and hyphens removed, unique per installation) and `open` (default off). The columns below reference those rows (`agent_id`, `connection_id`). The legacy `slack_agents` table is gone.
 
 - `slack_channel_routes.slack_agent_id`: the channel's "who answers" setting may name an agent. Turning the agent off in that installation (or deleting it) deletes that setting.
 - `slack_interactions.slack_agent_id` is frozen when a thread binds. `handoff_from_slack_agent_id` records who passed it on, and `last_inbound_*` says which message the chat is answering.

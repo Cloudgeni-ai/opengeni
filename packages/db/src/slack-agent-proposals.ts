@@ -3,7 +3,8 @@
  *
  * A proposal is the server's own record of a confirmation card a chat posted
  * in its Slack thread. A click on the card is checked against this row, never
- * against the button payload. Both tables are HOME-owned, like `slack_agents`.
+ * against the button payload. Both tables are HOME-owned, like
+ * `slack_channel_routes`.
  *
  * Authorization (who may confirm) is decided by callers from live grants.
  * Nothing here grants anything.

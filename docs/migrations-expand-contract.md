@@ -350,9 +350,9 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 
 `RETIRING_FEATURE_TABLES` in `packages/db/src/runtime-posture.ts` is the explicit
 release-N inventory for the removed Variable Sets, subscription pools, first
-automation API, PR Review and resumable-transcription features, and the legacy
-bot templates and Slack agents tables the agents contract stopped using
-(`agentsLegacy`: `bot_templates`, `slack_agents`). Readiness permits
+automation API, PR Review and resumable-transcription features. (The agents
+legacy drop removed `bot_templates` and `slack_agents`, and with them their
+`agentsLegacy` entry.) Readiness permits
 those tables to be absent but retains their exact ownership, grants and RLS
 checks while present. No prefix rule makes other tables optional. Modern
 subscription-core tables, vaults, automation templates, event sources and meeting

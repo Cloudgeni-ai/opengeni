@@ -1,9 +1,8 @@
 // Agents reads and writes (src/agents.ts and the Slack agent functions built
 // on them) under the production database setup: restricted runtime role,
-// FORCE RLS. Covers revisions, that nothing writes the legacy bot_templates
-// and slack_agents tables any more, Slack availability in several
-// installations (and what turning it off in one removes), name clashes, and
-// the Slack projections.
+// FORCE RLS. Covers revisions, Slack availability in several installations
+// (and what turning it off in one removes), name clashes, and the Slack
+// projections.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import {
@@ -31,7 +30,6 @@ import {
   touchSlackAgentUserState,
   updateAgent,
   updateSlackAgent,
-  withRlsContext,
   withWorkspaceSessionActivityRls,
   type CreateAgentInput,
 } from "../src/index";
@@ -115,14 +113,6 @@ function agentInput(org: Org, overrides: Partial<CreateAgentInput> = {}): Create
   };
 }
 
-/** Rows the legacy tables hold for an agent id: none, since the contract step. */
-async function legacyRows(id: string): Promise<number> {
-  const [row] = await shared.admin<{ count: number }[]>`
-    select (select count(*) from slack_agents where id = ${id})
-      + (select count(*) from bot_templates where id = ${id}) as count`;
-  return Number(row?.count ?? 0);
-}
-
 async function revisionCount(id: string): Promise<number> {
   const [row] = await shared.admin<{ count: number }[]>`
     select count(*)::int as count from agent_revisions where agent_id = ${id}`;
@@ -138,7 +128,6 @@ describe("agents data layer (restricted runtime role)", () => {
       agentInput(org, { origin: "bot_template", firstMessage: "Plan it." }),
     );
     expect(await revisionCount(agent.id)).toBe(1);
-    expect(await legacyRows(agent.id)).toBe(0);
 
     // A retried create with the same id finds the agent it made.
     const again = await createAgent(app.db, org.homeScope, {
@@ -163,7 +152,6 @@ describe("agents data layer (restricted runtime role)", () => {
       },
     });
     expect(await revisionCount(agent.id)).toBe(2);
-    expect(await legacyRows(agent.id)).toBe(0);
     expect(
       await updateAgent(app.db, org.homeScope, {
         agentId: agent.id,
@@ -198,7 +186,6 @@ describe("agents data layer (restricted runtime role)", () => {
       // Turning Slack on is a change of the agent.
       agent: { version: agent.version + 1 },
     });
-    expect(await legacyRows(agent.id)).toBe(0);
     expect(await revisionCount(agent.id)).toBe(1);
     // Idempotent, and available in a second installation too.
     expect(await put(agent.id, org.connectionId)).toMatchObject({ kind: "saved", created: false });
@@ -318,7 +305,6 @@ describe("agents data layer (restricted runtime role)", () => {
     ).toEqual([org.otherConnectionId]);
     expect(await getAgent(app.db, org.homeScope, agent.id)).not.toBeNull();
     expect(await revisionCount(agent.id)).toBe(2);
-    expect(await legacyRows(agent.id)).toBe(0);
   }, 120_000);
 
   test("the Slack agent functions write through agents", async () => {
@@ -392,7 +378,6 @@ describe("agents data layer (restricted runtime role)", () => {
 
     expect(await deleteSlackAgent(app.db, org.installScope, { agentId: created.id })).toBe(true);
     expect(await getAgent(app.db, org.homeScope, created.id)).toBeNull();
-    expect(await legacyRows(created.id)).toBe(0);
   }, 120_000);
 
   test("a chat's agent: sessions.agent_id, or an older Slack chat's interaction", async () => {
@@ -577,10 +562,8 @@ describe("agents data layer (restricted runtime role)", () => {
     };
     expect(await counts()).toEqual({ states: 2, intros: 2 });
 
-    // The same Slack person (Enterprise Grid) or channel (Slack Connect) in
-    // both installations: until the legacy drop removes the per-agent unique
-    // keys older binaries still use, the second installation's record counts
-    // as made, instead of failing.
+    // The same Slack person (Enterprise Grid) or shared channel (Slack
+    // Connect) in both installations: a record in each.
     expect(
       await touchSlackAgentUserState(app.db, org.otherInstallScope, {
         connectionId: org.otherConnectionId,
@@ -588,46 +571,39 @@ describe("agents data layer (restricted runtime role)", () => {
         slackUserId: "U0ONE",
         hintInteractionId: crypto.randomUUID(),
       }),
-    ).toEqual({ showHint: false });
+    ).toEqual({ showHint: true });
+    const notice = crypto.randomUUID();
     expect(
       await claimSlackAgentOpenNotice(app.db, org.otherInstallScope, {
         connectionId: org.otherConnectionId,
         slackAgentId: agent.id,
         slackUserId: "U0ONE",
-        interactionId: crypto.randomUUID(),
+        interactionId: notice,
       }),
-    ).toBe(false);
+    ).toBe(true);
     await recordSlackAgentIntroPost(app.db, org.otherInstallScope, {
       connectionId: org.otherConnectionId,
       slackAgentId: agent.id,
       slackChannelId: "C0ONE",
       postedBySubjectId: org.owner,
     });
-    expect(await counts()).toEqual({ states: 2, intros: 2 });
-    // A caller's transaction survives it.
-    await withRlsContext(app.db, org.otherInstallScope, async (tx) => {
-      await touchSlackAgentUserState(tx, org.otherInstallScope, {
-        connectionId: org.otherConnectionId,
+    expect(
+      await listSlackAgentIntroChannelIds(app.db, org.otherInstallScope, {
         slackAgentId: agent.id,
-        slackUserId: "U0ONE",
-        hintInteractionId: null,
-      });
-      expect(
-        await listSlackAgentIntroChannelIds(tx, org.otherInstallScope, {
-          slackAgentId: agent.id,
-          connectionId: org.otherConnectionId,
-        }),
-      ).toEqual(["C0TWO"]);
-    });
+        connectionId: org.otherConnectionId,
+      }),
+    ).toEqual(["C0ONE", "C0TWO"]);
+    expect(await counts()).toEqual({ states: 3, intros: 3 });
 
     await deleteAgentSlackInstall(app.db, org.homeScope, {
       agentId: agent.id,
       connectionId: org.connectionId,
     });
-    expect(await counts()).toEqual({ states: 1, intros: 1 });
-    const [left] = await shared.admin<{ connection_id: string }[]>`
-      select connection_id::text from slack_agent_user_states where slack_agent_id = ${agent.id}`;
-    expect(left?.connection_id).toBe(org.otherConnectionId);
+    expect(await counts()).toEqual({ states: 2, intros: 2 });
+    const left = await shared.admin<{ connection_id: string }[]>`
+      select distinct connection_id::text from slack_agent_user_states
+      where slack_agent_id = ${agent.id}`;
+    expect(left.map((row) => row.connection_id)).toEqual([org.otherConnectionId]);
 
     // Deleting the agent removes the rest.
     await deleteAgent(app.db, org.homeScope, agent.id);
@@ -724,6 +700,5 @@ describe("agents data layer (restricted runtime role)", () => {
     });
     if (!opened || typeof opened === "string") throw new Error(`open failed: ${opened}`);
     expect(opened).toMatchObject({ open: true, version: agentVersion + 2 });
-    expect(await legacyRows(created.id)).toBe(0);
   }, 120_000);
 });
