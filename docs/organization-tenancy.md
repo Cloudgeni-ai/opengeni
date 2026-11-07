@@ -869,25 +869,23 @@ reset the password. Every verification email also says to ignore it if the
 recipient did not create an Opengeni account.
 
 Verification proves who controls the address, not who chose the stored
-password, so a password only becomes usable when the address is verified from
-the browser that chose it (`apps/api/src/auth/managed-sign-up-browser.ts`).
-Every email sign-up response sets an HttpOnly, `SameSite=Lax` browser cookie
-(`opengeni.sign_up_browser`, `__Secure-` prefixed over HTTPS, 30 days, reused
-while present), whatever the outcome, and while the address is unverified the
-sign-up remembers its password hash for that browser; a repeated sign-up for
-the address leaves the stored password alone. Only a sign-up whose `Origin` is
-one of the deployment's trusted browser origins remembers anything, so a
-cross-site form post another page makes the owner's browser send (or a
-request without an `Origin`) can never plant a password that the owner's later
-verification in that browser would keep. When a link is followed, under
-the auth user's row lock, the password remembered for the verifying browser
-becomes the account's password; without one (another browser or device, a mail
-scanner that follows the link first, or someone else's unsolicited sign-up)
-every stored password is discarded. Either way the address is verified,
-existing sessions are revoked and the answer is the same; a person left
-without a password sets one with a password reset. This closes pre-account
-takeover, where someone signs up with another person's address and a password
-they know and the owner later verifies the address.
+password, so only the newest sign-up's link verifies an address
+(`apps/api/src/auth/managed-sign-up-verification.ts`). While the address is
+unverified, every email sign-up for it replaces the account's password with
+its own, under the auth user's row lock, and the response is the same as for
+a new address. Every verification link (sign-up, repeated sign-up or a
+requested new email) carries a keyed digest of the password stored when it
+was sent, in its signed token. Following a link checks that digest against the
+stored password under the same lock: the current link verifies the address
+with that sign-up's password, from any browser or device (or a mail scanner
+that follows it first), and revokes existing sessions; a link from an earlier
+sign-up gets the ordinary invalid-link answer (`error=INVALID_TOKEN`) and the
+person can request a new email. A repeated sign-up's link keeps the callback
+URL that sign-up asked for. This closes pre-account takeover, where someone
+signs up with another person's address and a password they know and the owner
+later signs up and verifies the address: the owner's sign-up replaced that
+password and invalidated the earlier link. A sign-up never adds a password to
+an account created without one (for example through Google or GitHub).
 
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 
