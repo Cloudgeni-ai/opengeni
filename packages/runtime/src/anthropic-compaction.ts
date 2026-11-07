@@ -1,9 +1,9 @@
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import { AnthropicMessagesModel } from "./anthropic-messages";
-import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
-import { toolCallIdFromSdkItem } from "./tool-call-identity";
-import type { CompactionItem } from "./context-compaction";
+import { compactionPrefixCuts, type CompactionItem } from "./context-compaction";
+
+export { compactionPrefixCuts };
 
 export type AnthropicCompactionOptions = {
   maxOutputTokens: number;
@@ -107,33 +107,6 @@ export function createAnthropicCompactionSizer(provider: ResolvedModelProvider, 
   }) as unknown as typeof fetch);
   return async (input: CompactionItem[], options: AnthropicCompactionOptions) =>
     (await transport.measureRequest(anthropicCompactionRequest(input, options))).requestBytes;
-}
-
-/** Cut only between whole assistant/tool batches; never split signed thinking
- * from its assistant turn or leave a tool receipt without its completed call. */
-export function compactionPrefixCuts(items: readonly CompactionItem[]): number[] {
-  const resultTypes = new Set(Object.values(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE));
-  const calls = new Set<string>();
-  const cuts: number[] = [];
-  let previousPhase = "";
-  let unidentifiedCall = false;
-  for (let index = 0; index < items.length; index++) {
-    const item = items[index]!;
-    const type = String(item.type ?? "message");
-    const isMessage = type === "message";
-    const realInput = isMessage && ["user", "system", "developer"].includes(String(item.role));
-    const phase = realInput || resultTypes.has(type) ? "user" : "assistant";
-    if (index > 0 && calls.size === 0 && !unidentifiedCall && phase !== previousPhase)
-      cuts.push(index);
-    const id = toolCallIdFromSdkItem(item);
-    if (Object.hasOwn(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE, type)) {
-      if (id) calls.add(id);
-      else unidentifiedCall = true;
-    }
-    if (resultTypes.has(type) && typeof id === "string") calls.delete(id);
-    previousPhase = phase;
-  }
-  return cuts;
 }
 
 /** Find a fitting earlier prefix; the caller retains the entire suffix. No

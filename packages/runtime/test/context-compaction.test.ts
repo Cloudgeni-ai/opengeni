@@ -1935,17 +1935,40 @@ describe("portableSwitchTranscriptStart", () => {
   ];
   const tokens = (from: number) => estimateTokens(items.slice(from));
 
-  test("keeps the whole transcript when it fits", () => {
+  test("keeps the whole transcript when it fits one request", () => {
     expect(portableSwitchTranscriptStart(items, tokens(0))).toBe(0);
   });
 
-  test("drops the oldest work units that do not fit, at a user message", () => {
-    expect(portableSwitchTranscriptStart(items, tokens(2))).toBe(2);
-    expect(portableSwitchTranscriptStart(items, tokens(4))).toBe(4);
+  test("keeps older chunks for further bounded requests, up to the request cap", () => {
+    // Request 1 reads the newest four items, request 2 the large reply alone
+    // and request 3 the first message: nothing is left out.
+    expect(portableSwitchTranscriptStart(items, tokens(2))).toBe(0);
+    expect(portableSwitchTranscriptStart(items, tokens(2), 3)).toBe(0);
+    // With fewer requests the oldest items are left out, starting at input.
+    expect(portableSwitchTranscriptStart(items, tokens(2), 2)).toBe(2);
+    expect(portableSwitchTranscriptStart(items, tokens(2), 1)).toBe(2);
+    expect(portableSwitchTranscriptStart(items, tokens(4), 1)).toBe(4);
   });
 
-  test("keeps at least the newest work unit", () => {
-    expect(portableSwitchTranscriptStart(items, 0)).toBe(4);
+  test("an oversized newest unit is cut between batches, never kept whole", () => {
+    // One person message followed by a long autonomous run: system updates
+    // and replies, with no newer person message to cut at.
+    const run = [
+      user("start the long task"),
+      ...Array.from({ length: 20 }, (_, index) => [
+        reply(`step ${index} `.repeat(500)),
+        { type: "message", role: "system", content: `update ${index}` },
+      ]).flat(),
+    ];
+    const chunk = estimateTokens(run.slice(-6));
+    const start = portableSwitchTranscriptStart(run, chunk, 1);
+    expect(start).toBeGreaterThan(0);
+    expect(run[start]).toMatchObject({ type: "message", role: "system" });
+    expect(estimateTokens(run.slice(start))).toBeLessThanOrEqual(chunk);
+  });
+
+  test("a single batch larger than a chunk is a chunk on its own, starting at input", () => {
+    expect(portableSwitchTranscriptStart(items, 0, 1)).toBe(4);
     expect(portableSwitchTranscriptStart([reply("only a reply")], 0)).toBe(0);
   });
 });
