@@ -1124,3 +1124,47 @@ test("a reply Teams refuses gives back the person's and tenant's count once, and
     ]),
   );
 });
+
+test("a reply the bot sends itself goes out once when Teams redelivers the message, and again only if Teams refused it", async () => {
+  const f = await fixture();
+  const other = f.replica();
+  const stranger = crypto.randomUUID();
+  // help, from the person and redelivered to another replica: one reply.
+  const help = f.message("help", stranger);
+  await f.handle(help);
+  await other(help);
+  expect(f.calls).toHaveLength(1);
+  // An unlinked person's link card: one card.
+  const hello = f.message("hello", stranger);
+  await f.handle(hello);
+  await other(hello);
+  await f.handle(hello);
+  expect(f.calls).toHaveLength(2);
+  expect((cardActions(f.calls[1]!.activity)[0] as { title: string }).title).toBe("Link account");
+  // A message with only an image: one notice.
+  const image = f.message("", stranger, {
+    attachments: [{ contentType: "image/png", contentUrl: "https://example.test/a.png" }],
+  });
+  await f.handle(image);
+  await other(image);
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls[2]!.activity.text).toBe(TEAMS_UNREADABLE_MESSAGE_TEXT);
+  // Teams refuses the reply (throttling): the activity fails, and its
+  // redelivery is answered.
+  const again = f.message("help", stranger);
+  f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
+  await expect(f.handle(again)).rejects.toThrow("throttled");
+  expect(f.calls).toHaveLength(3);
+  await other(again);
+  expect(f.calls).toHaveLength(4);
+  expect(f.calls[3]!.activity.text).toContain("**Opengeni help**");
+  // A different message is answered as usual.
+  await f.handle(f.message("help", stranger));
+  expect(f.calls).toHaveLength(5);
+  expect(f.outcomes.filter((outcome) => outcome === "reply_duplicate")).toHaveLength(4);
+  // Only content-free claims are stored.
+  const claims = await shared.admin<Array<{ scope_hash: string }>>`
+    select scope_hash from teams_bot_reply_claims`;
+  for (const row of claims) expect(row.scope_hash).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(claims)).not.toContain(stranger);
+});

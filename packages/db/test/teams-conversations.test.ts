@@ -22,6 +22,9 @@ import {
   releaseTeamsWelcome,
   pruneTeamsWelcomes,
   reserveTeamsOnboardingReply,
+  claimTeamsReply,
+  releaseTeamsReply,
+  pruneTeamsReplyClaims,
   releaseTeamsOnboardingReply,
   pruneTeamsOnboardingLimits,
   type TeamsOnboardingWindow,
@@ -394,5 +397,53 @@ test("onboarding reservations for different people sharing tenant and overall ro
     expect(capped.filter((grant) => grant !== null)).toHaveLength(7);
   } finally {
     await Promise.all(others.map((other) => other.close()));
+  }
+});
+
+test("a reply to one Teams activity is claimed once across connections, given back only by its own claim, and pruned after a day", async () => {
+  const other = createDb(shared!.appUrl);
+  const activity = {
+    tenantId: crypto.randomUUID().toUpperCase(),
+    conversationId: `a:${crypto.randomUUID()};messageid=1`,
+    activityId: `activity-${crypto.randomUUID()}`,
+  };
+  try {
+    // Replicas racing for one activity: exactly one claim. The tenant's case
+    // and the conversation's message suffix don't make it another activity.
+    const raced = await Promise.all([
+      claimTeamsReply(client!.db, activity),
+      claimTeamsReply(other.db, { ...activity, tenantId: activity.tenantId.toLowerCase() }),
+      claimTeamsReply(client!.db, {
+        ...activity,
+        conversationId: activity.conversationId.split(";")[0]!,
+      }),
+    ]);
+    const claimed = raced.filter((claim) => claim !== null);
+    expect(claimed).toHaveLength(1);
+    // Another activity in the same chat is its own reply.
+    expect(await claimTeamsReply(other.db, { ...activity, activityId: "another" })).not.toBeNull();
+    // Only the claim's own token gives it back.
+    await releaseTeamsReply(other.db, { ...claimed[0]!, claimId: crypto.randomUUID() });
+    expect(await claimTeamsReply(other.db, activity)).toBeNull();
+    await releaseTeamsReply(other.db, claimed[0]!);
+    const second = await claimTeamsReply(other.db, activity);
+    expect(second).not.toBeNull();
+    // After its window the activity can be claimed again.
+    await shared!
+      .admin`update teams_bot_reply_claims set claimed_at=now()-interval '11 minutes' where scope_hash=${second!.scopeHash}`;
+    expect(await claimTeamsReply(client!.db, activity)).not.toBeNull();
+    // Claims older than a day are removed; recent ones stay.
+    await shared!
+      .admin`update teams_bot_reply_claims set claimed_at=now()-interval '25 hours' where scope_hash=${second!.scopeHash}`;
+    expect(await pruneTeamsReplyClaims(client!.db)).toBeGreaterThanOrEqual(1);
+    expect(
+      (
+        await shared!
+          .admin`select count(*)::int n from teams_bot_reply_claims where scope_hash=${second!.scopeHash}`
+      )[0]!.n,
+    ).toBe(0);
+    expect(await claimTeamsReply(client!.db, { ...activity, activityId: "another" })).toBeNull();
+  } finally {
+    await other.close();
   }
 });

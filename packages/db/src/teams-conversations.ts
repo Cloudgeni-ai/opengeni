@@ -170,6 +170,59 @@ export async function pruneTeamsWelcomes(
   return rows.length;
 }
 /**
+ * How long an activity the bot answered itself isn't answered again: long
+ * enough to cover every redelivery Teams makes of it.
+ */
+export const TEAMS_REPLY_CLAIM_WINDOW_MS = 10 * 60_000;
+export type TeamsReplyClaim = { scopeHash: string; claimId: string };
+/**
+ * Claims the reply to one Teams activity (help, link, unlink, an onboarding
+ * reply or a notice), once across every API replica and every redelivery of
+ * the activity. Null when it was claimed within `windowMs`. Works before an
+ * organization has connected: the row holds only a hash of the tenant,
+ * conversation and activity id, and grants nothing.
+ */
+export async function claimTeamsReply(
+  db: Database,
+  input: { tenantId: string; conversationId: string; activityId: string },
+  windowMs: number = TEAMS_REPLY_CLAIM_WINDOW_MS,
+): Promise<TeamsReplyClaim | null> {
+  const scopeHash = createHash("sha256")
+    .update(
+      `${input.tenantId.toLowerCase()}\n${input.conversationId.split(";")[0]}\n${input.activityId}`,
+    )
+    .digest("hex");
+  const claimId = randomUUID();
+  const rows = await rawRows<{ claim_id: string }>(
+    db,
+    sql`insert into teams_bot_reply_claims(scope_hash,claim_id) values(${scopeHash},${claimId}::uuid) on conflict(scope_hash) do update set claim_id=excluded.claim_id,claimed_at=now() where teams_bot_reply_claims.claimed_at<=now()-(${Math.max(0, Math.trunc(windowMs))}*interval '1 millisecond') returning claim_id`,
+  );
+  return rows.length ? { scopeHash, claimId } : null;
+}
+/** Gives up a claim whose reply Teams never received, unless a newer claim replaced it. */
+export async function releaseTeamsReply(db: Database, claim: TeamsReplyClaim): Promise<void> {
+  await db.execute(
+    sql`delete from teams_bot_reply_claims where scope_hash=${claim.scopeHash} and claim_id=${claim.claimId}::uuid`,
+  );
+}
+/** How long a reply claim is kept: a day, then it is removed. */
+export const TEAMS_REPLY_CLAIM_RETENTION_MS = 24 * 60 * 60_000;
+/**
+ * Removes up to `limit` reply claims older than the retention, so the table
+ * holds roughly a day of replies. Returns how many it removed.
+ */
+export async function pruneTeamsReplyClaims(
+  db: Database,
+  limit = 100,
+  retentionMs: number = TEAMS_REPLY_CLAIM_RETENTION_MS,
+): Promise<number> {
+  const rows = await rawRows<{ scope_hash: string }>(
+    db,
+    sql`delete from teams_bot_reply_claims where scope_hash in (select scope_hash from teams_bot_reply_claims where claimed_at<now()-(${Math.max(TEAMS_REPLY_CLAIM_WINDOW_MS, Math.trunc(retentionMs))}*interval '1 millisecond') limit ${Math.max(1, Math.trunc(limit))} for update skip locked) returning scope_hash`,
+  );
+  return rows.length;
+}
+/**
  * One limit on Teams onboarding replies: at most `max` replies per `spanMs`
  * window for `key` (such as a budget and a person, a tenant or the whole
  * deployment), and none within `cooldownMs` of the last. A window starts with

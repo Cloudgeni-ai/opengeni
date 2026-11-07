@@ -8,6 +8,7 @@ import {
   teamsMarkdown,
   teamsMarkdownParts,
   teamsNoticeCard,
+  teamsPlainPreview,
   teamsAccountReply,
   teamsNotLinkedReply,
   teamsWelcome,
@@ -27,6 +28,7 @@ import {
   keepTeamsTyping,
   sendTeamsReply,
   type TeamsTypingLoop,
+  teamsNoticeActivity,
 } from "../src/integrations/teams-bot";
 
 const tenantId = "10000000-0000-4000-8000-000000000001";
@@ -155,6 +157,14 @@ describe("Teams welcome and help", () => {
 });
 
 describe("Teams notices", () => {
+  test("a notice's plain preview drops Markdown marks and link targets and stays short", () => {
+    expect(
+      teamsPlainPreview("Send **help** or `unlink`.\n\nSee [the guide](https://example.test/g)."),
+    ).toBe("Send help or unlink. See the guide.");
+    const long = teamsPlainPreview("word ".repeat(100), 40);
+    expect(long.length).toBeLessThanOrEqual(40);
+    expect(long.endsWith("…")).toBe(true);
+  });
   test("a notice is a card with its paragraphs and a labelled button, not a bare URL", () => {
     const card = teamsNoticeCard(
       "Started. Follow progress or approve requests in Opengeni.\n\nSend **help** for tips.",
@@ -164,6 +174,7 @@ describe("Teams notices", () => {
       $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
       type: "AdaptiveCard",
       version: "1.2",
+      fallbackText: "Started. Follow progress or approve requests in Opengeni. Send help for tips.",
       body: [
         {
           type: "TextBlock",
@@ -182,6 +193,17 @@ describe("Teams notices", () => {
     });
     expect(JSON.stringify(card.body)).not.toContain("https:");
   });
+  test("a notice card's message carries a plain summary for notifications", () => {
+    const link = { title: "Open in Opengeni", url: "https://app.example.test/s" };
+    const activity = teamsNoticeActivity("Started. Send **help** for tips.", link, "thread-1");
+    expect(activity).toMatchObject({
+      type: "message",
+      summary: "Started. Send help for tips.",
+      replyToId: "thread-1",
+    });
+    expect(activity.attachments[0]!.content.fallbackText).toBe("Started. Send help for tips.");
+    expect(teamsNoticeActivity("Started.", link, null)).not.toHaveProperty("replyToId");
+  });
 });
 
 describe("Teams messages the bot can't read", () => {
@@ -198,7 +220,7 @@ describe("Teams messages the bot can't read", () => {
     text: "Summarize this",
   };
   const image = { contentType: "image/png", contentUrl: "https://example.test/a.png" };
-  test("a 1:1 message with a file or image, or no text, names its sender and chat", () => {
+  test("a 1:1 message with a file or image, or no text, names its sender, chat and activity", () => {
     for (const body of [
       { ...base, attachments: [image] },
       { ...base, text: "  " },
@@ -209,6 +231,7 @@ describe("Teams messages the bot can't read", () => {
         conversationId: "a:personal",
         serviceUrl: "https://smba.trafficmanager.net/emea/",
         botId: "28:bot",
+        eventId: "message-1",
         personal: true,
         threadId: null,
       });

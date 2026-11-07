@@ -255,6 +255,8 @@ export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
     $schema: "http://adaptivecards.io/schemas/adaptive-card.json" as const,
     type: "AdaptiveCard" as const,
     version: "1.2" as const,
+    // Shown where the card can't be, such as some notifications and clients.
+    fallbackText: teamsPlainPreview(text),
     body: text
       .split(/\n{2,}/)
       .map((paragraph) => paragraph.trim())
@@ -262,6 +264,20 @@ export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
       .map((paragraph) => ({ type: "TextBlock" as const, text: paragraph, wrap: true })),
     actions: [{ type: "Action.OpenUrl" as const, title: link.title, url: link.url }],
   };
+}
+
+/**
+ * A short plain-text preview of an Opengeni notice, for notifications and
+ * clients that don't show cards: Markdown emphasis, code marks and link
+ * targets removed, whitespace collapsed, at most `max` characters.
+ */
+export function teamsPlainPreview(text: string, max = 200): string {
+  const plain = text
+    .replace(/\[([^\]\n]*)\]\([^)\s]*\)/g, "$1")
+    .replace(/(\*\*|__|`)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain.length > max ? `${plain.slice(0, max - 1).trimEnd()}…` : plain;
 }
 
 /** A stable UUID for a provider event, so a redelivered event is the same request. */
