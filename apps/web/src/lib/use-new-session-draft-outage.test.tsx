@@ -354,6 +354,162 @@ describe("useNewSessionDraft during a brief outage", () => {
     await hook.unmount();
   });
 
+  test.each([
+    { failingReads: 1, follows: true },
+    { failingReads: 2, follows: false },
+  ])(
+    "an emptied form whose post-Send read failed never autosaves over the kept draft (%o)",
+    async ({ failingReads, follows }) => {
+      const saves: [number, string][] = [];
+      let stored = remote(1, { text: "" });
+      let failReads = 0;
+      const hook = await renderDraft({
+        getNewSessionDraft: async () => {
+          if (failReads > 0) {
+            failReads -= 1;
+            // A refusal that is not retried, unlike an outage.
+            throw new OpenGeniApiError(400, JSON.stringify({ code: "BAD_REQUEST", message: "no" }));
+          }
+          return stored;
+        },
+        saveNewSessionDraft: async (_workspace, request) => {
+          saves.push([request.expectedRevision, request.text]);
+          if (request.expectedRevision !== stored.revision) {
+            // As the server answers: the refusal names the current revision.
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({
+                code: "NEW_SESSION_DRAFT_CONFLICT",
+                message: "changed",
+                currentRevision: stored.revision,
+              }),
+            );
+          }
+          stored = remote(stored.revision + 1, request);
+          return stored;
+        },
+        getFile: async () => {
+          throw new Error("unused");
+        },
+      });
+      await settle();
+      await actRun(() => hook.result.current.setValue(editable({ text: "hi" })));
+      const flushed = await actRun(() =>
+        hook.result.current.draft.flushForSend(editable({ text: "hi" })),
+      );
+      // The create kept the laptop's newer draft, and the post-Send read fails.
+      stored = remote(4, { text: "typed on my laptop" });
+      failReads = failingReads;
+      // The acknowledgement fails, then the box empties as it does on mobile.
+      await actRun(async () => {
+        await hook.result.current.draft.acknowledgeConsumed(flushed!).catch(() => null);
+      });
+      await actRun(() => hook.result.current.setValue(editable()));
+      await settle(1_600);
+
+      expect(saves.filter(([, text]) => text === "").every(([revision]) => revision < 4)).toBe(
+        true,
+      );
+      expect(stored.text).toBe("typed on my laptop");
+      if (follows) {
+        expect(hook.result.current.value.text).toBe("typed on my laptop");
+        expect(hook.result.current.draft.error).toBeNull();
+      } else {
+        // The read that would follow failed too: the form says so.
+        expect(hook.result.current.value.text).toBe("");
+        expect(hook.result.current.draft.error).not.toBeNull();
+      }
+      await hook.unmount();
+    },
+  );
+
+  test("a pick on an emptied form still saves over a newer draft that holds no message", async () => {
+    let stored = remote(1, { text: "" });
+    const hook = await renderDraft({
+      getNewSessionDraft: async () => stored,
+      saveNewSessionDraft: async (_workspace, request) => {
+        if (request.expectedRevision !== stored.revision) {
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({
+              code: "NEW_SESSION_DRAFT_CONFLICT",
+              message: "changed",
+              currentRevision: stored.revision,
+            }),
+          );
+        }
+        stored = remote(stored.revision + 1, request);
+        return stored;
+      },
+      getFile: async () => {
+        throw new Error("unused");
+      },
+    });
+    await settle();
+    // Another device's Send or settings change moved the draft, with no message.
+    stored = remote(2, { model: "other-device-model" });
+    await actRun(() => hook.result.current.setValue(editable({ model: "my-pick" })));
+    await settle(700);
+
+    expect(stored).toMatchObject({ revision: 3, model: "my-pick", text: "" });
+    expect(hook.result.current.value.model).toBe("my-pick");
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("an emptied form never saves over a message a reconnect read did not show", async () => {
+    const saves: [number, string][] = [];
+    let stored = remote(1, { text: "" });
+    let down = false;
+    const hook = await renderDraft({
+      getNewSessionDraft: async () => {
+        if (down) throw databaseUnavailable();
+        return stored;
+      },
+      saveNewSessionDraft: async (_workspace, request) => {
+        saves.push([request.expectedRevision, request.text]);
+        if (down) throw databaseUnavailable("PUT");
+        if (request.expectedRevision !== stored.revision) {
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({
+              code: "NEW_SESSION_DRAFT_CONFLICT",
+              message: "changed",
+              currentRevision: stored.revision,
+            }),
+          );
+        }
+        stored = remote(stored.revision + 1, request);
+        return stored;
+      },
+      getFile: async () => {
+        throw new Error("unused");
+      },
+    });
+    await settle();
+    await actRun(() => hook.result.current.setValue(editable({ text: "hi" })));
+    const flushed = await actRun(() =>
+      hook.result.current.draft.flushForSend(editable({ text: "hi" })),
+    );
+    // The create kept the laptop's newer draft; the post-Send read meets an outage.
+    stored = remote(4, { text: "typed on my laptop" });
+    down = true;
+    await actRun(async () => {
+      await hook.result.current.draft.acknowledgeConsumed(flushed!).catch(() => null);
+    });
+    await actRun(() => hook.result.current.setValue(editable()));
+    await settle(700);
+    down = false;
+    await settle(200);
+    // A pick on the emptied box after the reconnect.
+    await actRun(() => hook.result.current.setValue(editable({ text: "", model: "picked-model" })));
+    await settle(1_000);
+
+    expect(saves.filter(([revision, text]) => revision >= 4 && text === "")).toEqual([]);
+    expect(stored.text).toBe("typed on my laptop");
+    await hook.unmount();
+  });
+
   test("a Send after the post-Send save met another device's draft never saves over it", async () => {
     const saves: [number, string][] = [];
     let stored = remote(1, { text: "" });
