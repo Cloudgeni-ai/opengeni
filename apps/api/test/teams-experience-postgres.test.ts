@@ -1124,3 +1124,92 @@ test("a reply Teams refuses gives back the person's and tenant's count once, and
     ]),
   );
 });
+
+test("a reply the bot sends itself goes out once when Teams redelivers the message, and again only if Teams refused it", async () => {
+  const f = await fixture();
+  const other = f.replica();
+  const stranger = crypto.randomUUID();
+  // help, from the person and redelivered to another replica: one reply.
+  const help = f.message("help", stranger);
+  await f.handle(help);
+  await other(help);
+  expect(f.calls).toHaveLength(1);
+  // An unlinked person's link card: one card.
+  const hello = f.message("hello", stranger);
+  await f.handle(hello);
+  await other(hello);
+  await f.handle(hello);
+  expect(f.calls).toHaveLength(2);
+  expect((cardActions(f.calls[1]!.activity)[0] as { title: string }).title).toBe("Link account");
+  // A message with only an image: one notice.
+  const image = f.message("", stranger, {
+    attachments: [{ contentType: "image/png", contentUrl: "https://example.test/a.png" }],
+  });
+  await f.handle(image);
+  await other(image);
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls[2]!.activity.text).toBe(TEAMS_UNREADABLE_MESSAGE_TEXT);
+  // Teams refuses the reply (throttling): the activity fails, and its
+  // redelivery is answered.
+  const again = f.message("help", stranger);
+  f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
+  await expect(f.handle(again)).rejects.toThrow("throttled");
+  expect(f.calls).toHaveLength(3);
+  await other(again);
+  expect(f.calls).toHaveLength(4);
+  expect(f.calls[3]!.activity.text).toContain("**Opengeni help**");
+  // A different message is answered as usual.
+  await f.handle(f.message("help", stranger));
+  expect(f.calls).toHaveLength(5);
+  expect(f.outcomes.filter((outcome) => outcome === "reply_duplicate")).toHaveLength(4);
+  // Only content-free claims are stored.
+  const claims = await shared.admin<Array<{ scope_hash: string }>>`
+    select scope_hash from teams_bot_reply_claims`;
+  for (const row of claims) expect(row.scope_hash).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(claims)).not.toContain(stranger);
+});
+
+test("a reply claim is written only when a reply goes out, and a refused reply a helper absorbs is given back", async () => {
+  const f = await fixture();
+  const other = f.replica();
+  const claims = async () =>
+    (
+      await shared.admin<
+        Array<{ n: number }>
+      >`select count(*)::int as n from teams_bot_reply_claims`
+    )[0]!.n;
+  const before = await claims();
+  // A tenant that isn't admitted gets no reply, so nothing is claimed.
+  const outsider = crypto.randomUUID();
+  const elsewhere = f.message("help", crypto.randomUUID(), {
+    conversation: { id: "a:outsider", conversationType: "personal", tenantId: outsider },
+    channelData: { tenant: { id: outsider } },
+  });
+  await f.handle(elsewhere);
+  expect(f.calls).toHaveLength(0);
+  expect(await claims()).toBe(before);
+  // Teams throttles the reply to an image-only message; the reply helper
+  // absorbs the failure, but the claim is still given back, so the
+  // redelivery answers.
+  const stranger = crypto.randomUUID();
+  const image = f.message("", stranger, {
+    attachments: [{ contentType: "image/png", contentUrl: "https://example.test/a.png" }],
+  });
+  f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
+  expect(await f.handle(image)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(0);
+  expect(await claims()).toBe(before);
+  await other(image);
+  expect(f.calls).toHaveLength(1);
+  expect(f.calls[0]!.activity.text).toBe(TEAMS_UNREADABLE_MESSAGE_TEXT);
+  // A linked person who can't start chats is told once.
+  await shared.admin`update workspace_memberships set permissions = '["workspace:read", "sessions:read"]'::jsonb where workspace_id=${f.i.workspace_id} and subject_id=${f.subject}`;
+  const plan = f.message("Plan the launch");
+  await f.handle(plan);
+  await other(plan);
+  expect(f.calls.map((call) => call.activity.text)).toEqual([
+    TEAMS_UNREADABLE_MESSAGE_TEXT,
+    TEAMS_CANNOT_START_TEXT,
+  ]);
+  expect(f.outcomes.slice(-2)).toEqual(["sessions_create_denied", "reply_duplicate"]);
+});

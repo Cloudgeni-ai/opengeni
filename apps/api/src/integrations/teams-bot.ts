@@ -29,7 +29,11 @@ import {
   personalWorkspaceClosedToNewWork,
   resolveNamedManagedPersonalWorkspaceGrant,
   getTeamsInstallation,
+  claimTeamsReply,
   claimTeamsWelcome,
+  pruneTeamsReplyClaims,
+  releaseTeamsReply,
+  type TeamsReplyClaim,
   releaseTeamsWelcome,
   pruneTeamsWelcomes,
   invalidateTeamsGroup,
@@ -124,6 +128,7 @@ import {
   teamsMarkdown,
   teamsMarkdownParts,
   teamsNoticeCard,
+  teamsPlainPreview,
   teamsAccountReply,
   teamsNotLinkedReply,
   teamsWelcome,
@@ -204,6 +209,27 @@ function teamsReceipt(response: unknown): string | null {
   return typeof id === "string" && id ? id : null;
 }
 /**
+ * A notice from Opengeni with a link, as a message whose card shows the text
+ * and a button that opens the link. A card has no message text, so the
+ * message carries a plain-text `summary` and the card its `fallbackText`, for
+ * channels and clients that can't show cards.
+ */
+export function teamsNoticeActivity(text: string, link: TeamsNoticeLink, threadId: string | null) {
+  // The SDK's input type omits the Bot Framework `summary` field.
+  const summary: { summary?: string } = { summary: teamsPlainPreview(text) };
+  return {
+    type: "message" as const,
+    ...summary,
+    ...(threadId ? { replyToId: threadId } : {}),
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        content: teamsNoticeCard(text, link),
+      },
+    ],
+  };
+}
+/**
  * Text is Teams Markdown. An agent reply carries Teams' AI label and feedback
  * buttons. A notice with a link goes out as a card whose button opens it.
  */
@@ -217,16 +243,7 @@ async function send(
   const response = await client.conversations.createActivity(
     deliveryConversation(m),
     options.link
-      ? {
-          type: "message",
-          ...(m.threadId ? { replyToId: m.threadId } : {}),
-          attachments: [
-            {
-              contentType: "application/vnd.microsoft.card.adaptive",
-              content: teamsNoticeCard(text, options.link),
-            },
-          ],
-        }
+      ? teamsNoticeActivity(text, options.link, m.threadId)
       : {
           type: "message",
           text,
@@ -499,7 +516,8 @@ async function sendReserved(
     await reply();
   } catch (error) {
     const failure = teamsSendFailure(error);
-    if (failure.refused && !failure.throttled)
+    // A duplicate delivery sent nothing; the first delivery keeps its own count.
+    if (error instanceof TeamsDuplicateReply || (failure.refused && !failure.throttled))
       await reservation.release().catch(() => {
         // The reservation then lapses with its window.
       });
@@ -729,6 +747,113 @@ function teamsSendFailure(error: unknown): {
   if (typeof code !== "string") return { refused: true, retry: false, throttled: false };
   const unsent = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code);
   return { refused: unsent, retry: unsent, throttled: false };
+}
+const DUPLICATE_REPLY = Symbol("duplicate_reply");
+/** Thrown instead of sending when another delivery of the activity already replied. */
+class TeamsDuplicateReply extends Error {
+  constructor() {
+    super("teams_reply_duplicate");
+  }
+}
+type TeamsReplies = {
+  /** Sends through this client claim the activity first. */
+  app: App;
+  /** Runs a reply, returning DUPLICATE_REPLY when another delivery already replied. */
+  once<T>(reply: () => Promise<T>): Promise<T | typeof DUPLICATE_REPLY>;
+  /** Whether a send was skipped because another delivery already replied. */
+  duplicate(): boolean;
+};
+/**
+ * Replies the bot sends itself for one activity (help, link, unlink, the
+ * onboarding, reminder and notice replies) don't go through the inbox, and
+ * Teams redelivers an activity after a slow or failed response, to any
+ * replica. The first send for an activity claims it in the database, so a
+ * redelivery isn't answered twice; later sends for the same delivery reuse the
+ * claim. The claim is taken only when a reply is about to go out, so activities
+ * that get no reply write nothing. When nothing of the delivery reached the
+ * person and Teams clearly refused the send, the claim is given back so a
+ * redelivery can answer. If the claim can't be made, the reply goes out
+ * anyway: a rare repeat is better than silence. Only
+ * `api.fromServiceUrl(...).conversations.createActivity`, the send path of
+ * every reply helper here, is claimed; a helper that sends another way must
+ * be covered here too.
+ */
+function teamsReplies(
+  deps: ApiRouteDeps,
+  app: App,
+  activity: { tenantId: string; conversationId: string; activityId: string },
+): TeamsReplies {
+  let claimed: Promise<TeamsReplyClaim | "unclaimed" | null> | undefined;
+  let sent = false;
+  let duplicate = false;
+  const claim = () =>
+    (claimed ??= claimTeamsReply(deps.db, activity).then(
+      (held) => {
+        if (held)
+          void pruneTeamsReplyClaims(deps.db).catch(() => {
+            // Pruning is housekeeping; the next reply tries again.
+          });
+        return held;
+      },
+      () => "unclaimed" as const,
+    ));
+  const createActivity =
+    (conversations: { createActivity: (...args: never[]) => Promise<unknown> }) =>
+    async (...args: never[]) => {
+      const held = await claim();
+      if (held === null) {
+        duplicate = true;
+        throw new TeamsDuplicateReply();
+      }
+      try {
+        const response = await conversations.createActivity(...args);
+        sent = true;
+        return response;
+      } catch (error) {
+        if (!sent && held !== "unclaimed" && teamsSendFailure(error).refused) {
+          claimed = undefined;
+          await releaseTeamsReply(deps.db, held).catch(() => {
+            // The claim then lapses at the end of its window.
+          });
+        }
+        throw error;
+      }
+    };
+  const bound = <T extends object>(target: T, prop: string | symbol) => {
+    const value = Reflect.get(target, prop) as unknown;
+    return typeof value === "function" ? value.bind(target) : value;
+  };
+  const fromServiceUrl = (...args: Parameters<App["api"]["fromServiceUrl"]>) => {
+    const client = app.api.fromServiceUrl(...args);
+    return new Proxy(client, {
+      get: (target, prop) =>
+        prop === "conversations"
+          ? new Proxy(target.conversations, {
+              get: (conversations, name) =>
+                name === "createActivity"
+                  ? createActivity(conversations as never)
+                  : bound(conversations, name),
+            })
+          : bound(target, prop),
+    });
+  };
+  const api = new Proxy(app.api, {
+    get: (target, prop) => (prop === "fromServiceUrl" ? fromServiceUrl : bound(target, prop)),
+  });
+  return {
+    app: new Proxy(app, {
+      get: (target, prop) => (prop === "api" ? api : bound(target, prop)),
+    }),
+    once: async (reply) => {
+      try {
+        return await reply();
+      } catch (error) {
+        if (error instanceof TeamsDuplicateReply || duplicate) return DUPLICATE_REPLY;
+        throw error;
+      }
+    },
+    duplicate: () => duplicate,
+  };
 }
 /** What an organization that hasn't connected may have been sent. */
 const UNCONNECTED_DELIVERED: ReadonlySet<TeamsUnconnectedOutcome> = new Set([
@@ -1097,19 +1222,32 @@ export async function handleTeamsActivity(
   }
   if (!m) {
     const unreadable = teamsUnreadablePersonalMessage(body);
-    if (unreadable && unreadable.botId.toLowerCase() === botId)
-      observed(await replyToUnreadableMessage(deps, app, unreadable));
+    if (unreadable && unreadable.botId.toLowerCase() === botId) {
+      const replies = teamsReplies(deps, app, { ...unreadable, activityId: unreadable.eventId });
+      const outcome = await replyToUnreadableMessage(deps, replies.app, unreadable);
+      observed(replies.duplicate() ? "reply_duplicate" : outcome);
+    }
     return { status: 200 };
   }
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
     return { status: 200 };
   }
+  // Replies the bot sends itself are sent once per activity.
+  const replies = teamsReplies(deps, app, { ...m, activityId: m.eventId });
+  const { once } = replies;
+  const duplicate = () => {
+    observed("reply_duplicate");
+    return { status: 200 };
+  };
   // The way forward for people whose organization isn't connected yet; never
   // fails the activity.
   const unconnected = async () => {
     try {
-      observed(await replyToUnconnectedTeamsTenant(deps, app, m, "message"));
+      const outcome = await once(() =>
+        replyToUnconnectedTeamsTenant(deps, replies.app, m, "message"),
+      );
+      observed(outcome === DUPLICATE_REPLY ? "reply_duplicate" : outcome);
     } catch {
       observed("onboarding_reply_failed");
     }
@@ -1119,13 +1257,15 @@ export async function handleTeamsActivity(
     return { status: 200 };
   }
   if (!teamsConversationAllowed(deps, m)) {
-    observed(await replyToDisabledConversation(deps, app, m));
+    const outcome = await replyToDisabledConversation(deps, replies.app, m);
+    observed(replies.duplicate() ? "reply_duplicate" : outcome);
     return { status: 200 };
   }
   const i = await getTeamsInstallation(deps.db, m.tenantId);
   const command = teamsCommand(m.text);
   if (command) {
-    const answered = await answerTeamsCommand(deps, app, m, i, command);
+    const answered = await once(() => answerTeamsCommand(deps, replies.app, m, i, command));
+    if (answered === DUPLICATE_REPLY) return duplicate();
     if (answered) {
       observed(answered);
       return { status: 200 };
@@ -1137,21 +1277,26 @@ export async function handleTeamsActivity(
   }
   const grant = await actorGrant(deps, i, m.actorId);
   if (!grant) {
-    // Identity bearers are never sent to channels or shared conversations.
-    if (m.personal) await sendTeamsOnboarding(app, m, "link", proofLink(deps, m, i));
-    else
-      await send(
-        app,
-        m,
-        "Send me a direct message to link your Opengeni account, then mention me here again.",
-      );
+    const sent = await once(async () => {
+      // Identity bearers are never sent to channels or shared conversations.
+      if (m.personal) await sendTeamsOnboarding(replies.app, m, "link", proofLink(deps, m, i));
+      else
+        await send(
+          replies.app,
+          m,
+          "Send me a direct message to link your Opengeni account, then mention me here again.",
+        );
+    });
+    if (sent === DUPLICATE_REPLY) return duplicate();
     return { status: 200 };
   }
   if (!hasPermission(grant.permissions, "sessions:create")) {
     // One person's access is explained only to them.
     try {
-      await send(app, m, m.personal ? TEAMS_CANNOT_START_TEXT : TEAMS_SHARED_CANNOT_START_TEXT);
-      observed("sessions_create_denied");
+      const sent = await once(() =>
+        send(replies.app, m, m.personal ? TEAMS_CANNOT_START_TEXT : TEAMS_SHARED_CANNOT_START_TEXT),
+      );
+      observed(sent === DUPLICATE_REPLY ? "reply_duplicate" : "sessions_create_denied");
     } catch {
       observed("sessions_create_denied_reply_failed");
     }
@@ -1171,11 +1316,14 @@ export async function handleTeamsActivity(
       await invalidateTeamsGroup(deps.db, i, m.conversationId, {
         revision: i.group_revision,
       });
-      await send(
-        app,
-        m,
-        "I couldn’t verify this chat’s access. Everyone needs workspace access and a linked Opengeni account. Message me privately to connect, then @mention me here.",
+      const sent = await once(() =>
+        send(
+          replies.app,
+          m,
+          "I couldn’t verify this chat’s access. Everyone needs workspace access and a linked Opengeni account. Message me privately to connect, then @mention me here.",
+        ),
       );
+      if (sent === DUPLICATE_REPLY) return duplicate();
       return { status: 200 };
     }
   }

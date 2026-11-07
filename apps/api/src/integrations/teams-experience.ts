@@ -255,6 +255,8 @@ export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
     $schema: "http://adaptivecards.io/schemas/adaptive-card.json" as const,
     type: "AdaptiveCard" as const,
     version: "1.2" as const,
+    // Shown by clients that can't render the card.
+    fallbackText: teamsPlainPreview(text),
     body: text
       .split(/\n{2,}/)
       .map((paragraph) => paragraph.trim())
@@ -262,6 +264,27 @@ export function teamsNoticeCard(text: string, link: TeamsNoticeLink) {
       .map((paragraph) => ({ type: "TextBlock" as const, text: paragraph, wrap: true })),
     actions: [{ type: "Action.OpenUrl" as const, title: link.title, url: link.url }],
   };
+}
+
+/**
+ * A short plain-text version of an Opengeni notice, for clients that can't
+ * show cards: headings, strong emphasis, code marks and link targets removed,
+ * whitespace collapsed, at most `max` characters (never splitting one).
+ */
+export function teamsPlainPreview(text: string, max = 200): string {
+  const plain = text
+    .replace(/\[([^\]\n]*)\]\([^)\s]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/(\*\*|__|`)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const chars = Array.from(plain);
+  return chars.length > max
+    ? `${chars
+        .slice(0, max - 1)
+        .join("")
+        .trimEnd()}…`
+    : plain;
 }
 
 /** A stable UUID for a provider event, so a redelivered event is the same request. */

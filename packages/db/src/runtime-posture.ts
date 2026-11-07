@@ -2428,6 +2428,7 @@ export const FORCE_RLS_TABLES = [
   "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
+  "teams_bot_reply_claims",
   "teams_bot_routes",
   "teams_bot_welcomes",
   "temporal_schedule_cleanup_outbox",
@@ -2796,6 +2797,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
+  // 1301_teams_bot_reply_claims: bot-answered activities claimed once across replicas.
+  "teams_bot_reply_claims",
   "teams_bot_routes",
   // 1294_teams_bot_welcomes: install welcomes claimed once across replicas.
   "teams_bot_welcomes",

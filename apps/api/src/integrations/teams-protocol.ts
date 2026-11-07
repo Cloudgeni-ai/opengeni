@@ -227,6 +227,7 @@ export function teamsUnreadablePersonalMessage(raw: unknown): {
   conversationId: string;
   serviceUrl: string;
   botId: string;
+  eventId: string;
   personal: true;
   threadId: null;
 } | null {
@@ -251,6 +252,7 @@ export function teamsUnreadablePersonalMessage(raw: unknown): {
     conversationId: a.conversation.id,
     serviceUrl,
     botId: a.recipient.id,
+    eventId: a.id,
     personal: true,
     threadId: null,
   };
