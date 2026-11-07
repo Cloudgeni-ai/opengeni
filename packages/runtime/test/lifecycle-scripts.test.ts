@@ -2573,6 +2573,126 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("concurrent repository preparations on one box never fail on the global Git config lock", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-concurrent-prepare-"));
+    try {
+      const origin = makeOrigin(root);
+      // One box: every preparation shares HOME and so the global Git config,
+      // the way chats created together share their sandbox.
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const identity = {
+        name: "opengeni[bot]",
+        email: "42+opengeni[bot]@users.noreply.github.com",
+      };
+      const remotes = ["alpha", "beta", "gamma"].map(
+        (name) => `https://github.com/acme/${name}.git`,
+      );
+      const resources = remotes.map((uri, index) => ({
+        kind: "repository" as const,
+        uri,
+        ref: "main",
+        mountPath: `repos/acme/repo-${index}`,
+        githubInstallationId: 42,
+        githubRepositoryId: 100 + index,
+      }));
+      const bindings = [
+        {
+          credentialBindingId: "github-installation:42",
+          provider: "github" as const,
+          token: "app-token",
+          identity,
+        },
+      ];
+      const preparations = 6;
+      const sessions = Array.from({ length: preparations }, (_, index) => {
+        const workspace = join(root, `workspace-${index}`);
+        mkdirSync(workspace, { recursive: true });
+        return (extraEnv: Record<string, string> = {}) =>
+          hostShellSession(home, {
+            cwd: workspace,
+            env: {
+              GIT_TERMINAL_PROMPT: "0",
+              GIT_CONFIG_COUNT: String(remotes.length),
+              ...Object.fromEntries(
+                remotes.flatMap((remote, remoteIndex) => [
+                  [`GIT_CONFIG_KEY_${remoteIndex}`, `url.file://${origin}.insteadOf`],
+                  [`GIT_CONFIG_VALUE_${remoteIndex}`, remote],
+                ]),
+              ),
+              ...extraEnv,
+            },
+            rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+          });
+      });
+
+      // Another writer (the agent's own `git config --global`, say) holds the
+      // global config lock while every preparation starts.
+      const prepareAllWhileLocked = async (extraEnv: Record<string, string> = {}) => {
+        const lockFile = join(home, ".gitconfig.lock");
+        writeFileSync(lockFile, "");
+        const release = setTimeout(() => rmSync(lockFile, { force: true }), 1_500);
+        try {
+          return await Promise.allSettled(
+            sessions.map((session) =>
+              runRepositoryCloneHook(session(extraEnv) as never, resources, {
+                environment: {},
+                gitCredentialBindings: bindings,
+              }),
+            ),
+          );
+        } finally {
+          clearTimeout(release);
+          rmSync(lockFile, { force: true });
+        }
+      };
+      const failures = (results: PromiseSettledResult<void>[]) =>
+        results.flatMap((result) =>
+          result.status === "rejected" ? [String(result.reason).slice(0, 2_000)] : [],
+        );
+
+      // Fresh box: credential helper, broker include and default identity.
+      expect(failures(await prepareAllWhileLocked())).toEqual([]);
+      // Next turn on a box whose folders another user owns: every parallel
+      // clone also trusts its folder in safe.directory.
+      expect(
+        failures(await prepareAllWhileLocked({ GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" })),
+      ).toEqual([]);
+
+      const globalConfig = (...args: string[]) =>
+        execFileSync("git", ["config", "--global", ...args], { env: { HOME: home } })
+          .split("\n")
+          .filter((line, index, lines) => index < lines.length - 1 || line !== "");
+      const helper = join(home, ".opengeni", "git-credentials", "helper");
+      for (let index = 0; index < preparations; index += 1) {
+        for (const resource of resources) {
+          const target = join(root, `workspace-${index}`, resource.mountPath);
+          expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+        }
+      }
+      expect(globalConfig("--get", "user.email")).toEqual([identity.email]);
+      const helpers = globalConfig("--get-all", "credential.helper");
+      const safeDirectories = globalConfig("--get-all", "safe.directory");
+      expect(new Set(safeDirectories).size).toBe(safeDirectories.length);
+      expect(safeDirectories.length).toBeGreaterThanOrEqual(preparations * resources.length);
+      if (Bun.which("flock")) {
+        // Serialised per box: each preparation replaced the helper chain whole.
+        expect(helpers).toEqual(["", helper]);
+        expect(globalConfig("--get-all", "include.path")).toEqual([
+          join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"),
+        ]);
+      } else {
+        // Unserialised (no flock): writes still all land, and the chain after
+        // the last reset is only our helper.
+        const effective = helpers.slice(helpers.lastIndexOf("") + 1);
+        expect(effective.length).toBeGreaterThan(0);
+        expect(new Set(effective)).toEqual(new Set([helper]));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   describe("per-repository commit identity", () => {
     const appRemote = "https://github.com/acme/app-repo.git";
     const personalRemote = "https://github.com/octocat/personal-repo";
