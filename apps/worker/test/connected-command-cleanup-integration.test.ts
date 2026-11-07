@@ -50,6 +50,7 @@ import {
   connectedOutputRetryMs,
   reconcileConnectedMachineBackgroundCommands as reconcile,
   reconcileConnectedCommandOutputReleases as releaseOutput,
+  releaseClaimedConnectedCommandOutput,
 } from "../src/activities/sandbox-lease";
 let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -1270,15 +1271,23 @@ test("uncaptured output stops being retried once its runner can no longer hold i
   // after a week regardless. Captured output and younger output keep retrying.
   const hour = 60 * 60_000;
   const day = 24 * hour;
-  for (const [kind, settledAgoMs, runnerSeen, captured, expired] of [
-    ["sandbox", day + hour, true, false, true],
-    ["sandbox", day + hour, false, false, false],
-    ["sandbox", day - hour, true, false, false],
-    ["sandbox", 8 * day, false, false, true],
-    ["sandbox", 8 * day, true, true, false],
-    ["machine", day + hour, true, false, true],
-    ["machine", day - hour, true, false, false],
-    ["machine", 8 * day, true, true, false],
+  // Last seen relative to the exit: well after it, within the hour after it
+  // (it may have slept with the output), or not since.
+  const seenAfter = 2 * hour;
+  const seenWithinHour = 30 * 60_000;
+  const notSeen = -60_000;
+  for (const [kind, settledAgoMs, seenAtExitPlusMs, captured, expired] of [
+    ["sandbox", day + hour, seenAfter, false, true],
+    ["sandbox", day + hour, notSeen, false, false],
+    ["sandbox", day + hour, seenWithinHour, false, false],
+    ["sandbox", day - hour, seenAfter, false, false],
+    ["sandbox", 8 * day, notSeen, false, true],
+    ["sandbox", 8 * day, seenAfter, true, false],
+    ["machine", day + hour, seenAfter, false, true],
+    ["machine", day + hour, seenWithinHour, false, false],
+    ["machine", day - hour, seenAfter, false, false],
+    ["machine", 8 * day, notSeen, false, true],
+    ["machine", 8 * day, seenAfter, true, false],
   ] as const) {
     const fixture = await terminalOutputFixture({ kind });
     try {
@@ -1289,14 +1298,14 @@ test("uncaptured output stops being retried once its runner can no longer hold i
           exitCode: 0,
         });
       const settledAt = new Date(Date.now() - settledAgoMs);
-      const lastSeenAt = new Date(settledAt.getTime() + (runnerSeen ? 2 * hour : -60_000));
+      const lastSeenAt = new Date(settledAt.getTime() + seenAtExitPlusMs);
       await shared.admin`update session_background_commands set settled_at=${settledAt} where id=${fixture.identity.commandId}`;
       await shared.admin`update enrollments set last_seen_at=${lastSeenAt} where id=${fixture.identity.enrollmentId}`;
       await fixture.due();
       const rpc = kind === "machine" ? noRunnerRpc() : fixture.rpc;
       await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
       const row = await fixture.stored();
-      const label = `${kind} ${settledAgoMs / hour}h seen=${runnerSeen} captured=${captured}`;
+      const label = `${kind} ${settledAgoMs / hour}h seen=${seenAtExitPlusMs / 60_000}m captured=${captured}`;
       expect({ label, claim: row.reconcile_claim_id }).toEqual({ label, claim: null });
       expect(row.output_release_observed_at).toBeNull();
       if (expired) {
@@ -1391,6 +1400,55 @@ test("an inventory runner's output recheck backs off to six hours; a legacy runn
       connectedOutputRetryMs(reaper, { reconcileAttempts: attempts }, 6 * 60 * 60_000),
     ),
   ).toEqual([30_000, 240_000, 3_840_000, 7_680_000, 15_360_000, 21_600_000, 21_600_000]);
+});
+
+test("output whose runner mode cannot be looked up keeps the ordinary retry schedule", async () => {
+  const fixture = await terminalOutputFixture({ kind: "sandbox" });
+  try {
+    await shared.admin`update session_background_commands set reconcile_attempts=20 where id=${fixture.identity.commandId}`;
+    await fixture.due();
+    const [claim] = (
+      await claimConnectedCommandOutputReleases(client.db, {
+        claimId: crypto.randomUUID(),
+        dueBefore: new Date(),
+        limit: 100,
+        claimTtlMs: 60_000,
+      })
+    ).filter((candidate) => candidate.commandId === fixture.identity.commandId);
+    expect(claim?.commandId).toBe(fixture.identity.commandId);
+    // A failed mode lookup resolves to null.
+    const modes = new Map([
+      [
+        JSON.stringify([
+          claim!.controlWorkspaceId,
+          claim!.enrollmentId,
+          claim!.connectionInstanceId,
+        ]),
+        Promise.resolve(null),
+      ],
+    ]);
+    const before = Date.now();
+    await releaseClaimedConnectedCommandOutput(
+      {
+        db: client.db,
+        settings,
+        observability,
+        bus: fixture.outputBus,
+        controlRpc: fixture.rpc,
+        lookups: { runners: new Map(), modes },
+      },
+      claim!,
+    );
+    const row = await fixture.stored();
+    expect(row.last_reconcile_outcome).toBe("output_retry");
+    expect(row.output_unavailable_at).toBeNull();
+    const delay = row.reconcile_after.getTime() - before;
+    expect(delay).toBeGreaterThan(5 * 60_000 - 60_000);
+    expect(delay).toBeLessThan(5 * 60_000 + 60_000);
+    expect(fixture.operations).toEqual([]);
+  } finally {
+    await parkSession(fixture.identity.sessionId);
+  }
 });
 
 test("a retired compute sandbox's output obligation settles once, with no request", async () => {

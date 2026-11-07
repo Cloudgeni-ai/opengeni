@@ -2231,7 +2231,8 @@ export const CONNECTED_OUTPUT_CAPTURE_EXPIRY: ConnectedCommandOutputExpiry = {
 const CONNECTED_OUTPUT_RETRY_MAX_MS = 5 * 60_000;
 /** A runner that reports its own inventory collects its output itself while
  * it talks; the database recheck only notices that it retired or that its
- * output expired, so it backs off further. */
+ * output expired, so it backs off further. A runner whose mode could not be
+ * looked up keeps the ordinary schedule. */
 const CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS = 6 * 60 * 60_000;
 
 export function connectedOutputRetryMs(
@@ -2286,7 +2287,7 @@ export async function releaseClaimedConnectedCommandOutput(
         retryAfterMs: connectedOutputRetryMs(
           settings,
           claim,
-          CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS,
+          mode === null ? CONNECTED_OUTPUT_RETRY_MAX_MS : CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS,
         ),
         uncapturedOutputExpiry: CONNECTED_OUTPUT_CAPTURE_EXPIRY,
       }).catch(() => null);

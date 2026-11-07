@@ -7,4 +7,6 @@ Background maintenance no longer sweeps connected-command output that can never 
 - a day after its command exited, if its runner was seen alive at least an hour after the exit;
 - otherwise, after a week.
 
+A personal Connected Machine used from another workspace only gets the one-week limit, because its last-seen time is not visible from there.
+
 For a runner that reports its own operation inventory, such as a compute sandbox, the database recheck now backs off to once every six hours. That runner still collects its output itself whenever it talks. Captured output, recent output and the legacy Connected Machine retry schedule are unchanged.
