@@ -10632,6 +10632,8 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "agent_run.completed",
   "model.tokens",
   "model.cost",
+  "model.provider_cost",
+  "model.estimated_provider_cost",
   "file.uploaded",
   "file.deleted",
   "document.indexed",
@@ -10651,6 +10653,8 @@ export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
 export type UsageEventType = KnownUsageEventType | (string & {});
 
 export type UsageEvent = {
+  /** Caller attribution only; does not select the payer or workspace. */
+  tenantLabel?: string | undefined;
   id: string;
   workspaceId: string;
   accountId: string;

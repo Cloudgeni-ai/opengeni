@@ -1,3 +1,16 @@
+export type {
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  DecisionQuestion,
+  DecisionResult,
+  DecisionUsage,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionRefusal,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from "@opengeni/contracts";
 /** Backward-compatible non-artifact client surface. */
 export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
 export {

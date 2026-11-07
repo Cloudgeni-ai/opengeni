@@ -1,3 +1,5 @@
+export * from "./model-inference";
+export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";
@@ -5469,6 +5471,8 @@ export const UsageEventType = /* @__PURE__ */ defineSchema(() =>
     "agent_run.completed",
     "model.tokens",
     "model.cost",
+    "model.provider_cost",
+    "model.estimated_provider_cost",
     "file.uploaded",
     "file.deleted",
     "document.indexed",
@@ -5507,6 +5511,8 @@ export const UsageEvent = /* @__PURE__ */ defineSchema(() =>
     recordedAt: primitives.string,
     exportedToBillingAt: primitives.nullableString,
     billingProviderEventId: primitives.nullableString,
+    /** Caller attribution only; does not select the payer or workspace. */
+    tenantLabel: z.string().optional(),
   }),
 );
 export type UsageEvent = z.infer<typeof UsageEvent>;

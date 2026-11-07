@@ -92,6 +92,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/decisions": "workspace:*",
     "@opengeni/interaction": "workspace:*",
+    "@opengeni/jev": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/sdk": "workspace:*",

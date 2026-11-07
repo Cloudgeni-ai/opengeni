@@ -97098,6 +97098,9 @@ function mapGitHubInstallation(
 
 function mapUsageEvent(row: typeof schema.usageEvents.$inferSelect): UsageEvent {
   return {
+    ...(typeof row.initiatorContext?.tenantLabel === "string"
+      ? { tenantLabel: row.initiatorContext.tenantLabel }
+      : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     accountId: row.accountId,

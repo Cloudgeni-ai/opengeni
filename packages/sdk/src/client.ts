@@ -1,5 +1,10 @@
 import { version as sdkVersion } from "../package.json";
 import type {
+  DecisionQuestion,
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+} from "@opengeni/contracts";
+import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   ListBillingCreditNotificationsResponse,
@@ -1521,6 +1526,21 @@ export class OpenGeniClient {
       });
     }
     return body;
+  }
+
+  /** Typed stateless judgments using the deployment's configured decision model. */
+  async decide<Q extends Record<string, DecisionQuestion>>(
+    workspaceId: string,
+    request: ModelDecisionRequest<Q>,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ModelDecisionResponse<Q>> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/decisions`,
+      request,
+      {},
+      options,
+    );
   }
 
   async createSession(

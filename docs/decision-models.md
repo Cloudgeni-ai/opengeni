@@ -6,7 +6,10 @@ the conversational model picker. A model judges common input against named
 `@opengeni/decisions` owns the interface and OpenAI/OpenRouter HTTP adapters.
 `@opengeni/jev` adapts its existing TypeSafe client to that interface.
 
-Two consumers use it:
+Three consumers use it:
+
+- The public [stateless decisions API](model-inference.md) exposes the same typed
+  interface to authorized products, using the deployment's configured model.
 
 - Tool discovery judges a candidate list built from keywords and, when an
   embedding model is configured, meaning, then resolves only exact authorized
