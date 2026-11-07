@@ -169,6 +169,28 @@ describe("persistent stock conversation controller", () => {
       });
     }, 60_000);
 
+    test(`{ goal: false } hides only the goal pill, keeping queue and agents, at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&agents=1&signals=no-goal", async (page) => {
+        await queueChip(page).waitFor();
+        expect(await goalPill(page).count()).toBe(0);
+        expect(await queueChip(page).innerText()).toContain("2");
+        const agents = page.locator('[data-og-session-chrome-signal="agents"]');
+        const activity = page.getByRole("button", { name: "Session activity" });
+        // Narrow rows fold agents behind the Activity button.
+        expect((await agents.count()) + (await activity.count())).toBeGreaterThan(0);
+      });
+    }, 60_000);
+
+    test(`the session row lines up with the composer at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&agents=1", async (page) => {
+        await goalPill(page).waitFor();
+        const row = await page.locator("[data-og-session-chrome]").boundingBox();
+        const composer = await page.locator("[data-og-conversation-composer]").boundingBox();
+        expect(Math.abs(row!.x - composer!.x)).toBeLessThanOrEqual(1);
+        expect(Math.abs(row!.width - composer!.width)).toBeLessThanOrEqual(1);
+      });
+    }, 60_000);
+
     test(`agentSignals off keeps approvals and questions at ${width}px`, async () => {
       await open(width, "scenario=approval&goal=paused&signals=off", async (page) => {
         const approve = page.getByRole("button", { name: "Approve action" });

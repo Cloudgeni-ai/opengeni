@@ -76,6 +76,11 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import {
+  resolveAgentSignals,
+  type AgentSignals,
+  type ResolvedAgentSignals,
+} from "../session-agents-model";
 import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
@@ -223,9 +228,12 @@ export type SessionConversationProps = ClientOverride &
      * Defaults to true. Set `false` for end users to whom a paused goal, a
      * count of helper agents, a running command or a tool step means
      * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
-     * Queued messages, approvals and the agent's questions still show.
+     * Or hide only some of them, for example `{ goal: false }` to drop the
+     * goal pill and keep helper agents and turn-row detail (see
+     * `AgentSignalOptions`). Queued messages, the agent's wait, incoming
+     * updates, approvals and the agent's questions always show.
      */
-    agentSignals?: boolean | undefined;
+    agentSignals?: AgentSignals | undefined;
     /** Localized actions for already-sent user-message disclosure. */
     userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
     loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -412,7 +420,7 @@ function ConversationView({
   realtimeVoiceProps,
   genieLoading,
   modelPickerProps,
-  agentSignals = true,
+  agentSignals,
   userMessageDisclosureLabels,
   loadSkillReview,
   className,
@@ -430,8 +438,8 @@ function ConversationView({
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
   const t = useOpenGeniText();
-  // Without agent signals the chrome keeps only the queue and incoming rows.
-  const hostChrome = agentSignals ? chromeProps : withoutAgentSignals(chromeProps);
+  const signals = resolveAgentSignals(agentSignals);
+  const hostChrome = withoutHiddenSignals(chromeProps, signals);
   const {
     sessionId,
     config,
@@ -722,7 +730,7 @@ function ConversationView({
               events={feed.events}
               items={conversation.timeline}
               turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-              agentSignals={agentSignals}
+              agentSignals={signals.turnDetail}
               renderAuthNeeded={(item) =>
                 timelineProps?.renderAuthNeeded?.(item) ??
                 (item.capability?.id === "api:connected-machine" && computerConnection ? (
@@ -808,7 +816,7 @@ function ConversationView({
                 client={context.client}
                 workspaceId={context.workspaceId}
                 events={feed.events}
-                goal={agentSignals}
+                goal={signals.goal}
                 chrome={
                   terminal
                     ? {
@@ -925,19 +933,30 @@ type ConversationChromeProps = {
   chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
 };
 
-type ConversationChromeExtras = SessionConversationProps["chromeProps"];
+type ConversationChromeExtras = NonNullable<SessionConversationProps["chromeProps"]>;
 
-/** The host's chrome extras without the agents and commands segments. */
-function withoutAgentSignals(chrome: ConversationChromeExtras): ConversationChromeExtras {
-  if (!chrome) return chrome;
+/**
+ * The host's chrome extras without the segments it hides, in the composer's
+ * readable column: the row lines up with the composer in a wide panel.
+ */
+function withoutHiddenSignals(
+  chrome: SessionConversationProps["chromeProps"],
+  signals: ResolvedAgentSignals,
+): ConversationChromeExtras {
   const {
-    agentsPanel: _agentsPanel,
-    agentsSignal: _agentsSignal,
-    commandsPanel: _commandsPanel,
-    commandsCount: _commandsCount,
+    agentsPanel,
+    agentsSignal,
+    commandsPanel,
+    commandsCount,
+    className,
     ...rest
-  } = chrome;
-  return rest;
+  }: ConversationChromeExtras = chrome ?? {};
+  return {
+    ...rest,
+    ...(signals.agents ? { agentsPanel, agentsSignal } : {}),
+    ...(signals.commands ? { commandsPanel, commandsCount } : {}),
+    className: cn("mx-auto max-w-3xl", className),
+  };
 }
 
 /** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */

@@ -573,6 +573,37 @@ test("without agent signals there is no work row under the line", async () => {
   }
 });
 
+test("only agentSignals' turnDetail switch replaces the host's facets with the status", async () => {
+  sequence = 0;
+  const events = [
+    event("user.message", { text: "Update the records." }, null),
+    event("turn.started", {}),
+    event("agent.toolCall.created", { id: "call-1", name: "update_records", arguments: {} }),
+    event("agent.toolCall.output", { id: "call-1", output: "{}" }),
+    event("agent.message.completed", { messageId: "m1", phase: "final", text: "Done." }),
+    event("turn.completed", {}),
+  ];
+  const facets = {
+    replace: [{ id: "records", summarize: () => ({ content: "2 records updated" }) }],
+  };
+  const rowText = async (agentSignals: Parameters<typeof MessageTimeline>[0]["agentSignals"]) => {
+    const view = await renderComponent(
+      <MessageTimeline events={events} facets={facets} agentSignals={agentSignals} />,
+    );
+    try {
+      return view.container.textContent ?? "";
+    } finally {
+      await view.unmount();
+    }
+  };
+  expect(await rowText(undefined)).toContain("2 records updated");
+  expect(await rowText({ goal: false, agents: false, commands: false })).toContain(
+    "2 records updated",
+  );
+  expect(await rowText({ turnDetail: false })).not.toContain("2 records updated");
+  expect(await rowText(false)).not.toContain("2 records updated");
+});
+
 test("an ID in what the event says goes with its label, never leaving it dangling", async () => {
   const withId = {
     summary: "Ticket assigned to you",

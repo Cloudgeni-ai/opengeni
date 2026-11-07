@@ -226,6 +226,14 @@ someone else's product with zero styling:
   `OpenGeniChat`). Queued messages, approvals and the agent's questions still
   show, and the goal is not read at all. Turn rows then show only their status,
   and an automation run shows as its one line and its answer.
+  To hide only some of it, pass an object of switches, each `true` unless set:
+  `agentSignals={{ goal: false }}` drops the goal pill and keeps queued
+  messages, helper agents and turn-row detail (your `turnSummary` facets and
+  the live step). The switches are `goal`, `agents`, `commands` and
+  `turnDetail`.
+- **The session row lines up with the composer**: queue, wait, goal and agents
+  chips sit in the composer's readable column in a wide panel; a
+  `chromeProps.className` is added to that row and isn't needed to center it.
 - **Automation runs read as what happened**: a run shows one line, the
   automation's name and what the event that started it says, never its
   instructions. A run whose answer is exactly `NO_REPLY` (nothing for the

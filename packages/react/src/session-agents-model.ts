@@ -5,6 +5,50 @@ import { sessionAdmissionBlocked } from "./session-status-model";
 /* Renderer-neutral session chrome signals shared by the web dock and native
    apps: the sub-agents chip and the goal chip. */
 
+/**
+ * Which parts of how the agent works a conversation shows. Every switch
+ * defaults to `true`; set one to `false` to hide only that part. As an
+ * `agentSignals` value, `true` shows all of them and `false` hides all of them.
+ */
+export type AgentSignalOptions = {
+  /** The goal pill above the composer (for example "Goal · Paused · agent"). */
+  goal?: boolean | undefined;
+  /** The helper agents segment above the composer. */
+  agents?: boolean | undefined;
+  /** The running commands segment above the composer. */
+  commands?: boolean | undefined;
+  /**
+   * Detail on each turn row: the live step under it and its step facets
+   * (a host's `turnSummary` facets included), and an automation run's work.
+   * Off, a row reads only its status ("Working · 8s", "Worked for 8s") and an
+   * automation run shows as its one line and its answer.
+   */
+  turnDetail?: boolean | undefined;
+};
+
+/** `agentSignals`: `true` (the default) shows everything, `false` hides everything. */
+export type AgentSignals = boolean | AgentSignalOptions;
+
+export type ResolvedAgentSignals = {
+  goal: boolean;
+  agents: boolean;
+  commands: boolean;
+  turnDetail: boolean;
+};
+
+/** Each switch of an `agentSignals` value, with omitted ones shown. */
+export function resolveAgentSignals(signals: AgentSignals | undefined): ResolvedAgentSignals {
+  if (typeof signals === "boolean") {
+    return { goal: signals, agents: signals, commands: signals, turnDetail: signals };
+  }
+  return {
+    goal: signals?.goal !== false,
+    agents: signals?.agents !== false,
+    commands: signals?.commands !== false,
+    turnDetail: signals?.turnDetail !== false,
+  };
+}
+
 export type SessionAgentsSignal = {
   count: number;
   detail: string;

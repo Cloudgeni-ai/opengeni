@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ComponentProps } from "react";
 import {
   MessageTimeline,
   TurnSummary,
@@ -282,6 +283,36 @@ describe("TurnSummary facets", () => {
 
     expect(summaryText(rendered.container)).toBe("1 memory saved");
     await rendered.unmount();
+  });
+
+  test("only agentSignals' turnDetail switch replaces the host's facets with the status", async () => {
+    const items: TimelineItem[] = [
+      toolCall("1", "exec_command"),
+      {
+        kind: "turn-end",
+        id: "end-1",
+        turnId: "turn-1",
+        outcome: "complete",
+        failureText: null,
+        occurredAt: new Date(1_500).toISOString(),
+      },
+    ];
+    const facets: TurnSummaryFacetConfiguration = {
+      replace: [customFacet("records", "2 records updated")],
+    };
+    const rowFor = async (agentSignals: ComponentProps<typeof MessageTimeline>["agentSignals"]) => {
+      const rendered = await renderComponent(
+        <MessageTimeline items={items} turnSummary={{ facets }} agentSignals={agentSignals} />,
+      );
+      await flush();
+      const text = summaryText(rendered.container);
+      await rendered.unmount();
+      return text;
+    };
+    expect(await rowFor(undefined)).toBe("2 records updated");
+    expect(await rowFor({ goal: false, agents: false, commands: false })).toBe("2 records updated");
+    expect(await rowFor({ turnDetail: false })).not.toContain("2 records updated");
+    expect(await rowFor(false)).not.toContain("2 records updated");
   });
 });
 

@@ -16,7 +16,9 @@
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
    messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
    `&signals=off` mounts it with `agentSignals: false`, as a product for end
-   users would. `&mark=1` leads the live turn row with a host mark
+   users would; `&signals=no-goal` hides only the goal (`{ goal: false }`).
+   `&agents=1` makes the host pass two helper agents in `chromeProps`.
+   `&mark=1` leads the live turn row with a host mark
    (`turnSummary.renderLiveMark`). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
@@ -43,7 +45,24 @@ const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
 const pausedGoal = params.get("goal") === "paused";
-const agentSignals = params.get("signals") !== "off";
+const signalsParam = params.get("signals");
+const agentSignals =
+  signalsParam === "off" ? false : signalsParam === "no-goal" ? { goal: false } : true;
+// A host that shows the chat's helper agents above the composer.
+const hostAgents =
+  params.get("agents") === "1"
+    ? {
+        chromeProps: {
+          agentsSignal: { count: 2, detail: "1 running", tone: "running" as const },
+          agentsPanel: (
+            <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
+              <li>Check the payment provider's log · running</li>
+              <li>Draft the refund note · done</li>
+            </ul>
+          ),
+        },
+      }
+    : {};
 const liveMark = params.get("mark") === "1";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
@@ -722,6 +741,7 @@ function HostApp() {
               defaultSessionId={scenario === "empty" ? null : SELECTED}
               conversationProps={{
                 agentSignals,
+                ...hostAgents,
                 ...(liveMark
                   ? {
                       timelineProps: {
