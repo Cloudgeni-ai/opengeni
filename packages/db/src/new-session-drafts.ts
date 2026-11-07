@@ -1,4 +1,5 @@
 import {
+  type CreateSessionRequest,
   NewSessionDraftOptions,
   type NewSessionDraftOptions as NewSessionDraftOptionsValue,
   type NewSessionSelectionHistory,
@@ -176,6 +177,61 @@ export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessio
   delete options.selectionHistory;
   delete options.selectedProjectChannelId;
   return options;
+}
+
+/** Every create option a new-session draft can hold, from the contract itself. */
+export const NEW_SESSION_DRAFT_OPTION_KEYS = Object.keys(
+  NewSessionDraftOptions.shape,
+) as readonly (keyof NewSessionDraftOptionsValue)[];
+
+// The fence reads each draft option from the create field of the same name. A
+// draft option the create request cannot carry would make every Send conflict,
+// so it must not compile.
+const draftOptionsAreCreateFields: [
+  Exclude<keyof NewSessionDraftOptionsValue, keyof CreateSessionRequest>,
+] extends [never]
+  ? true
+  : never = true;
+void draftOptionsAreCreateFields;
+// ...and the create field must accept the draft option's value, or a draft
+// option whose create field later changed shape would conflict on every Send.
+type DraftOptionsCreateFieldsDisagree = {
+  [K in keyof NewSessionDraftOptionsValue]-?: [
+    NonNullable<NewSessionDraftOptionsValue[K]>,
+  ] extends [NonNullable<CreateSessionRequest[K & keyof CreateSessionRequest]>]
+    ? never
+    : K;
+}[keyof NewSessionDraftOptionsValue];
+const draftOptionValuesAreCreateValues: [DraftOptionsCreateFieldsDisagree] extends [never]
+  ? true
+  : never = true;
+void draftOptionValuesAreCreateValues;
+
+/**
+ * The form both sides of the exact-draft fence compare. It holds exactly the
+ * contract's draft option keys, read from the saved options or from a create
+ * request alike, so a new draft option is compared without a hand-written
+ * list. Absent, null and empty-object values (an Agent learning override with
+ * nothing overridden) all mean "not set"; arrays are kept even when empty,
+ * because an empty list is a deliberate choice.
+ */
+export function comparableNewSessionDraftOptions(
+  source: Partial<Record<keyof NewSessionDraftOptionsValue, unknown>>,
+): NewSessionDraftOptionsValue {
+  const comparable: Record<string, unknown> = {};
+  for (const key of NEW_SESSION_DRAFT_OPTION_KEYS) {
+    const value = source[key];
+    if (value === undefined || value === null) continue;
+    if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.values(value).every((entry) => entry === undefined)
+    ) {
+      continue;
+    }
+    comparable[key] = value;
+  }
+  return comparable as NewSessionDraftOptionsValue;
 }
 
 function projectComputeMatches(
@@ -563,8 +619,12 @@ async function lockExactNewSessionDraft(
       model: current.model,
       reasoningEffort: current.reasoningEffort,
       latencyMode: current.latencyMode,
-      options,
-    }) !== stableJson(input.expectedSnapshot)
+      options: comparableNewSessionDraftOptions(options),
+    }) !==
+    stableJson({
+      ...input.expectedSnapshot,
+      options: comparableNewSessionDraftOptions(input.expectedSnapshot.options),
+    })
   ) {
     throw new NewSessionDraftConflictError(current.revision);
   }
