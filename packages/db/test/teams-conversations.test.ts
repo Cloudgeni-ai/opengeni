@@ -21,7 +21,12 @@ import {
   claimTeamsWelcome,
   releaseTeamsWelcome,
   pruneTeamsWelcomes,
+  reserveTeamsOnboardingReply,
+  releaseTeamsOnboardingReply,
+  pruneTeamsOnboardingLimits,
+  type TeamsOnboardingWindow,
 } from "../src";
+import { createHash } from "node:crypto";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 beforeAll(async () => {
@@ -289,5 +294,105 @@ test("a welcome is claimed once per window across connections, and only its own 
     ).toBe(0);
   } finally {
     await other.close();
+  }
+});
+test("onboarding reply limits are shared across connections, all or nothing, and released only by their owner", async () => {
+  const id = crypto.randomUUID();
+  const person: TeamsOnboardingWindow = {
+    key: `${id}:person`,
+    spanMs: 24 * 60 * 60_000,
+    max: 2,
+    cooldownMs: 60_000,
+  };
+  const tenant: TeamsOnboardingWindow = { key: `${id}:tenant`, spanMs: 24 * 60 * 60_000, max: 3 };
+  const other = createDb(shared!.appUrl);
+  const hash = (key: string) => createHash("sha256").update(key).digest("hex");
+  const count = async (window: TeamsOnboardingWindow) =>
+    (
+      await shared!
+        .admin`select count from teams_bot_onboarding_limits where scope_hash=${hash(window.key)}`
+    )[0]?.count;
+  try {
+    // Replicas racing for one person's reply: exactly one reservation.
+    const raced = await Promise.all([
+      reserveTeamsOnboardingReply(client!.db, [person, tenant]),
+      reserveTeamsOnboardingReply(other.db, [tenant, person]),
+      reserveTeamsOnboardingReply(client!.db, [person, tenant]),
+    ]);
+    const granted = raced.filter((grant) => grant !== null);
+    expect(granted).toHaveLength(1);
+    expect(await count(person)).toBe(1);
+    expect(await count(tenant)).toBe(1);
+    // A refused reservation counts nowhere.
+    expect(await reserveTeamsOnboardingReply(other.db, [person, tenant])).toBeNull();
+    expect(await count(tenant)).toBe(1);
+    // Released by the person, the reservation is usable again at once.
+    await releaseTeamsOnboardingReply(other.db, granted[0]!, person, [tenant]);
+    expect(await count(person)).toBe(0);
+    expect(await count(tenant)).toBe(0);
+    const regranted = await reserveTeamsOnboardingReply(client!.db, [person, tenant]);
+    expect(regranted).not.toBeNull();
+    // Someone who holds no reservation gives nothing back.
+    const stranger = { ...person, key: `${id}:stranger` };
+    await releaseTeamsOnboardingReply(client!.db, regranted!, stranger, [tenant]);
+    expect(await count(tenant)).toBe(1);
+    // After the cooldown the person may have a second reply, and then reaches the cap.
+    await shared!
+      .admin`update teams_bot_onboarding_limits set last_at=now()-interval '2 minutes' where scope_hash=${hash(person.key)}`;
+    expect(await reserveTeamsOnboardingReply(client!.db, [person, tenant])).not.toBeNull();
+    await shared!
+      .admin`update teams_bot_onboarding_limits set last_at=now()-interval '2 minutes' where scope_hash=${hash(person.key)}`;
+    expect(await reserveTeamsOnboardingReply(client!.db, [person, tenant])).toBeNull();
+    // A new window starts the count again.
+    await shared!
+      .admin`update teams_bot_onboarding_limits set window_start=now()-interval '25 hours',last_at=now()-interval '25 hours' where scope_hash in (${hash(person.key)},${hash(tenant.key)})`;
+    expect(await reserveTeamsOnboardingReply(other.db, [person, tenant])).not.toBeNull();
+    expect(await count(person)).toBe(1);
+    // Rows whose windows ended days ago are removed; current ones stay.
+    await shared!
+      .admin`update teams_bot_onboarding_limits set window_start=now()-interval '3 days',last_at=now()-interval '3 days' where scope_hash=${hash(stranger.key)}`;
+    await reserveTeamsOnboardingReply(client!.db, [stranger]);
+    await shared!
+      .admin`update teams_bot_onboarding_limits set window_start=now()-interval '3 days',last_at=now()-interval '3 days' where scope_hash=${hash(stranger.key)}`;
+    expect(await pruneTeamsOnboardingLimits(client!.db)).toBeGreaterThanOrEqual(1);
+    expect(await count(stranger)).toBeUndefined();
+    expect(await count(person)).toBe(1);
+  } finally {
+    await other.close();
+  }
+});
+test("onboarding reservations for different people sharing tenant and overall rows don't refuse each other", async () => {
+  const id = crypto.randomUUID();
+  const day = 24 * 60 * 60_000;
+  const others = [createDb(shared!.appUrl), createDb(shared!.appUrl), createDb(shared!.appUrl)];
+  const hash = (key: string) => createHash("sha256").update(key).digest("hex");
+  try {
+    const dbs = [client!.db, ...others.map((other) => other.db)];
+    const people = Array.from({ length: 40 }, (_, n) => n);
+    const granted = await Promise.all(
+      people.map((n) =>
+        reserveTeamsOnboardingReply(dbs[n % dbs.length]!, [
+          { key: `${id}:person:${n}`, spanMs: day, max: 1, cooldownMs: 60_000 },
+          { key: `${id}:tenant`, spanMs: day, max: 1_000 },
+          { key: `${id}:overall`, spanMs: 60 * 60_000, max: 1_000 },
+        ]),
+      ),
+    );
+    expect(granted.filter((grant) => grant !== null)).toHaveLength(40);
+    const [tenant] = await shared!
+      .admin`select count from teams_bot_onboarding_limits where scope_hash=${hash(`${id}:tenant`)}`;
+    expect(tenant!.count).toBe(40);
+    // A tenant cap is never exceeded under the same race.
+    const capped = await Promise.all(
+      people.map((n) =>
+        reserveTeamsOnboardingReply(dbs[n % dbs.length]!, [
+          { key: `${id}:capped-person:${n}`, spanMs: day, max: 1 },
+          { key: `${id}:capped-tenant`, spanMs: day, max: 7 },
+        ]),
+      ),
+    );
+    expect(capped.filter((grant) => grant !== null)).toHaveLength(7);
+  } finally {
+    await Promise.all(others.map((other) => other.close()));
   }
 });

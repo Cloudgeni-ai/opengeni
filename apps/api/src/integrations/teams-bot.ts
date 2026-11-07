@@ -76,6 +76,7 @@ import {
   teamsThreadlessConversationId,
   normalizeTeamsFeedback,
   teamsPersonalInstall,
+  teamsUnreadablePersonalMessage,
   teamsRouteId,
   mintTeamsProof,
   verifyTeamsProof,
@@ -104,10 +105,18 @@ import {
 } from "./teams-admin-proof";
 import {
   createTeamsOnboardingBudgets,
-  type TeamsOnboardingLimiter,
   type TeamsOnboardingBudgets,
+  type TeamsOnboardingReservation,
 } from "./teams-onboarding-limit";
 import {
+  TEAMS_CANNOT_START_TEXT,
+  TEAMS_SHARED_CANNOT_START_TEXT,
+  TEAMS_UNREADABLE_MESSAGE_TEXT,
+  TEAMS_CONNECT_REMINDER_TEXT,
+  TEAMS_CONNECT_TEXT,
+  TEAMS_CONVERSATION_OFF_TEXT,
+  TEAMS_SHARED_CONNECT_TEXT,
+  TEAMS_WORK_ACCOUNT_TEXT,
   teamsAiGeneratedEntity,
   teamsCommand,
   teamsEventUuid,
@@ -116,6 +125,7 @@ import {
   teamsMarkdownParts,
   teamsNoticeCard,
   teamsAccountReply,
+  teamsNotLinkedReply,
   teamsWelcome,
   type TeamsCommand,
   type TeamsExperienceReply,
@@ -291,16 +301,19 @@ export async function sendTeamsReply(
 const ONBOARDING_TEXT = {
   setup: "Connect Teams to your Opengeni workspace.",
   link: "Link your Opengeni account to use this bot.",
-  connect:
-    "Welcome to Opengeni. Your organization hasn't connected Opengeni yet. A Microsoft 365 Global Administrator or Teams Administrator connects it once for everyone. If that's you, select Connect your organization. Otherwise, ask your admin to message Opengeni in Teams and connect it.",
+  connect: `Welcome to Opengeni. ${TEAMS_CONNECT_TEXT}`,
 } as const;
 const ONBOARDING_ACTION = {
   setup: "Connect Teams",
   link: "Link account",
   connect: "Connect your organization",
 } as const;
-export const TEAMS_TENANT_UNAVAILABLE_TEXT =
-  "Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can contact the Opengeni team to request access.";
+/** The notice for a tenant that isn't admitted, with the operator's support address when set. */
+export function teamsTenantUnavailableText(settings: Pick<Settings, "supportEmail">): string {
+  return settings.supportEmail
+    ? `Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can request access at ${settings.supportEmail}.`
+    : "Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can contact the Opengeni team to request access.";
+}
 export const TEAMS_SETUP_CONFIRMED_TEXT =
   "Opengeni is now connected for your organization. Send me a message to start. Everyone else in your organization links their own Opengeni account the first time they message me.";
 
@@ -343,13 +356,20 @@ export type TeamsUnconnectedOutcome =
   | "tenant_unavailable_notice_sent"
   | "setup_link_sent"
   | "connect_link_sent"
+  | "connect_reminder_sent"
+  | "work_account_notice_sent"
+  | "shared_connect_reminder_sent"
   | "onboarding_reply_limited"
   | "setup_not_permitted";
 
 function onboardingBudgets(deps: ApiRouteDeps): TeamsOnboardingBudgets {
   let budgets = onboardingBudgetsByDeps.get(deps);
   if (!budgets) {
-    budgets = createTeamsOnboardingBudgets();
+    budgets = createTeamsOnboardingBudgets(deps.db, (error) =>
+      deps.observability?.warn("Teams onboarding limits fell back to memory", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
     onboardingBudgetsByDeps.set(deps, budgets);
   }
   return budgets;
@@ -363,38 +383,65 @@ export function teamsSelfServeSetupAvailable(settings: Settings, tenantId: strin
     teamsSelfServeTenantAllowed(tenantId)
   );
 }
+/**
+ * Whether this tenant is a personal Microsoft account's, which can never
+ * connect Opengeni, on a deployment where organizations connect themselves.
+ */
+function teamsWorkAccountRequired(settings: Settings, tenantId: string): boolean {
+  return (
+    settings.teamsBotSelfServeSetupEnabled &&
+    teamsTenantEnabled(settings, tenantId) &&
+    !teamsSelfServeTenantAllowed(tenantId)
+  );
+}
 
 /**
  * The way forward for a person whose Teams organization has no active
  * connection: an operator-approved installer gets the setup link, everyone
  * else gets a welcome with the self-serve Connect your organization link (or a
- * not-available notice when the tenant isn't admitted). Only 1:1 chats get a
- * reply, and replies are bounded per person, per tenant and per process, so a
- * tenant can't make the bot answer every message forever. Installing the app
- * (`source` "install") gets at most a welcome, from its own smaller budget, and
- * never a not-available notice. The operator setup link, which skips the
- * Microsoft sign-in, only answers a person's own authenticated 1:1 message:
- * an install event's sender needn't be the person whose chat it is.
+ * not-available notice when the tenant isn't admitted, or a work or school
+ * account notice for a personal Microsoft account). Once a person's or
+ * tenant's cards are used up, a short reminder that points to help (which
+ * always answers with the way forward) is sent instead of silence, from its
+ * own larger budget. In a group chat or channel, a mention gets a reminder to
+ * message the bot directly. Replies are bounded per person, per tenant and
+ * across the deployment, so a tenant can't make the bot answer every message
+ * forever. Installing the app (`source` "install") gets at most a welcome,
+ * from its own smaller budget, and never a not-available notice. The operator
+ * setup link, which skips the Microsoft sign-in, only answers a person's own
+ * authenticated 1:1 message: an install event's sender needn't be the person
+ * whose chat it is.
  */
 export async function replyToUnconnectedTeamsTenant(
   deps: ApiRouteDeps,
   app: App,
-  m: TeamsPersonalContact & Pick<TeamsMessage, "botId">,
+  m: TeamsPersonalContact & Pick<TeamsMessage, "botId"> & { threadId?: string | null },
   source: "message" | "install" = "message",
   budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
 ): Promise<TeamsUnconnectedOutcome> {
   const admitted = teamsTenantEnabled(deps.settings, m.tenantId);
-  if (!m.personal) return admitted ? "setup_not_permitted" : "tenant_disabled";
+  if (!m.personal) {
+    if (!admitted) return "tenant_disabled";
+    const reminder =
+      source === "message" && deps.settings.teamsBotSelfServeSetupEnabled
+        ? await budgets.sharedNotice.reserve(m.tenantId, m.actorId)
+        : null;
+    if (!reminder) return "setup_not_permitted";
+    await sendReserved(reminder, () =>
+      send(app, { ...m, threadId: m.threadId ?? null }, TEAMS_SHARED_CONNECT_TEXT),
+    );
+    return "shared_connect_reminder_sent";
+  }
   if (!admitted) {
-    if (
-      source === "install" ||
-      !deps.settings.teamsBotSelfServeSetupEnabled ||
-      !teamsBotConfigured(deps.settings) ||
-      !budgets.unavailableNotice.tryReserve(m.tenantId, m.actorId)
-    )
-      return "tenant_disabled";
-    await sendReserved(budgets.unavailableNotice, m, () =>
-      send(app, { ...m, threadId: null }, TEAMS_TENANT_UNAVAILABLE_TEXT),
+    const notice =
+      source === "message" &&
+      deps.settings.teamsBotSelfServeSetupEnabled &&
+      teamsBotConfigured(deps.settings)
+        ? await budgets.unavailableNotice.reserve(m.tenantId, m.actorId)
+        : null;
+    if (!notice) return "tenant_disabled";
+    await sendReserved(notice, () =>
+      send(app, { ...m, threadId: null }, teamsTenantUnavailableText(deps.settings)),
     );
     return "tenant_unavailable_notice_sent";
   }
@@ -405,27 +452,57 @@ export async function replyToUnconnectedTeamsTenant(
     await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
     return "setup_link_sent";
   }
-  if (!teamsSelfServeSetupAvailable(deps.settings, m.tenantId)) return "setup_not_permitted";
+  const personal = { ...m, threadId: null };
   const budget = source === "install" ? budgets.installWelcome : budgets.connect;
-  if (!budget.tryReserve(m.tenantId, m.actorId)) return "onboarding_reply_limited";
-  await sendReserved(budget, m, () =>
-    sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null)),
+  if (teamsWorkAccountRequired(deps.settings, m.tenantId)) {
+    // Short text either way, so a used-up budget falls back to the reminders'.
+    const granted =
+      (await budget.reserve(m.tenantId, m.actorId)) ??
+      (await budgets.reminder.reserve(m.tenantId, m.actorId));
+    if (!granted) return "onboarding_reply_limited";
+    await sendReserved(granted, () => send(app, personal, TEAMS_WORK_ACCOUNT_TEXT));
+    return "work_account_notice_sent";
+  }
+  if (!teamsSelfServeSetupAvailable(deps.settings, m.tenantId)) return "setup_not_permitted";
+  const card = await budget.reserve(m.tenantId, m.actorId);
+  if (card) {
+    await sendReserved(card, () =>
+      sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null)),
+    );
+    return "connect_link_sent";
+  }
+  const reminder = await budgets.reminder.reserve(m.tenantId, m.actorId);
+  if (!reminder) return "onboarding_reply_limited";
+  await sendReserved(reminder, () =>
+    send(
+      app,
+      personal,
+      source === "install"
+        ? `Welcome to Opengeni. ${TEAMS_CONNECT_REMINDER_TEXT}`
+        : TEAMS_CONNECT_REMINDER_TEXT,
+    ),
   );
-  return "connect_link_sent";
+  return "connect_reminder_sent";
 }
 /**
- * Sends a reply reserved from `budget`, giving the reservation back when Teams
- * clearly never received it, so a redelivery can still answer.
+ * Sends a reserved reply, giving the reservation back when Teams clearly
+ * refused it, so a redelivery can still answer. A throttled reply keeps its
+ * count: Teams throttles per conversation, so a person flooding their own chat
+ * could otherwise retry without limit and use up the shared budgets. Their own
+ * caps bound those retries, and a redelivery falls back to the short reminder.
  */
 async function sendReserved(
-  budget: TeamsOnboardingLimiter,
-  m: Pick<TeamsMessage, "tenantId" | "actorId">,
+  reservation: TeamsOnboardingReservation,
   reply: () => Promise<unknown>,
 ): Promise<void> {
   try {
     await reply();
   } catch (error) {
-    if (teamsSendFailure(error).refused) budget.release(m.tenantId, m.actorId);
+    const failure = teamsSendFailure(error);
+    if (failure.refused && !failure.throttled)
+      await reservation.release().catch(() => {
+        // The reservation then lapses with its window.
+      });
     throw error;
   }
 }
@@ -550,12 +627,25 @@ function experienceState(
   i: TeamsInstallation | null,
   grant: AccessGrant | null,
   sharedConversations = false,
+  unconnected?: { deps: ApiRouteDeps; tenantId: string },
 ): TeamsExperienceState {
+  const setup =
+    i?.active || !unconnected
+      ? undefined
+      : teamsSelfServeSetupAvailable(unconnected.deps.settings, unconnected.tenantId)
+        ? ("connect" as const)
+        : teamsWorkAccountRequired(unconnected.deps.settings, unconnected.tenantId)
+          ? ("work_account" as const)
+          : undefined;
+  // Only an organization that isn't connected needs somewhere else to turn.
+  const supportEmail = i?.active ? undefined : unconnected?.deps.settings.supportEmail;
   return {
     personal,
     installation: i?.active ? "active" : "unavailable",
     linked: Boolean(grant),
     sharedConversations,
+    ...(setup ? { setup } : {}),
+    ...(supportEmail ? { supportEmail } : {}),
   };
 }
 /** Whether any group chat or channel of this tenant is on the allowlists. */
@@ -592,7 +682,9 @@ async function welcomeTeamsInstall(
   try {
     result = await sendTeamsInstallWelcome(deps, app, install, attempt);
   } catch (error) {
-    const failure = attempt.sending ? teamsSendFailure(error) : { refused: true, retry: true };
+    const failure = attempt.sending
+      ? teamsSendFailure(error)
+      : { refused: true, retry: true, throttled: false };
     const outcome = attempt.connected ? "welcome_failed" : "onboarding_reply_failed";
     if (!failure.refused) return { outcome, status: 200 };
     // A redelivery can only send once the claim is back; otherwise the claim
@@ -614,27 +706,37 @@ async function welcomeTeamsInstall(
   return { outcome: result.outcome, status: 200 };
 }
 /**
- * Whether a failed Teams send clearly didn't reach the person (`refused`), and
- * whether Teams redelivering the activity could help (`retry`). A send that may
- * have arrived, such as a timeout, a reset connection or a Teams 5xx, is
- * neither.
+ * Whether a failed Teams send clearly didn't reach the person (`refused`),
+ * whether Teams redelivering the activity could help (`retry`), and whether
+ * Teams throttled it (`throttled`). A send that may have arrived, such as a
+ * timeout, a reset connection or a Teams 5xx, is none of these.
  */
-function teamsSendFailure(error: unknown): { refused: boolean; retry: boolean } {
+function teamsSendFailure(error: unknown): {
+  refused: boolean;
+  retry: boolean;
+  throttled: boolean;
+} {
   const e = error as { response?: { status?: unknown }; code?: unknown } | null | undefined;
   const httpStatus = e?.response?.status;
   if (typeof httpStatus === "number")
-    return { refused: httpStatus >= 400 && httpStatus < 500, retry: httpStatus === 429 };
+    return {
+      refused: httpStatus >= 400 && httpStatus < 500,
+      retry: httpStatus === 429,
+      throttled: httpStatus === 429,
+    };
   const code = e?.code;
   // Thrown before any request, such as a rejected service URL.
-  if (typeof code !== "string") return { refused: true, retry: false };
+  if (typeof code !== "string") return { refused: true, retry: false, throttled: false };
   const unsent = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code);
-  return { refused: unsent, retry: unsent };
+  return { refused: unsent, retry: unsent, throttled: false };
 }
 /** What an organization that hasn't connected may have been sent. */
 const UNCONNECTED_DELIVERED: ReadonlySet<TeamsUnconnectedOutcome> = new Set([
   "tenant_unavailable_notice_sent",
   "setup_link_sent",
   "connect_link_sent",
+  "connect_reminder_sent",
+  "work_account_notice_sent",
 ]);
 async function sendTeamsInstallWelcome(
   deps: ApiRouteDeps,
@@ -665,14 +767,15 @@ async function sendTeamsInstallWelcome(
   await sendTeamsReply(
     app,
     { ...install, threadId: null, personal: true },
-    teamsWelcome(experienceState(true, active, grant)),
+    teamsWelcome(experienceState(true, active, grant, false, { deps, tenantId: install.tenantId })),
   );
   return { outcome: "welcome_sent", delivered: true };
 }
 /**
  * Help and account commands: fixed replies that never reach the agent.
  * Returns null when the message should continue down the normal path, as
- * "link" does for someone who isn't linked yet.
+ * "link" does for someone who isn't linked yet. In an organization that
+ * isn't connected, help and unlink also carry the way to connect it.
  */
 async function answerTeamsCommand(
   deps: ApiRouteDeps,
@@ -682,6 +785,10 @@ async function answerTeamsCommand(
   command: TeamsCommand,
 ): Promise<string | null> {
   const active = i?.active ? i : null;
+  const unconnected = { deps, tenantId: m.tenantId };
+  // The button opens account linking, or the organization's connection when
+  // it isn't connected yet; only ever sent in a 1:1 chat.
+  const linkUrl = () => proofLink(deps, m, active);
   if (command === "help") {
     const grant = active ? await actorGrant(deps, active, m.actorId) : null;
     await sendTeamsReply(
@@ -694,9 +801,10 @@ async function answerTeamsCommand(
           grant,
           // Shared conversations only answer once the organization is connected.
           Boolean(active) && teamsSharedConversationsEnabled(deps, m.tenantId),
+          unconnected,
         ),
       ),
-      active ? () => proofLink(deps, m, active) : undefined,
+      linkUrl,
     );
     return "help_sent";
   }
@@ -713,7 +821,12 @@ async function answerTeamsCommand(
   // anyone may always remove their own link.
   const subjectId = active ? await getTeamsActor(deps.db, active, m.actorId) : null;
   if (!active || !subjectId) {
-    await sendTeamsReply(app, m, teamsAccountReply("not_linked"));
+    await sendTeamsReply(
+      app,
+      m,
+      teamsNotLinkedReply(experienceState(true, active, null, false, unconnected)),
+      linkUrl,
+    );
     return "unlink_not_linked";
   }
   if (command === "unlink") {
@@ -867,6 +980,46 @@ function teamsConversationAllowed(
         deps.settings.teamsBotAllowedChannelIds.includes(`${c.tenantId}:${c.channelId}`);
 }
 /**
+ * A 1:1 message with a file or image, or no text, is told to send text, in an
+ * admitted tenant and within the short-reply budget. It never fails the
+ * activity.
+ */
+async function replyToUnreadableMessage(
+  deps: ApiRouteDeps,
+  app: App,
+  m: NonNullable<ReturnType<typeof teamsUnreadablePersonalMessage>>,
+  budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
+): Promise<string> {
+  if (!teamsTenantEnabled(deps.settings, m.tenantId)) return "unreadable_message_ignored";
+  try {
+    const reply = await budgets.reminder.reserve(m.tenantId, m.actorId);
+    if (!reply) return "unreadable_message_limited";
+    await sendReserved(reply, () => send(app, m, TEAMS_UNREADABLE_MESSAGE_TEXT));
+    return "unreadable_message_notice_sent";
+  } catch {
+    return "unreadable_message_notice_failed";
+  }
+}
+/**
+ * A mention in a group chat or channel that isn't turned on gets a short,
+ * bounded reply saying so, instead of silence. It never fails the activity.
+ */
+async function replyToDisabledConversation(
+  deps: ApiRouteDeps,
+  app: App,
+  m: TeamsMessage,
+  budgets: TeamsOnboardingBudgets = onboardingBudgets(deps),
+): Promise<string> {
+  try {
+    const reply = await budgets.sharedNotice.reserve(m.tenantId, m.actorId);
+    if (!reply) return "channel_disabled";
+    await sendReserved(reply, () => send(app, m, TEAMS_CONVERSATION_OFF_TEXT));
+    return "channel_disabled_notice_sent";
+  } catch {
+    return "channel_disabled_notice_failed";
+  }
+}
+/**
  * Handles one Teams activity. Call it only with an activity the Teams SDK has
  * authenticated (Connector JWT, audience, issuer, expiry and service URL);
  * it never authenticates anything itself.
@@ -942,7 +1095,12 @@ export async function handleTeamsActivity(
     if (recorded && diagnostic.reason === "missing_mention") continue;
     deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
   }
-  if (!m) return { status: 200 };
+  if (!m) {
+    const unreadable = teamsUnreadablePersonalMessage(body);
+    if (unreadable && unreadable.botId.toLowerCase() === botId)
+      observed(await replyToUnreadableMessage(deps, app, unreadable));
+    return { status: 200 };
+  }
   if (m.botId.toLowerCase() !== botId) {
     observed("bot_identity_mismatch");
     return { status: 200 };
@@ -961,7 +1119,7 @@ export async function handleTeamsActivity(
     return { status: 200 };
   }
   if (!teamsConversationAllowed(deps, m)) {
-    observed("channel_disabled");
+    observed(await replyToDisabledConversation(deps, app, m));
     return { status: 200 };
   }
   const i = await getTeamsInstallation(deps.db, m.tenantId);
@@ -989,7 +1147,16 @@ export async function handleTeamsActivity(
       );
     return { status: 200 };
   }
-  if (!hasPermission(grant.permissions, "sessions:create")) return { status: 200 };
+  if (!hasPermission(grant.permissions, "sessions:create")) {
+    // One person's access is explained only to them.
+    try {
+      await send(app, m, m.personal ? TEAMS_CANNOT_START_TEXT : TEAMS_SHARED_CANNOT_START_TEXT);
+      observed("sessions_create_denied");
+    } catch {
+      observed("sessions_create_denied_reply_failed");
+    }
+    return { status: 200 };
+  }
   let audience: TeamsGroupAudience | undefined;
   if (m.groupChat) {
     try {

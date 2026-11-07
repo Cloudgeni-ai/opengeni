@@ -9,10 +9,20 @@ import {
   teamsMarkdownParts,
   teamsNoticeCard,
   teamsAccountReply,
+  teamsNotLinkedReply,
   teamsWelcome,
+  TEAMS_CONNECT_REMINDER_TEXT,
+  TEAMS_CONNECT_TEXT,
+  TEAMS_SHARED_CONNECT_TEXT,
+  TEAMS_WORK_ACCOUNT_TEXT,
   type TeamsExperienceState,
 } from "../src/integrations/teams-experience";
-import { normalizeTeamsFeedback, teamsPersonalInstall } from "../src/integrations/teams-protocol";
+import {
+  normalizeTeamsFeedback,
+  normalizeTeamsMessage,
+  teamsPersonalInstall,
+  teamsUnreadablePersonalMessage,
+} from "../src/integrations/teams-protocol";
 import {
   keepTeamsTyping,
   sendTeamsReply,
@@ -101,6 +111,38 @@ describe("Teams welcome and help", () => {
     });
     expect(teamsCommand("unlink confirm")).toBe("unlink_confirm");
   });
+  test("in an organization that isn't connected, help and unlink carry the way to connect it", () => {
+    const unconnected = { personal: true, installation: "unavailable", linked: false } as const;
+    const connect = { ...unconnected, setup: "connect" } as const;
+    expect(teamsHelp(connect).text).toContain(TEAMS_CONNECT_TEXT);
+    expect(teamsHelp(connect).action).toEqual({ kind: "link", title: "Connect your organization" });
+    expect(teamsNotLinkedReply(connect)).toEqual({
+      text: `Your Teams account isn't linked to Opengeni.\n\n${TEAMS_CONNECT_TEXT}`,
+      action: { kind: "link", title: "Connect your organization" },
+    });
+    // A welcome may be read much later, so it points to help for a fresh link.
+    expect(teamsWelcome(connect).text).toContain(TEAMS_CONNECT_REMINDER_TEXT);
+    expect(teamsWelcome(connect).action).toBeUndefined();
+    const personalAccount = { ...unconnected, setup: "work_account" } as const;
+    expect(teamsHelp(personalAccount).text).toContain(TEAMS_WORK_ACCOUNT_TEXT);
+    expect(teamsNotLinkedReply(personalAccount).text).toContain(TEAMS_WORK_ACCOUNT_TEXT);
+    expect(teamsHelp(personalAccount).action).toBeUndefined();
+    // Without self-serve setup, the operator's support address is the way forward.
+    expect(teamsHelp({ ...unconnected, supportEmail: "support@example.test" }).text).toContain(
+      "your Microsoft 365 or Teams admin can contact support@example.test",
+    );
+    expect(teamsHelp(unconnected).action).toBeUndefined();
+    // A group chat never gets the button, only where to go.
+    const shared = { ...connect, personal: false };
+    expect(teamsHelp(shared).text).toContain(TEAMS_SHARED_CONNECT_TEXT);
+    expect(teamsHelp(shared).action).toBeUndefined();
+  });
+  test("unlink from someone not linked in a connected organization offers linking", () => {
+    expect(teamsNotLinkedReply({ personal: true, installation: "active", linked: true })).toEqual({
+      text: "Your Teams account isn't linked to Opengeni.\n\nLink your Opengeni account to start.",
+      action: { kind: "link", title: "Link account" },
+    });
+  });
   test("help's section headings are spaced from the paragraph above them", () => {
     const { text } = teamsHelp({ personal: true, installation: "active", linked: true });
     // Teams leaves no gap between paragraphs; a list already has one after it.
@@ -139,6 +181,60 @@ describe("Teams notices", () => {
       ],
     });
     expect(JSON.stringify(card.body)).not.toContain("https:");
+  });
+});
+
+describe("Teams messages the bot can't read", () => {
+  const base = {
+    type: "message",
+    id: "message-1",
+    timestamp: "2026-11-06T10:00:00Z",
+    channelId: "msteams",
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    from: { id: "29:human", aadObjectId: actorId },
+    recipient: { id: "28:bot" },
+    conversation: { id: "a:personal", conversationType: "personal", tenantId },
+    channelData: { tenant: { id: tenantId } },
+    text: "Summarize this",
+  };
+  const image = { contentType: "image/png", contentUrl: "https://example.test/a.png" };
+  test("a 1:1 message with a file or image, or no text, names its sender and chat", () => {
+    for (const body of [
+      { ...base, attachments: [image] },
+      { ...base, text: "  " },
+    ])
+      expect(teamsUnreadablePersonalMessage(body)).toEqual({
+        tenantId,
+        actorId,
+        conversationId: "a:personal",
+        serviceUrl: "https://smba.trafficmanager.net/emea/",
+        botId: "28:bot",
+        personal: true,
+        threadId: null,
+      });
+  });
+  test("readable messages, shared conversations, bots and untrusted service URLs are not", () => {
+    expect(normalizeTeamsMessage(base)).not.toBeNull();
+    for (const body of [
+      base,
+      {
+        ...base,
+        attachments: [{ contentType: "text/html", content: "<p>Summarize this</p>" }],
+      },
+      {
+        ...base,
+        attachments: [image],
+        conversation: { id: "19:group", conversationType: "groupChat", tenantId },
+      },
+      { ...base, attachments: [image], from: { ...base.from, role: "bot" } },
+      { ...base, attachments: [image], serviceUrl: "https://untrusted.example.test/" },
+      {
+        ...base,
+        attachments: [image],
+        conversation: { ...base.conversation, tenantId: "20000000-0000-4000-8000-000000000002" },
+      },
+    ])
+      expect(teamsUnreadablePersonalMessage(body)).toBeNull();
   });
 });
 
