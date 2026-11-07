@@ -400,7 +400,8 @@ Outside the Store configuration, these cases still have gaps:
 - A tenant that isn't admitted (`OPENGENI_TEAMS_BOT_ENABLED` off and not on
   the tenant allowlist) gets the not-available notice for a 1:1 message, once
   a day per person. It names `OPENGENI_SUPPORT_EMAIL` as the contact when that
-  is set; installing the app there sends no welcome.
+  is set; installing the app there sends no welcome. A notice Teams throttles
+  keeps its count, so that person gets no notice again that day.
 - With self-serve setup off, an admitted tenant that isn't connected answers
   only `help` and `unlink` (and the welcome), which name
   `OPENGENI_SUPPORT_EMAIL` when set; `link` and prompt starters from anyone
