@@ -524,7 +524,7 @@ describe("composerSubmissionErrorMessage", () => {
     const generic = "The request could not be accepted. Check your input and try again.";
     const one = composerSubmissionErrorMessage(englishText, refusal(["benyhh/grocery-bot"]));
     expect(one).toBe(
-      "benyhh/grocery-bot is no longer available to this workspace. Remove it, or restore its GitHub access, then retry. Your message is saved.",
+      "benyhh/grocery-bot is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
     );
     expect(
       composerSubmissionErrorMessage(
@@ -532,10 +532,10 @@ describe("composerSubmissionErrorMessage", () => {
         refusal(["acme/a", "acme/b", "acme/c", "acme/d"]),
       ),
     ).toBe(
-      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them, or restore their GitHub access, then retry. Your message is saved.",
+      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
     );
     expect(composerSubmissionErrorMessage(englishText, refusal())).toBe(
-      "A repository is no longer available to this workspace. Remove it, or restore its GitHub access, then retry. Your message is saved.",
+      "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
     );
     expect(one).not.toBe(generic);
     // Removing the repository or restoring its access makes the same Send succeed.
