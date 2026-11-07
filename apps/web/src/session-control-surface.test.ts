@@ -32,15 +32,15 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
-    // Send saved the draft before each refused create: exhausting the retries
-    // must not leave "Draft not saved" up or autosave paused.
+    // Send is never checked against the draft, so there is no retry loop. Only
+    // an older server can still refuse it; that one attempt must not leave
+    // "Draft not saved" up or autosave paused.
     expect(route).toMatch(
-      /await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: draftConflictDuringSendText\(draftChangedElsewhere\),/,
+      /if \(draftConflict\) \{\s*await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: draftConflictDuringSendText\(draftChangedElsewhere\),/,
     );
-    // Other tabs are named only when the refusal showed the draft moved on;
-    // refused at the revision this Send saved, it stops retrying instead.
+    // Other tabs are named only when the refusal showed the draft moved on.
     expect(route).toContain("newSessionDraftConflictRevision(error) !== flushed.revision");
-    expect(route).toContain("if (draftConflict && !draftChangedElsewhere) break;");
+    expect(route).not.toContain("for (let attempt");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");

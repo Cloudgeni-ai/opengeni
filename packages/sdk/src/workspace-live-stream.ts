@@ -19,10 +19,24 @@ export type WorkspaceSessionListEvent = {
   siteSessionIds?: string[];
 };
 
+/**
+ * The viewer's own drafts changed on another of their devices: their composer
+ * drafts in `sessionIds`, and their new-chat draft when `newSession` is true.
+ * It carries no content; a composer that isn't being typed in reads its draft
+ * again. Only the draft's author receives it.
+ */
+export type WorkspaceDraftsChangedEvent = {
+  type: "workspace.drafts.changed";
+  workspaceId: string;
+  sessionIds: string[];
+  newSession: boolean;
+};
+
 export type WorkspaceLiveEvent =
   | WorkspaceControlEvent
   | WorkspaceInteractionRevisionEvent
-  | WorkspaceSessionListEvent;
+  | WorkspaceSessionListEvent
+  | WorkspaceDraftsChangedEvent;
 
 export type WorkspaceLiveStreamOptions = Omit<StreamSessionEventsOptions, "after"> & {
   controlAfter?: number;
@@ -88,6 +102,20 @@ export function parseWorkspaceLiveEvent(data: string): WorkspaceLiveEvent | null
     return Array.isArray(siteSessionIds) && siteSessionIds.every((id) => typeof id === "string")
       ? { ...hint, siteSessionIds }
       : hint;
+  }
+  if (
+    value.type === "workspace.drafts.changed" &&
+    typeof value.workspaceId === "string" &&
+    Array.isArray(value.sessionIds) &&
+    value.sessionIds.every((id) => typeof id === "string") &&
+    typeof value.newSession === "boolean"
+  ) {
+    return {
+      type: "workspace.drafts.changed",
+      workspaceId: value.workspaceId,
+      sessionIds: value.sessionIds as string[],
+      newSession: value.newSession,
+    };
   }
   if (typeof value.sequence !== "number") return null;
   if (

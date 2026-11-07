@@ -177,7 +177,6 @@ import {
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
-  assertExactNewSessionDraftInTransaction,
   createSession,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
@@ -219,7 +218,6 @@ import {
   listSessionMcpServersForChildInheritance,
   requireSession,
   setActiveSandbox,
-  setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
@@ -1263,7 +1261,6 @@ export async function createAndStartSessionWithOutcome(input: {
   let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
     requiresActiveWorkspaceCustomModel ||
-    input.consumeNewSessionDraft ||
     input.beforeCreateCommit ||
     preflightTarget ||
     targetPreflightFailureMessage
@@ -1322,18 +1319,6 @@ export async function createAndStartSessionWithOutcome(input: {
             if (!active) {
               throw modelUnavailableHttpException(input.model);
             }
-          }
-          // Reject an already-stale browser draft before the newly inserted
-          // shell can commit. The initializer repeats this exact check while
-          // consuming the draft after it installs the first runnable unit.
-          if (input.consumeNewSessionDraft && context?.created !== false) {
-            await setSubjectRlsContext(tx, input.consumeNewSessionDraft.subjectId);
-            await assertExactNewSessionDraftInTransaction(tx, {
-              workspaceId: input.workspaceId,
-              subjectId: input.consumeNewSessionDraft.subjectId,
-              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
-              expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
-            });
           }
           if (preflightTarget?.ok && context?.created !== false) {
             const seeded = await setActiveSandbox(tx, {
@@ -3649,11 +3634,6 @@ async function createSessionForRequestInFileScope(
   // This is a fresh-creation default only: replay/repair preserves persisted
   // policy, and follow-ups use the recipient session's own frozen settings.
   const latencyMode = payload.latencyMode ?? "standard";
-  if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
-    throw new HTTPException(409, {
-      message: "The submitted session options are not represented by the new-session draft",
-    });
-  }
   const expectedNewSessionDraftSnapshot: NewSessionDraftSnapshot | null =
     payload.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -3664,9 +3644,11 @@ async function createSessionForRequestInFileScope(
           model,
           reasoningEffort,
           latencyMode,
-          // Every draft option is also a create field with the same name, so
-          // the request supplies the whole comparable set: a draft option added
-          // later is fenced without another hand-written entry here.
+          // What this Send carried. After the create is accepted, the draft is
+          // cleared only while it still holds this (or is still at the
+          // revision the sender saw). Every draft option is also a create
+          // field with the same name, so the request supplies the whole
+          // comparable set without a hand-written entry per option.
           options: comparableNewSessionDraftOptions({
             ...payload,
             visibility: visibilityProvided ? payload.visibility : undefined,

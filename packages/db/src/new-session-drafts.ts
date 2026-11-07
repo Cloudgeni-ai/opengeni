@@ -12,6 +12,7 @@ import {
 import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
+import { notifyActorDraftChanged } from "./session-list-notifications";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -424,6 +425,7 @@ export async function saveNewSessionDraftInTransaction(
       .where(eq(schema.newSessionDrafts.id, current.id))
       .returning();
     if (!saved) throw new Error("New-session draft did not save");
+    await notifyActorDraftChanged(db, { ...input, sessionId: null });
     return saved;
   }
 
@@ -437,7 +439,10 @@ export async function saveNewSessionDraftInTransaction(
       target: [schema.newSessionDrafts.workspaceId, schema.newSessionDrafts.subjectId],
     })
     .returning();
-  if (inserted) return inserted;
+  if (inserted) {
+    await notifyActorDraftChanged(db, { ...input, sessionId: null });
+    return inserted;
+  }
   const raced = await getNewSessionDraftInTransaction(db, {
     ...input,
     lock: true,
@@ -595,58 +600,29 @@ function newSessionDraftCreateToolsProvided(
   return !(options.excludedMcpServerIds !== undefined && row.tools.length === 0);
 }
 
-async function lockExactNewSessionDraft(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    expectedRevision: number;
-    expectedSnapshot: NewSessionDraftSnapshot;
-  },
-): Promise<NewSessionDraftRow> {
-  const current = await lockCurrentNewSessionDraft(db, input);
-  if (!current || current.revision !== input.expectedRevision) {
-    throw new NewSessionDraftConflictError(current?.revision ?? 0);
-  }
-  const options = publicNewSessionDraftOptions(current);
-  const toolsProvided = newSessionDraftCreateToolsProvided(current, options);
-  if (
-    stableJson({
-      text: current.text,
-      resources: current.resources,
-      tools: toolsProvided ? current.tools : [],
-      toolsProvided,
-      model: current.model,
-      reasoningEffort: current.reasoningEffort,
-      latencyMode: current.latencyMode,
-      options: comparableNewSessionDraftOptions(options),
-    }) !==
-    stableJson({
-      ...input.expectedSnapshot,
-      options: comparableNewSessionDraftOptions(input.expectedSnapshot.options),
-    })
-  ) {
-    throw new NewSessionDraftConflictError(current.revision);
-  }
-  return current;
-}
-
 /**
- * Fence a fresh session shell on the exact actor-private draft it represents.
- * The caller keeps this row lock through its create transaction, so a draft
- * that was already stale cannot leave a committed, uninitialized session.
- * The later atomic initializer still performs the authoritative consume.
+ * Whether the stored draft holds exactly what a create sent: the same text,
+ * files, tools, model policy and create options.
  */
-export async function assertExactNewSessionDraftInTransaction(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    expectedRevision: number;
-    expectedSnapshot: NewSessionDraftSnapshot;
-  },
-): Promise<void> {
-  await lockExactNewSessionDraft(db, input);
+function newSessionDraftHolds(row: NewSessionDraftRow, sent: NewSessionDraftSnapshot): boolean {
+  const options = publicNewSessionDraftOptions(row);
+  const toolsProvided = newSessionDraftCreateToolsProvided(row, options);
+  return (
+    stableJson({
+      text: row.text,
+      resources: row.resources,
+      tools: toolsProvided ? row.tools : [],
+      toolsProvided,
+      model: row.model,
+      reasoningEffort: row.reasoningEffort,
+      latencyMode: row.latencyMode,
+      options: comparableNewSessionDraftOptions(options),
+    }) ===
+    stableJson({
+      ...sent,
+      options: comparableNewSessionDraftOptions(sent.options),
+    })
+  );
 }
 
 async function workspacePlacementDefaults(db: Database, workspaceId: string, subjectId: string) {
@@ -677,11 +653,13 @@ async function workspacePlacementDefaults(db: Database, workspaceId: string, sub
 }
 
 /**
- * Replace one exact accepted draft with the next-create safe seed. The row is
- * identity-serialized before the revision check so even the absent-row
- * revision-zero case cannot race a first save. Exact create callers receive a
- * typed conflict; legacy revision-only callers retain the old false/no-op
- * result. A missing row is an idempotent no-op.
+ * After an accepted create, clear the draft it was sent from: replace it with
+ * the next-create safe seed. Send carries its own content and is never refused
+ * because of the draft. The draft is cleared only while it still holds what was
+ * sent: it is still at the revision the sender last saw (`expectedRevision`),
+ * or it holds exactly the sent content (`expectedSnapshot`). A newer draft
+ * saved from another device since then stays as the draft; only the accepted
+ * project and machine choice is remembered. A missing row is a no-op.
  */
 export async function seedNewSessionDraftInTransaction(
   db: Database,
@@ -693,15 +671,28 @@ export async function seedNewSessionDraftInTransaction(
     acceptedSelection?: AcceptedNewSessionSelection;
   },
 ): Promise<boolean> {
-  const current = input.expectedSnapshot
-    ? await lockExactNewSessionDraft(db, {
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        expectedRevision: input.expectedRevision,
-        expectedSnapshot: input.expectedSnapshot,
-      })
-    : await lockCurrentNewSessionDraft(db, input);
-  if (!current || current.revision !== input.expectedRevision) {
+  const current = await lockCurrentNewSessionDraft(db, input);
+  if (!current) return false;
+  const holdsSent =
+    current.revision === input.expectedRevision ||
+    (input.expectedSnapshot !== undefined && newSessionDraftHolds(current, input.expectedSnapshot));
+  if (!holdsSent) {
+    if (input.acceptedSelection) {
+      await db
+        .update(schema.newSessionDrafts)
+        .set({
+          sessionOptions: storedOptions(
+            publicNewSessionDraftOptions(current),
+            newSessionDraftToolsProvided(current),
+            rememberNewSessionSelection(
+              newSessionSelectionHistory(current),
+              input.acceptedSelection,
+            ),
+            newSessionDraftModelProvided(current),
+          ),
+        })
+        .where(eq(schema.newSessionDrafts.id, current.id));
+    }
     return false;
   }
 
@@ -771,10 +762,11 @@ export async function seedNewSessionDraftInTransaction(
     .where(
       and(
         eq(schema.newSessionDrafts.id, current.id),
-        eq(schema.newSessionDrafts.revision, input.expectedRevision),
+        eq(schema.newSessionDrafts.revision, current.revision),
       ),
     )
     .returning({ id: schema.newSessionDrafts.id });
+  if (seeded) await notifyActorDraftChanged(db, { ...input, sessionId: null });
   return Boolean(seeded);
 }
 
