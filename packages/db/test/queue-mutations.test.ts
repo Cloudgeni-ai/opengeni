@@ -306,10 +306,6 @@ describe("latest started session policy", () => {
         operationKey: crypto.randomUUID(),
         expectedDraftRevision: draft.revision,
       };
-      await expect(
-        submit({ ...request, expectedDraftRevision: draft.revision + 1 }),
-      ).rejects.toThrow();
-      await expect(submit({ ...request, model: "not-the-saved-choice" })).rejects.toThrow();
       expect(await storedPolicy()).toEqual(original);
 
       const accepted = await submit(request);
@@ -417,11 +413,14 @@ describe("latest started session policy", () => {
     expect(await read()).toMatchObject({ policyFollowsSession: true, model: "free-model" });
     const next = await save(first.draft!.revision, "second");
     expect(next).toMatchObject({ policyFollowsSession: true, model: "free-model" });
-    // A client still holding the old model is refused rather than undoing the switch.
-    await expect(submit(next.revision, "second", { model: "scripted-model" })).rejects.toThrow(
-      QueueCommandConflictError,
-    );
-    const second = await submit(next.revision, "second");
+    // A Send that names a model runs that message on it, but a draft that made
+    // no pick does not change the chat's settings, so the agent's switch stays.
+    const named = await submit(next.revision, "second", { model: "scripted-model" });
+    expect(await getSessionTurn(client.db, workspaceId, named.turnId)).toMatchObject({
+      model: "scripted-model",
+    });
+    expect(await storedModel()).toBe("free-model");
+    const second = await submit(named.draft!.revision, "second");
     expect(await getSessionTurn(client.db, workspaceId, second.turnId)).toMatchObject({
       model: "free-model",
     });
@@ -1839,7 +1838,7 @@ describe("canonical queue commands", () => {
     }
   });
 
-  test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
+  test("Send keeps custom file mounts distinct and sends changed content as typed", async () => {
     const value = await fixture(1);
     const fileId = crypto.randomUUID();
     const customResource = {
@@ -1889,19 +1888,18 @@ describe("canonical queue commands", () => {
         ),
       );
 
+    // What is in the box is what is sent, even when it differs from the draft.
     for (const changed of [
       {
         resources: [{ kind: "file" as const, fileId, mountPath: `files/${fileId}` }],
       },
       { text: "inspect different content" },
     ]) {
-      try {
-        await submit(changed);
-        throw new Error("changed draft unexpectedly admitted");
-      } catch (error) {
-        expect(error).toBeInstanceOf(QueueCommandConflictError);
-        expect((error as QueueCommandConflictError).code).toBe("DRAFT_CHANGED");
-      }
+      const sent = await submit(changed);
+      expect(sent.replay).toBe(false);
+      const turn = await getSessionTurn(client.db, value.grant.workspaceId!, sent.turnId);
+      expect(turn?.prompt).toBe("text" in changed ? changed.text : draft.text);
+      if ("resources" in changed) expect(turn?.resources).toEqual(changed.resources);
     }
   });
 

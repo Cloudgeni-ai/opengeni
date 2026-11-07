@@ -483,12 +483,16 @@ expect the documented dependency slice plus an `AccessGrant`.
 `submitComposerDraftForRequest` lives in
 `packages/core/src/application/composer-submit.ts`; it is the composer-shaped
 application boundary used by both the stock HTTP route and an in-process host.
-It validates/accepts the exact durable draft revision, appends the event,
-creates or steers the turn, rotates the draft, and returns the native
-`SubmitComposerDraftResponse`. An in-process host may provide
+It validates and accepts the submitted content, appends the event, creates or
+steers the turn, clears the draft if it still holds what was sent, and returns
+the native `SubmitComposerDraftResponse`. Send is never refused because the
+saved draft changed: `expectedDraftRevision` (and `expectedNewSessionDraftRevision`
+on create) is the revision the sender last saw, the basis for that clear. The
+draft is cleared when it is still at that revision or holds exactly the sent
+content; otherwise another device saved something newer, which stays and is
+returned as `draft`. Retries stay idempotent through `clientEventId`. An in-process host may provide
 `additionalResources`; they join the accepted command, idempotency hash, turn,
-and durable session resource set atomically while the saved actor draft remains
-the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+and durable session resource set atomically. This avoids a trusted draft PUT solely to add host-authorized
 repositories or files. Terminal control lives in
 `packages/core/src/application/session-commands.ts` and uses an explicit
 authenticated command context. Scheduled-task validation/sync helpers live in

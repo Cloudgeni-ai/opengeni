@@ -276,6 +276,9 @@ function Home() {
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),
         resources: [...chosen.resources, ...attachments.readyResources],
+        // The draft this Send was composed in. Once the chat is accepted the
+        // server clears that draft, unless another device saved a newer one.
+        ...(flushed ? { expectedNewSessionDraftRevision: flushed.revision } : {}),
       });
       rememberPendingPrompt(client, workspaceId, created.id, {
         text: text || "See the attached files.",

@@ -1579,6 +1579,7 @@ export type {
   SessionListDatabaseChange,
   SessionListNotification,
 } from "./session-list-notifications";
+export { notifyActorDraftChanged } from "./session-list-notifications";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,

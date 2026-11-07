@@ -1,21 +1,29 @@
 /* ----------------------------------------------------------------------------
    "Draft changed" (409 DRAFT_CHANGED) on a composer draft save.
 
-   - An explicit Send delivers the person's text exactly once: the save
-     re-reads the draft and either finds the same content already there or
-     saves the person's text at the current revision.
+   - Send wins: an explicit Send delivers what is in the box exactly once and
+     is never refused because of the draft. The server clears the draft only
+     while it still holds what was sent; a newer draft from another device
+     stays and the composer shows it.
    - One tab can fall behind its own writes (a save whose reply is lost, a
      save that lands after the composer remounted). That is not "another
      tab": autosave catches up silently.
-   - A real edit from another tab while typing still offers Keep mine / Use
-     other draft, without a generic "conflicts with the current state" error.
+   - Typing over another device's edit saves on top of it (latest typing
+     wins), with nothing to choose.
    -------------------------------------------------------------------------- */
 import { beforeEach, describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type ComposerDraft, type SessionEvent } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type ComposerDraft,
+  type SessionEvent,
+  type WorkspaceDraftsChangedEvent,
+} from "@opengeni/sdk";
+import { useMemo } from "react";
 
-import { useComposer } from "../src/hooks/use-composer";
+import { useComposer, type ComposerControllerState } from "../src/hooks/use-composer";
+import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import { fakeClient, fakeTurn, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderHook } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
 registerDom({ clock: "real" });
 
@@ -32,13 +40,15 @@ function draftChanged(): OpenGeniApiError {
   );
 }
 
-/** The server's one draft slot with its revision fence. */
+/** The server's one draft slot: saves are fenced on its revision; Send is not. */
 function draftServer() {
   const slot = { revision: 1, text: "" };
   const saves: string[] = [];
   const delivered: string[] = [];
   let loseNextSaveReply = false;
+  let failSaves = false;
   let holdNextSave: Promise<void> | null = null;
+  let beforeSubmit: (() => void) | null = null;
   let sequence = 0;
   const base = fakeClient({});
   const read = async (): Promise<ComposerDraft> => ({
@@ -52,6 +62,10 @@ function draftServer() {
       const held = holdNextSave;
       holdNextSave = null;
       if (held) await held;
+      if (failSaves) {
+        saves.push(`${request.expectedRevision} ${request.text}: refused`);
+        throw draftChanged();
+      }
       if (request.expectedRevision !== slot.revision) {
         saves.push(`${request.expectedRevision} ${request.text}: draft changed`);
         throw draftChanged();
@@ -72,11 +86,13 @@ function draftServer() {
       return await read();
     },
     submitComposerDraft: async (_workspaceId, _sessionId, request) => {
-      if (request.expectedDraftRevision !== slot.revision || request.text !== slot.text) {
-        throw draftChanged();
+      beforeSubmit?.();
+      beforeSubmit = null;
+      // Clear the draft only while it still holds what was sent.
+      if (request.expectedDraftRevision === slot.revision || request.text === slot.text) {
+        slot.revision += 1;
+        slot.text = "";
       }
-      slot.revision += 1;
-      slot.text = "";
       delivered.push(request.text);
       const accepted = {
         id: crypto.randomUUID(),
@@ -123,6 +139,14 @@ function draftServer() {
     },
     loseNextSaveReply() {
       loseNextSaveReply = true;
+    },
+    /** Every save is refused, as when another device keeps writing. */
+    failSaves() {
+      failSaves = true;
+    },
+    /** Runs just before the server accepts the next Send. */
+    beforeSubmit(run: () => void) {
+      beforeSubmit = run;
     },
     holdNextSave(): () => void {
       let release!: () => void;
@@ -256,38 +280,125 @@ describe("composer draft changed", () => {
     }
   });
 
-  test("typing over another tab's edit still offers Keep mine and Use other draft", async () => {
+  test("typing over another device's edit saves on top of it, with nothing to choose", async () => {
     const server = draftServer();
     const hook = await mount(server);
     try {
       await flush(20);
       server.otherTabWrites("theirs");
       await actRun(() => hook.result.current.setValue("mine"));
-      await until(() => hook.result.current.draftConflict !== null);
-
-      expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
-      // The choice is the message; no generic "conflicts with the current state".
+      // The latest typing wins: the save moves onto the newer revision.
+      await until(() => server.slot.text === "mine");
+      expect(hook.result.current.draftConflict).toBeNull();
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.value).toBe("mine");
-      expect(server.slot.text).toBe("theirs");
-
-      await actRun(async () => {
-        await hook.result.current.resolveDraftConflict("keep_mine");
-      });
-      expect(server.slot.text).toBe("mine");
-      expect(hook.result.current.draftConflict).toBeNull();
-
-      server.otherTabWrites("theirs again");
-      await actRun(() => hook.result.current.setValue("mine again"));
-      await until(() => hook.result.current.draftConflict !== null);
-      await actRun(async () => {
-        await hook.result.current.resolveDraftConflict("use_remote");
-      });
-      expect(hook.result.current.value).toBe("theirs again");
-      expect(server.slot.text).toBe("theirs again");
-      expect(hook.result.current.draftConflict).toBeNull();
     } finally {
       await hook.unmount();
+    }
+  });
+
+  test("Send goes through even when the pre-send save is refused", async () => {
+    const server = draftServer();
+    const hook = await mount(server);
+    try {
+      await flush(20);
+      server.failSaves();
+      await actRun(() => hook.result.current.setValue("send me anyway"));
+      await actRun(async () => {
+        await hook.result.current.send();
+      });
+      await until(() => server.delivered.length > 0);
+
+      expect(server.delivered).toEqual(["send me anyway"]);
+      expect(hook.result.current.draftConflict).toBeNull();
+      expect(hook.result.current.error).toBeNull();
+      expect(
+        (hook.result.current.optimisticMessages ?? []).filter(
+          (message) => message.state === "failed",
+        ),
+      ).toEqual([]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("after Send, a newer draft from another device stays and is shown", async () => {
+    const server = draftServer();
+    const hook = await mount(server);
+    try {
+      await flush(20);
+      await actRun(() => hook.result.current.setValue("first message"));
+      await until(() => server.slot.text === "first message");
+      // Another device types its next message while this Send is on the wire.
+      server.beforeSubmit(() => server.otherTabWrites("typed on my phone"));
+      await actRun(async () => {
+        await hook.result.current.send();
+      });
+      await until(() => server.delivered.length > 0);
+      await until(() => hook.result.current.value === "typed on my phone");
+
+      expect(server.delivered).toEqual(["first message"]);
+      expect(server.slot.text).toBe("typed on my phone");
+      expect(hook.result.current.value).toBe("typed on my phone");
+      expect(hook.result.current.draftConflict).toBeNull();
+      expect(hook.result.current.error).toBeNull();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a composer nobody is typing in follows the person's other device live", async () => {
+    const server = draftServer();
+    const result: { current: ComposerControllerState | null } = { current: null };
+    function Composer() {
+      result.current = useComposer(sessionId, {
+        client: server.client,
+        workspaceId: WORKSPACE_ID,
+      });
+      return null;
+    }
+    function Harness({ event }: { event: WorkspaceDraftsChangedEvent | null }) {
+      const value = useMemo<OpenGeniContextValue>(
+        () => ({
+          client: server.client,
+          workspaceId: WORKSPACE_ID,
+          workspaceControlEvent: null,
+          workspaceControlConnectionState: "live",
+          workspaceInteractionEvent: null,
+          workspaceInteractionConnectionState: "live",
+          workspaceDraftsEvent: event,
+          registerSessionReconciler: () => () => {},
+          reconcileSession: async () => {},
+        }),
+        [event],
+      );
+      return (
+        <OpenGeniContext.Provider value={value}>
+          <Composer />
+        </OpenGeniContext.Provider>
+      );
+    }
+    const mounted = await renderComponent(<Harness event={null} />);
+    try {
+      await flush(20);
+      server.otherTabWrites("typed on my laptop");
+      // The hint carries no text: the composer re-reads its own draft.
+      await mounted.rerender(
+        <Harness
+          event={{
+            type: "workspace.drafts.changed",
+            workspaceId: WORKSPACE_ID,
+            sessionIds: [sessionId],
+            newSession: false,
+          }}
+        />,
+      );
+      await until(() => result.current?.value === "typed on my laptop");
+      expect(result.current?.value).toBe("typed on my laptop");
+      expect(result.current?.draft?.revision).toBe(server.slot.revision);
+      expect(result.current?.draftConflict).toBeNull();
+    } finally {
+      await mounted.unmount();
     }
   });
 });

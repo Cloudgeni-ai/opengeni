@@ -1849,8 +1849,6 @@ export const englishMessages = {
   "hooks.useComposer.seeAttachedContext": "(see attached context)",
   "hooks.useComposer.theDurableComposerDraftIs":
     "The durable composer draft is not ready for delivery.",
-  "hooks.useComposer.theMessageDraftCouldNot":
-    "The message draft could not be saved before delivery.",
   "hooks.useComposer.theRequestCouldNotBe":
     "The request could not be confirmed. Check its status before retrying.",
   "hooks.useComputerFrameStream.desktopViewLostConnection": "Desktop view lost connection.",
