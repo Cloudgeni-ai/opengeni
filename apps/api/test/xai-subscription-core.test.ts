@@ -245,6 +245,24 @@ describe("SuperGrok transcription on the shared core", () => {
     await expect(transcribe()).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
   });
 
+  test("core: a subscription out of credit says so and stays on its provider", async () => {
+    upstream = async () =>
+      Response.json(
+        {
+          code: "The caller does not have permission to execute the specified operation",
+          error:
+            "You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok. [WKE=personal-team-blocked:spending-limit]",
+        },
+        { status: 403 },
+      );
+    await expect(transcribe()).rejects.toMatchObject({
+      code: "unavailable",
+      providerCode: "quota_exceeded",
+      fallbackSafe: false,
+    });
+    expect(calls.filter((call) => call.startsWith("refresh"))).toEqual([]);
+  });
+
   test("availability: core needs a shared candidate", async () => {
     const input = { accountId: ACCOUNT, workspaceId: WORKSPACE, subjectId: "user:caller" };
     candidates = [];

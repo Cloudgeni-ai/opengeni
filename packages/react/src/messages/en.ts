@@ -1268,6 +1268,8 @@ export const englishMessages = {
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
   "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
+  "composerTranscriptionControl.speechServiceOutOfCredit":
+    "The speech-to-text service is out of credit. Recording saved; retry once it's topped up.",
   "composerTranscriptionControl.startVoiceInput": "Start voice input",
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":

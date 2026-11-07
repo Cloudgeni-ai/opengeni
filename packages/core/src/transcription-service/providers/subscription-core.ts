@@ -60,8 +60,8 @@ export async function coreTranscriptionResult(
   response: Response,
 ): Promise<{ text: string; languages: string[] }> {
   if (!response.ok) {
-    await response.arrayBuffer().catch(() => undefined);
-    throw withoutFallback(responseError(response.status));
+    // The body says why: a subscription out of credit is not a broken service.
+    throw withoutFallback(responseError(response.status, await response.json().catch(() => null)));
   }
   const body = await response.json().catch(() => null);
   if (!body || typeof body.text !== "string") throw withoutFallback(responseError(502));

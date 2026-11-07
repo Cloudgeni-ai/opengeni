@@ -191,13 +191,16 @@ function nativeError(code: string, held: boolean, t: ReturnType<typeof useOpenGe
       return t("composerTranscriptionControl.usageLimitReachedRecordingSaved");
     case "too_large":
       return t("composerTranscriptionControl.recordingIsTooLargeTry");
+    case "provider_quota_exceeded":
+      return t("composerTranscriptionControl.speechServiceOutOfCredit");
     case "network":
     case "timeout":
-    case "unavailable":
-    case "provider":
       return held
         ? t("native.voiceInput.couldnTReachTranscriptionYour")
         : t("native.voiceInput.couldnTStartTheMicrophone");
+    // The speech service answered and failed: being online again won't help.
+    case "unavailable":
+    case "provider":
     default:
       return held
         ? t("native.voiceInput.couldNotTranscribe")

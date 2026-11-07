@@ -1326,6 +1326,8 @@ function chooseMimeType(accepted: string[]): string | undefined {
 function voiceInputCode(code: string | null): string {
   if (!code) return "unknown";
   if (code.startsWith("voice_")) return voiceInputCode(code.slice("voice_".length));
+  // An account out of credit needs someone to top it up, not a retry.
+  if (code === "provider_quota_exceeded") return code;
   if (code.startsWith("provider_")) return "provider";
   switch (code) {
     case "insufficient_credits":

@@ -2140,6 +2140,24 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     });
   });
 
+  test("a speech service out of credit fails the dictation with the provider's reason", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const run = dictationActivities(storage, async () => {
+      throw new TranscriptionServiceError({
+        code: "unavailable",
+        message: "Transcription is unavailable.",
+        providerCode: "quota_exceeded",
+      });
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "failed",
+      errorCode: "provider_quota_exceeded",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+  });
+
   test("an EU-only region refusal fails the dictation without retrying", async () => {
     if (!client) return;
     const storage = memoryStorage();
