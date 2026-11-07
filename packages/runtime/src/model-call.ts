@@ -8,6 +8,7 @@
  * sandbox APIs are deliberately not re-exported here.
  */
 export { MultiProviderModelProvider } from "./model-provider-routing";
+export { configuredDecisionModel, type WorkerDecisionSettings } from "./configured-decision-model";
 export {
   InferenceRegionRestrictedError,
   assertSideFeatureRoute,

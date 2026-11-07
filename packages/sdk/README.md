@@ -1910,3 +1910,13 @@ hidden. A missing legacy snapshot may return 404; other authorization or transpo
 failures must not be interpreted as permission to execute. Responses are private
 and non-cacheable. Review states distinguish waiting, execution, cancellation,
 failure and uncertain outcome. Exact stored arguments are never client-editable.
+
+## Stateless decisions and embeddings
+
+`client.decide(workspaceId, { input, questions }, { signal? })` returns typed
+predicate, choice or score answers (or typed refusals) from the deployment's
+configured decision model. `client.embed(workspaceId, { input }, { signal? })`
+returns ordered vectors and their dimensions from its document embedder.
+Both use the same API key and `sessions:create` authority as chat completions.
+See [stateless inference](../../docs/model-inference.md) for examples, model
+configuration, usage and cost receipts, and residency requirements.

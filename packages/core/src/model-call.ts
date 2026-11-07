@@ -1,4 +1,10 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type {
+  AccessGrant,
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  ModelEmbeddingsRequest,
+  ModelEmbeddingsResponse,
+} from "@opengeni/contracts";
 import type { SingleModelCallRequest, SingleModelCallResult } from "@opengeni/runtime";
 
 /**
@@ -43,6 +49,16 @@ export interface ModelCallService {
   /** Models the caller may use for a single call, in catalog order. */
   listModels(caller: ModelCallCaller): Promise<ModelCallModel[]>;
   call(input: ModelCallInput): Promise<ModelCallOutput>;
+}
+
+export type AuxiliaryModelCallInput<T> = ModelCallCaller & {
+  requestId: string;
+  signal?: AbortSignal;
+  request: T;
+};
+export interface AuxiliaryModelCallService {
+  decide(input: AuxiliaryModelCallInput<ModelDecisionRequest>): Promise<ModelDecisionResponse>;
+  embed(input: AuxiliaryModelCallInput<ModelEmbeddingsRequest>): Promise<ModelEmbeddingsResponse>;
 }
 
 export type ModelCallErrorType =

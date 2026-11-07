@@ -6,6 +6,36 @@ icon: "server"
 
 Opengeni is Apache-2.0: the API, web app, workers, Helm chart, and reference Terraform are all open source.
 
+## Use your deployment for decisions and embeddings
+
+Your API key also works for stateless typed judgments and embeddings, without
+creating a chat. Configure your existing decision and document-embedding models
+on the API server. Calls require `sessions:create` in the target workspace and
+honor its inference residency requirement.
+
+```ts
+const decision = await client.decide(workspaceId, {
+  input: "Please send the invoice.",
+  questions: {
+    billing: { type: "predicate", instructions: "Is this about billing?" },
+  },
+});
+const answer = decision.answers.billing;
+if (answer.type === "predicate") console.log(answer.probability);
+else console.log(answer.reason); // typed refusal
+
+const vectors = await client.embed(workspaceId, { input: ["First text", "Second text"] });
+console.log(vectors.dimensions, vectors.data[0].embedding);
+```
+
+These are `POST /v1/workspaces/{id}/decisions` and
+`POST /v1/workspaces/{id}/embeddings`. They use the deployment's configured models,
+not a model or provider key supplied by the caller. Decisions support predicates,
+choices and scores with typed refusals. Embeddings preserve input order and report
+vector dimensions. Both report usage; unknown provider costs remain unknown.
+The deployment pays its provider directly; these categories do not introduce a
+customer-credit tariff. They share chat-completions admission and usage receipts.
+
 ## What you run
 
 | Component                      | Role                                                                               |

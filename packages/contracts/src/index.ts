@@ -1,3 +1,4 @@
+export * from "./model-inference";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";

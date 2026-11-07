@@ -83,6 +83,9 @@ export type ModelUsageSettlementInput = {
   countsTowardTokenCap: boolean;
   creditPolicyRevision?: number | undefined;
   gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  /** External inference pricing, never debit authority. Null explicitly means unknown,
+   * not permission to borrow a same-named conversational model's price. */
+  externalProviderCost?: ExternalModelProviderCost | null;
   /**
    * Searches the provider ran with its own hosted search tool for this
    * response (`ModelResponseUsage.webSearchRequests`). On a credit-billed
@@ -135,6 +138,11 @@ export type ModelUsageSettlementInput = {
    * custody the failure throws.
    */
   receiptCustody?: ((receipt: HeldSessionUsageReceipt, error: unknown) => void) | null;
+};
+
+export type ExternalModelProviderCost = {
+  costUsd: number;
+  source: "provider-reported" | "estimate";
 };
 
 /** A content-free task usage receipt whose write is still owed. */
@@ -254,6 +262,10 @@ export async function settleModelUsage(
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
   const { chargesOpenGeniCredits, countsTowardTokenCap } = input;
+  const externalPricing = input.externalProviderCost !== undefined;
+  if (externalPricing && (chargesOpenGeniCredits || input.gatewayBilling)) {
+    throw new Error("Invalid externally funded model cost");
+  }
   const resolvedGatewayModel = input.gatewayBilling
     ? resolveModelProvider(settings, input.model)
     : undefined;
@@ -293,11 +305,13 @@ export async function settleModelUsage(
     }
   }
   const pricingSchedules = configuredModelPricingSchedules(settings);
-  const configuredPricingModel = pricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
+  const configuredPricingModel = externalPricing
+    ? null
+    : pricingSchedules[input.model]
+      ? input.model
+      : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
+        ? input.model.slice("codex/".length)
+        : null;
   const pricingBreakdown = gatewayBilling
     ? unpinnedWorkspaceGatewayModel
       ? {
@@ -324,11 +338,13 @@ export async function settleModelUsage(
   // current usage frame does not establish geography/service-tier provenance,
   // so forward class splits stay unknown even when a total estimate is priced.
   const listPricingSchedules = configuredModelListPricingSchedules(settings);
-  const configuredListPricingModel = listPricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
+  const configuredListPricingModel = externalPricing
+    ? null
+    : listPricingSchedules[input.model]
+      ? input.model
+      : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
+        ? input.model.slice("codex/".length)
+        : null;
   const listSnapshot =
     !gatewayBilling && hasCompleteCoreTokenTelemetry && configuredListPricingModel
       ? calculateModelListUsageCostSnapshot(settings, configuredListPricingModel, sanitizedUsage, {
@@ -340,11 +356,24 @@ export async function settleModelUsage(
     listByClassMicros: listSnapshot?.listByClassMicros ?? null,
     listByClassApprox: listSnapshot?.listByClassApprox ?? false,
   };
-  const estimatedProviderCostMicros = gatewayBilling
-    ? (pricingBreakdown?.providerCostMicros ?? null)
-    : hasCompleteCoreTokenTelemetry
-      ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
-      : null;
+  const externalCost = input.externalProviderCost;
+  if (
+    externalCost &&
+    (chargesOpenGeniCredits ||
+      !Number.isFinite(externalCost.costUsd) ||
+      externalCost.costUsd < 0 ||
+      !Number.isSafeInteger(Math.round(externalCost.costUsd * 1_000_000)))
+  ) {
+    throw new Error("Invalid externally funded model cost");
+  }
+  const externalCostMicros = externalCost ? Math.round(externalCost.costUsd * 1_000_000) : null;
+  const estimatedProviderCostMicros =
+    externalCostMicros ??
+    (gatewayBilling
+      ? (pricingBreakdown?.providerCostMicros ?? null)
+      : hasCompleteCoreTokenTelemetry
+        ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
+        : null);
   // The credit price a debit would use, else the reviewed list price's
   // equivalent-credit comparison: a model priced only by a reviewed list rate
   // (for example a newer Codex catalog model) still reports what it would
@@ -357,11 +386,12 @@ export async function settleModelUsage(
       : !gatewayBilling && listSnapshot && estimatedProviderCostMicros !== null
         ? listSnapshot.creditCostMicros
         : null;
-  const pricingSource = gatewayBilling
-    ? ("gateway_reported" as const)
-    : estimatedProviderCostMicros !== null
-      ? ("configured_list_price" as const)
-      : null;
+  const pricingSource =
+    gatewayBilling || externalCost?.source === "provider-reported"
+      ? ("gateway_reported" as const)
+      : estimatedProviderCostMicros !== null
+        ? ("configured_list_price" as const)
+        : null;
   // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
@@ -372,7 +402,7 @@ export async function settleModelUsage(
   if (usageLimitSessionId) {
     const meterAmountMicros = sessionUsageMeterAmountMicros({
       estimatedProviderCostMicros,
-      gatewayReported: pricingSource === "gateway_reported",
+      gatewayReported: pricingSource === "gateway_reported" || externalCostMicros !== null,
       inputTokens: normalizedUsage.telemetry.inputTokens,
       outputTokens: normalizedUsage.telemetry.outputTokens,
     });
@@ -430,6 +460,23 @@ export async function settleModelUsage(
     });
   }
   if (!chargesOpenGeniCredits) {
+    if (externalCostMicros !== null) {
+      const eventType =
+        externalCost?.source === "estimate"
+          ? "model.estimated_provider_cost"
+          : "model.provider_cost";
+      await recordUsageEvent(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        eventType,
+        quantity: externalCostMicros,
+        unit: "usd_micros",
+        sourceResourceType: "model_response",
+        sourceResourceId: input.sourceId,
+        ...usageContext,
+        idempotencyKey: `usage:${eventType}:${input.sourceId}`,
+      });
+    }
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

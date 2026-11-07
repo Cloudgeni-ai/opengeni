@@ -23,7 +23,7 @@ import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { SpeechToTextDeployment } from "./transcription-service/deployment";
-import type { ModelCallService } from "./model-call";
+import type { ModelCallService, AuxiliaryModelCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
@@ -354,6 +354,7 @@ export type AppDependencies = {
   transcriptionSegmenter?: TranscriptionSegmenter | null;
   /** Stateless single model calls (chat completions); built from settings when omitted. */
   modelCalls?: ModelCallService | null;
+  auxiliaryModelCalls?: AuxiliaryModelCallService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

@@ -1,4 +1,19 @@
 export type {
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  ModelEmbeddingsRequest,
+  ModelEmbeddingsResponse,
+  DecisionQuestion,
+  DecisionResult,
+  DecisionUsage,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionRefusal,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from "@opengeni/contracts";
+export type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   BillingCreditNotification,
