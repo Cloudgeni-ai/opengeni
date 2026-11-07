@@ -18,7 +18,6 @@ import {
   projectRejectedReasoningArtifact,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
-import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import {
   MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   boundModelToolOutputItem,
@@ -1703,83 +1702,6 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
  * remote compaction checkpoint when its chat switches to another model.
  */
 export const PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION = "portable_model_switch" as const;
-
-/**
- * Most summary requests a model switch spends rebuilding a chat's context from
- * its stored transcript. Each request reads one chunk that fits the new model,
- * after the summary of the chunks before it. Items older than this many chunks
- * are left out (`modelSwitchEarlierItemsOmitted`), which bounds the cost of a
- * switch on a very long chat.
- */
-export const MODEL_SWITCH_MAX_SUMMARY_REQUESTS = 4;
-
-/** Cut only between whole assistant/tool batches; never split signed thinking
- * from its assistant turn or leave a tool receipt without its completed call. */
-export function compactionPrefixCuts(items: readonly CompactionItem[]): number[] {
-  const resultTypes = new Set(Object.values(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE));
-  const calls = new Set<string>();
-  const cuts: number[] = [];
-  let previousPhase = "";
-  let unidentifiedCall = false;
-  for (let index = 0; index < items.length; index++) {
-    const item = items[index]!;
-    const type = String(item.type ?? "message");
-    const isMessage = type === "message";
-    const realInput = isMessage && ["user", "system", "developer"].includes(String(item.role));
-    const phase = realInput || resultTypes.has(type) ? "user" : "assistant";
-    if (index > 0 && calls.size === 0 && !unidentifiedCall && phase !== previousPhase)
-      cuts.push(index);
-    const id = toolCallIdFromSdkItem(item);
-    if (Object.hasOwn(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE, type)) {
-      if (id) calls.add(id);
-      else unidentifiedCall = true;
-    }
-    if (resultTypes.has(type) && typeof id === "string") calls.delete(id);
-    previousPhase = phase;
-  }
-  return cuts;
-}
-
-/**
- * Where the part of a stored transcript a model switch summarizes begins. From
- * the newest item back, the transcript is split at whole assistant/tool batch
- * boundaries into at most `maxRequests` chunks of at most `chunkTokens` each (a
- * single batch larger than that is a chunk on its own). The summarized part
- * starts at the first input message from there (or the nearest one before it
- * when none follows), so its first request opens with input; everything older
- * is left out.
- */
-export function portableSwitchTranscriptStart(
-  items: readonly CompactionItem[],
-  chunkTokens: number,
-  maxRequests: number = MODEL_SWITCH_MAX_SUMMARY_REQUESTS,
-): number {
-  const prefixTokens = new Array<number>(items.length + 1).fill(0);
-  for (let index = 0; index < items.length; index += 1) {
-    prefixTokens[index + 1] = prefixTokens[index]! + estimateItemTokens(items[index]!);
-  }
-  const cuts = [0, ...compactionPrefixCuts(items)];
-  let end = items.length;
-  for (let request = 0; request < maxRequests && end > 0; request += 1) {
-    const chunkEnd = end;
-    const earlier = cuts.filter((cut) => cut < chunkEnd);
-    end =
-      earlier.find((cut) => prefixTokens[chunkEnd]! - prefixTokens[cut]! <= chunkTokens) ??
-      earlier[earlier.length - 1]!;
-  }
-  if (end === 0) return 0;
-  const start = end;
-  const inputStarts = cuts.filter((cut) => {
-    const item = items[cut];
-    return (
-      itemType(item) === "message" &&
-      ["user", "system", "developer"].includes(String(itemRole(item)))
-    );
-  });
-  return (
-    inputStarts.find((cut) => cut >= start) ?? inputStarts.filter((cut) => cut < start).at(-1) ?? 0
-  );
-}
 
 /**
  * Preparation for the retention rebuild shared by both compaction modes.

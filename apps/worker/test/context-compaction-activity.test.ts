@@ -3678,7 +3678,8 @@ describe("standalone context compaction execution", () => {
   }
 
   test("switching a long chat to a smaller-window model summarizes it in bounded requests", async () => {
-    const { workspaceId, session, scope } = await codexCompactedSession(longAutonomousRun(60));
+    // About four times the new model's window: nothing may be left out.
+    const { workspaceId, session, scope } = await codexCompactedSession(longAutonomousRun(200));
     const { summarize, requests } = smallWindowSummarizer();
     const outcome = await maybeCompactContext(
       client.db,
@@ -3691,9 +3692,9 @@ describe("standalone context compaction execution", () => {
     expect(outcome).toMatchObject({ compacted: true });
     if (!outcome.compacted) throw new Error("expected the switch to compact");
     // The history is larger than the new model's whole window...
-    expect(outcome.estimatedTokensBefore).toBeGreaterThan(SMALL_WINDOW);
+    expect(outcome.estimatedTokensBefore).toBeGreaterThan(4 * SMALL_WINDOW);
     // ...yet no request was larger than it accepts, and none was rejected.
-    expect(requests.length).toBeGreaterThan(1);
+    expect(requests.length).toBeGreaterThan(4);
     for (const request of requests) {
       expect(request.ok).toBe(true);
       expectToolCallsPaired(request.input);
@@ -3708,7 +3709,7 @@ describe("standalone context compaction execution", () => {
         content: `${SUMMARY_PREFIX}\nsummary ${index}`,
       });
     }
-    expect(JSON.stringify(requests.at(-1)!.input)).toContain("update 59");
+    expect(JSON.stringify(requests.at(-1)!.input)).toContain("update 199");
     const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
     expect(active.some((row) => row.item.type === "compaction")).toBe(false);
     expect(JSON.stringify(active.map((row) => row.item))).toContain(`summary ${requests.length}`);
@@ -3726,7 +3727,6 @@ describe("standalone context compaction execution", () => {
       estimatedTokensBefore: outcome.estimatedTokensBefore,
       compactionInputProviderCalls: requests.length,
     });
-    expect(compacted?.payload).not.toHaveProperty("modelSwitchEarlierItemsOmitted");
   });
 
   test("a model switch refits a chunk the new model rejects as too long instead of failing", async () => {
@@ -3755,6 +3755,28 @@ describe("standalone context compaction execution", () => {
     const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
     expect(JSON.stringify(active.map((row) => row.item))).toContain(
       `summary ${requests.filter((request) => request.ok).length}`,
+    );
+  });
+
+  test("a model switch whose newest batch alone exceeds the new window fails without sending that batch", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession([
+      { type: "message", role: "user", content: "start" },
+      { type: "message", role: "assistant", content: "x".repeat(400_000) },
+    ]);
+    const { summarize, requests } = smallWindowSummarizer();
+    await expect(
+      maybeCompactContext(client.db, smallWindowSettings(), scope, null, summarize, {
+        clearRequestedCompaction: true,
+        trigger: "operator",
+        codexCompactionMode: "portable",
+      }),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    // Only the fitting first message was summarized; the oversized reply was
+    // never sent, and nothing reached the provider as too long.
+    expect(requests.every((request) => request.ok)).toBe(true);
+    expect(requests.some((request) => JSON.stringify(request.input).includes("xxxx"))).toBe(false);
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
     );
   });
 

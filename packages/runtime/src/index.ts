@@ -1037,8 +1037,6 @@ export {
   isRemoteCompactionItem,
   isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
-  portableSwitchTranscriptStart,
-  MODEL_SWITCH_MAX_SUMMARY_REQUESTS,
   PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,

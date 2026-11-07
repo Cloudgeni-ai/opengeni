@@ -41,23 +41,21 @@ never deletes rows, so only Codex's opaque checkpoint and encrypted reasoning
 are unreadable; the portable path drops those as usual.
 
 That stored transcript spans every Codex checkpoint since the last clear, so it
-can be far larger than any model's window, the new one included. The new model
-therefore summarizes it in bounded requests, oldest first
-(`summarizeTranscriptInBoundedRequests`): each request reads the summary so far
-and then the largest next chunk, cut between whole assistant/tool batches, that
-fits 80% of the new model's checkpoint input budget (local estimate, after the
-prepared tools and instructions) and, on Claude, the exact request-byte limit.
-The last summary covers the whole transcript, just as repeated ordinary
-checkpoints build on each other. The provider's token count is authoritative: a
-context-window rejection halves the budget and refits that chunk, at most twice,
-and later chunks keep the smaller budget. A single batch over the budget has
-its tool output shortened (not on Claude); one that still cannot fit fails the
-rebuild before any request is sent. At most four chunks' worth of the newest
-transcript is summarized (`portableSwitchTranscriptStart`,
-`MODEL_SWITCH_MAX_SUMMARY_REQUESTS`), starting at an input message; anything
-older is left out, and the receipt records how many items
-(`modelSwitchEarlierItemsOmitted`) and how many requests
-(`compactionInputProviderCalls`). These requests read no warm cache: the
+can be far larger than any model's window, the new one included (the
+recovery-view read above bounds it). The new model therefore summarizes it in
+bounded requests, oldest first (`summarizeTranscriptInBoundedRequests`): each
+request reads the summary so far and then the largest next chunk, cut between
+whole assistant/tool batches, that fits the same checkpoint input budget as any
+portable checkpoint on that model (its declared window minus the summary
+output, its prepared tools and instructions) and, on Claude, the exact
+request-byte limit. The last summary covers the whole transcript, just as
+repeated ordinary checkpoints build on each other. The provider's token count
+is authoritative over the local estimate: when it rejects a request as too
+long, the budget becomes half of that request's estimate and the chunk is
+refitted, and later chunks keep the smaller budget. A single batch that cannot
+fit (after shortening its tool output, where the portable preparation can)
+fails the rebuild without being sent. The receipt counts the requests in
+`compactionInputProviderCalls`. These requests read no warm cache: the
 transcript differs from what Codex was sent. The replacement is
 installed with `implementation: "portable_model_switch"` (the timeline says
 "Earlier messages summarized for the new model") and switches

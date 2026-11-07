@@ -29,7 +29,6 @@ import {
   isCompactionSummary,
   isRemoteCompactionItem,
   PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION,
-  portableSwitchTranscriptStart,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
@@ -109,8 +108,6 @@ export type RemoteCompactionV2Requester = ((
 type CompactionInputRecoveryPayload = {
   compactionInputHistoryRowsOmitted?: number;
   compactionInputInlinePayloadRowsElided?: number;
-  /** A model switch: oldest transcript items beyond its bounded summary requests. */
-  modelSwitchEarlierItemsOmitted?: number;
 };
 
 /**
@@ -247,7 +244,7 @@ export async function maybeCompactContext(
         (row) => !isRemoteCompactionItem(row.item) && !isCompactionSummary(row.item),
       )
     : activeHistory.items;
-  let recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
+  const recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
     ? {
         compactionInputHistoryRowsOmitted: activeHistory.recovery.omittedRows,
         compactionInputInlinePayloadRowsElided: activeHistory.recovery.elidedRows,
@@ -301,25 +298,6 @@ export async function maybeCompactContext(
       canonicalItems.push(item as CompactionItem);
       canonicalTurnIds.push(row.turnId ?? null);
     }
-  }
-  if (portableModelSwitch) {
-    // The switch summarizes the stored transcript in bounded requests on the
-    // new model (see summarizeTranscriptInBoundedRequests). Keep what at most
-    // MODEL_SWITCH_MAX_SUMMARY_REQUESTS of them can read; older items are left
-    // out rather than deferred. Each chunk shares its request with the summary
-    // so far and the checkpoint prompt.
-    const start = portableSwitchTranscriptStart(
-      canonicalItems,
-      Math.max(
-        0,
-        portableSwitchRequestBudgetTokens(settings, summarize) -
-          compactionSummaryOutputTokens(settings.contextWindowTokens) -
-          estimateTokens(buildCompactionPromptInput([])),
-      ),
-    );
-    canonicalItems.splice(0, start);
-    canonicalTurnIds.splice(0, start);
-    if (start > 0) recoveryPayload = { ...recoveryPayload, modelSwitchEarlierItemsOmitted: start };
   }
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
     const materialized = options.materializeHistory
@@ -419,32 +397,11 @@ export async function maybeCompactContext(
   return prependCompactionEvents(started.events, outcome);
 }
 
-/**
- * Estimated-token budget for one summary request of a model switch: what one
- * checkpoint request on the new model can read, with headroom because the
- * local estimate is not the new model's tokenizer.
- */
-function portableSwitchRequestBudgetTokens(
-  settings: Settings,
-  summarize: CompactionSummarizer,
-): number {
-  const outputReserve = compactionSummaryOutputTokens(settings.contextWindowTokens);
-  const structuralBudget = Math.min(
-    contextInputBudgetTokens(settings) || settings.contextWindowTokens - outputReserve,
-    settings.contextWindowTokens - outputReserve,
-  );
-  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
-  return Math.max(0, Math.floor((structuralBudget - prefixTokens) * 0.8));
-}
-
 type SummarizedCheckpoint = {
   summaryBody: string;
   preparation: PreparedCompactionPromptInput;
   providerCalls: number;
 };
-
-/** Context-window rejections of one chunk retried with half the budget. */
-const MODEL_SWITCH_CHUNK_OVERFLOW_RETRIES = 2;
 
 /**
  * Summarizes a switched chat's stored transcript on the new model in bounded
@@ -456,11 +413,13 @@ const MODEL_SWITCH_CHUNK_OVERFLOW_RETRIES = 2;
  * than this fit, so an oversized history is never sent to the new model at
  * once.
  *
- * The provider counts tokens, not this estimate: a context-window rejection
- * halves the budget and refits that chunk, at most twice, and later chunks
- * keep the smaller budget. A single batch over the budget has its tool output
- * shortened where the portable preparation can; one that still cannot fit
- * fails the rebuild before any request is sent.
+ * `budgetTokens` comes from the new model's declared window, but the provider
+ * counts tokens, not this estimate: when it rejects a request as too long,
+ * the budget becomes half of that request's estimate and the same chunk is
+ * refitted (a bisection), and later chunks keep the smaller budget. A single
+ * batch over the budget has its tool output shortened where the portable
+ * preparation can; one that still cannot fit fails the rebuild without
+ * sending it.
  */
 async function summarizeTranscriptInBoundedRequests(
   summarize: CompactionSummarizer,
@@ -521,22 +480,20 @@ async function summarizeTranscriptInBoundedRequests(
     });
   };
   while (from < items.length) {
-    for (let retry = 0; ; retry += 1) {
-      const { end, prepared } = await nextChunk();
-      providerCalls += 1;
-      try {
-        summaryBody = await summarize(settings, prepared.input);
-      } catch (error) {
-        if (!isContextWindowExceeded(error) || retry >= MODEL_SWITCH_CHUNK_OVERFLOW_RETRIES)
-          throw error;
-        budget = Math.floor(Math.min(budget, prepared.estimatedInputTokens) / 2);
-        continue;
-      }
-      rewrittenToolOutputs += prepared.rewrittenToolOutputs;
-      from = end;
-      finalPreparation = prepared;
-      break;
+    const { end, prepared } = await nextChunk();
+    providerCalls += 1;
+    try {
+      summaryBody = await summarize(settings, prepared.input);
+    } catch (error) {
+      if (!isContextWindowExceeded(error)) throw error;
+      // Strictly smaller each time, so a chunk that never fits ends in
+      // nextChunk's no_complete_prefix_fit rather than looping.
+      budget = Math.floor(Math.min(budget, prepared.estimatedInputTokens) / 2);
+      continue;
     }
+    rewrittenToolOutputs += prepared.rewrittenToolOutputs;
+    from = end;
+    finalPreparation = prepared;
   }
   if (summaryBody === undefined || !finalPreparation) {
     throw new EmptyCompactionSummaryError({
@@ -876,7 +833,7 @@ async function compactContextPortable(
       settings,
       canonicalItems,
       projectForWire,
-      { budgetTokens: portableSwitchRequestBudgetTokens(settings, summarize), maxBytes },
+      { budgetTokens: Math.max(0, structuralBudget - prefixTokens), maxBytes },
     );
   } else if (summarize.measureInputBytes) {
     const budget = Math.max(0, structuralBudget - prefixTokens);
