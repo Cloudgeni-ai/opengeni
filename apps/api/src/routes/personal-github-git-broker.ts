@@ -80,13 +80,16 @@ export type PersonalGitHubGitBrokerServices = {
     operation: "identity_verify" | "repository_verify" | BrokerOperation,
   ) => Promise<string>;
   /**
-   * Hold a force push or a ref deletion for the person's approval. Other
+   * Decide a force push or a ref deletion: the person's policy for a branch
+   * other than the default branch, the person's approval otherwise. Other
    * pushes are forwarded unchanged.
    */
   inspectPush?: (
     authority: BrokerAuthority,
     body: ReadableStream<Uint8Array> | null,
     gzip: boolean,
+    /** The repository's default branch from GitHub; null when unknown. */
+    defaultBranch: string | null,
   ) => Promise<PushInspection>;
   completePush?: (
     authority: BrokerAuthority,
@@ -257,6 +260,7 @@ export async function handlePersonalGitHubGitBrokerRequest(
         authority,
         inspected,
         request.headers.get("content-encoding")?.trim().toLowerCase() === "gzip",
+        repositoryLive.defaultBranch,
       );
     } catch (error) {
       deadline.clear();
@@ -354,8 +358,9 @@ function personalGitHubGitBrokerServices(deps: ApiRouteDeps): PersonalGitHubGitB
 }
 
 /**
- * Push approvals for a Git route: force pushes and ref deletions ask the
- * person (Block in their GitHub settings still wins).
+ * Push approvals for a Git route: force pushes and ref deletions of a branch
+ * other than the default branch follow the person's policy; of the default
+ * branch, a tag or another ref they ask (Block in their settings still wins).
  */
 export function personalGitHubPushPolicyServices(
   deps: ApiRouteDeps,
@@ -365,12 +370,13 @@ export function personalGitHubPushPolicyServices(
   const decide = databaseGatewayDecider(deps.db);
   const complete = databaseGatewayCompleter(deps.db);
   return {
-    inspectPush: async (authority, body, gzip) => {
+    inspectPush: async (authority, body, gzip, defaultBranch) => {
       const identity = authority.identity;
       if (!identity) throw new Error("personal GitHub push identity is unavailable");
       return await inspectPersonalGitHubPush({
         body,
         gzip,
+        defaultBranch,
         repositoryFullName: authority.repository.fullName,
         identity,
         decide,
@@ -805,26 +811,33 @@ export async function assertCurrentPersonalGitHubConnection(
   return { providerPrincipalId: metadata.providerPrincipalId, metadata, selection };
 }
 
+/** The live repository when it is still the expected one at its access; null otherwise. */
 async function fetchLiveRepository(
   fetchImpl: typeof fetch,
   url: URL,
   authorization: string,
   expected: BrokerRepository,
-): Promise<boolean> {
+): Promise<{ defaultBranch: string | null } | null> {
   const payload = await fetchLiveGitHubJson(fetchImpl, url, authorization);
-  if (!payload) return false;
+  if (!payload) return null;
   try {
     const permissions = providerPermissions(payload.permissions);
-    return (
+    const live =
       String(payload.id) === expected.repositoryId &&
       payload.full_name === expected.fullName &&
       payload.html_url === expected.canonicalUrl &&
       payload.disabled !== true &&
       canRead(permissions) &&
-      (expected.access !== "write" || (payload.archived !== true && canWrite(permissions)))
-    );
+      (expected.access !== "write" || (payload.archived !== true && canWrite(permissions)));
+    if (!live) return null;
+    return {
+      defaultBranch:
+        typeof payload.default_branch === "string" && payload.default_branch.length > 0
+          ? payload.default_branch
+          : null,
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 

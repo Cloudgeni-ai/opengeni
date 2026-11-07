@@ -29,6 +29,8 @@ function repositoryIdentityBlock(context: AgentPromptContext): string | null {
       context.resources.managedSandbox
         ? "On repositories mounted as the person, git and gh (including gh api) act as the person, as on their own computer; the github_personal__* tools act as them too."
         : "On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.",
+      context.resources.managedSandbox &&
+        "Force-pushing or deleting a non-default branch there follows the person's GitHub settings; the default branch and tags wait for their approval.",
       app && "On GitHub app repositories, use the github_app__* tools.",
     ),
   );

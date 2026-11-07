@@ -565,3 +565,209 @@ describe("gateway repository allowlist", () => {
     );
   });
 });
+
+describe("force updates and deletions of refs", () => {
+  /**
+   * GitHub for acme/widgets, whose default branch is main: the REST
+   * repository, GraphQL Ref and Repository nodes, and the request itself.
+   */
+  function github(defaultBranch: string | null = "main") {
+    const repositoryReads: string[] = [];
+    const respond = (url: string, init: RequestInit) => {
+      if (
+        url.startsWith("https://api.github.com/repos/acme/widgets") &&
+        (init.method ?? "GET") === "GET"
+      ) {
+        repositoryReads.push(url);
+        return defaultBranch
+          ? Response.json({ full_name: "acme/widgets", default_branch: defaultBranch })
+          : Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      if (url === "https://api.github.com/graphql") {
+        const body = JSON.parse(bodyText(init)) as {
+          query: string;
+          variables?: { ids?: string[] };
+        };
+        const branchRef = defaultBranch ? { name: defaultBranch } : null;
+        const nodes = (body.variables?.ids ?? []).map((id) => {
+          if (id === "R_kgDOWidgets") {
+            return {
+              __typename: "Repository",
+              nameWithOwner: "acme/widgets",
+              defaultBranchRef: branchRef,
+            };
+          }
+          const [prefix, name] = {
+            REF_kwDOFeature1: ["refs/heads/", "feature"],
+            REF_kwDOMainRef1: ["refs/heads/", "main"],
+            REF_kwDOTagRef01: ["refs/tags/", "v1"],
+          }[id] ?? ["refs/heads/", "unknown"];
+          return {
+            __typename: "Ref",
+            name,
+            prefix,
+            repository: { nameWithOwner: "acme/widgets", defaultBranchRef: branchRef },
+          };
+        });
+        if (body.query.includes("OpengeniGateway")) return Response.json({ data: { nodes } });
+        return Response.json({ data: {} });
+      }
+      return Response.json({ ok: true });
+    };
+    return { respond, repositoryReads };
+  }
+
+  const graphql = (query: string, variables: Record<string, unknown> = {}) => ({
+    method: "POST",
+    body: JSON.stringify({ query, variables }),
+  });
+
+  test("of a branch other than the default branch follow the person's policy", async () => {
+    const { respond } = github();
+    const { send, decisions, upstream } = harness({ respond });
+    expect(
+      (await send("/repos/acme/widgets/git/refs/heads/feature/x", { method: "DELETE" })).status,
+    ).toBe(200);
+    await send("/repos/acme/widgets/git/refs/heads/feature", {
+      method: "PATCH",
+      body: JSON.stringify({ sha: "a".repeat(40), force: true }),
+    });
+    await send(
+      "/graphql",
+      graphql('mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } }'),
+    );
+    await send(
+      "/graphql",
+      graphql(
+        'mutation { updateRef(input: {refId: "REF_kwDOFeature1", oid: "abc", force: true}) { clientMutationId } }',
+      ),
+    );
+    await send(
+      "/graphql",
+      graphql("mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }", {
+        i: {
+          repositoryId: "R_kgDOWidgets",
+          refUpdates: [
+            { name: "refs/heads/feature", beforeOid: "a".repeat(40), afterOid: "0".repeat(40) },
+            { name: "refs/heads/other", afterOid: "b".repeat(40), force: true },
+          ],
+        },
+      }),
+    );
+    expect(decisions.map((decision) => [decision.title, decision.action])).toEqual([
+      [
+        "Delete branch or tag on acme/widgets",
+        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+      ],
+      [
+        "Force-update branch on acme/widgets",
+        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+      ],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
+      ["Force-update branch on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
+    ]);
+    expect(upstream.some((request) => request.init.method === "DELETE")).toBe(true);
+  });
+
+  test("of the default branch, a tag or an unconfirmed ref always ask", async () => {
+    const { respond } = github();
+    const { send, decisions } = harness({ respond });
+    await send("/repos/acme/widgets/git/refs/heads/main", { method: "DELETE" });
+    await send("/repos/acme/widgets/git/refs/heads/Main", {
+      method: "PATCH",
+      body: JSON.stringify({ sha: "a".repeat(40), force: true }),
+    });
+    await send("/repos/acme/widgets/git/refs/tags/v1", { method: "DELETE" });
+    await send(
+      "/graphql",
+      graphql('mutation { deleteRef(input: {refId: "REF_kwDOMainRef1"}) { clientMutationId } }'),
+    );
+    await send(
+      "/graphql",
+      graphql('mutation { deleteRef(input: {refId: "REF_kwDOTagRef01"}) { clientMutationId } }'),
+    );
+    await send(
+      "/graphql",
+      graphql("mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }", {
+        i: {
+          repositoryId: "R_kgDOWidgets",
+          refUpdates: [
+            { name: "refs/heads/feature", afterOid: "0".repeat(40) },
+            { name: "refs/heads/main", afterOid: "b".repeat(40), force: true },
+          ],
+        },
+      }),
+    );
+    // Another mutation that always asks keeps the request asking.
+    await send(
+      "/graphql",
+      graphql(
+        'mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } updateRepository(input: {repositoryId: "R_kgDOWidgets", hasWikiEnabled: false}) { clientMutationId } }',
+      ),
+    );
+    expect(decisions.map((decision) => decision.action)).toHaveLength(7);
+    expect(
+      decisions.every((decision) => decision.action.kind === "write" && decision.action.alwaysAsk),
+    ).toBe(true);
+  });
+
+  test("ask when GitHub does not tell the default branch", async () => {
+    const { respond } = github(null);
+    const { send, decisions } = harness({ respond });
+    await send("/repos/acme/widgets/git/refs/heads/feature", { method: "DELETE" });
+    await send(
+      "/graphql",
+      graphql('mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } }'),
+    );
+    expect(decisions.map((decision) => decision.action)).toEqual([
+      expect.objectContaining({ alwaysAsk: true }),
+      expect.objectContaining({ alwaysAsk: true }),
+    ]);
+  });
+
+  test("the default branch is read once with the person's token and kept", async () => {
+    const { respond, repositoryReads } = github();
+    const { services, send, decisions, authorized } = harness({ respond });
+    services.defaultBranches = new Map();
+    await send("/repos/acme/widgets/git/refs/heads/one", { method: "DELETE" });
+    await send("/repos/acme/widgets/git/refs/heads/two", { method: "DELETE" });
+    expect(repositoryReads).toEqual(["https://api.github.com/repos/acme/widgets"]);
+    expect(
+      authorized.some((call) => call.url === "https://api.github.com/repos/acme/widgets"),
+    ).toBe(true);
+    expect(decisions.map((decision) => decision.action)).toEqual([
+      expect.objectContaining({ alwaysAsk: false }),
+      expect.objectContaining({ alwaysAsk: false }),
+    ]);
+  });
+
+  test("with Ask first a branch rewrite still asks; with Allow it runs", async () => {
+    const { respond } = github();
+    for (const policy of ["allow", "ask"] as const) {
+      const context = harness({ respond });
+      context.services.decide = async (_identity, input) => {
+        context.decisions.push(input);
+        return policy === "allow" && !input.action.alwaysAsk
+          ? { kind: "allow" }
+          : {
+              kind: "refuse",
+              status: 403,
+              waiting: true,
+              message: `Waiting for approval: ${input.title}.`,
+            };
+      };
+      const response = await context.send("/repos/acme/widgets/git/refs/heads/feature", {
+        method: "DELETE",
+      });
+      if (policy === "allow") {
+        expect(response.status).toBe(200);
+        expect(context.upstream.some((request) => request.init.method === "DELETE")).toBe(true);
+      } else {
+        expect(response.status).toBe(403);
+        expect(response.headers.get("x-opengeni-approval")).toBe("pending");
+        expect(context.upstream.some((request) => request.init.method === "DELETE")).toBe(false);
+      }
+    }
+  });
+});

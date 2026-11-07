@@ -300,8 +300,10 @@ identity, repository identity, and pull/push permission. Provider OAuth tokens
 are decrypted only at that server boundary. Requests use fixed GitHub hosts,
 no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
 A receive-pack transport failure is outcome-unknown and is never automatically
-replayed. A push that deletes a branch or tag, or force-updates one, asks the
-person first (see [Git pushes](#git-pushes)); ordinary pushes are unchanged.
+replayed. A push that deletes or force-updates a branch other than the default
+branch follows the person's policy; one that deletes or force-updates the
+default branch or a tag asks the person first (see [Git pushes](#git-pushes)).
+Ordinary pushes are unchanged.
 The standalone consumer remains default-off with personal GitHub OAuth; GitHub
 App and Connected Machine credential paths are unchanged.
 
@@ -399,12 +401,21 @@ tools use, so one setting covers both:
   person's policy for the matching action, or the strictest of the routine
   group when no single action matches. Reviews and merges follow their own
   groups.
-- Destructive or hard-to-undo requests always ask: deleting repositories,
-  branches, tags, releases, comments or other data; force-updating a branch;
-  repository settings, collaborators and teams, secrets and variables,
-  webhooks and deploy keys, branch protection, transfer, archive and
-  visibility, approving deployments or fork workflow runs. So do REST writes
-  and GraphQL mutations the gateway doesn't recognise.
+- Deleting or force-updating a branch other than the repository's default
+  branch (REST `git/refs`, GraphQL `deleteRef`, `updateRef` and `updateRefs`)
+  follows the person's `Create and update work` policy, so agents can rebase
+  their own pull request branches and delete merged ones. The gateway reads
+  the default branch with the person's token (REST `default_branch`, kept for
+  five minutes per connection and repository, or the GraphQL Ref and
+  Repository nodes); when it can't confirm every ref is such a branch, the
+  request asks.
+- Destructive or hard-to-undo requests always ask: deleting or force-updating
+  the default branch, deleting or moving tags, deleting repositories,
+  releases, comments or other data; repository settings, collaborators and
+  teams, secrets and variables, webhooks and deploy keys, branch protection,
+  transfer, archive and visibility, approving deployments or fork workflow
+  runs. So do REST writes and GraphQL mutations the gateway doesn't
+  recognise.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for approval:
@@ -420,12 +431,18 @@ is not replayed.
 ### Git pushes
 
 Pushes through the broker or the gateway are inspected before they reach
-GitHub. A push that deletes a branch or tag, or moves a branch to a commit
-that does not descend from its current tip, asks the person; the approval is
-bound to the exact ref updates. Git reports a waiting push as a rejected ref
-with the same message. When the gateway can't tell whether an update is a
-fast-forward (for example a push over 64 MiB), or can't read the push at all,
-it asks.
+GitHub. A push that deletes a ref, or moves a branch to a commit that does
+not descend from its current tip (a force push), is decided as one request:
+when every such ref is a branch other than the repository's default branch
+(the `default_branch` of the live repository check the broker makes on every
+request), it follows the person's `Create and update work` policy; when one
+is the default branch, a tag or another ref, or the default branch is
+unknown, it asks the person. An approval is bound to the exact ref updates.
+Git reports a waiting push as a rejected ref with the same message. Pushes
+from shallow clones (how managed sandboxes clone) are read like any other.
+When the gateway can't tell whether an update is a fast-forward, it treats it
+as a force push; past the 64 MiB inspection limit it uses the commits it read
+before the cut. A push it can't read at all asks.
 Ordinary fast-forward pushes and new branches follow the existing write
 access.
 
