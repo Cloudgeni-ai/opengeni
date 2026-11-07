@@ -1792,6 +1792,11 @@ observability:
     providerTtftRegressionFloorSeconds: 5
     providerTtftRecentMinSamples: 30
     providerTtftBaselineMinSamples: 200
+    # Streaming p99 alerts (session event append and live publish) need at
+    # least this many observations in their window. Below 100 the p99 is just
+    # the slowest single observation, so one slow write on a quiet deployment
+    # would page.
+    sessionEventMinSamples: 100
     labels: {}
     annotations: {}
     rules: []
