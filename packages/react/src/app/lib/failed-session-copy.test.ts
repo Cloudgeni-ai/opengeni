@@ -580,3 +580,19 @@ test("the plain failure line tells a member who can't fix a refusal to ask an ow
   const generic = failedSessionCopy({ ...summary, reason: null }, true, false, true, null, null);
   expect(failureFallbackReason(generic, false)).toBe(generic.reason);
 });
+
+test("a turn refused for machine access says so, never a database error", () => {
+  const recorded =
+    "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now. Its owner can allow it for this chat.";
+  expect(
+    failedSessionCopy({ ...summary, reason: recorded, failureCode: "machine_access_required" }),
+  ).toEqual({ reason: recorded, unavailableModel: false, machineAccess: true });
+  expect(
+    failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }),
+  ).toEqual({
+    reason:
+      "Machine access needed: this chat isn’t allowed to use its machine right now. Its owner can allow it for this chat.",
+    unavailableModel: false,
+    machineAccess: true,
+  });
+});

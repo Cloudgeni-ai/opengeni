@@ -1116,3 +1116,48 @@ test("the Codex usage notice is one line with when it resets and the Continue at
   expect(changes).toEqual([false]);
   expect(container.querySelector('[role="alert"]')?.textContent).toBe("Try again.");
 });
+
+test("a chat its owner's machine isn't allowed for offers Allow in place of Retry", async () => {
+  const machineFailure = {
+    ...failure,
+    failureCode: "machine_access_required",
+    reason:
+      "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now. Its owner can allow it for this chat.",
+  };
+  // Someone who can't allow it reads the reason and keeps Retry for once it is.
+  const viewer = await render(<FailedSessionBanner failure={machineFailure} actions={actions} />);
+  expect(viewer.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    machineFailure.reason,
+  );
+  expect(viewer.textContent).not.toContain("database");
+  expect(viewer.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  let resolveAllow: (error: string | null) => void = () => {};
+  const onAllow = mock(() => new Promise<string | null>((resolve) => (resolveAllow = resolve)));
+  const owner = await render(
+    <FailedSessionBanner
+      failure={machineFailure}
+      actions={actions}
+      allowMachine={{ machineName: "Studio Mac", onAllow }}
+    />,
+  );
+  expect(owner.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+  );
+  const buttons = () => [...owner.querySelectorAll("button")];
+  expect(buttons().map((button) => button.textContent)).toEqual(["Allow for this chat"]);
+  await act(async () => {
+    buttons()[0]!.click();
+    buttons()[0]!.click();
+  });
+  expect(onAllow).toHaveBeenCalledTimes(1);
+  expect(buttons()[0]!.textContent).toBe("Allowing…");
+  expect(buttons()[0]!.disabled).toBe(true);
+  await act(async () => resolveAllow("This chat has ended. Start a new chat to use a repository."));
+  expect(owner.querySelector('[role="alert"]')!.textContent).toBe(
+    "This chat has ended. Start a new chat to use a repository.",
+  );
+  expect(buttons()[0]!.textContent).toBe("Allow for this chat");
+});

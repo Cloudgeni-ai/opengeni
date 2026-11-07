@@ -34,6 +34,10 @@ import {
 import { type Settings } from "@opengeni/config";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
 import {
+  isPersonalMachineAccessRefusal,
+  PersonalMachineAccessRequiredError,
+} from "./machine-access";
+import {
   backgroundCommandWakeSender,
   managedSessionGroupBackend,
   managedSessionGroupOs,
@@ -361,11 +365,20 @@ export async function resolveMachineEnrollmentForTurn(
   authority: Omit<Parameters<typeof resolvePersonalMachineRouteForAttempt>[1], "enrollmentId">,
 ) {
   if (sandbox.scope === "user") {
-    const route = await resolvePersonalMachineRouteForAttempt(db, {
-      ...authority,
-      enrollmentId: sandbox.enrollmentId!,
-    });
-    if (!route) throw new Error("personal Connected Machine use was not admitted for this turn");
+    let route: Awaited<ReturnType<typeof resolvePersonalMachineRouteForAttempt>>;
+    try {
+      route = await resolvePersonalMachineRouteForAttempt(db, {
+        ...authority,
+        enrollmentId: sandbox.enrollmentId!,
+      });
+    } catch (error) {
+      // A missing, used, revoked or expired approval is the person's to give
+      // again, not a database fault.
+      if (isPersonalMachineAccessRefusal(error))
+        throw new PersonalMachineAccessRequiredError(sandbox.name, { cause: error });
+      throw error;
+    }
+    if (!route) throw new PersonalMachineAccessRequiredError(sandbox.name);
     return route;
   }
   const liveConnection = await getLiveEnrollmentConnection(

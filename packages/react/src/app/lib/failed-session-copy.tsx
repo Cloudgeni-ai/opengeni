@@ -107,6 +107,10 @@ const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution e
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 const COMPACTION_FAILURE =
   "Couldn’t compact conversation history. If the next message fails too, start a new session.";
+/** The worker's code for a turn whose personal machine isn't allowed in this chat. */
+export const MACHINE_ACCESS_REQUIRED_CODE = "machine_access_required";
+const MACHINE_ACCESS_REQUIRED =
+  "Machine access needed: this chat isn’t allowed to use its machine right now. Its owner can allow it for this chat.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -225,6 +229,8 @@ export function failedSessionCopy(
   compaction?: true | undefined;
   /** A credit stop one action fixes (own-key fee or API use); no model choice helps. */
   creditRefusal?: CreditRefusalKind | undefined;
+  /** The chat's personal machine isn't allowed for it; its owner can allow it here. */
+  machineAccess?: true | undefined;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -233,6 +239,15 @@ export function failedSessionCopy(
   // Retry stays, because an upgrade or another account clears the condition
   // and admission re-checks the plan without a model request.
   const code = failure.failureCode;
+  // The worker names the machine; the owner allows it for this chat. Retrying
+  // the same message can't, so Allow takes its place where it is offered.
+  if (code === MACHINE_ACCESS_REQUIRED_CODE) {
+    return {
+      reason: recorded || MACHINE_ACCESS_REQUIRED,
+      unavailableModel: false,
+      machineAccess: true,
+    };
+  }
   if (code === "codex_request_rejected") {
     return {
       reason:
