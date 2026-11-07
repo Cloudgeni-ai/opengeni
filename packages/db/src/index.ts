@@ -1332,7 +1332,6 @@ import {
 } from "./quiescence-receipt-wake-repair";
 export * from "./maintenance-work-probes";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
-export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 import { createArchivedSessionImportPersistence } from "./archived-session-imports";
 export {

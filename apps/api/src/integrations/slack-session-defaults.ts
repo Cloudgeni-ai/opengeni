@@ -5,19 +5,15 @@ import {
   type GitHubRepository,
   type RepositoryResourceRef,
 } from "@opengeni/contracts";
-import { listRecentSessionRepositoryResources } from "@opengeni/db";
 import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import { githubRepositoryResourceRef, listWorkspaceGitHubRepositories } from "../github-access";
 
 /**
  * A Slack task starts with at most this many repositories. Each one is a
  * shallow, blob-filtered fetch before the first command, so the set stays
- * small: the person's own most recently used repositories, not a catalog.
+ * small even when the person's new-chat form holds many.
  */
-export const SLACK_SESSION_RECENT_REPOSITORY_LIMIT = 5;
-
-/** How far back the person's own sessions count as recent use. */
-export const SLACK_SESSION_RECENT_REPOSITORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const SLACK_SESSION_REPOSITORY_LIMIT = 5;
 
 function githubUriKey(uri: string): string | null {
   try {
@@ -42,11 +38,10 @@ function positiveRepositoryId(value: unknown): number | null {
 }
 
 /**
- * Pick a Slack task's repositories: the person's recently used repositories,
- * in recency order, that the workspace GitHub App catalog still offers them.
+ * Pick a Slack task's repositories: the repositories in the person's new-chat
+ * form, in form order, that the workspace GitHub App catalog offers them.
  *
- * `recent` is a usage signal only, and only repositories the person attached
- * themselves count: an automatically attached (`optional`) one never does. A
+ * `form` is a selection signal only. A
  * repository reaches the task only through its current catalog entry (the
  * same catalog and `github:use` permission as the website picker), on its
  * default branch, so a Slack task never reaches a repository the person could
@@ -55,10 +50,10 @@ function positiveRepositoryId(value: unknown): number | null {
  * an empty repository has nothing to check out. Every returned resource is
  * best effort (`optional`): one failed clone warns instead of failing setup.
  */
-export function selectRecentRepositoryResources(
-  recent: readonly RepositoryResourceRef[],
+export function selectFormRepositoryResources(
+  form: readonly RepositoryResourceRef[],
   catalog: readonly GitHubRepository[],
-  limit = SLACK_SESSION_RECENT_REPOSITORY_LIMIT,
+  limit = SLACK_SESSION_REPOSITORY_LIMIT,
 ): RepositoryResourceRef[] {
   const byId = new Map<number, GitHubRepository[]>();
   const byUri = new Map<string, GitHubRepository>();
@@ -73,19 +68,18 @@ export function selectRecentRepositoryResources(
   const chosen = new Set<string>();
   const mountKeys = new Set<string>();
   const resources: RepositoryResourceRef[] = [];
-  for (const used of recent) {
+  for (const selected of form) {
     if (resources.length >= limit) break;
-    // A repository Opengeni attached automatically is not a choice the person
-    // made; counting it would keep re-attaching it to every later Slack task.
-    if (used.optional === true) continue;
     const repositoryId = positiveRepositoryId(
-      used.githubRepositoryId ?? (used.provider === "github" ? used.repositoryId : undefined),
+      selected.githubRepositoryId ??
+        (selected.provider === "github" ? selected.repositoryId : undefined),
     );
     const installationId = positiveRepositoryId(
-      used.githubInstallationId ?? (used.provider === "github" ? used.installationId : undefined),
+      selected.githubInstallationId ??
+        (selected.provider === "github" ? selected.installationId : undefined),
     );
     const candidates = repositoryId !== null ? (byId.get(repositoryId) ?? []) : [];
-    const uriKey = githubUriKey(used.uri);
+    const uriKey = githubUriKey(selected.uri);
     const match =
       candidates.find((candidate) => candidate.installationId === installationId) ??
       candidates[0] ??
@@ -111,29 +105,23 @@ export function selectRecentRepositoryResources(
 }
 
 /**
- * The repositories a new Slack task starts with: the person's own recently
- * used repositories in this workspace (their own top-level sessions active in
- * the last 30 days, most recent first, at most five), limited to what the
- * workspace GitHub App catalog offers them now. None when they have none; the
- * agent can still find and clone repositories through its GitHub tools.
+ * The repositories a new Slack task starts with: those in the person's
+ * new-chat form for this workspace (`form`, what a new chat in the app would
+ * start with now), in form order and at most five, limited to what the
+ * workspace GitHub App catalog offers them now. None when the form has none.
  *
- * GitHub is asked only when there is something to look up. A GitHub outage or
+ * GitHub is asked only when the form has a repository. A GitHub outage or
  * an unconfigured App starts the task without repositories instead of failing
  * it, with a log line for diagnosis.
  */
-export async function slackRecentRepositoryResources(
+export async function slackFormRepositoryResources(
   deps: ApiRouteDeps,
-  grant: Pick<AccessGrant, "permissions" | "subjectId">,
+  grant: Pick<AccessGrant, "permissions">,
   workspaceId: string,
-  now: Date = new Date(),
+  form: readonly RepositoryResourceRef[],
 ): Promise<RepositoryResourceRef[]> {
   if (!hasPermission(grant.permissions, "github:use")) return [];
-  const recent = await listRecentSessionRepositoryResources(deps.db, {
-    workspaceId,
-    subjectId: grant.subjectId,
-    since: new Date(now.getTime() - SLACK_SESSION_RECENT_REPOSITORY_WINDOW_MS),
-  });
-  if (!recent.some((resource) => resource.optional !== true)) return [];
+  if (form.length === 0) return [];
   let catalog: GitHubRepository[];
   try {
     catalog = await listWorkspaceGitHubRepositories(deps, workspaceId);
@@ -147,7 +135,7 @@ export async function slackRecentRepositoryResources(
     });
     return [];
   }
-  return selectRecentRepositoryResources(recent, catalog);
+  return selectFormRepositoryResources(form, catalog);
 }
 
 const OPEN_GENI_LINK_PATTERN =

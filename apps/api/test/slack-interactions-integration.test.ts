@@ -1537,7 +1537,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ["app_mention", true],
     ["reaction", true],
   ] as const) {
-    test(`${trigger} ${retryShell ? "recovers a pending shell with" : "starts with"} workspace defaults instead of the actor's website selections`, async () => {
+    test(`${trigger} ${retryShell ? "recovers a pending shell with" : "starts with"} workspace defaults and the form's repositories instead of the actor's other website selections`, async () => {
       if (!available) return;
       const value = await fixture({
         slackWorkspaceRouting: true,
@@ -1646,10 +1646,9 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           githubRepository(99, "unbound", { installationId: 72 }),
         ],
       };
-      // What this person used recently in this workspace: their own website
-      // sessions. Another member's session, one older than 30 days and a
-      // repository that was itself attached automatically never count, and
-      // archived or empty repositories are skipped.
+      // What this person used recently in this workspace. None of it counts:
+      // a Slack task starts with the repositories in the person's new-chat
+      // form, as a new chat in the app would, not a union of recent use.
       const ownerGrant = await getWorkspaceGrant(
         client.db,
         value.owner.subjectId,
@@ -1683,9 +1682,10 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           0,
         ),
       ];
-      // The website draft is one chat's explicit narrowing: no connectors, no
-      // Opengeni tools, an extra Variable Set, a restricted permission set and
-      // a different repository. None of it may reach a Slack task.
+      // The website draft narrows connectors, Opengeni tools and permissions,
+      // none of which may reach a Slack task. Its repositories do, in form
+      // order, through the workspace App catalog: an archived, an empty and a
+      // repository the catalog does not offer are skipped.
       const draftRepository = {
         kind: "repository" as const,
         uri: "https://github.com/example/draft-only.git",
@@ -1694,7 +1694,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       const save = (
         workspaceId: string,
         subjectId: string,
-        resources: (typeof draftRepository)[],
+        resources: Array<typeof draftRepository | ReturnType<typeof appRepository>>,
       ) =>
         withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
           saveNewSessionDraftInTransaction(db, {
@@ -1716,7 +1716,15 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
             },
           }),
         );
-      await save(target.workspaceId, value.owner.subjectId, [draftRepository]);
+      await save(target.workspaceId, value.owner.subjectId, [
+        appRepository(44, "stale"),
+        appRepository(46, "retired"),
+        draftRepository,
+        appRepository(47, "blank"),
+        appRepository(43, "service"),
+      ]);
+      // Another member's form never counts.
+      await save(target.workspaceId, value.otherSubjectId, [appRepository(45, "theirs")]);
       await save(value.owner.workspaceId, value.owner.subjectId, []);
       const timestamp = "1700000999.000001";
       value.slack.reactionContexts.set(`${channelId}:${timestamp}`, {
@@ -1807,10 +1815,21 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           reasoning_effort: string;
         }[]
       >`select resources, variable_set_ids, tools, tool_policy, first_party_mcp_tools, first_party_mcp_permissions, initial_message, reasoning_effort from sessions where id = ${interaction!.session_id}`;
-      // The person's own recently used repositories, most recent first, on
-      // the default branch and best effort; never the draft's, another
-      // member's, a stale one, an archived one or an empty one.
+      // The repositories in the person's own form, in form order, on the
+      // default branch and best effort; never their recently used ones,
+      // another member's, an archived one, an empty one or one the catalog
+      // does not offer.
       expect(session!.resources).toEqual([
+        {
+          kind: "repository",
+          uri: "https://github.com/example-owner/stale.git",
+          ref: "main",
+          mountPath: "repos/github.com/example-owner/stale",
+          provider: "github",
+          githubInstallationId: 71,
+          githubRepositoryId: 44,
+          optional: true,
+        },
         {
           kind: "repository",
           uri: "https://github.com/example-owner/service.git",
@@ -1819,16 +1838,6 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           provider: "github",
           githubInstallationId: 71,
           githubRepositoryId: 43,
-          optional: true,
-        },
-        {
-          kind: "repository",
-          uri: "https://github.com/example-owner/project.git",
-          ref: "main",
-          mountPath: "repos/github.com/example-owner/project",
-          provider: "github",
-          githubInstallationId: 71,
-          githubRepositoryId: 42,
           optional: true,
         },
       ]);
@@ -7833,12 +7842,22 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         return [];
       },
     };
-    const grant = await getWorkspaceGrant(
-      client.db,
-      value.owner.subjectId,
-      value.owner.workspaceId,
+    await withWorkspaceSubjectRls(client.db, value.owner.workspaceId, value.owner.subjectId, (db) =>
+      saveNewSessionDraftInTransaction(db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        subjectId: value.owner.subjectId,
+        expectedRevision: 0,
+        text: "",
+        resources: [appRepository(42, "project")],
+        tools: [],
+        toolsProvided: false,
+        model: value.deps.settings.openaiModel,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        options: {},
+      }),
     );
-    await seedRecentSession(value.deps, grant!, [appRepository(42, "project")], 1);
     catalog.failing = true;
     catalog.calls = 0;
     const errors: unknown[][] = [];
@@ -7872,7 +7891,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const [session] = await shared!.admin<{ resources: unknown[] }[]>`
       select resources from sessions where id = ${interaction!.session_id}`;
     expect(session!.resources).toEqual([]);
-    // The recent repository was found and GitHub was asked, once, and failed.
+    // The form has a repository, so GitHub was asked, once, and failed.
     expect(catalog.calls).toBe(1);
     const acknowledgement = value.slack.posts.find(isStartMessage);
     expect(acknowledgement).toBeDefined();

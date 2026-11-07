@@ -1012,7 +1012,7 @@ mount path in `skippedOptionalRepositories` on the `repository-clone`
 `sandbox.operation.completed` event, and the session continues without it.
 Without the flag a failed clone fails sandbox setup, as before. Opengeni sets
 it only on repositories it attaches on a person's behalf (a Slack task's
-recently used repositories); it grants no access and changes no credential
+repositories from the person's new-chat form); it grants no access and changes no credential
 routing. An optional clone is bounded to 60 seconds (90 seconds for all
 optional clones of one setup command) when the sandbox has a `timeout` binary,
 so a hung fetch is skipped the same way. Before each turn's strict GitHub App

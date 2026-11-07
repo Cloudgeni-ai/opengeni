@@ -5,6 +5,7 @@ import {
   SaveNewSessionDraftRequest,
   type AccessGrant,
   type NewSessionDraft as NewSessionDraftValue,
+  type RepositoryResourceRef,
 } from "@opengeni/contracts";
 import {
   getNewSessionDraftInTransaction,
@@ -433,11 +434,10 @@ export async function saveActorNewSessionDraft(
  * The model policy the person explicitly chose in the website composer, or an
  * empty object when their draft follows the default.
  *
- * Only the model policy is reused. Connectors, repositories, Variable Sets,
- * Sandbox Environment and compute target in the draft are the person's last
- * explicit narrowing of one website chat, so surfaces that start work without
- * the composer (Slack) resolve those from workspace defaults instead of
- * silently inheriting that narrowing.
+ * Connectors, Variable Sets, Sandbox Environment and compute target in the
+ * draft are the person's last explicit narrowing of one website chat, so
+ * surfaces that start work without the composer (Slack) resolve those from
+ * workspace defaults instead of silently inheriting that narrowing.
  */
 export async function getActorNewSessionModelChoice(
   deps: Parameters<typeof getActorNewSessionDraft>[0],
@@ -446,16 +446,44 @@ export async function getActorNewSessionModelChoice(
 ): Promise<
   Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode"> | Record<string, never>
 > {
+  return (await getActorNewSessionStartChoices(deps, grant, workspaceId)).modelChoice;
+}
+
+/**
+ * What a chat started without the composer (Slack) takes from the person's
+ * new-chat form, read once: the model policy they explicitly chose (empty when
+ * the form follows the default) and the repositories in the form, in form
+ * order. The repositories are exactly what a new chat in the app would start
+ * with now: after each chat starts, the form keeps its repositories for the
+ * next one. Hydration has already dropped repositories whose authorization
+ * was revoked; callers still check them against what they may attach.
+ */
+export async function getActorNewSessionStartChoices(
+  deps: Parameters<typeof getActorNewSessionDraft>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+): Promise<{
+  modelChoice:
+    | Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode">
+    | Record<string, never>;
+  repositories: RepositoryResourceRef[];
+}> {
   // A draft that follows the default is not projected here; session creation
   // resolves the default itself, once.
   const draft = await getActorNewSessionDraft(deps, grant, workspaceId, undefined, {
     projectDefaultModel: false,
   });
-  return draft.revision > 0 && draft.modelProvided === true
-    ? {
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
-      }
-    : {};
+  return {
+    modelChoice:
+      draft.revision > 0 && draft.modelProvided === true
+        ? {
+            model: draft.model,
+            reasoningEffort: draft.reasoningEffort,
+            latencyMode: draft.latencyMode,
+          }
+        : {},
+    repositories: draft.resources.filter(
+      (resource): resource is RepositoryResourceRef => resource.kind === "repository",
+    ),
+  };
 }
