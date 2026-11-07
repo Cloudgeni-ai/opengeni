@@ -38935,6 +38935,8 @@
       "ActivityRailProps": "type",
       "advancedSourceSummary": "value",
       "AgentMessageItem": "type",
+      "AgentSignalOptions": "type",
+      "AgentSignals": "type",
       "AllowanceLabels": "type",
       "AllowanceScope": "type",
       "answersFromDrafts": "value",
@@ -41054,7 +41056,11 @@
       "endsText": "value"
     },
     "@opengeni/react/session-agents-model": {
+      "AgentSignalOptions": "type",
+      "AgentSignals": "type",
       "formatWaitingSince": "value",
+      "resolveAgentSignals": "value",
+      "ResolvedAgentSignals": "type",
       "sessionAgentAttention": "value",
       "SessionAgentAttention": "type",
       "sessionAgentsSignal": "value",

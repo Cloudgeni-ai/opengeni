@@ -91,6 +91,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
@@ -151,10 +152,10 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
    * Show how the agent works on each turn row. Defaults to true. With `false`
    * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
    * step under it and no step facets (yours included). The steps stay behind
-   * the row for anyone who opens it. `NativeSessionScreen` passes its own
-   * `agentSignals` here.
+   * the row for anyone who opens it. An object reads only its `turnDetail`
+   * switch. `NativeSessionScreen` passes its own `agentSignals` here.
    */
-  agentSignals?: boolean | undefined;
+  agentSignals?: AgentSignals | undefined;
   /**
    * Your own mark (a small animated logo or mascot) at the leading edge of the
    * live "Working" / "Waiting" / "Paused" row. Called with the row's state
@@ -236,12 +237,13 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
+  const turnDetail = resolveAgentSignals(props.agentSignals).turnDetail;
   const items = useMemo(() => {
     const built = props.items ?? buildTimeline(t, props.events ?? []);
     // A person who never sees the agent's work reads an automation run as
     // its line and its answer only.
-    return props.agentSignals === false ? automationRunOutcomesOnly(built) : built;
-  }, [t, props.items, props.events, props.agentSignals]);
+    return turnDetail ? built : automationRunOutcomesOnly(built);
+  }, [t, props.items, props.events, turnDetail]);
   const pauses = useTimelinePauses(props.events, props.pause);
   const groups = useMemo(
     () => groupTimeline(t, items, { readableTurns: true, pauses }),
@@ -651,9 +653,9 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const context: GroupContext = {
     turnsWithOutput,
-    // Without agent signals a turn row is only its status ("Working · 8s").
-    facets: props.agentSignals === false ? STATUS_ONLY_FACETS : props.facets,
-    agentSignals: props.agentSignals !== false,
+    // Without turn detail a turn row is only its status ("Working · 8s").
+    facets: turnDetail ? props.facets : STATUS_ONLY_FACETS,
+    agentSignals: turnDetail,
     renderLiveMark: props.renderLiveMark,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,

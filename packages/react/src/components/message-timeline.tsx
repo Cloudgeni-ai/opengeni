@@ -15,6 +15,7 @@ import {
   readableWorkStatus,
 } from "../timeline/work-presentation";
 import { useErrorMessage } from "../lib/error-message";
+import { resolveAgentSignals, type AgentSignals } from "../session-agents-model";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
 import { TurnStepsAction, TurnStepsLoader } from "../timeline/turn-steps";
@@ -359,10 +360,11 @@ export type MessageTimelineProps = {
    * Show how the agent works on each turn row. Defaults to true. With `false`
    * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
    * step under it and no step facets (yours included). The steps stay behind
-   * the row for anyone who opens it. `SessionConversation` and
-   * `NativeSessionScreen` pass their own `agentSignals` here.
+   * the row for anyone who opens it. An object reads only its `turnDetail`
+   * switch. `SessionConversation` and `NativeSessionScreen` pass their own
+   * `agentSignals` here.
    */
-  agentSignals?: boolean | undefined;
+  agentSignals?: AgentSignals | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
@@ -700,7 +702,7 @@ export function MessageTimeline({
   computeLabel = null,
   genieLoading,
   turnSummary,
-  agentSignals = true,
+  agentSignals: agentSignalsProp,
   autoFollow = true,
   onAnnotate,
   questionNavMinViewportHeight = 0,
@@ -721,6 +723,7 @@ export function MessageTimeline({
 }: MessageTimelineProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
+  const agentSignals = resolveAgentSignals(agentSignalsProp).turnDetail;
   const resolvedItems = useMemo(() => {
     const builtItems = items ?? buildTimeline(t, events ?? []);
     // A person who never sees the agent's work reads an automation run as

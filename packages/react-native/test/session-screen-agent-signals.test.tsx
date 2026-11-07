@@ -111,9 +111,13 @@ mock.module("react-native-reanimated", () => ({
 registerDom();
 
 const timelinePath = new URL("../src/timeline/message-timeline.tsx", import.meta.url).pathname;
+// What the screen hands the timeline, for the turn-detail switch.
+const timelineSignals: unknown[] = [];
 mock.module(timelinePath, () => ({
-  MessageTimeline: (props: { trailing?: ReactNode }) =>
-    createElement("div", { "data-testid": "timeline" }, props.trailing),
+  MessageTimeline: (props: { trailing?: ReactNode; agentSignals?: unknown }) => {
+    timelineSignals.push(props.agentSignals);
+    return createElement("div", { "data-testid": "timeline" }, props.trailing);
+  },
 }));
 const annotationsPath = new URL("../src/timeline/annotations.tsx", import.meta.url).pathname;
 mock.module(annotationsPath, () => ({
@@ -177,7 +181,7 @@ const client = new Proxy({} as Record<string, unknown>, {
 });
 
 const noop = async () => {};
-function Screen(props: { agentSignals?: boolean; loadReview?: unknown }) {
+function Screen(props: { agentSignals?: unknown; loadReview?: unknown }) {
   const control = useSessionControl("session-a", {
     client: client as never,
     workspaceId: "workspace-a",
@@ -265,6 +269,54 @@ test("agentSignals={false} hides the chips but keeps the queue, approvals and th
   expect(text).toContain("1 queued");
   expect(text).toContain("Approval needed");
   expect(text).toContain("Which colour should the kitchen wall be?");
+  await view.unmount();
+});
+
+test("{ goal: false } hides only the goal chip: queue, agents and commands stay", async () => {
+  const view = await renderComponent(createElement(Screen, { agentSignals: { goal: false } }));
+  await flush();
+  expect(chip(view.container, "Goal")).toBeNull();
+  expect(chip(view.container, "1 agent")).not.toBeNull();
+  expect(chip(view.container, "1 command")).not.toBeNull();
+  expect(view.container.textContent).toContain("1 queued");
+  await view.unmount();
+});
+
+test("{ agents: false } and { commands: false } each hide only their chip", async () => {
+  const noAgents = await renderComponent(
+    createElement(Screen, { agentSignals: { agents: false } }),
+  );
+  await flush();
+  expect(chip(noAgents.container, "Goal")).not.toBeNull();
+  expect(chip(noAgents.container, "1 agent")).toBeNull();
+  expect(chip(noAgents.container, "1 command")).not.toBeNull();
+  await noAgents.unmount();
+  const noCommands = await renderComponent(
+    createElement(Screen, { agentSignals: { commands: false } }),
+  );
+  await flush();
+  expect(chip(noCommands.container, "Goal")).not.toBeNull();
+  expect(chip(noCommands.container, "1 agent")).not.toBeNull();
+  expect(chip(noCommands.container, "1 command")).toBeNull();
+  await noCommands.unmount();
+});
+
+test("the turn-detail switch reaches the timeline unchanged", async () => {
+  for (const agentSignals of [{ goal: false }, { turnDetail: false }, false]) {
+    timelineSignals.length = 0;
+    const view = await renderComponent(createElement(Screen, { agentSignals }));
+    await flush();
+    expect(timelineSignals.at(-1)).toEqual(agentSignals);
+    await view.unmount();
+  }
+});
+
+test("the chips share the composer's own block with the queue", async () => {
+  const view = await renderComponent(createElement(Screen, { agentSignals: { goal: false } }));
+  await flush();
+  const above = view.container.querySelector('[data-testid="above-composer"]');
+  expect(above?.contains(chip(view.container, "1 agent"))).toBe(true);
+  expect(above?.textContent).toContain("1 queued");
   await view.unmount();
 });
 

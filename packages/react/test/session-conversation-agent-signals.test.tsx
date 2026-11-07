@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { ComponentProps } from "react";
 import type { SessionHumanInputRequest, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -9,7 +10,8 @@ registerDom({ clock: "virtual" });
 /*
  * `agentSignals={false}` hides how the agent works (goal pill, agents and
  * commands segments) from end users, and keeps everything they act on: the
- * queue, approvals and the agent's questions.
+ * queue, approvals and the agent's questions. An object hides only the
+ * switches set to false.
  */
 
 const effectiveControl = {
@@ -175,5 +177,116 @@ test("agentSignals={false} hides goal, agents and commands but keeps queue, appr
     expect(view.container.textContent).toContain("Which colour should the kitchen wall be?");
   } finally {
     await view.unmount();
+  }
+});
+
+function mountSignals(agentSignals: ComponentProps<typeof SessionConversation>["agentSignals"]) {
+  const { client, goalReads } = signalsClient();
+  return renderComponent(
+    <SessionConversation
+      sessionId={SESSION_ID}
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      chromeProps={chromeProps}
+      agentSignals={agentSignals}
+    />,
+  ).then((view) => ({ view, goalReads }));
+}
+
+async function openActivity(root: HTMLElement) {
+  await actRun(() => activity(root)!.click());
+  await flush(50);
+}
+
+test("{ goal: false } hides only the goal pill: queue, agents and commands stay", async () => {
+  const { view, goalReads } = await mountSignals({ goal: false });
+  try {
+    await flush(200);
+    expect(signal(view.container, "goal")).toBeNull();
+    expect(view.container.textContent).not.toContain("Paused");
+    expect(goalReads.count).toBe(0);
+    expect(signal(view.container, "queue")?.textContent).toContain("1 queued");
+    await openActivity(view.container);
+    expect(view.container.textContent).toContain("2 agents");
+    expect(view.container.textContent).toContain("Command list");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("{ agents: false } hides only the helper agents", async () => {
+  const { view } = await mountSignals({ agents: false });
+  try {
+    await flush(200);
+    expect(signal(view.container, "goal")?.textContent).toContain("Paused · agent");
+    await openActivity(view.container);
+    expect(view.container.textContent).toContain("Command list");
+    expect(view.container.textContent).not.toContain("Agent tree");
+    expect(view.container.textContent).not.toContain("2 agents");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("{ commands: false } hides only the running commands", async () => {
+  const { view } = await mountSignals({ commands: false });
+  try {
+    await flush(200);
+    expect(signal(view.container, "goal")?.textContent).toContain("Paused · agent");
+    await openActivity(view.container);
+    expect(view.container.textContent).toContain("2 agents");
+    expect(view.container.textContent).not.toContain("Command list");
+    expect(view.container.textContent).not.toContain("1 command");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an object with every switch off matches agentSignals={false}", async () => {
+  const { view, goalReads } = await mountSignals({
+    goal: false,
+    agents: false,
+    commands: false,
+    turnDetail: false,
+  });
+  try {
+    await flush(200);
+    expect(signal(view.container, "goal")).toBeNull();
+    expect(activity(view.container)).toBeNull();
+    expect(goalReads.count).toBe(0);
+    expect(signal(view.container, "queue")?.textContent).toContain("1 queued");
+  } finally {
+    await view.unmount();
+  }
+});
+
+/*
+ * In a panel wider than the readable column, the session row sits in the
+ * composer's column (as approvals and questions do), not at the panel's left.
+ */
+test("the session row shares the composer's readable column", async () => {
+  const columnClasses = (element: Element | null) =>
+    ["mx-auto", "max-w-3xl"].filter((name) => element?.classList.contains(name));
+  for (const extra of [{}, { className: "og-host-chrome" }]) {
+    const { client } = signalsClient();
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        chromeProps={{ ...chromeProps, ...extra }}
+      />,
+    );
+    try {
+      await flush(200);
+      const row = view.container.querySelector("[data-og-session-chrome]");
+      const composer = view.container.querySelector("[data-og-conversation-composer]");
+      expect(columnClasses(composer)).toEqual(["mx-auto", "max-w-3xl"]);
+      expect(columnClasses(row)).toEqual(columnClasses(composer));
+      // A host class still reaches the row.
+      if ("className" in extra) expect(row?.classList.contains("og-host-chrome")).toBe(true);
+    } finally {
+      await view.unmount();
+    }
   }
 });

@@ -682,6 +682,7 @@ export type {
   SessionConversationProps,
   SessionConversationViewProps,
 } from "./components/session-conversation";
+export type { AgentSignalOptions, AgentSignals } from "./session-agents-model";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {

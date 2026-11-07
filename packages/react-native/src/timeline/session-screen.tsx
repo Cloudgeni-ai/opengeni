@@ -15,6 +15,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
+import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import {
   Component,
   useCallback,
@@ -144,9 +145,12 @@ export interface NativeSessionScreenProps extends Omit<
    * facets. Defaults to true. Set `false` for end users to whom a paused
    * goal, a count of helper agents, a running command or a tool step means
    * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
-   * Queued messages, approvals and the agent's questions still show.
+   * Or hide only some of them, for example `{ goal: false }` to drop the goal
+   * chip and keep helper agents and turn-row detail (see the web
+   * `AgentSignalOptions`). Queued messages, approvals and the agent's
+   * questions always show.
    */
-  agentSignals?: boolean | undefined;
+  agentSignals?: AgentSignals | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
   timelineMessages?: Partial<NativeTimelineMessages> | undefined;
   /**
@@ -283,7 +287,7 @@ function SessionScreenBody({
   client,
   inChatConnect,
   models,
-  agentSignals = true,
+  agentSignals,
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
@@ -291,6 +295,7 @@ function SessionScreenBody({
   const theme = useNativeTimelineTheme();
   const t = useOpenGeniText();
   const m = useNativeTimelineMessages();
+  const signals = resolveAgentSignals(agentSignals);
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   const annotationReveal = useRef<AnnotationReveal | null>(null);
@@ -564,12 +569,14 @@ function SessionScreenBody({
               onComposerFocus={() => composerInput.current?.focus()}
               onReviewAnnotations={setQueuedReview}
               leading={
-                agentSignals ? (
+                signals.goal || signals.agents || signals.commands ? (
                   <SessionSignals
-                    goal={controller.goal}
-                    agents={controller.lineage.lineage?.children ?? []}
+                    goal={signals.goal ? controller.goal : null}
+                    agents={signals.agents ? (controller.lineage.lineage?.children ?? []) : []}
                     commandsCount={
-                      controller.session.session?.backgroundCommandActivity?.count ?? 0
+                      signals.commands
+                        ? (controller.session.session?.backgroundCommandActivity?.count ?? 0)
+                        : 0
                     }
                     onOpenSession={timelineProps.onOpenSession}
                     models={models}

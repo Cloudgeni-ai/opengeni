@@ -78,7 +78,7 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | `headers`, `fetch`                                     | With `baseUrl`: headers for every request (static or a function), or a custom fetch      |
 | `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
 | `modelPicker`                                          | Show the model picker. Hidden unless the proxy sets `modelSelection: true`               |
-| `agentSignals`                                         | Show the goal pill and agent activity. Defaults to `true`; see below                     |
+| `agentSignals`                                         | Show the goal pill and agent activity, or only some of it. Defaults to `true`; see below |
 | `toolRegistry`                                         | Your own renderers for your tools                                                        |
 | `renderMessageText`                                    | Custom rendering for message text, such as links into your product                       |
 | `renderAllowanceExhausted`, `allowanceExhaustedLabels` | Replace the row or its words when a [usage allowance](/guides/usage-allowances) runs out |
@@ -109,6 +109,37 @@ one line and its answer, with no work row; a run that is still working, or
 ends with a failure only an operator can fix, shows nothing. React Native's
 `NativeSessionScreen` takes the same `agentSignals={false}` for all of this,
 and to hide its goal, agents and commands chips.
+
+To hide only some of it, pass an object instead. Each switch defaults to
+`true`, so name only what you hide:
+
+| Switch       | Hides                                                                         |
+| ------------ | ----------------------------------------------------------------------------- |
+| `goal`       | The goal pill (and the conversation no longer reads the goal)                 |
+| `agents`     | The helper agents segment                                                     |
+| `commands`   | The running commands segment                                                  |
+| `turnDetail` | Turn-row detail: step previews and your `turnSummary` facets, automation work |
+
+For example, an assistant whose users should see queued messages and helper
+agents, but not a "Goal · Paused" chip:
+
+```tsx
+<SessionConversation
+  baseUrl="/api/opengeni"
+  sessionId={sessionId}
+  agentSignals={{ goal: false }}
+  chromeProps={{ agentsSignal, agentsPanel }}
+/>
+```
+
+Turn rows keep their live step and your facets, because `turnDetail` stays on.
+`true` and `false` keep their meaning: everything shown, or everything hidden.
+`NativeSessionScreen` takes the same object for its chips and turn rows.
+
+The row above the composer (queue, wait, goal and agents) sits in the same
+readable column as the composer, so it lines up with the composer in a wide
+panel. A `className` in `chromeProps` is added to that row; you no longer need
+one to center it.
 
 ## Automation runs in the chat
 

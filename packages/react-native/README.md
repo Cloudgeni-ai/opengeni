@@ -54,6 +54,10 @@ paused goal or a count of helper agents means nothing, pass
 `agentSignals={false}`. Queued messages, approvals and the agent's questions
 still show, turn rows show only their status, and an automation run shows as
 its one line and its answer.
+To hide only some of it, pass an object of switches (`goal`, `agents`,
+`commands`, `turnDetail`), each `true` unless set: `agentSignals={{ goal: false }}`
+hides the goal chip and keeps queued messages, helper agents and your turn-row
+facets.
 
 An automation run reads as one line saying what happened (the automation's
 name and what its event says), never its instructions, and a run whose answer
