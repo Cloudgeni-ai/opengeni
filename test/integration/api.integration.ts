@@ -10,6 +10,7 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   bindAuthorizedGitHubInstallationRepositories,
+  applyGitHubInstallationRepositoryObservation,
   bindGitHubInstallationRepositories,
   buildConnectionTokenResolver,
   claimCodemodeOperation,
@@ -6205,6 +6206,172 @@ describe("API component integration", () => {
     await expect(callMcpTool(staleTokenMcp, "github_token", {})).rejects.toThrow(
       "MCP tool not registered: github_token",
     );
+  });
+
+  test("a chat whose automatically attached repository lost GitHub access still accepts follow-ups", async () => {
+    const installationId = 238826628;
+    const repository = (id: number, name: string) => ({
+      id,
+      installationId,
+      fullName: `acme/${name}`,
+      name,
+      private: true,
+      htmlUrl: `https://github.com/acme/${name}`,
+      cloneUrl: `https://github.com/acme/${name}.git`,
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    });
+    const optionalRepository = repository(2001, "optional-repository");
+    const explicitRepository = repository(2002, "explicit-repository");
+    let installed = true;
+    const githubAppApi = {
+      getInstallation: async ({ installationId: requested }: { installationId: number }) =>
+        installed && requested === installationId
+          ? {
+              installationId,
+              accountId: 9101,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            }
+          : null,
+      listRepositories: async () => (installed ? [optionalRepository, explicitRepository] : []),
+    };
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      publicBaseUrl: "https://api.opengeni.test",
+      githubAppId: "12345",
+      githubClientId: "test-client-id",
+      githubClientSecret: "test-client-secret",
+      githubAppSlug: "opengeni-test-app",
+      githubAppPrivateKey: generateKeyPairSync("rsa", { modulusLength: 2048 })
+        .privateKey.export({ type: "pkcs8", format: "pem" })
+        .toString(),
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubAppApi,
+    });
+    const context = await defaultAccessContext(app);
+    const workspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Revoked repository follow-up workspace",
+      }),
+    });
+    expect(workspaceResponse.status).toBe(201);
+    const revokedWorkspaceId = ((await workspaceResponse.json()) as { id: string }).id;
+    await defaultAccessContext(app);
+    const authorityCheckedAt = new Date();
+    await bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: revokedWorkspaceId,
+      installationId,
+      githubAccountId: 9101,
+      accountLogin: "acme",
+      accountType: "Organization",
+      linkedBySubjectId: context.subjectId,
+      githubActorId: 9102,
+      githubActorLogin: "acme-owner",
+      authorityKind: "organization_owner",
+      authorityCheckedAt,
+      authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
+      authorityNonce: `revoked-${crypto.randomUUID()}`,
+      repositoryIds: [optionalRepository.id, explicitRepository.id],
+      eventRouteSecret: null,
+    });
+    const repositoryResource = (
+      repo: ReturnType<typeof repository>,
+      optional: boolean,
+    ): Record<string, unknown> => ({
+      kind: "repository",
+      uri: repo.cloneUrl,
+      ref: repo.defaultBranch,
+      provider: "github",
+      githubInstallationId: installationId,
+      githubRepositoryId: repo.id,
+      ...(optional ? { optional: true } : {}),
+    });
+    const createRepositorySession = async (resource: Record<string, unknown>) => {
+      const created = await app.request(workspacePath(revokedWorkspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ initialMessage: "Start with a repository", resources: [resource] }),
+      });
+      expect(created.status).toBe(202);
+      return ((await created.json()) as { id: string }).id;
+    };
+    const optionalSessionId = await createRepositorySession(
+      repositoryResource(optionalRepository, true),
+    );
+    const explicitSessionId = await createRepositorySession(
+      repositoryResource(explicitRepository, false),
+    );
+
+    // The GitHub App is uninstalled: its webhook removes every repository.
+    installed = false;
+    await applyGitHubInstallationRepositoryObservation(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: revokedWorkspaceId,
+      installationId,
+      observation: { kind: "remove", repositoryIds: "all", observedAt: new Date() },
+    });
+
+    const followUp = async (sessionId: string) =>
+      await app.request(workspacePath(revokedWorkspaceId, `/sessions/${sessionId}/events`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "user.message", payload: { text: "And a follow-up" } }),
+      });
+
+    // The automatically attached repository no longer blocks the chat; the
+    // worker drops it for the turn and reports it as skipped.
+    const accepted = await followUp(optionalSessionId);
+    expect(accepted.status).toBe(202);
+
+    // A repository the person attached explicitly is still refused, and the
+    // refusal says which one so it can be removed or restored.
+    const refused = await followUp(explicitSessionId);
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message:
+          "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
+        retryable: false,
+        details: {
+          code: "github_repository_unavailable",
+          repositories: ["acme/explicit-repository"],
+        },
+      },
+    });
+
+    // Adding a repository that lost access is still refused for any chat.
+    const addRevoked = await app.request(
+      workspacePath(revokedWorkspaceId, `/sessions/${optionalSessionId}/events`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          payload: {
+            text: "Use the other repository too",
+            resources: [repositoryResource(explicitRepository, false)],
+          },
+        }),
+      },
+    );
+    expect(addRevoked.status).toBe(422);
+    expect(
+      ((await addRevoked.json()) as { error: { details?: { code?: string } } }).error.details?.code,
+    ).toBe("github_repository_unavailable");
   });
 
   test("configured-token browser handoff preserves Opengeni grant but still requires GitHub owner proof", async () => {

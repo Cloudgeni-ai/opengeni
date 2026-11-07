@@ -92,6 +92,7 @@ export * from "./skills";
 export * from "./agent-config";
 export * from "./first-party-tool-authorization";
 export * from "./model-availability";
+export * from "./repository-availability";
 export * from "./model-residency";
 import { ClientModelResidencyV1 } from "./model-residency";
 import { InferenceFeatureAvailability } from "./inference-residency";
