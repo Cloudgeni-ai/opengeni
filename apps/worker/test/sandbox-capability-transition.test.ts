@@ -55,7 +55,7 @@ describe("sandboxless attempt attachment boundary", () => {
         resolver.mockResolvedValue(null);
         await expect(
           resolveMachineEnrollmentForTurn({} as never, sandbox, authority),
-        ).rejects.toThrow("was not admitted");
+        ).rejects.toThrow("Machine access needed");
       } finally {
         resolver.mockRestore();
         ordinary.mockRestore();
