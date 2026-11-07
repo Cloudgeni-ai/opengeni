@@ -30,33 +30,7 @@ import {
   type SlackAgentProjection,
 } from "./agents";
 import { withRlsContext, type Database } from "./database";
-import { safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
-
-/**
- * The per-agent unique keys from before an agent could be in several Slack
- * installations. Older binaries still name them in ON CONFLICT during the
- * rollout, so they stay until the legacy drop. Until then, the same Slack
- * person (Enterprise Grid) or channel (Slack Connect) in two installations of
- * one agent hits them: that installation's record is then taken as already
- * made by the other one.
- */
-const LEGACY_AGENT_UNIQUE_KEYS = new Set([
-  "slack_agent_user_states_agent_user_uq",
-  "slack_agent_intro_posts_agent_channel_uq",
-]);
-
-async function unlessLegacyAgentKeyTaken<T>(write: () => Promise<T>, taken: T): Promise<T> {
-  try {
-    return await write();
-  } catch (error) {
-    const facts = safeDatabaseErrorFacts(error);
-    if (facts.constraint !== undefined && LEGACY_AGENT_UNIQUE_KEYS.has(facts.constraint)) {
-      return taken;
-    }
-    throw error;
-  }
-}
 
 export type SlackAgentHome = { accountId: string; workspaceId: string };
 
@@ -330,38 +304,34 @@ export async function touchSlackAgentUserState(
     hintInteractionId: string | null;
   },
 ): Promise<{ showHint: boolean }> {
-  return await unlessLegacyAgentKeyTaken(
-    () =>
-      withRlsContext(db, home, async (scopedDb) => {
-        const [row] = await scopedDb
-          .insert(schema.slackAgentUserStates)
-          .values({
-            accountId: home.accountId,
-            workspaceId: home.workspaceId,
-            connectionId: input.connectionId,
-            slackAgentId: input.slackAgentId,
-            slackUserId: input.slackUserId,
-            hintInteractionId: input.hintInteractionId,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.slackAgentUserStates.connectionId,
-              schema.slackAgentUserStates.slackAgentId,
-              schema.slackAgentUserStates.slackUserId,
-            ],
-            set: {
-              hintInteractionId: sql`coalesce(${schema.slackAgentUserStates.hintInteractionId}, excluded.hint_interaction_id)`,
-              updatedAt: sql`now()`,
-            },
-          })
-          .returning({ hintInteractionId: schema.slackAgentUserStates.hintInteractionId });
-        return {
-          showHint:
-            input.hintInteractionId !== null && row?.hintInteractionId === input.hintInteractionId,
-        };
-      }),
-    { showHint: false },
-  );
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackAgentUserStates)
+      .values({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        connectionId: input.connectionId,
+        slackAgentId: input.slackAgentId,
+        slackUserId: input.slackUserId,
+        hintInteractionId: input.hintInteractionId,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.slackAgentUserStates.connectionId,
+          schema.slackAgentUserStates.slackAgentId,
+          schema.slackAgentUserStates.slackUserId,
+        ],
+        set: {
+          hintInteractionId: sql`coalesce(${schema.slackAgentUserStates.hintInteractionId}, excluded.hint_interaction_id)`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({ hintInteractionId: schema.slackAgentUserStates.hintInteractionId });
+    return {
+      showHint:
+        input.hintInteractionId !== null && row?.hintInteractionId === input.hintInteractionId,
+    };
+  });
 }
 
 /**
@@ -379,37 +349,33 @@ export async function claimSlackAgentOpenNotice(
     interactionId: string;
   },
 ): Promise<boolean> {
-  return await unlessLegacyAgentKeyTaken(
-    () =>
-      withRlsContext(db, home, async (scopedDb) => {
-        const [row] = await scopedDb
-          .insert(schema.slackAgentUserStates)
-          .values({
-            accountId: home.accountId,
-            workspaceId: home.workspaceId,
-            connectionId: input.connectionId,
-            slackAgentId: input.slackAgentId,
-            slackUserId: input.slackUserId,
-            openNoticeInteractionId: input.interactionId,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.slackAgentUserStates.connectionId,
-              schema.slackAgentUserStates.slackAgentId,
-              schema.slackAgentUserStates.slackUserId,
-            ],
-            set: {
-              openNoticeInteractionId: sql`coalesce(${schema.slackAgentUserStates.openNoticeInteractionId}, excluded.open_notice_interaction_id)`,
-              updatedAt: sql`now()`,
-            },
-          })
-          .returning({
-            openNoticeInteractionId: schema.slackAgentUserStates.openNoticeInteractionId,
-          });
-        return row?.openNoticeInteractionId === input.interactionId;
-      }),
-    false,
-  );
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackAgentUserStates)
+      .values({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        connectionId: input.connectionId,
+        slackAgentId: input.slackAgentId,
+        slackUserId: input.slackUserId,
+        openNoticeInteractionId: input.interactionId,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.slackAgentUserStates.connectionId,
+          schema.slackAgentUserStates.slackAgentId,
+          schema.slackAgentUserStates.slackUserId,
+        ],
+        set: {
+          openNoticeInteractionId: sql`coalesce(${schema.slackAgentUserStates.openNoticeInteractionId}, excluded.open_notice_interaction_id)`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({
+        openNoticeInteractionId: schema.slackAgentUserStates.openNoticeInteractionId,
+      });
+    return row?.openNoticeInteractionId === input.interactionId;
+  });
 }
 
 /** The agents one Slack person has already used through this installation. */
@@ -541,30 +507,26 @@ export async function recordSlackAgentIntroPost(
     postedBySubjectId: string;
   },
 ): Promise<void> {
-  await unlessLegacyAgentKeyTaken(
-    () =>
-      withRlsContext(db, home, async (scopedDb) => {
-        await scopedDb
-          .insert(schema.slackAgentIntroPosts)
-          .values({
-            accountId: home.accountId,
-            workspaceId: home.workspaceId,
-            connectionId: input.connectionId,
-            slackAgentId: input.slackAgentId,
-            slackChannelId: input.slackChannelId,
-            postedBySubjectId: input.postedBySubjectId,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.slackAgentIntroPosts.connectionId,
-              schema.slackAgentIntroPosts.slackAgentId,
-              schema.slackAgentIntroPosts.slackChannelId,
-            ],
-            set: { postedBySubjectId: input.postedBySubjectId, updatedAt: sql`now()` },
-          });
-      }),
-    undefined,
-  );
+  await withRlsContext(db, home, async (scopedDb) => {
+    await scopedDb
+      .insert(schema.slackAgentIntroPosts)
+      .values({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        connectionId: input.connectionId,
+        slackAgentId: input.slackAgentId,
+        slackChannelId: input.slackChannelId,
+        postedBySubjectId: input.postedBySubjectId,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.slackAgentIntroPosts.connectionId,
+          schema.slackAgentIntroPosts.slackAgentId,
+          schema.slackAgentIntroPosts.slackChannelId,
+        ],
+        set: { postedBySubjectId: input.postedBySubjectId, updatedAt: sql`now()` },
+      });
+  });
 }
 
 /** The channels an agent's intro was posted in (in one installation, given `connectionId`). */

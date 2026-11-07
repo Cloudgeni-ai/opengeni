@@ -11,12 +11,13 @@ The change ships as expand, migrate and contract releases
 ([migrations-expand-contract.md](migrations-expand-contract.md)). The API now
 reads and writes only `agents`; since the contract
 ([Contract](#contract)) every legacy foreign key points at
-`agent_slack_installs` and nothing writes `bot_templates` or `slack_agents`.
-The legacy drop removes those tables.
+`agent_slack_installs`, and the legacy drop ([Legacy drop](#legacy-drop))
+removed the `bot_templates` and `slack_agents` tables.
 
 ## Data
 
-Every id is kept: `agents.id` = `slack_agents.id` = `bot_templates.id`, so
+Every id was kept: `agents.id` is the old `slack_agents.id` or
+`bot_templates.id`, so
 Slack routes, interactions, proposals, intro posts, suggestions, the
 `slack-agent:<id>` service principal and `?botTemplateId=` links all stay valid.
 
@@ -35,8 +36,9 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
 - `agent_slack_installs`: where an agent is available in Slack, one row per
   agent and Slack connection, owned by the agent's home workspace so a rename
   updates it in the same transaction. `name_key` is the Slack handle key (same
-  normalisation as `slack_agents.name_key`), unique per connection; `open` is
-  the open-use switch; `install_workspace_id` (migration 1301) is the Slack
+  normalisation as the old `slack_agents.name_key`), unique per connection;
+  `open` is the open-use switch; `install_workspace_id` (migration 1301,
+  required since 1322) is the Slack
   installation's own workspace, where its routes and Slack records live.
   Deleting that workspace deletes the row. The announcement channel stays per
   installation in `slack_agent_update_settings`.
@@ -170,31 +172,69 @@ referencing table and then the referenced one, the order writers take them in.
 4. 1318 and 1319 add unique indexes per installation (`connection_id`,
    agent, Slack person or channel) concurrently; the API writes against them.
 
-The API no longer writes `bot_templates` or `slack_agents`. It only deletes an
-agent's leftover `slack_agents` row when it renames the agent or removes the
-agent or one of its installations: the previous release still inserts those
-rows, and a stale one (its id or old name) would refuse it turning the agent
-on again in an installation it left, or reusing a freed name, during the
-rollout or after a rollback to it. Once the legacy drop has removed the table
-this is skipped. The per-agent
+The contract release no longer wrote `bot_templates` or `slack_agents`. It
+only deleted an agent's leftover `slack_agents` row when it renamed the agent
+or removed the agent or one of its installations: the release before it still
+inserted those rows, and a stale one (its id or old name) would have refused
+it turning the agent on again in an installation it left, or reusing a freed
+name. It skips that once the legacy drop has removed the table. The per-agent
 unique keys `slack_agent_user_states_agent_user_uq` and
 `slack_agent_intro_posts_agent_channel_uq` stay until the legacy drop because
 the previous release names them in `ON CONFLICT`. Until then, the same Slack
 person (Enterprise Grid) or shared channel (Slack Connect) in two installations
 of one agent hits them, and that installation's hint, open notice or intro
-record counts as already made.
+record counts as already made. The legacy drop removes them.
+
+### Legacy drop
+
+Migrations 1320 to 1330, after the contract is the previous release:
+
+1. 1320 adds `CHECK (install_workspace_id IS NOT NULL) NOT VALID`; 1321
+   validates it; 1322 sets the column `NOT NULL` (no scan, thanks to the
+   validated check) and drops the check. There is no second copy: 1301, its
+   fill trigger and the contract's own writes leave no row without the
+   workspace. Before releasing, check as a role that bypasses row-level
+   security (a superuser or a `BYPASSRLS` role; both tables are FORCE RLS, so
+   the migration owner sees no rows and the check would wrongly read 0) that
+   `select count(*) from agent_slack_installs where install_workspace_id is null`
+   is 0; otherwise 1321 fails and the release stops before anything is
+   dropped. To repair such rows, as the same role, set each from its Slack
+   connection's workspace (the installation's own workspace):
+   `update agent_slack_installs i set install_workspace_id = c.workspace_id from connections c where c.id = i.connection_id and i.install_workspace_id is null`.
+2. 1323 and 1324 drop the per-agent unique keys, so the same Slack person or
+   channel in two installations of one agent gets a record in each.
+3. 1325 to 1327 drop `slack_agents`'s own foreign keys, one referenced table
+   per file, each locking the referenced table first and then `slack_agents`,
+   the order a cascading delete takes them in. 1328 drops `slack_agents`,
+   locking only it (and stops if a foreign key is left), and 1329
+   `bot_templates`, locking `workspaces` first (no `CASCADE`: nothing
+   references them); 1330 drops
+   the sync and fill trigger functions. During 1326, a workspace or account
+   delete that reaches `slack_agents` through its own cascade can still
+   deadlock with it; PostgreSQL aborts one side and the file is safe to
+   rerun. The contract release's delete of a leftover `slack_agents` row
+   touches none of the referenced tables, and once the table is gone it
+   skips the delete. The explicit locks put 1325 onwards in the release's
+   maintenance span, and each of 1325 to 1327 and 1329 can hold up readers
+   of the referenced table for up to two 5 second lock timeouts, one per
+   lock it takes (dropping such a key locks it anyway).
+
+Readiness no longer lists the two tables or the functions. The compatibility
+layers below, `?botTemplateId=` links and `slack-agent:<id>` principals keep
+working: they never needed the legacy rows.
 
 Rolling back past the API switch is not safe once the contract is applied:
 older binaries rely on the dropped triggers and foreign keys.
 
-The API switch release itself (the previous release, during the rollout or
-after a rollback to it) still finds an installation's workspace through
-`slack_agents`, which this release no longer writes. An agent this release
-turned on in Slack therefore falls back to its home workspace there, and an
+The API switch release itself (the previous release, during the contract's
+rollout or after a rollback to it) still finds an installation's workspace
+through `slack_agents`, which the contract release no longer writes. An agent
+the contract release turned on in Slack therefore falls back to its home
+workspace there, and an
 agent in several installations is seen only through the installation it
 joined first: in the others a pick from a route card answers that the agent
 is gone, and turning it on in another installation is refused. That degrades
-until this release serves again; it does not change any data.
+until the contract release serves again; it does not change any data.
 
 ### Chats bound to an agent
 
@@ -283,11 +323,8 @@ own Knowledge collection and its chats may read its other shared chats
   through the old endpoint takes the agent out of that installation, and
   deletes the agent with its last one.
 
-### Contract follow-ups
+### Follow-ups
 
-- The legacy drop: drop `bot_templates`, `slack_agents`, the sync and fill
-  functions and the per-agent unique keys, and make
-  `install_workspace_id` NOT NULL.
 - Make the old Slack agent `DELETE` turn Slack off in that installation
   instead of deleting the agent, once nothing older depends on it.
 
@@ -340,8 +377,10 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
    a chat starts. Old endpoints and frozen MCP tool names stay as
    compatibility layers.
 4. App: the Agents page replaces bot templates and the Slack agents list.
-5. Contract (this step), once step 3 is the previous release: point the
+5. Contract, once step 3 is the previous release: point the
    legacy foreign keys at `agent_slack_installs`, stop writing the legacy
    tables, drop the sync triggers and allow several Slack installations per
    agent.
-6. Drop the legacy tables once the contract is the previous release.
+6. Legacy drop (this step), once the contract is the previous release: drop
+   the legacy tables and functions and the per-agent keys, and require the
+   installation workspace.

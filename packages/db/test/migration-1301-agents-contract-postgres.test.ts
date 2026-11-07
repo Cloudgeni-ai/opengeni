@@ -14,9 +14,12 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const firstContractMigration = "1301_agent_slack_install_workspace.sql";
+// The legacy drop (1320 on) removes slack_agents; this suite stops before it.
+const firstLegacyDropMigration = "1320_agent_slack_installs_workspace_check.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
+let contract: string | null = null;
 let appSql: postgres.Sql | null = null;
 
 beforeAll(async () => {
@@ -25,10 +28,11 @@ beforeAll(async () => {
   if (!owned) throw new Error("Real PostgreSQL is required for the agents contract migrations");
   prefix = await mkdtemp(join(tmpdir(), "opengeni-before-agents-contract-"));
   const source = join(import.meta.dir, "../drizzle");
+  contract = await mkdtemp(join(tmpdir(), "opengeni-agents-contract-"));
   for (const name of await readdir(source)) {
-    if (name.endsWith(".sql") && name < firstContractMigration) {
-      await copyFile(join(source, name), join(prefix, name));
-    }
+    if (!name.endsWith(".sql")) continue;
+    if (name < firstContractMigration) await copyFile(join(source, name), join(prefix, name));
+    if (name < firstLegacyDropMigration) await copyFile(join(source, name), join(contract, name));
   }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: prefix });
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
@@ -42,6 +46,7 @@ afterAll(async () => {
   await appSql?.end().catch(() => undefined);
   await owned?.release();
   if (prefix) await rm(prefix, { recursive: true, force: true });
+  if (contract) await rm(contract, { recursive: true, force: true });
 }, 180_000);
 
 type Install = { connectionId: string; workspaceId: string; label: string };
@@ -138,7 +143,7 @@ describe.skipIf(!realDatabase)("1301 to 1319 agents contract", () => {
     await records(agentA, installA);
     await records(agentB, installB);
 
-    await migrate(owned!.ownerUrl);
+    await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: contract! });
 
     // The installation's workspace came across, and each agent's version
     // never goes below what the legacy Slack agents API last showed.

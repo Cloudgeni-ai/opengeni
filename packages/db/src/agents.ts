@@ -9,10 +9,8 @@
  * installations; the Slack tables (channel routes, interactions, user states,
  * proposals, intro records, suggestions) point at its installation row.
  *
- * Nothing here reads or writes the legacy `bot_templates` and `slack_agents`
- * tables any more (the contract step, migrations 1301 to 1319), except that
- * removing an agent or its Slack name deletes its leftover `slack_agents` row
- * (clearLegacySlackRows), so the previous release is not refused by it.
+ * The legacy `bot_templates` and `slack_agents` tables are gone (the contract,
+ * migrations 1301 to 1319, and the legacy drop, 1320 to 1330).
  *
  * Authorization (who may read, change or enable what) is decided by callers
  * from live grants. Reads filter Only me agents explicitly; nothing here
@@ -76,10 +74,9 @@ export type AgentSlackInstallRecord = {
   updatedAt: Date;
   /**
    * The Slack installation's own workspace (where the installation binding
-   * and its routes live). Null only for a row an older release wrote whose
-   * legacy row was never found (see migration 1301).
+   * and its routes live).
    */
-  installWorkspaceId: string | null;
+  installWorkspaceId: string;
 };
 
 export type AgentRevisionRecord = {
@@ -170,7 +167,7 @@ type InstallRow = {
   version: number;
   created_at: Date | string;
   updated_at: Date | string;
-  install_workspace_id: string | null;
+  install_workspace_id: string;
 };
 
 function mapInstall(row: InstallRow): AgentSlackInstallRecord {
@@ -627,7 +624,6 @@ export async function updateAgent(
           }
           install.nameKey = slackAgentNameKey(name);
         }
-        await clearLegacySlackRows(tx, home.accountId, current.id, installs);
       }
       const updated = await getAgent(tx, home, current.id);
       if (!updated) throw new Error("Agent update lost its row");
@@ -648,57 +644,6 @@ class SlackNameClash extends Error {
   constructor(readonly connectionId: string) {
     super("Slack name clash");
   }
-}
-
-/**
- * Remove the agent's leftover legacy `slack_agents` rows for these
- * installations. Nothing reads them, but until the legacy drop the previous
- * release (PR3a/PR3b) still inserts them, and a stale row's primary key or
- * name would refuse its valid actions during a rollout or after a rollback:
- * turning the agent on again where it left, or reusing a freed name. Only a
- * delete, never a write; it does nothing once the table is gone (the legacy
- * drop runs while this release serves).
- */
-async function clearLegacySlackRows(
-  tx: Database,
-  accountId: string,
-  agentId: string,
-  installs: readonly AgentSlackInstallRecord[],
-): Promise<void> {
-  for (const install of installs) {
-    if (!install.installWorkspaceId) continue;
-    const workspaceId = install.installWorkspaceId;
-    try {
-      // No session tenancy lock: it runs after the agent's row lock, and
-      // slack_agents needs none (no trigger checks the fence, and nothing
-      // references it, so the delete cascades nowhere).
-      await withRlsContext(
-        tx,
-        { accountId, workspaceId },
-        async (scoped) => {
-          if (!(await legacySlackTablePresent(scoped))) return;
-          await scoped.execute(sql`delete from slack_agents
-            where id = ${agentId}::uuid
-              and workspace_id = ${workspaceId}::uuid
-              and connection_id = ${install.connectionId}::uuid`);
-        },
-        undefined,
-        "none",
-      );
-    } catch (error) {
-      // Dropped between the check and the delete: nothing left to clear.
-      if (!(await legacySlackTablePresent(tx))) continue;
-      throw error;
-    }
-  }
-}
-
-async function legacySlackTablePresent(tx: Database): Promise<boolean> {
-  const rows = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regclass('slack_agents') is not null as present`,
-  );
-  return rows[0]?.present === true;
 }
 
 /** Remember the agent's Memory collection once it exists. Version-free and idempotent. */
@@ -730,7 +675,6 @@ export async function deleteAgent(
   return await withRlsContext(db, home, async (tx) => {
     const current = await lockAgent(tx, home, agentId);
     if (!current) return false;
-    await clearLegacySlackRows(tx, home.accountId, current.id, await installsOf(tx, home, agentId));
     await tx.execute(sql`delete from agents
       where id = ${agentId}::uuid and workspace_id = ${home.workspaceId}::uuid`);
     return true;
@@ -779,13 +723,6 @@ export async function putAgentSlackInstall(
       if (existing) {
         if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
           return { kind: "version_conflict" as const, install: existing };
-        }
-        if (existing.installWorkspaceId === null) {
-          // A row an older release wrote without its installation's workspace.
-          await tx.execute(sql`update agent_slack_installs
-            set install_workspace_id = ${input.installWorkspaceId}::uuid
-            where id = ${existing.id}::uuid and install_workspace_id is null`);
-          existing.installWorkspaceId = input.installWorkspaceId;
         }
         if (input.open === undefined || input.open === existing.open) {
           return { kind: "saved" as const, install: existing, agent, created: false };
@@ -843,7 +780,6 @@ export async function deleteAgentSlackInstall(
       (candidate) => candidate.connectionId === input.connectionId,
     );
     if (!install) return false;
-    await clearLegacySlackRows(tx, home.accountId, agent.id, [install]);
     await tx.execute(sql`delete from agent_slack_installs where id = ${install.id}::uuid`);
     await tx.execute(sql`update agents set version = version + 1, updated_at = now()
       where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
@@ -870,7 +806,6 @@ export async function deleteAgentFromSlackInstall(
     const installs = await installsOf(tx, home, agent.id);
     const install = installs.find((candidate) => candidate.connectionId === input.connectionId);
     if (!install) return false;
-    await clearLegacySlackRows(tx, home.accountId, agent.id, [install]);
     if (installs.length === 1) {
       await tx.execute(sql`delete from agents
         where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
@@ -1153,11 +1088,11 @@ type ProjectionRow = InstallRow & {
   instructions: string | null;
 };
 
-function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAgentProjection {
+function mapProjection(row: ProjectionRow): SlackAgentProjection {
   return {
     id: row.agent_id,
     accountId: row.account_id,
-    workspaceId: row.install_workspace_id ?? fallbackHome ?? row.agent_workspace_id,
+    workspaceId: row.install_workspace_id,
     connectionId: row.connection_id,
     slackTeamId: row.slack_team_id,
     targetAccountId: row.agent_account_id,
@@ -1261,7 +1196,7 @@ export async function listSlackAgentProjectionsForConnection(
     );
     if (rows.length === 0) return [];
     const projections = rows
-      .map((row) => mapProjection(row, installHome.workspaceId))
+      .map((row) => mapProjection(row))
       .filter((agent) => agent.workspaceId === installHome.workspaceId);
     return (
       await withProjectionInstructions(tx, installHome.accountId, projections, readableIds(rows))
@@ -1279,7 +1214,7 @@ export async function listOrganizationSlackAgentProjections(
       tx,
       projectionQuery(sql`i.account_id = ${input.accountId}::uuid`),
     );
-    const projections = rows.map((row) => mapProjection(row, null));
+    const projections = rows.map((row) => mapProjection(row));
     return (
       await withProjectionInstructions(tx, input.accountId, projections, readableIds(rows))
     ).sort(compareProjections);
@@ -1309,10 +1244,7 @@ export async function getSlackAgentProjection(
           ${input.connectionId ? sql`and i.connection_id = ${input.connectionId}::uuid` : sql``}
           ${
             input.installWorkspaceId
-              ? // A row still missing its workspace (an installation whose legacy
-                // row was never found, see migration 1301) is shown in the caller's.
-                sql`and (i.install_workspace_id = ${input.installWorkspaceId}::uuid
-                  or i.install_workspace_id is null)`
+              ? sql`and i.install_workspace_id = ${input.installWorkspaceId}::uuid`
               : sql``
           }
           order by i.created_at, i.id limit 1`,
@@ -1321,7 +1253,7 @@ export async function getSlackAgentProjection(
     const [projection] = await withProjectionInstructions(
       tx,
       input.accountId,
-      rows.map((row) => mapProjection(row, null)),
+      rows.map((row) => mapProjection(row)),
       readableIds(rows),
     );
     return projection ?? null;

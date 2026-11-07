@@ -277,11 +277,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     installs: readonly AgentSlackInstallRecord[],
   ): Promise<Map<string, string | null>> {
     const names = new Map<string, string | null>();
-    const homes = new Set(
-      installs.flatMap((install) =>
-        install.installWorkspaceId ? [install.installWorkspaceId] : [],
-      ),
-    );
+    const homes = new Set(installs.map((install) => install.installWorkspaceId));
     for (const workspaceId of homes) {
       const bindings = await listSlackInstallationBindings(db, { accountId, workspaceId }).catch(
         () => [],

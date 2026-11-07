@@ -77,9 +77,8 @@ choosing a machine) and the chat simply continues as the bot.
 Bot templates are being merged with Slack agents into [agents](agents.md).
 The routes below are a compatibility layer over `agents`: they list every
 agent the reader can see, a template's setup instructions are the agent's
-First message, and a new template is an agent with empty Instructions.
-Nothing writes the legacy `bot_templates` table any more; it stays only until
-the legacy drop ([agents.md](agents.md#contract)).
+First message, and a new template is an agent with empty Instructions. The
+legacy `bot_templates` table is gone ([agents.md](agents.md#legacy-drop)).
 
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
@@ -100,9 +99,7 @@ Someone without it sees that they can't install it here, and the agent is told
 the same, so it does not send them to the card. The agent continues once the plugin is installed, and a plugin that
 is already installed shows as done.
 
-Templates are stored per workspace as agents (`agents`, see
-[agents.md](agents.md); visibility was added for the legacy `bot_templates`
-in migration `1064_bot_template_visibility.sql`). Like a chat, each template is either
+Templates are agents, stored per workspace (`agents`). Like a chat, each template is either
 shared with the workspace, so everyone can start bots from it, or **Only me**,
 so only whoever saved it can see, find or use it. A template the agent saves
 from an Only me chat is Only me; one saved from a shared chat is shared. People

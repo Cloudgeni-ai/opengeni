@@ -9,9 +9,9 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 // Agents through the API (real PostgreSQL): `/agents` CRUD with revisions and
-// optimistic versions, who may see and change an agent, the legacy rows kept
-// for older releases, chats started with an agent, and which of its chats
-// each reader sees.
+// optimistic versions, who may see and change an agent, bot templates as
+// agents, chats started with an agent, and which of its chats each reader
+// sees.
 
 const DELEGATION_SECRET = "agents-api-test-secret";
 
@@ -278,7 +278,7 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(refused.json.error.message).toContain("member of the organization");
   }, 180_000);
 
-  test("bot templates are agents: First message, legacy row, and ids", async () => {
+  test("bot templates are agents: First message, listing, and ids", async () => {
     if (!shared) return;
     const workspace = await freshWorkspace("agents templates");
     await member(workspace, "user:alice");
