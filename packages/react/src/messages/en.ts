@@ -3605,6 +3605,10 @@ export const englishMessages = {
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
+  "native.realtime.nativeCall.noInputAudio":
+    "Your microphone isn't picking up any sound. Check that no other app is using it.",
+  "native.realtime.nativeCall.replyNotPlayed":
+    "A reply arrived but couldn't be played. Check your volume.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
   "native.realtime.wakePhrase.copied": "Copied",
@@ -4167,6 +4171,9 @@ export const englishMessages = {
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
   "realtime.realtimeControl.muteVoiceAudio": "Mute voice audio",
+  "realtime.realtimeControl.noMicrophoneSound": "No sound from your microphone",
+  "realtime.realtimeControl.noMicrophoneSoundDetail":
+    "The voice can't hear you. Check that no other app is using your microphone.",
   "realtime.realtimeControl.opengeni": "{product}",
   "realtime.realtimeControl.pendingBytes": "pending bytes",
   "realtime.realtimeControl.pendingDurableEvents": "pending durable events",
@@ -4179,6 +4186,9 @@ export const englishMessages = {
   "realtime.realtimeControl.recommendedDescription": "Recommended · {description}",
   "realtime.realtimeControl.reconnectAttempt": "reconnect attempt",
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
+  "realtime.realtimeControl.replyNotPlayed": "Reply not played",
+  "realtime.realtimeControl.replyNotPlayedDetail":
+    "A reply arrived but couldn't be played. Check your volume and audio output.",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
     "Your browser didn't let the replies play. Tap to hear them.",

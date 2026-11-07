@@ -683,6 +683,18 @@ export function RealtimeVoiceControl(props: {
           </span>
         </button>
       ) : null}
+      {!audioBlocked && props.snapshot.status === "active" && status.phase === "blocked" ? (
+        // Connected but silent on one side (no microphone sound, or a reply
+        // that never played): say so where the person looks.
+        <span
+          data-realtime-attention=""
+          data-testid="realtime-audio-flow-issue"
+          title={status.detail}
+          className="og-realtime-audio-flow mr-1.5 inline-flex min-w-0 items-center px-1 text-og-xs font-medium leading-tight text-og-status-waiting"
+        >
+          <span className="line-clamp-2 max-w-40 text-right">{status.label}</span>
+        </span>
+      ) : null}
       <div className="inline-flex shrink-0 items-center">
         <motion.button
           type="button"
@@ -1272,6 +1284,21 @@ function statusContent(
         detail: t("realtime.realtimeControl.preparingYourMicrophoneAndLive"),
       };
     case "active":
+      // Connected, yet silent on one side: say so instead of "Listening".
+      if (snapshot.diagnostic?.kind === "no_input_audio" && !snapshot.inputMuted) {
+        return {
+          phase: "blocked",
+          label: t("realtime.realtimeControl.noMicrophoneSound"),
+          detail: t("realtime.realtimeControl.noMicrophoneSoundDetail"),
+        };
+      }
+      if (snapshot.diagnostic?.kind === "output_silent" && !snapshot.outputMuted) {
+        return {
+          phase: "blocked",
+          label: t("realtime.realtimeControl.replyNotPlayed"),
+          detail: t("realtime.realtimeControl.replyNotPlayedDetail"),
+        };
+      }
       return snapshot.bridge?.speaking
         ? {
             phase: "speaking",

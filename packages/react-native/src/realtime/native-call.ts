@@ -80,10 +80,17 @@ export type NativeCallRouteChangeReason =
 
 /**
  * The platform call service seam. The Opengeni Expo module implements it with
- * CallKit; hosts on other platforms can implement it or omit it, in which case
- * the realtime session runs without a system call.
+ * CallKit on iOS and with the phone's call audio setup on Android; hosts on
+ * other platforms can implement it or omit it, in which case the realtime
+ * session runs without a system call.
  */
 export interface NativeCallAdapter {
+  /**
+   * Whether the system shows a started call (CallKit's call screen and
+   * Recents). False where the adapter only sets up call audio (Android).
+   * Absent means true.
+   */
+  showsSystemCall?: boolean | undefined;
   /** Report an outgoing call to the system and activate the call audio session. */
   startCall(call: { callId: string; title: string; target: string | null }): Promise<void>;
   /** The voice connection is live: the system call shows as connected. */
@@ -137,8 +144,14 @@ export type NativeRealtimeCall = {
   route: NativeCallAudioRoute | null;
   error: string | null;
   /**
+   * Why the live call is silent on one side, when it is: the microphone picks
+   * up no sound, or a reply arrived but did not play. Null while audio flows.
+   */
+  notice?: string | null | undefined;
+  /**
    * Whether the system shows this call (CallKit). False when the platform has
-   * no call service or refused the call; voice then runs as an in-app call.
+   * no call screen (Android, where only call audio is set up), no call
+   * service, or refused the call; voice then runs as an in-app call.
    */
   systemCall: boolean;
   canStart: boolean;
@@ -198,6 +211,13 @@ export function useNativeRealtimeCall(options: {
   realtimeRef.current = realtime;
   const status = realtime.snapshot.status;
   const muted = realtime.snapshot.inputMuted;
+  const audioIssue = status === "active" ? realtime.snapshot.diagnostic?.kind : undefined;
+  const notice =
+    audioIssue === "no_input_audio" && !muted
+      ? t("native.realtime.nativeCall.noInputAudio")
+      : audioIssue === "output_silent"
+        ? t("native.realtime.nativeCall.replyNotPlayed")
+        : null;
 
   const finish = useCallback(
     async (reason: "ended" | "failed") => {
@@ -299,13 +319,13 @@ export function useNativeRealtimeCall(options: {
     if (answered) {
       // The system already shows this call: it was answered on the ring screen.
       systemCallRef.current = id;
-      setSystemCall(Boolean(call));
+      setSystemCall(Boolean(call) && call?.showsSystemCall !== false);
     } else if (call) {
       try {
         await call.startCall({ callId: id, title: options.title, target: options.target ?? null });
         if (callIdRef.current === id) {
           systemCallRef.current = id;
-          setSystemCall(true);
+          setSystemCall(call.showsSystemCall !== false);
         }
       } catch (cause) {
         // The system refused the call; talk anyway, without the system call UI.
@@ -372,6 +392,7 @@ export function useNativeRealtimeCall(options: {
     speaker,
     route,
     error,
+    notice,
     systemCall,
     canStart: !callId && realtime.canStart,
     start,

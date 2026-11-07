@@ -581,6 +581,49 @@ describe("ordinary session Codex realtime control", () => {
     expect(calls).toEqual(["start", "input:true", "output:true", "stop"]);
   });
 
+  test("a live call that is silent on one side says so next to the control", async () => {
+    const render = async (kind: "no_input_audio" | "output_silent" | null, inputMuted = false) =>
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            snapshot={{
+              ...idle,
+              status: "active",
+              realtimeId: "redacted-realtime-id",
+              mode: activeMode,
+              inputMuted,
+              diagnostic: kind
+                ? { kind, message: kind, recoverable: true, connectionGeneration: 1, attempt: 0 }
+                : null,
+            }}
+            canStart={false}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+    const note = () => container.querySelector('[data-testid="realtime-audio-flow-issue"]');
+    await render(null);
+    expect(note()).toBeNull();
+    await render("no_input_audio");
+    expect(note()?.textContent).toBe("No sound from your microphone");
+    expect(
+      container
+        .querySelector('[data-testid="realtime-primary-action"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("End voice conversation");
+    await render("no_input_audio", true);
+    expect(note()).toBeNull();
+    await render("output_silent");
+    expect(note()?.textContent).toBe("Reply not played");
+  });
+
   test("notifies the host when voice becomes active so dictate can soft-hide", async () => {
     const activeUpdates: boolean[] = [];
     let current = {

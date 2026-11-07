@@ -1,4 +1,5 @@
 import { requireOptionalNativeModule } from "expo-modules-core";
+import { Platform } from "react-native";
 import {
   parseNativeCallEvent,
   parseNativeIncomingCall,
@@ -27,9 +28,11 @@ type OpenGeniCallNativeModule = {
 export { parseNativeCallEvent };
 
 /**
- * CallKit for Expo hosts, from the native module this package ships (linked by
- * Expo autolinking). Returns null where it is unavailable (Android, web, or a
- * build without the module), so voice still works without a system call.
+ * Calls for Expo hosts, from the native module this package ships (linked by
+ * Expo autolinking). On iOS a call is a CallKit call; on Android it sets up
+ * the phone's call audio (communication mode, audio focus, loudspeaker or
+ * headset) without a system call screen. Returns null where it is unavailable
+ * (web, or a build without the module), so voice still works without it.
  */
 export function createExpoCallAdapter(
   options: { includeInRecents?: boolean } = {},
@@ -40,6 +43,7 @@ export function createExpoCallAdapter(
   // Call ids are UUIDs; CallKit reports them upper-case, the hook compares lower-case.
   const id = (callId: string) => callId.toLowerCase();
   return {
+    showsSystemCall: Platform.OS === "ios",
     startCall: ({ callId, title, target }) => native.startCall(id(callId), title, target),
     reportConnected: (callId) => native.reportConnected(id(callId)),
     endCall: (callId, reason = "ended") => native.endCall(id(callId), reason === "failed"),

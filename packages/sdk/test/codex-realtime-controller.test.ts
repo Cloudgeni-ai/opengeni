@@ -3140,4 +3140,134 @@ describe("reply audio without a host audio element", () => {
       globalThis.Audio = previousAudio;
     }
   });
+
+  // A connected call can still be silent on one side: the phone's microphone
+  // hands WebRTC nothing but silence, or replies arrive and never play.
+  function audioFlowController() {
+    const { browser, options } = replyController("gpt-live-1-boulder-alpha");
+    let clock = Date.parse("2026-07-29T07:00:00.000Z");
+    const energy = { input: 0, output: 0 };
+    const intervals = new Map<number, { callback: () => void; delay: number }>();
+    let nextInterval = 1;
+    const controller = createCodexRealtimeController({
+      ...options,
+      now: () => new Date(clock),
+      setInterval: (callback: () => void, delay: number) => {
+        intervals.set(nextInterval, { callback, delay });
+        return nextInterval++;
+      },
+      clearInterval: (handle: unknown) => intervals.delete(Number(handle)),
+      createPeerConnection: () => {
+        const peer = browser.createPeerConnection();
+        Object.defineProperty(peer, "getStats", {
+          value: async () =>
+            new Map<string, unknown>([
+              ["source", { type: "media-source", kind: "audio", totalAudioEnergy: energy.input }],
+              ["inbound", { type: "inbound-rtp", kind: "audio", totalAudioEnergy: energy.output }],
+            ]),
+        });
+        return peer;
+      },
+    });
+    const settle = async () => {
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    };
+    return {
+      browser,
+      controller,
+      energy,
+      intervalDelays: () => [...intervals.values()].map((timer) => timer.delay),
+      async seconds(count: number, add: { input?: number; output?: number } = {}) {
+        for (let index = 0; index < count; index += 1) {
+          await settle();
+          clock += 1_000;
+          energy.input += add.input ?? 0;
+          energy.output += add.output ?? 0;
+          for (const timer of [...intervals.values()]) {
+            if (timer.delay === 1_000) timer.callback();
+          }
+          await settle();
+        }
+      },
+    };
+  }
+
+  test("a live call whose microphone hands over only silence says so, and clears once sound arrives", async () => {
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      expect(call.controller.snapshot().status).toBe("active");
+      await call.seconds(9);
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: { kind: "no_input_audio", recoverable: true },
+        error: expect.stringContaining("microphone isn't picking up any sound"),
+      });
+
+      await call.seconds(1, { input: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: null,
+        error: null,
+      });
+    } finally {
+      call.controller.close();
+    }
+    // Closing the call stops reading its statistics.
+    expect(call.intervalDelays()).not.toContain(1_000);
+  });
+
+  test("a muted microphone is never reported as silent", async () => {
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      call.controller.setInputMuted(true);
+      await call.seconds(20);
+      expect(call.controller.snapshot().diagnostic?.kind).not.toBe("no_input_audio");
+    } finally {
+      call.controller.close();
+    }
+  });
+
+  test("a reply that played no audio says so", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      await call.seconds(1, { input: 1e-3 });
+      await speakReply(call.controller, call.browser);
+      await call.seconds(4, { input: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: { kind: "output_silent", recoverable: true },
+        error: expect.stringContaining("couldn't be played"),
+      });
+
+      await call.seconds(1, { input: 1e-3, output: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({ diagnostic: null, error: null });
+    } finally {
+      call.controller.close();
+      globalThis.Audio = previousAudio;
+    }
+  });
+
+  test("a reply that played is not flagged", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      await call.seconds(2, { input: 1e-3, output: 2e-3 });
+      await speakReply(call.controller, call.browser);
+      await call.seconds(5, { input: 1e-3 });
+      expect(call.controller.snapshot().diagnostic?.kind).not.toBe("output_silent");
+      expect(call.controller.snapshot().error).toBeNull();
+    } finally {
+      call.controller.close();
+      globalThis.Audio = previousAudio;
+    }
+  });
 });

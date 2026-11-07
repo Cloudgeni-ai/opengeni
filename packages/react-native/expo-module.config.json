@@ -11,6 +11,7 @@
   },
   "android": {
     "modules": [
+      "dev.opengeni.call.OpenGeniCallModule",
       "dev.opengeni.textselection.OpenGeniTextSelectionModule",
       "dev.opengeni.audiocapture.OpenGeniAudioCaptureModule"
     ]

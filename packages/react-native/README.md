@@ -145,7 +145,7 @@ pass `useOpenGeniText()` when you build on them.
 
 ## Voice calls with your agent
 
-A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset.
+A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset. On Android the same adapter sets up the phone's call audio (communication mode, audio focus, and the loudspeaker or a connected headset) without a system call screen.
 
 ```sh
 npx expo install react-native-webrtc
@@ -176,7 +176,8 @@ function AgentCall({ session }: { session: SessionInputs }) {
 ```
 
 - `useNativeSessionRealtime` takes the same session inputs as `useSessionRealtime` from `@opengeni/react/session-realtime` (client, workspace, session, status, control, events). Pick the voice model with `useRealtimeModelSelection`. Native voice supports the WebRTC models; check with `nativeRealtimeModelSupported`.
-- `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter (for example on Android), voice still works without a system call.
+- `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter, voice still works without a system call; on Android, `systemCall` stays false because there is no call screen.
+- When a live call is silent on one side, `notice` says why and the call view shows it: the microphone picks up no sound at all, or a reply arrived but did not play. The realtime snapshot carries the same as the `no_input_audio` and `output_silent` diagnostics.
 - Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to.
 - `NativeAgentCallProvider` defaults generic outside calls to a fresh realtime session; `resolveOutsideCall` can preserve a host's explicit preferences. An explicit session request still wins. Generic calls keep a generic system-recents handle; calling a named session records that session. Selecting another session as conversational context does not change the active voice session.
 
