@@ -283,7 +283,15 @@ metadata. `install.sh` gets the host its certificate from the service
 instance's identity token, for `control_url`, and the service issues a
 week's certificate for that name; a daily timer renews it when fewer than
 four days are left, with a new token, so a host whose certificate expired
-gets a new one all the same. Terraform sets the group's first size; the service sizes it
+gets a new one all the same. A host reset during or just after its
+install (as a group update may do) can come back with what the install
+wrote in place but empty, so neither script takes a step as done because
+a file is there: at every boot the startup script checks the unpacked
+bundle whole against the `SHA256SUMS` it came with and fetches it again
+when it is not, and `install.sh` compares each installed file and unit
+with the bundle's or its pin and writes again what differs. Both write
+each file to a temporary name, flushed to the disk before its rename, so
+the next boot repairs the host with no hand work. Terraform sets the group's first size; the service sizes it
 from then on. The group has no auto-healing (the service decides when a
 host is lost and fences it), and a new template reaches hosts as they are
 replaced, or, when it changes only their metadata (such as the bundle),

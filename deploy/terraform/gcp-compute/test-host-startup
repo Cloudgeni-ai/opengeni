@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# Tests the startup script (host-startup.sh) and the bundle's install.sh
+# together against a stand-in host: directories for /etc/compute,
+# /opt/compute, /var/lib/compute and /etc/systemd/system, the metadata
+# server and the downloads served from files, and shims for systemd. On
+# Linux, as any user:
+#
+#   deploy/terraform/gcp-compute/test-host-startup
+#
+# - a first boot fetches the bundle, Firecracker and the guest kernel and
+#   installs all of it, each file on the disk before it takes its name;
+# - a boot again with all of it whole fetches nothing and rewrites nothing;
+# - a host reset during or just after its install, which comes back with
+#   what the install wrote in place but empty (bundle, release, units,
+#   host.env and the rest, as a staging host did), or cut short, gets the
+#   bundle again at its next boot and comes back whole, its agent started;
+#   so does one whose bundle's SHA256SUMS lost lines, whose bundle an
+#   earlier startup script unpacked, or whose reset came mid-download.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../../.." && pwd)
+hostdir=$repo/compute/deploy/host
+startup=$here/host-startup.sh
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+failures=0
+ok() { echo "ok: $*"; }
+bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+root=$work/root
+export COMPUTE_ETC=$root/etc/compute COMPUTE_OPT=$root/opt/compute COMPUTE_VAR=$root/var/lib/compute \
+  COMPUTE_UNITS=$root/etc/systemd/system COMPUTE_DEV=$root/dev COMPUTE_RUN=$root/run
+units_dir=$COMPUTE_UNITS
+mkdir -p "$work/bin" "$work/net" "$work/metadata" "$COMPUTE_ETC" "$COMPUTE_VAR" "$units_dir" \
+  "$COMPUTE_RUN/systemd/system" "$COMPUTE_DEV"
+ln -s /dev/null "$COMPUTE_DEV/kvm" # a character device, as /dev/kvm is
+
+# --- Shims, ahead of everything else on PATH.
+real_sync=$(command -v sync)
+shim() {
+  cat >"$work/bin/$1"
+  chmod 755 "$work/bin/$1"
+}
+# curl: the metadata server answers from $work/metadata, 404 for what is
+# not there; any other URL is the file of its name in $work/net, each
+# fetch listed in $work/fetched.
+shim curl <<EOF
+#!/usr/bin/env bash
+out= format= url=
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    -w) format=\$2; shift 2 ;;
+    -H | --retry) shift 2 ;;
+    -*) shift ;;
+    *) url=\$1; shift ;;
+  esac
+done
+case "\$url" in
+  http://metadata.google.internal/computeMetadata/v1/*)
+    file=$work/metadata/\${url#http://metadata.google.internal/computeMetadata/v1/} ;;
+  *) file=$work/net/\${url##*/}; echo "\${url##*/}" >>"$work/fetched" ;;
+esac
+code=404
+if [ -f "\$file" ]; then
+  code=200
+  if [ -n "\$out" ]; then cp "\$file" "\$out"; else cat "\$file"; fi
+fi
+[ -z "\$format" ] || printf %s "\$code"
+[ "\$code" = 200 ] || [ -n "\$format" ] || exit 22
+EOF
+# systemctl: lists what it is asked; no compute unit is running.
+shim systemctl <<EOF
+#!/bin/sh
+echo "\$*" >>"$work/systemctl"
+case "\$1" in is-active) exit 3 ;; esac
+EOF
+# sync: lists what it flushes, one path a line, then flushes it.
+shim sync <<EOF
+#!/bin/sh
+for path in "\$@"; do
+  case "\$path" in -*) ;; *) echo "\$path" >>"$work/synced" ;; esac
+done
+exec $real_sync "\$@"
+EOF
+shim id <<'EOF'
+#!/bin/sh
+[ "$1" = -u ] && { echo 0; exit 0; }
+exec /usr/bin/id "$@"
+EOF
+shim uname <<'EOF'
+#!/bin/sh
+[ "$1" = -m ] && { echo x86_64; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+shim apt-get <<'EOF'
+#!/bin/sh
+echo "apt-get shim: not installing $*" >&2
+exit 1
+EOF
+for tool in journalctl mdadm mount mountpoint; do
+  printf '#!/bin/sh\nexit 0\n' | shim "$tool"
+done
+# The packages install.sh wants, where this machine lacks them.
+for tool in ip nft mkfs.ext4 mkfs.xfs findmnt flock jq openssl; do
+  command -v "$tool" >/dev/null || printf '#!/bin/sh\nexit 0\n' | shim "$tool"
+done
+export PATH=$work/bin:$PATH
+
+# --- What the host fetches: Firecracker, the guest kernel and a bundle
+# with the real install.sh and units, and stand-ins for the programs.
+fc_version=v0.0.1
+mkdir -p "$work/fc/release-$fc_version-x86_64"
+echo "firecracker binary" >"$work/fc/release-$fc_version-x86_64/firecracker-$fc_version-x86_64"
+echo "jailer binary" >"$work/fc/release-$fc_version-x86_64/jailer-$fc_version-x86_64"
+tar -czf "$work/net/firecracker-$fc_version-x86_64.tgz" -C "$work/fc" "release-$fc_version-x86_64"
+echo "guest kernel" >"$work/net/vmlinux-test"
+echo "guest kernel config" >"$work/net/vmlinux-test.config"
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+
+b=$work/build/compute-host-test-x86_64-linux
+mkdir -p "$b/guest"
+cat >"$b/compute-host" <<'EOF'
+#!/bin/sh
+# compute-host stand-in: runs, answers, and builds an image.
+case "$1" in
+  build-image)
+    while [ $# -gt 0 ]; do [ "$1" = --output ] && echo "image of $2" >"$2"; shift; done ;;
+esac
+exit 0
+EOF
+printf '#!/bin/sh\n# check-host stand-in\n' >"$b/check-host"
+printf '#!/bin/sh\n# host-setup stand-in\n' >"$b/host-setup"
+printf '#!/bin/sh\n# compute-host-certificate stand-in\n' >"$b/compute-host-certificate"
+# The agent never runs here, so install.sh always restarts it.
+printf '#!/bin/sh\n[ "$1" = current ] && echo "it does not run"\nexit 1\n' >"$b/agent-inputs"
+# The state volume is mounted and recorded already (tested on its own).
+printf '#!/bin/sh\n# state-volume stand-in\n' >"$b/state-volume"
+cp "$hostdir/install.sh" "$b/"
+chmod 755 "$b"/*
+for file in compute-host.service compute-guard.service compute-guard-shared.conf compute-host-setup.service \
+  compute-host-certificate.service compute-host-certificate.timer host.env.example; do
+  install -m 644 "$hostdir/$file" "$b/"
+done
+cat >"$b/pins.env" <<EOF
+FC_VERSION=$fc_version
+FC_SHA256_X86_64=$(sha "$work/net/firecracker-$fc_version-x86_64.tgz")
+GUEST_ARTIFACTS=https://artifacts.test
+GUEST_KERNEL=vmlinux-test
+GUEST_KERNEL_SHA256=$(sha "$work/net/vmlinux-test")
+GUEST_KERNEL_CONFIG_SHA256=$(sha "$work/net/vmlinux-test.config")
+EOF
+for file in compute-guest envd bash; do echo "guest $file" >"$b/guest/$file"; done
+echo "versions" >"$b/guest/VERSIONS"
+echo test >"$b/VERSION"
+(cd "$b" && find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs sha256sum >SHA256SUMS)
+tar -czf "$work/net/compute-host-test.tar.gz" -C "$work/build" compute-host-test-x86_64-linux
+bundle_sha=$(sha "$work/net/compute-host-test.tar.gz")
+bundle=$COMPUTE_OPT/bundles/$bundle_sha
+
+# --- The instance's metadata.
+md() {
+  mkdir -p "$(dirname "$work/metadata/$1")"
+  printf '%s' "$2" >"$work/metadata/$1"
+}
+md instance/name host-1
+md instance/zone projects/1/zones/zone-a
+md instance/network-interfaces/0/ip 10.0.0.5
+md instance/attributes/compute-bundle-url https://bundles.test/compute-host-test.tar.gz
+md instance/attributes/compute-bundle-sha256 "$bundle_sha"
+authority=$'-----BEGIN CERTIFICATE-----\nAUTHORITY\n-----END CERTIFICATE-----\n'
+md instance/attributes/compute-host-authority "$authority"
+md instance/attributes/compute-memory-profile bare-metal
+md instance/attributes/compute-control https://control.test
+md instance/attributes/compute-store gs://store
+md instance/attributes/compute-base-image registry.test/base:1
+# This host's state volume is set up and recorded already.
+echo 11111111-2222-3333-4444-555555555555 >"$COMPUTE_ETC/state-volume.uuid"
+
+# boot: runs the startup script once (without its retry loop), with a
+# fresh list of what it fetched, flushed and asked systemd.
+boot() {
+  : >"$work/fetched"
+  : >"$work/synced"
+  : >"$work/systemctl"
+  COMPUTE_STARTUP_ATTEMPT=1 bash "$startup" >"$work/out" 2>&1
+}
+fetched() { grep -cx "$1" "$work/fetched" || true; }
+
+# whole: whether everything the host runs from is installed, each file as
+# it should be; it says what is not.
+whole() {
+  local file release=$COMPUTE_OPT/releases/test fc=$COMPUTE_OPT/firecracker/$fc_version
+  for file in compute-host check-host host-setup compute-host-certificate agent-inputs pins.env VERSION SHA256SUMS \
+    guest/compute-guest guest/envd guest/bash guest/VERSIONS; do
+    cmp -s "$b/$file" "$release/$file" || { echo "release file $file"; return 1; }
+  done
+  [ "$(readlink "$COMPUTE_OPT/current")" = "$release" ] || { echo "current"; return 1; }
+  for file in compute-host.service compute-guard.service compute-host-setup.service \
+    compute-host-certificate.service compute-host-certificate.timer; do
+    cmp -s "$hostdir/$file" "$units_dir/$file" || { echo "unit $file"; return 1; }
+  done
+  cmp -s "$work/fc/release-$fc_version-x86_64/firecracker-$fc_version-x86_64" "$fc/firecracker" &&
+    cmp -s "$work/fc/release-$fc_version-x86_64/jailer-$fc_version-x86_64" "$fc/jailer" ||
+    { echo firecracker; return 1; }
+  cmp -s "$work/net/vmlinux-test" "$COMPUTE_OPT/kernel/vmlinux-test" &&
+    cmp -s "$work/net/vmlinux-test.config" "$COMPUTE_OPT/kernel/vmlinux-test.config" || { echo kernel; return 1; }
+  grep -qx 'COMPUTE_NAME=host-1' "$COMPUTE_ETC/host.env" &&
+    grep -qx 'COMPUTE_BASE_IMAGE_REF=registry.test/base:1' "$COMPUTE_ETC/host.env" || { echo host.env; return 1; }
+  [ "$(stat -c %a "$COMPUTE_ETC/host.env")" = 600 ] || { echo "host.env mode"; return 1; }
+  grep -qx 'COMPUTE_VERSION=test' "$COMPUTE_ETC/installed.env" &&
+    grep -qx "COMPUTE_KERNEL=$COMPUTE_OPT/kernel/vmlinux-test" "$COMPUTE_ETC/installed.env" ||
+    { echo installed.env; return 1; }
+  [ "$(cat "$COMPUTE_ETC/ca.pem")" = "${authority%$'\n'}" ] || { echo ca.pem; return 1; }
+  grep -q '^image of ' "$COMPUTE_VAR/base.ext4" && grep -q '^registry.test/base:1 guest-sha256:' "$COMPUTE_VAR/base.ref" ||
+    { echo "base image"; return 1; }
+  # Nothing half-done is left behind.
+  file=$(find "$root" \( -name '*.part' -o -name '*.new' -o -name .download \) -print -quit)
+  [ -z "$file" ] || { echo "left over: ${file#"$root"}"; return 1; }
+}
+# check NAME: the boot just run succeeded, the host is whole, and its
+# agent was started.
+check() {
+  local why
+  if ! why=$(whole); then
+    bad "$1: not whole ($why)"
+    sed 's/^/  /' "$work/out" >&2
+  elif ! grep -qx 'restart compute-host.service' "$work/systemctl"; then
+    bad "$1: the agent was not started"
+  else
+    ok "$1"
+  fi
+}
+# empty FILE...: as a reset leaves a file whose data never reached the disk.
+empty() { find "$@" -type f -exec truncate -s 0 {} +; }
+halve() { truncate -s $(($(stat -c %s "$1") / 2)) "$1"; }
+
+# --- A first boot.
+if boot; then
+  check "a first boot installs the bundle"
+else
+  bad "a first boot failed"
+  sed 's/^/  /' "$work/out" >&2
+fi
+[ "$(fetched compute-host-test.tar.gz)" = 1 ] && [ "$(fetched "firecracker-$fc_version-x86_64.tgz")" = 1 ] &&
+  [ "$(fetched vmlinux-test)" = 1 ] && ok "it fetched the bundle, Firecracker and the kernel once" ||
+  bad "a first boot fetched: $(tr '\n' ' ' <"$work/fetched")"
+# Each file reached the disk under its temporary name, before its rename.
+missing=
+for part in "$bundle.part/.unpacked" "$bundle.part/install.sh" "$COMPUTE_OPT/releases/test.part/compute-host" \
+  "$units_dir/compute-host.service.part" "$COMPUTE_ETC/host.env.part" "$COMPUTE_ETC/installed.env.part" \
+  "$COMPUTE_ETC/ca.pem.part" "$COMPUTE_OPT/firecracker/$fc_version.part/jailer" \
+  "$COMPUTE_OPT/kernel/vmlinux-test.part" "$COMPUTE_VAR/base.ext4.part" "$COMPUTE_VAR/base.ref.part"; do
+  grep -qxF -- "$part" "$work/synced" || missing="$missing ${part#"$root"}"
+done
+[ -z "$missing" ] && ok "every file is flushed before it takes its name" || bad "not flushed before the rename:$missing"
+grep -qxF -- "$COMPUTE_OPT/bundles" "$work/synced" && grep -qxF -- "$units_dir" "$work/synced" &&
+  ok "and every rename is flushed" || bad "the renames in bundles/ or the units' directory are not flushed"
+
+# --- A boot again, with everything whole.
+inode=$(stat -c %i "$units_dir/compute-host.service" "$COMPUTE_ETC/host.env" "$COMPUTE_OPT/releases/test")
+if boot; then
+  check "a boot again keeps the host as it is"
+  [ ! -s "$work/fetched" ] && ok "and fetches nothing" || bad "a boot again fetched: $(tr '\n' ' ' <"$work/fetched")"
+  [ "$(stat -c %i "$units_dir/compute-host.service" "$COMPUTE_ETC/host.env" "$COMPUTE_OPT/releases/test")" = "$inode" ] &&
+    ok "and rewrites nothing" || bad "a boot again rewrote files that were whole"
+else
+  bad "a boot again failed"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- The reset: everything the install wrote is there, and empty.
+empty "$COMPUTE_OPT/bundles" "$COMPUTE_OPT/releases" "$COMPUTE_OPT/firecracker" "$COMPUTE_OPT/kernel" "$units_dir" \
+  "$COMPUTE_ETC/host.env" "$COMPUTE_ETC/installed.env" "$COMPUTE_ETC/ca.pem" "$COMPUTE_VAR/base.ext4"
+if boot; then
+  check "a host reset just after its install, its files empty, comes back whole at the next boot"
+  [ "$(fetched compute-host-test.tar.gz)" = 1 ] && grep -q "is not whole; fetching it again" "$work/out" &&
+    ok "it fetched the empty bundle again" || bad "the empty bundle was not fetched again: $(tr '\n' ' ' <"$work/fetched")"
+  [ "$(fetched "firecracker-$fc_version-x86_64.tgz")" = 1 ] && [ "$(fetched vmlinux-test)" = 1 ] &&
+    ok "and the empty Firecracker and kernel" || bad "Firecracker or the kernel not fetched again"
+else
+  bad "the boot after the reset failed"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- Files cut short rather than emptied.
+halve "$bundle/install.sh"
+halve "$bundle/compute-host"
+halve "$COMPUTE_OPT/releases/test/agent-inputs"
+halve "$units_dir/compute-guard.service"
+halve "$COMPUTE_ETC/host.env"
+halve "$COMPUTE_OPT/firecracker/$fc_version/firecracker"
+if boot && [ "$(fetched compute-host-test.tar.gz)" = 1 ]; then
+  check "a host whose files were cut short comes back whole"
+else
+  bad "a host whose files were cut short: $(tr '\n' ' ' <"$work/fetched")"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- The bundle's files whole, but its SHA256SUMS lost all but one line,
+# so what is left of it still checks out.
+head -n 1 "$bundle/SHA256SUMS" >"$work/sums" && cat "$work/sums" >"$bundle/SHA256SUMS"
+empty "$bundle/install.sh"
+if boot && [ "$(fetched compute-host-test.tar.gz)" = 1 ]; then
+  check "a bundle whose SHA256SUMS lost lines is fetched again"
+else
+  bad "a bundle whose SHA256SUMS lost lines was used"
+fi
+
+# --- A bundle an earlier startup script unpacked, with no record of it.
+rm "$bundle/.unpacked"
+if boot && [ "$(fetched compute-host-test.tar.gz)" = 1 ]; then
+  check "a bundle with no record of its unpacking is fetched again"
+else
+  bad "a bundle with no record of its unpacking was used"
+fi
+
+# --- A reset mid-download: no bundle yet, parts of one left.
+rm -rf "$bundle"
+mkdir -p "$COMPUTE_OPT/bundles/.download" "$bundle.part"
+echo partial >"$COMPUTE_OPT/bundles/.download/bundle.tar.gz"
+: >"$bundle.part/install.sh"
+if boot && [ "$(fetched compute-host-test.tar.gz)" = 1 ]; then
+  check "a host reset mid-download fetches the bundle again"
+else
+  bad "a host reset mid-download"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- A bundle that does not match the template's SHA-256 is refused.
+rm -rf "$bundle"
+cp "$work/net/compute-host-test.tar.gz" "$work/good.tar.gz"
+echo tampered >>"$work/net/compute-host-test.tar.gz"
+if boot; then
+  bad "a bundle not matching its SHA-256 was installed"
+elif [ -e "$bundle" ]; then
+  bad "a bundle not matching its SHA-256 was unpacked"
+else
+  ok "a bundle not matching its SHA-256 is refused"
+fi
+cp "$work/good.tar.gz" "$work/net/compute-host-test.tar.gz"
+
+if [ "$failures" -gt 0 ]; then
+  echo "$failures failed" >&2
+  exit 1
+fi
+echo "all passed"
