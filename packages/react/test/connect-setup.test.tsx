@@ -8,6 +8,7 @@ async function render(
   nextAction: ConnectAttempt["nextAction"],
   state: ConnectAttempt["state"] = "requires_user_action",
   overrides: Partial<ConnectAttempt> = {},
+  props: { explained?: boolean } = {},
 ) {
   const attempt: ConnectAttempt = {
     id: "attempt",
@@ -36,7 +37,9 @@ async function render(
   const controller = new ConnectController(transport, "workspace");
   await controller.recover("attempt");
   try {
-    return renderToStaticMarkup(<ConnectSetup controller={controller} onAuthorize={() => {}} />);
+    return renderToStaticMarkup(
+      <ConnectSetup controller={controller} onAuthorize={() => {}} {...props} />,
+    );
   } finally {
     controller.dispose();
   }
@@ -142,6 +145,19 @@ test("OAuth presents one primary action without an empty credential form heading
   expect(html).toContain('class="og-connect-setup-secondary"');
   expect(html).toContain("Check status");
   expect(html).toContain("Cancel setup");
+});
+
+test("a header that explains the fix leaves sign-in without the generic connection summary", async () => {
+  const action = { type: "authorize", url: "https://github.com/login/oauth/authorize" } as const;
+  const generic = await render(action);
+  expect(generic).toContain('class="og-connect-setup-scope"');
+  expect(generic).toContain("Personal connection");
+  const explained = await render(action, "requires_user_action", {}, { explained: true });
+  expect(explained).not.toContain("og-connect-setup-summary");
+  expect(explained).not.toContain("Personal connection");
+  expect(explained).not.toContain("Authorize your account");
+  expect(explained).toContain("Authorize connection");
+  expect(explained).toContain("Cancel setup");
 });
 
 test("a GitHub owner-approval request reads as a calm waiting state, not an error", async () => {

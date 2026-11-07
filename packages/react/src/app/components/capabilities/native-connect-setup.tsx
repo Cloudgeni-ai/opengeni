@@ -39,6 +39,11 @@ export type NativeConnectRequest = {
   requestedScopes?: string[] | undefined;
   installationTarget?: ConnectInstallationTarget | undefined;
   displayName?: string | undefined;
+  /**
+   * Replaces "Connect <name>", for a repair that names its fix ("Authorize acme").
+   * With a description, the setup drops its generic connection summary.
+   */
+  title?: string | undefined;
   description?: string | undefined;
   logoUrl?: string | undefined;
   authorizeLabel?: string | undefined;
@@ -247,8 +252,8 @@ export function NativeConnectSetup({
               tabIndex={-1}
               className="text-xl font-semibold tracking-tight outline-hidden"
             >
-              Connect{" "}
-              {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
+              {request.title ??
+                `Connect ${request.displayName ?? request.installationTarget?.displayName ?? request.providerId}`}
             </DialogTitle>
             <DialogDescription
               className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
@@ -332,6 +337,7 @@ export function NativeConnectSetup({
             <ConnectSetup
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
+              explained={!!request.title && !!request.description}
               controller={controller}
               onRetry={() =>
                 controller.begin(
