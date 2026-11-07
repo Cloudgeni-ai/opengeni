@@ -366,7 +366,6 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "@opengeni/decisions": "workspace:*",
     "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"

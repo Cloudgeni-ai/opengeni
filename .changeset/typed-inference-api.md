@@ -5,6 +5,7 @@
 "@opengeni/core": minor
 "@opengeni/runtime": minor
 "@opengeni/db": minor
+"@opengeni/decisions": patch
 ---
 
 Add workspace-scoped stateless typed decisions with SDK `decide`. Reuse the

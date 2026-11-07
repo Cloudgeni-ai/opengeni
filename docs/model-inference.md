@@ -30,7 +30,7 @@ console.log(result.id, result.model, result.usage);
 ```
 
 Predicates return a probability from zero to one; choices return an allowed key;
-scores return a zero-based criteria index. Every answer can instead be a typed
+scores return a value on the zero-based criteria scale. Every answer can instead be a typed
 refusal. The existing provider adapter validates all answers. A malformed answer
 fails the request, but any usage already reported by the provider is retained.
 The SDK does not silently retry a failed decision call.

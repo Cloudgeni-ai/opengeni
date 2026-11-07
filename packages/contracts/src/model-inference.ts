@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { DecisionQuestion, DecisionResult, DecisionUsage } from "@opengeni/decisions";
+import type { DecisionQuestion, DecisionResult, DecisionUsage } from "./decision-types";
 
 const Instructions = z.union([z.string(), z.record(z.string(), z.unknown()), z.array(z.unknown())]);
 const Question = z.discriminatedUnion("type", [
@@ -70,4 +70,4 @@ export type {
   DecisionPredicateQuestion,
   DecisionChoiceQuestion,
   DecisionScoreQuestion,
-} from "@opengeni/decisions";
+} from "./decision-types";

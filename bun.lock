@@ -500,7 +500,6 @@
       "version": "6.11.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
-        "@opengeni/decisions": "workspace:*",
         "entities": "^7.0.1",
         "yaml": "2.9.0",
         "zod": "^4.2.1",
@@ -564,6 +563,9 @@
     "packages/decisions": {
       "name": "@opengeni/decisions",
       "version": "6.11.0",
+      "dependencies": {
+        "@opengeni/contracts": "workspace:*",
+      },
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
