@@ -220,6 +220,7 @@ import {
   repositorySelectionFromResources,
 } from "../lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "../lib/use-new-session-draft";
+import { newSessionDraftConflictRevision } from "../../hooks/use-new-session-draft";
 import { userErrorText } from "../../ui/api-error";
 import {
   newSessionCreateSnapshot,
@@ -1344,6 +1345,8 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
+              // Whether a refusal showed the draft moved on since this Send saved it.
+              let draftChangedElsewhere = false;
               for (let attempt = 0; attempt < 3; attempt += 1) {
                 // Voice launch does not consume the draft. Save local edits if
                 // possible, but never rebase an old voice draft over a sibling's
@@ -1392,6 +1395,10 @@ function SessionsIndexRouteContent({
                     ),
                     onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
                       draftConflict = newSessionDraft.captureConflict(error);
+                      if (draftConflict) {
+                        draftChangedElsewhere =
+                          newSessionDraftConflictRevision(error) !== flushed.revision;
+                      }
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
                       connectionAccounts.onSelectionError(error);
@@ -1406,6 +1413,9 @@ function SessionsIndexRouteContent({
                   },
                 );
                 if (!created) {
+                  // Refused at the revision this Send saved: nothing else changed
+                  // the draft, so another attempt would be refused the same way.
+                  if (draftConflict && !draftChangedElsewhere) break;
                   if (draftConflict) continue;
                   if (!outcomeUnknown) await preserveNewerLocalDraft();
                   return null;
@@ -1422,12 +1432,14 @@ function SessionsIndexRouteContent({
               await preserveNewerLocalDraft();
               newSessionDraft.clearError();
               toast.error("Couldn't start voice", {
-                description: DRAFT_CHANGED_DURING_SEND_TEXT,
+                description: draftConflictDuringSendText(draftChangedElsewhere),
               });
               return null;
             }
 
             const submittedResources = submittedSnapshot.resources;
+            // Whether a refusal showed the draft moved on since this Send saved it.
+            let draftChangedElsewhere = false;
             for (let attempt = 0; attempt < 3; attempt += 1) {
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
@@ -1473,6 +1485,10 @@ function SessionsIndexRouteContent({
                   ),
                   onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
                     draftConflict = newSessionDraft.captureConflict(error);
+                    if (draftConflict) {
+                      draftChangedElsewhere =
+                        newSessionDraftConflictRevision(error) !== flushed.revision;
+                    }
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
                     connectionAccounts.onSelectionError(error);
@@ -1489,6 +1505,9 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) {
+                // Refused at the revision this Send saved: nothing else changed
+                // the draft, so another attempt would be refused the same way.
+                if (draftConflict && !draftChangedElsewhere) break;
                 if (draftConflict) continue;
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
@@ -1547,7 +1566,7 @@ function SessionsIndexRouteContent({
             // draft is not unsaved: clear that notice and resume autosave.
             newSessionDraft.clearError();
             toast.error("Couldn't send", {
-              description: DRAFT_CHANGED_DURING_SEND_TEXT,
+              description: draftConflictDuringSendText(draftChangedElsewhere),
             });
             return null;
           },
@@ -2355,9 +2374,16 @@ function SessionsIndexRouteContent({
   );
 }
 
-/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
-const DRAFT_CHANGED_DURING_SEND_TEXT =
-  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+/**
+ * Send was refused as a draft conflict. Only a draft that really moved on
+ * since this Send saved it was changed somewhere else (another tab, window or
+ * device); otherwise nothing is known to have changed it.
+ */
+function draftConflictDuringSendText(changedElsewhere: boolean): string {
+  return changedElsewhere
+    ? "Your message is saved, but this draft kept changing in another tab or window. Check it and send again."
+    : "Your message is saved, but it couldn't be sent. Check the draft and send again.";
+}
 
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {

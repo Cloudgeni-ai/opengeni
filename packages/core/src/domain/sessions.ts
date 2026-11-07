@@ -248,6 +248,7 @@ import {
   WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
+  comparableNewSessionDraftOptions,
 } from "@opengeni/db";
 import {
   publishDurableSessionEvents,
@@ -3663,24 +3664,13 @@ async function createSessionForRequestInFileScope(
           model,
           reasoningEffort,
           latencyMode,
-          options: {
-            ...(payload.excludedMcpServerIds !== undefined
-              ? { excludedMcpServerIds: payload.excludedMcpServerIds }
-              : {}),
-            ...(visibilityProvided ? { visibility: payload.visibility } : {}),
-            ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
-            ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
-            ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(payload.rigId ? { rigId: payload.rigId } : {}),
-            ...(payload.goal ? { goal: payload.goal } : {}),
-            ...(payload.firstPartyMcpPermissions
-              ? { firstPartyMcpPermissions: payload.firstPartyMcpPermissions }
-              : {}),
-            ...(payload.firstPartyMcpTools
-              ? { firstPartyMcpTools: payload.firstPartyMcpTools }
-              : {}),
-            ...(payload.agent ? { agent: payload.agent } : {}),
-          },
+          // Every draft option is also a create field with the same name, so
+          // the request supplies the whole comparable set: a draft option added
+          // later is fenced without another hand-written entry here.
+          options: comparableNewSessionDraftOptions({
+            ...payload,
+            visibility: visibilityProvided ? payload.visibility : undefined,
+          }),
         }
       : null;
   const inheritedFromParent = parentSession !== null;
