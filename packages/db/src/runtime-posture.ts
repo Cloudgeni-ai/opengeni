@@ -2792,7 +2792,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_inbox",
   "teams_bot_installations",
   "teams_bot_links",
-  // 1296_teams_bot_onboarding_limits: onboarding reply limits across replicas.
+  // 1300_teams_bot_onboarding_limits: onboarding reply limits across replicas.
   "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",

@@ -255,7 +255,7 @@ replica, in separate budgets so one kind can't use up another:
   messages are ignored as before.
 
 The counts are kept in the database (`teams_bot_onboarding_limits`, migration
-`1296_teams_bot_onboarding_limits.sql`): content-free rows keyed by a hash of
+`1300_teams_bot_onboarding_limits.sql`): content-free rows keyed by a hash of
 the budget and the person, tenant or deployment, using the database clock, and
 removed once both the window's start and the last reply are two days old. A
 refused reply changes no existing row, and a window starts with its first
