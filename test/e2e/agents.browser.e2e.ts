@@ -79,10 +79,14 @@ describe("agents in the browser", () => {
     expect(await acme.isChecked()).toBe(true);
     const support = page.getByRole("switch", { name: "Available in Acme Support" });
     expect(await support.isChecked()).toBe(false);
-    // On in one Slack workspace at a time: the other says why it's off.
-    expect(await support.getAttribute("aria-disabled")).toBe("true");
-    await page.getByText("It's available in Acme. Turn that off first.").first().waitFor();
-    await page.getByRole("button", { name: "Introduce" }).waitFor();
+    // An agent can be on in several Slack workspaces: the other can be turned on too.
+    expect(await support.getAttribute("aria-disabled")).not.toBe("true");
+    expect(await page.getByText("Turn that off first").count()).toBe(0);
+    await support.click();
+    await page.getByRole("switch", { name: "Available in Acme Support", checked: true }).waitFor();
+    expect(await acme.isChecked()).toBe(true);
+    // Each Slack workspace it is on in can be introduced to.
+    expect(await page.getByRole("button", { name: "Introduce" }).count()).toBe(2);
     await page.close();
   }, 60_000);
 

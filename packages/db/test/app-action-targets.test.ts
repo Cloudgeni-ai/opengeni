@@ -576,10 +576,10 @@ test("a member never sees a colleague's private rows or the workspace's keys and
       'private', ${colleague}, ${colleague})
     returning id`;
   const [template] = await shared!.admin<{ id: string }[]>`
-    insert into bot_templates (account_id, workspace_id, name, setup_instructions, visibility,
-      created_by_subject_id)
-    values (${org.accountId}, ${org.workspaceId}, 'Colleague private template', 'x', 'private',
-      ${colleague})
+    insert into agents (account_id, workspace_id, visibility, owner_subject_id, name, name_key,
+      origin, created_by_subject_id)
+    values (${org.accountId}, ${org.workspaceId}, 'private', ${colleague},
+      'Colleague private template', 'colleague private template', 'bot_template', ${colleague})
     returning id`;
   const [key] = await shared!.admin<{ id: string }[]>`
     insert into api_keys (account_id, workspace_id, name, prefix, key_hash, credential_kind)

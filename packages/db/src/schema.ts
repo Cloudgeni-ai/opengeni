@@ -2474,9 +2474,9 @@ export const slackAgentUserStates = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1306).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     slackUserId: text("slack_user_id").notNull(),
     hintInteractionId: uuid("hint_interaction_id"),
     /** The open-agent chat that showed this person the visibility notice. */
@@ -2487,6 +2487,12 @@ export const slackAgentUserStates = pgTable(
   },
   (table) => ({
     agentUser: unique("slack_agent_user_states_agent_user_uq").on(
+      table.slackAgentId,
+      table.slackUserId,
+    ),
+    // 1318: per installation, now that an agent may be in several.
+    installUser: uniqueIndex("slack_agent_user_states_install_user_uq").on(
+      table.connectionId,
       table.slackAgentId,
       table.slackUserId,
     ),
@@ -2539,9 +2545,9 @@ export const slackAgentProposals = pgTable(
       .$type<"pending" | "creating" | "created" | "cancelled">()
       .notNull()
       .default("pending"),
-    createdSlackAgentId: uuid("created_slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "set null",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE SET NULL (created_slack_agent_id) (migration 1307).
+    createdSlackAgentId: uuid("created_slack_agent_id"),
     decidedBySubjectId: text("decided_by_subject_id"),
     decidedBySlackUserId: text("decided_by_slack_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2690,9 +2696,9 @@ export const slackAgentIntroPosts = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1308).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     postedBySubjectId: text("posted_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2700,6 +2706,12 @@ export const slackAgentIntroPosts = pgTable(
   },
   (table) => ({
     agentChannel: unique("slack_agent_intro_posts_agent_channel_uq").on(
+      table.slackAgentId,
+      table.slackChannelId,
+    ),
+    // 1319: per installation, now that an agent may be in several.
+    installChannel: uniqueIndex("slack_agent_intro_posts_install_channel_uq").on(
+      table.connectionId,
       table.slackAgentId,
       table.slackChannelId,
     ),
@@ -2736,9 +2748,9 @@ export const slackAgentSuggestions = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1309).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     interactionId: uuid("interaction_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     providerEventId: text("provider_event_id").notNull(),
@@ -2898,9 +2910,9 @@ export const slackChannelRoutes = pgTable(
     source: text("source").$type<"picker" | "admin">().notNull(),
     // Set when the channel's answer is a Slack agent rather than plain Opengeni
     // in the target workspace. The target then equals the agent's own target.
-    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "cascade",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1304).
+    slackAgentId: uuid("slack_agent_id"),
     version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3720,9 +3732,9 @@ export const slackInteractions = pgTable(
     // this column existed, or by an older image).
     startMessageLine: text("start_message_line"),
     // The Slack agent this chat was started for, frozen when the thread binds.
-    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "set null",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE SET NULL (slack_agent_id) (migration 1305).
+    slackAgentId: uuid("slack_agent_id"),
     // The agent whose chat passed this thread on, so it is never handed back.
     handoffFromSlackAgentId: uuid("handoff_from_slack_agent_id"),
     // The latest Slack message this chat was given and who sent it. A message
