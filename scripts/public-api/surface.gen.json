@@ -19103,10 +19103,19 @@
         "$.createdAt": "string!",
         "$.githubAccountId": "integer! null",
         "$.installationId": "integer!",
+        "$.issue": "ref(GitHubInstallationIssue)? null",
         "$.lifecycle": "ref(GitHubInstallationLifecycle)!",
         "$.repositoryCount": "integer!",
         "$.repositoryScope": "ref(GitHubRepositoryScope)!",
         "$.updatedAt": "string!"
+      }
+    },
+    "GitHubInstallationIssue": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"account_changed\\\"\",\"\\\"github_unreachable\\\"\",\"\\\"no_repositories\\\"\",\"\\\"owner_unconfirmed\\\"\",\"\\\"suspended\\\"\",\"\\\"uninstalled\\\"\"]"
       }
     },
     "GitHubInstallationLifecycle": {
@@ -36182,6 +36191,7 @@
       "GitHubAppSetupMode": "type",
       "GitHubBindingStatus": "type",
       "GitHubInstallationBinding": "type",
+      "GitHubInstallationIssue": "type",
       "GitHubInstallationLifecycle": "type",
       "GitHubRepositoriesResponse": "type",
       "GitHubRepository": "type",

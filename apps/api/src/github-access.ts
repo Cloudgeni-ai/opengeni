@@ -3,6 +3,7 @@ import {
   type GitHubAppRepositoryBranchPage,
   type GitHubBindingStatus,
   type GitHubInstallationBinding,
+  type GitHubInstallationIssue,
   type GitHubRepository,
   type RepositoryResourceRef,
 } from "@opengeni/contracts";
@@ -136,6 +137,12 @@ export async function listWorkspaceGitHubInstallationBindings(
       installation.installationId,
       lifecycleVerified,
     ),
+    issue: githubInstallationBindingIssue(
+      installation,
+      liveById,
+      installation.installationId,
+      lifecycleVerified,
+    ),
     repositoryScope: installation.repositoryScope,
     repositoryCount: installation.repositoryIds.length,
     configureUrl: null,
@@ -233,6 +240,46 @@ export function githubInstallationBindingLifecycle(
     liveById,
     lifecycleVerified,
   );
+}
+
+/**
+ * Why a binding is not active, named by its fix, so the integration page can
+ * say what is wrong instead of a generic "Needs attention". Null exactly when
+ * the lifecycle is active. A binding that lost its repositories and is also
+ * gone or unreachable on GitHub reports the GitHub cause, which is the one to
+ * fix first.
+ */
+export function githubInstallationBindingIssue(
+  stored: Awaited<ReturnType<typeof listGitHubInstallationAccessForWorkspace>>[number],
+  liveById: Map<number, LiveGitHubInstallation | null>,
+  installationId: number,
+  lifecycleVerified: boolean,
+): GitHubInstallationIssue | null {
+  if (
+    githubInstallationBindingLifecycle(stored, liveById, installationId, lifecycleVerified) ===
+    "active"
+  ) {
+    return null;
+  }
+  if (!hasGitHubInstallationOwnerAuthority(stored)) {
+    return "owner_unconfirmed";
+  }
+  if (!lifecycleVerified) {
+    return "github_unreachable";
+  }
+  const live = liveById.get(installationId);
+  if (!live) {
+    return "uninstalled";
+  }
+  if (live.suspended) {
+    return "suspended";
+  }
+  if (live.installationId !== installationId || stored.githubAccountId !== live.accountId) {
+    return "account_changed";
+  }
+  // Owner proof and GitHub agree; the only gap left is the auditable
+  // repository allowlist (hasAuditableGitHubInstallationAuthority).
+  return stored.repositoryIds.length === 0 ? "no_repositories" : "owner_unconfirmed";
 }
 
 /**

@@ -1,0 +1,9 @@
+---
+"@opengeni/react": minor
+"@opengeni/sdk": minor
+"@opengeni/contracts": minor
+---
+
+The GitHub integration page is compact. Each Opengeni app installation is one row: a healthy one shows its account type and repository count with **Change repositories**. One that is not active shows a status in the attention colour ("Uninstalled on GitHub", "Suspended on GitHub", "No repositories", "Not checked", "Account changed" or "Needs authorization"), one sentence on what is wrong, and the one action that fixes it (Reinstall, Unsuspend on GitHub, Choose repositories, Check again, Remove or Authorize). Remove sits in the row's ⋯ menu. Approvals come before the repositories and are one table: rows are the three kinds of action, columns are the Opengeni app and Your GitHub, and an **All actions** row sets a whole column at once. Per-installation choices sit behind **Advanced**, and one footnote replaces the repeated text. A long repository list folds behind its count with a search field. Repair opens a dialog that names the installation and the fix instead of a generic Connect dialog.
+
+GitHub installation bindings carry an optional `issue` (`GitHubInstallationIssue`: `uninstalled`, `suspended`, `no_repositories`, `owner_unconfirmed`, `github_unreachable` or `account_changed`) that says why an installation is not active, in terms of its fix. It is null while active, and older servers omit it. The integration view model adds `IntegrationSection.rows` and `statusTone`, `IntegrationViewModel.policies` (an `IntegrationPolicyTable`) and `IntegrationAccess.collapsed`. `NativeConnectRequest.title` replaces the "Connect …" heading; with a description, the setup leaves out its generic connection summary. `ConnectSetup` takes `explained` to do the same, and a `DetailSection` action now wraps under its title on narrow screens.

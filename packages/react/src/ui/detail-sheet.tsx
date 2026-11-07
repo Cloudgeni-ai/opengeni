@@ -445,8 +445,10 @@ export function DetailSection({
       className={cn("min-w-0", spacing, className)}
     >
       {title || action ? (
-        <div className="flex min-w-0 items-center justify-between gap-4">
-          <div className="min-w-0">
+        // On a narrow page a long action wraps under the title instead of
+        // squeezing the description into a sliver beside it.
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-3">
+          <div className="min-w-0 grow basis-[min(100%,14rem)]">
             {title ? (
               <Heading
                 id={headingId}
