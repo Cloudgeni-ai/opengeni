@@ -144,12 +144,12 @@ export function FailedSessionBanner({
       ? `Machine access needed: this chat isn’t allowed to use “${machineAllow.machineName}” right now.`
       : freeModelLimit
         ? freeModelDailyLimitReason({
-          modelChanged,
-          canBuyCredits: offerCredits,
-          canConnectModel: offerConnect,
-          subscriptions,
-          canChooseModel: hasModelPicker ?? canChooseModel,
-        })
+            modelChanged,
+            canBuyCredits: offerCredits,
+            canConnectModel: offerConnect,
+            subscriptions,
+            canChooseModel: hasModelPicker ?? canChooseModel,
+          })
         : creditRefusal && !offerCredits
           ? // Without billing access the one fix is asking an owner.
             creditRefusalHeadline(t, creditRefusal, false)

@@ -56,7 +56,7 @@ export function findPersonalMachineAccessRequiredError(
   error: unknown,
 ): PersonalMachineAccessRequiredError | null {
   const seen = new Set<unknown>();
-  for (let current = error; current && typeof current === "object" && !seen.has(current); ) {
+  for (let current = error; current && typeof current === "object" && !seen.has(current);) {
     if (current instanceof PersonalMachineAccessRequiredError) return current;
     seen.add(current);
     current = (current as { cause?: unknown }).cause;

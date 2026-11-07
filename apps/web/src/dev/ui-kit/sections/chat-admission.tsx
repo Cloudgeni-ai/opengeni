@@ -198,9 +198,7 @@ export default function ChatAdmissionSection() {
                 failure={MACHINE_ACCESS_FAILURE}
                 actions={{ onRetry: async () => true, retryBlocker: null }}
                 allowMachine={
-                  state.owner
-                    ? { machineName: "Laptop", onAllow: async () => null }
-                    : undefined
+                  state.owner ? { machineName: "Laptop", onAllow: async () => null } : undefined
                 }
               />
             </StateCell>
