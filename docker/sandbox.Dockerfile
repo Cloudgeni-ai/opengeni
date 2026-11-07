@@ -14,6 +14,23 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
+# The pinned rg and jq builds the agent embeds and appends to every command's
+# PATH. Pins equal packages/runtime/src/sandbox/shell-tools-manifest.ts
+# (checked by scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+ADD --checksum=sha256:b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64 /cache/b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f
+ADD --checksum=sha256:8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-arm64 /cache/8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309
+
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS shell-tools-fetch
+WORKDIR /src
+COPY scripts/fetch-shell-tools.ts scripts/
+COPY packages/runtime/src/sandbox/shell-tools-manifest.ts packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt packages/runtime/src/sandbox/
+COPY --from=shell-tools-linux /cache/ /cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /out
+
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
 FROM --platform=$BUILDPLATFORM rust:1.82-bookworm AS computer-native-build
 
@@ -38,6 +55,7 @@ RUN set -eux; \
       linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
+COPY --from=shell-tools-fetch /out/ /shell-tools/
 # Cache mounts keep the crates.io registry and the per-target build directory
 # between builds so an edit under agent/ recompiles only the changed crates.
 # Cargo locks its own package cache, so the registry/git mounts are shared and
@@ -49,7 +67,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
+    OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
     xx-verify /out/opengeni-computer-native; \
