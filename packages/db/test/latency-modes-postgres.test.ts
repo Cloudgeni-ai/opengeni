@@ -88,7 +88,8 @@ describe("every latency mode round-trips through PostgreSQL", () => {
         workspaceId: scope.workspaceId,
         initialMessage: "initial",
         resources: [],
-        metadata: {},
+        // Core also records the chat's speed in its metadata.
+        metadata: { latencyMode },
         model: "scripted-model",
         reasoningEffort: "medium",
         latencyMode,
