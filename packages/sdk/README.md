@@ -1820,8 +1820,9 @@ Rare exceptions (an emergency security fix or an explicit product-owner decision
 The committed `test/integration/sdk-compatibility/versions.json` matrix tests
 pinned stable releases and known customer pins against the current API; it is
 not a limit on the compatibility promise. Requests include
-`x-opengeni-sdk-version` for server diagnostics; missing or unknown versions
-never change authorization or compatibility admission.
+`x-opengeni-sdk-version` (`OPENGENI_SDK_VERSION_HEADER`) for server
+diagnostics; missing or unknown versions never change authorization or
+compatibility admission.
 
 ## Proxy through your own API
 
@@ -1853,6 +1854,30 @@ export function GET(request: Request): Response {
 For custom layers, the pieces are exported individually:
 `sessionEventsToSseStream`, `sessionEventsToSseResponse`, `formatSseEvent`,
 `resumeSequenceFromRequest`, and `parseSseStream`.
+
+### Cross-origin proxies and CORS
+
+When your web app and the route that proxies Opengeni (the session proxy or
+your own) live on different origins, every browser request with an Opengeni
+header is preflighted. Allow every header the SDK's browser clients may send,
+or every preflight fails and the chat sits on "reconnecting".
+`OPENGENI_BROWSER_REQUEST_HEADERS` lists them, lower-cased, and grows when the
+SDK starts sending a new header, so build your allow-list from it rather than
+copying names:
+
+```ts
+import { OPENGENI_BROWSER_REQUEST_HEADERS } from "@opengeni/sdk";
+
+const allowHeaders = [...OPENGENI_BROWSER_REQUEST_HEADERS, "x-my-app-header"].join(", ");
+// Answer the OPTIONS preflight on your proxy route with:
+// Access-Control-Allow-Headers: <allowHeaders>
+```
+
+It covers `accept`, `authorization`, `content-type`, `range` and Opengeni's own
+`x-opengeni-*` request headers, including `x-opengeni-sdk-version`
+(`OPENGENI_SDK_VERSION_HEADER`), which every request carries. Add any header
+your app sets through the client's `headers` option. The `asUser` and
+`asService` attribution headers are server-only and not in the list.
 
 ## Types
 

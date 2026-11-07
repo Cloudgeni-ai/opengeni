@@ -5891,6 +5891,36 @@ export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
+/**
+ * The installed SDK version, sent on every request for server diagnostics. It never
+ * changes authorization or compatibility admission.
+ */
+export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
+
+/**
+ * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
+ * A host that serves the Opengeni API or its session proxy from a different origin
+ * than its web app must allow all of them in `Access-Control-Allow-Headers`;
+ * otherwise browser preflights fail and nothing loads. Headers your app adds itself
+ * (through the client's `headers` option) need allowing too. The `asUser` and
+ * `asService` attribution headers are server-only and deliberately absent.
+ */
+export const OPENGENI_BROWSER_REQUEST_HEADERS = [
+  "accept",
+  "authorization",
+  "content-type",
+  "range",
+  // Deployment-key auth mode (`ClientAuth`).
+  "x-opengeni-access-key",
+  // Browser account session-set mutations.
+  "x-opengeni-actor-epoch",
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  "x-opengeni-session-csrf",
+  // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
+  "x-opengeni-session-id",
+] as const;
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
