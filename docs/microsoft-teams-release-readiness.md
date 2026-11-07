@@ -587,15 +587,18 @@ conversation, organization connected or not, account linked or not).
   conversations `unlink` points to the 1:1 chat.
 - **Replies once per message.** Replies the bot sends itself (help, `link`,
   `unlink`, the link card, onboarding replies, reminders and notices) don't go
-  through the inbox, so each replica first claims the message in
-  `teams_bot_reply_claims` (a hash of the tenant, conversation and activity id,
-  no content). A message Teams redelivers, after a slow or failed response and
-  to any replica, isn't answered again for ten minutes. When Teams clearly
-  refused the reply (such as throttling), the claim is given back so the
-  redelivery answers. If the claim can't be made, the reply goes out anyway.
-  Claims older than a day are removed as later replies are sent. Notice cards
-  (such as "Started") carry a plain-text summary and card fallback text, so
-  Teams notifications show a preview.
+  through the inbox, so just before the first send for a message the replica
+  claims it in `teams_bot_reply_claims` (a hash of the tenant, conversation and
+  activity id, no content); a message that gets no reply writes nothing. A
+  message Teams redelivers, after a slow or failed response and to any
+  replica, isn't answered again for ten minutes. When nothing reached the
+  person and Teams clearly refused the send (such as throttling), the claim is
+  given back so the redelivery answers. If the claim can't be made, the reply
+  goes out anyway. Claims older than a day are removed as later replies are
+  sent. Notice cards (such as "Started") carry a plain-text summary and card
+  fallback text for clients that can't show cards. Microsoft doesn't document
+  Teams using either for an Adaptive Card's notification preview, so
+  notifications for these cards may still show a generic preview.
 - **Typing.** After a message is queued, the bot sends Teams typing activities
   about every three seconds until the reply, request for input or failure of
   the turn that answers it is queued for Teams, the message is refused, or five

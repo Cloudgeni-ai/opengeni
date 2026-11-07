@@ -1168,3 +1168,48 @@ test("a reply the bot sends itself goes out once when Teams redelivers the messa
   for (const row of claims) expect(row.scope_hash).toMatch(/^[0-9a-f]{64}$/);
   expect(JSON.stringify(claims)).not.toContain(stranger);
 });
+
+test("a reply claim is written only when a reply goes out, and a refused reply a helper absorbs is given back", async () => {
+  const f = await fixture();
+  const other = f.replica();
+  const claims = async () =>
+    (
+      await shared.admin<
+        Array<{ n: number }>
+      >`select count(*)::int as n from teams_bot_reply_claims`
+    )[0]!.n;
+  const before = await claims();
+  // A tenant that isn't admitted gets no reply, so nothing is claimed.
+  const outsider = crypto.randomUUID();
+  const elsewhere = f.message("help", crypto.randomUUID(), {
+    conversation: { id: "a:outsider", conversationType: "personal", tenantId: outsider },
+    channelData: { tenant: { id: outsider } },
+  });
+  await f.handle(elsewhere);
+  expect(f.calls).toHaveLength(0);
+  expect(await claims()).toBe(before);
+  // Teams throttles the reply to an image-only message; the reply helper
+  // absorbs the failure, but the claim is still given back, so the
+  // redelivery answers.
+  const stranger = crypto.randomUUID();
+  const image = f.message("", stranger, {
+    attachments: [{ contentType: "image/png", contentUrl: "https://example.test/a.png" }],
+  });
+  f.failures.push(Object.assign(new Error("throttled"), { response: { status: 429 } }));
+  expect(await f.handle(image)).toEqual({ status: 200 });
+  expect(f.calls).toHaveLength(0);
+  expect(await claims()).toBe(before);
+  await other(image);
+  expect(f.calls).toHaveLength(1);
+  expect(f.calls[0]!.activity.text).toBe(TEAMS_UNREADABLE_MESSAGE_TEXT);
+  // A linked person who can't start chats is told once.
+  await shared.admin`update workspace_memberships set permissions = '["workspace:read", "sessions:read"]'::jsonb where workspace_id=${f.i.workspace_id} and subject_id=${f.subject}`;
+  const plan = f.message("Plan the launch");
+  await f.handle(plan);
+  await other(plan);
+  expect(f.calls.map((call) => call.activity.text)).toEqual([
+    TEAMS_UNREADABLE_MESSAGE_TEXT,
+    TEAMS_CANNOT_START_TEXT,
+  ]);
+  expect(f.outcomes.slice(-2)).toEqual(["sessions_create_denied", "reply_duplicate"]);
+});

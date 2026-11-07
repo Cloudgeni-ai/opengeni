@@ -164,6 +164,11 @@ describe("Teams notices", () => {
     const long = teamsPlainPreview("word ".repeat(100), 40);
     expect(long.length).toBeLessThanOrEqual(40);
     expect(long.endsWith("…")).toBe(true);
+    expect(teamsPlainPreview("## Started\n\nDone.")).toBe("Started Done.");
+    // An emoji at the cut is kept whole or dropped, never split.
+    const emoji = teamsPlainPreview(`${"a".repeat(8)}😀😀😀`, 10);
+    expect(emoji).toBe(`${"a".repeat(8)}😀…`);
+    expect(emoji.isWellFormed()).toBe(true);
   });
   test("a notice is a card with its paragraphs and a labelled button, not a bare URL", () => {
     const card = teamsNoticeCard(
@@ -193,7 +198,7 @@ describe("Teams notices", () => {
     });
     expect(JSON.stringify(card.body)).not.toContain("https:");
   });
-  test("a notice card's message carries a plain summary for notifications", () => {
+  test("a notice card's message carries a plain summary for clients that can't show cards", () => {
     const link = { title: "Open in Opengeni", url: "https://app.example.test/s" };
     const activity = teamsNoticeActivity("Started. Send **help** for tips.", link, "thread-1");
     expect(activity).toMatchObject({
