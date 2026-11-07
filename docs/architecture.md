@@ -1857,7 +1857,9 @@ Discovery uses field-aware retrieval and optional generic decision-model selecti
 The shared typed predicate/choice/score interface is `@opengeni/decisions`, used by
 both discovery and the code-search judge. Deployment-owned Jev, OpenAI Decisions
 or OpenRouter Decisions credentials are explicit, separate from conversational
-models. See [`decision-models.md`](decision-models.md) for configuration, usage and
+models. The public stateless API reuses the same configured adapter, with an optional
+independent public model category that defaults to the shared model and never
+changes agent decisions. See [`decision-models.md`](decision-models.md) for configuration, usage and
 verified provider boundaries; no ordinary-chat inference fallback is implied.
 Native Responses routes retain hosted search and native function loading; generic
 routes return compact alternatives and append selected schemas after the result.

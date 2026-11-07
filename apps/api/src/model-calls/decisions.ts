@@ -1,5 +1,6 @@
 import {
   decisionModelRoute,
+  publicDecisionModelSettings,
   sideFeatureProcessingResidency,
   type Settings,
 } from "@opengeni/config";
@@ -71,12 +72,14 @@ export function createDecisionCallService(deps: {
     flushUsage,
     async decide(input: DecisionCallInput) {
       input.signal?.throwIfAborted();
-      const settings = await withAccessGrantSessionRlsContext(deps, input.grant, () =>
-        settingsWithInferenceResidency(deps.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          settings: deps.settings,
-        }),
+      const settings = publicDecisionModelSettings(
+        await withAccessGrantSessionRlsContext(deps, input.grant, () =>
+          settingsWithInferenceResidency(deps.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            settings: deps.settings,
+          }),
+        ),
       );
       const target = decisionModelRoute(settings);
       if (target) assertSideFeatureRoute(settings, target);
@@ -89,10 +92,11 @@ export function createDecisionCallService(deps: {
           message: "The deployment's decision model is not configured.",
         });
       const record = (usage: DecisionUsage) => {
+        const model = `${usage.provider}/${usage.model}`;
         const receipt = {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          model: configured.id,
+          model,
           chargesOpenGeniCredits: false,
           countsTowardTokenCap: true,
           byok: false,
@@ -108,7 +112,7 @@ export function createDecisionCallService(deps: {
           },
           initiatorContext: {
             modelCallId: input.requestId,
-            model: configured.id,
+            model,
             usage,
             ...(input.request.tenantLabel !== undefined
               ? { tenantLabel: input.request.tenantLabel }
@@ -135,7 +139,7 @@ export function createDecisionCallService(deps: {
         return {
           id: input.requestId,
           object: "decision",
-          model: configured.id,
+          model: `${result.usage.provider}/${result.usage.model}`,
           ...(input.request.tenantLabel !== undefined
             ? { tenantLabel: input.request.tenantLabel }
             : {}),

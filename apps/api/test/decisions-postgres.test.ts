@@ -65,6 +65,7 @@ async function fixture() {
     async fetch(request) {
       const started = performance.now();
       const body = (await request.json()) as {
+        model?: string;
         input?: string;
         messages?: Array<{ content: string }>;
       };
@@ -73,6 +74,7 @@ async function fixture() {
       if (delayMs) await Bun.sleep(delayMs);
       const response = new URL(request.url).pathname.endsWith("/decisions")
         ? Response.json({
+            model: `${body.model}-resolved`,
             answers: [{ name: "match", type: "predicate", probability: 0.9 }],
             usage: { input_tokens: 12, output_tokens: 3, cost: 0.004 },
           })
@@ -95,9 +97,13 @@ async function fixture() {
     usageAllowancesEnabled: true,
     voiceInputProviderOrder: "",
     decisionModelProvider: "openai",
-    decisionModelId: "local-decision",
-    decisionModelApiKey: "fixture-key",
-    decisionModelBaseUrl: `${upstream.url.origin}/v1`,
+    decisionModelId: "agent-only",
+    decisionModelApiKey: "agent-fixture-key",
+    decisionModelBaseUrl: "https://agent.example.test/v1",
+    publicDecisionModelProvider: "openai",
+    publicDecisionModelId: "local-decision",
+    publicDecisionModelApiKey: "fixture-key",
+    publicDecisionModelBaseUrl: `${upstream.url.origin}/v1`,
     modelProvidersJson: JSON.stringify([
       {
         kind: "anonymous",
@@ -166,6 +172,7 @@ test("real HTTP API key, exhausted customer, platform receipts and revocation", 
   const result = await f.call();
   expect(result.response.status).toBe(200);
   expect(result.body).toMatchObject({
+    model: "openai/local-decision-resolved",
     tenantLabel: f.customer.id,
     answers: { match: { type: "predicate", probability: 0.9 } },
   });
@@ -175,6 +182,9 @@ test("real HTTP API key, exhausted customer, platform receipts and revocation", 
   expect(rows.length).toBeGreaterThan(0);
   expect(rows.every((row) => row.workspace_id === f.platform.id)).toBe(true);
   expect(rows.every((row) => row.initiator_context.tenantLabel === f.customer.id)).toBe(true);
+  expect(
+    rows.every((row) => row.initiator_context.model === "openai/local-decision-resolved"),
+  ).toBe(true);
   expect(Number(rows.find((row) => row.event_type === "model.provider_cost")?.quantity)).toBe(4000);
   expect(Number(rows.find((row) => row.event_type === "model.cost")?.quantity)).toBe(0);
   const events = await listUsageEvents(client.db, {

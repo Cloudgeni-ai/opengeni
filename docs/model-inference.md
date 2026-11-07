@@ -1,7 +1,8 @@
 # Stateless typed decisions
 
-`POST /v1/workspaces/{workspaceId}/decisions` uses the deployment's existing
-decision model. It creates no session, turn, checkpoint or turn audit. There is
+`POST /v1/workspaces/{workspaceId}/decisions` uses the deployment's configured
+public decision model, or its shared decision model when no public override is set.
+It creates no session, turn, checkpoint or turn audit. There is
 no chat fallback and no caller-selected model or provider credential.
 
 ## SDK
@@ -50,15 +51,34 @@ selects a customer workspace nor changes the payer. It is returned in the answer
 and on the platform's usage events (`listUsageEvents`). Do not put secrets in it.
 
 Configure the API process using the existing [decision-model settings](decision-models.md),
-also used by worker code search and tool discovery. A missing configuration
-returns 503. Workspace/deployment EU-only requirements and the existing
+also used by worker code search and tool discovery. To select a different model
+for product calls without changing agent decisions, set the public category:
+
+```dotenv
+OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER=openrouter
+OPENGENI_PUBLIC_DECISION_MODEL_ID=typesafe/jev-1.13
+OPENGENI_PUBLIC_DECISION_MODEL_API_KEY=<server-side credential>
+```
+
+Optional `OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL` and
+`OPENGENI_PUBLIC_DECISION_MODEL_AUTH` have the same provider and authentication
+semantics as the shared category, including Azure `deployment_identity`.
+Leave **all** public settings unset to retain the shared model. Setting any public
+field selects that category as a whole: it never inherits an agent key, base URL
+or authentication mode. Partial/missing configuration returns 503. The default
+auth mode for an explicit public category is `api_key`. No per-request model
+selection is exposed, and `tenantLabel` does not route calls.
+
+Workspace/deployment EU-only requirements and the existing
 side-feature endpoint residency checks run before dispatch. Provider failures
 are sanitized; rate limiting returns 429 and other decision failures return 502.
 
 ## Usage and receipt durability
 
-The response includes the configured model, validated answers, a server-generated
-request ID, and provider usage. Unknown token counts/costs remain `null`, not zero.
+The response and usage receipts identify the answering provider/model reported by
+the adapter (the configured model when the provider omits it), alongside validated
+answers, a server-generated request ID, and provider usage.
+Unknown token counts/costs remain `null`, not zero.
 Reported and estimated cost sources stay distinct. Existing canonical settlement
 records token usage, a zero-credit `model.cost`, and (when known) provider cost
 as `model.provider_cost` or `model.estimated_provider_cost` in USD micros.
