@@ -8749,7 +8749,11 @@ export function latencyModeForMetadata(
   fallback: LatencyMode = "standard",
 ): LatencyMode {
   const value = metadata.latencyMode;
-  return value === "standard" || value === "priority" || value === "fast" ? value : fallback;
+  // Every LatencyMode; the scheduled-run admission trigger maps session
+  // metadata with the same list.
+  return (LatencyMode.options as readonly unknown[]).includes(value)
+    ? (value as LatencyMode)
+    : fallback;
 }
 
 export function stableJson(value: unknown): string {

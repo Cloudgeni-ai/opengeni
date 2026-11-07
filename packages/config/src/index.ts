@@ -8439,7 +8439,21 @@ function builtinContextLimitsForModel(
   return { contextWindowTokens: settings.contextWindowTokens };
 }
 
-function builtinLatencyModesForModel(modelId: string): Array<{
+/**
+ * Whether the built-in provider can serve Ultrafast. OpenAI serves the tier
+ * only on its own API (GPT-6 Astra not on regional endpoints), so Azure OpenAI
+ * and other base URLs never offer it.
+ */
+function builtinProviderServesUltrafast(
+  settings: Pick<Settings, "openaiProvider" | "openaiBaseUrl">,
+): boolean {
+  return settings.openaiProvider === "openai" && isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl);
+}
+
+function builtinLatencyModesForModel(
+  modelId: string,
+  options: { ultrafast: boolean } = { ultrafast: true },
+): Array<{
   id: z.infer<typeof ModelLatencyModeV1>;
   upstream: "supported" | "unsupported" | "unknown";
   runnable: boolean;
@@ -8451,7 +8465,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     modelId.startsWith("codex/gpt-5.6-") ||
     /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
-    const ultrafast = ultrafastLatencyModeForModel(modelId);
+    const ultrafast = options.ultrafast ? ultrafastLatencyModeForModel(modelId) : undefined;
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -9305,7 +9319,38 @@ function acceptedDefinitionVersionMatches(
     policy.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(model, provider) ||
     matchesAdditiveCapabilityDefinitionVersion(model, provider, policy) ||
-    matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+    matchesWebSearchEnablementDefinitionVersion(model, provider, policy) ||
+    matchesBuiltinUltrafastRetractionDefinitionVersion(model, provider, policy)
+  );
+}
+
+/**
+ * Built-in models on Azure OpenAI or another base URL declared Ultrafast until
+ * it was limited to the direct OpenAI API. A non-Ultrafast turn accepted under
+ * that one declaration (the current one plus the Ultrafast mode) keeps
+ * running; an Ultrafast turn stays refused, since that route cannot serve it.
+ */
+function matchesBuiltinUltrafastRetractionDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  if (!provider.builtin || policy.latencyMode === "ultrafast") return false;
+  if (model.capabilities.latencyModes.some((mode) => mode.id === "ultrafast")) return false;
+  const ultrafast = ultrafastLatencyModeForModel(model.id);
+  if (!ultrafast) return false;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return matchesCurrentOrPreCompactionExclusionDigest(
+    policy,
+    {
+      ...modelWithoutVersion,
+      // Ultrafast was the last declared mode, after Standard and Fast.
+      capabilities: {
+        ...model.capabilities,
+        latencyModes: [...model.capabilities.latencyModes, ultrafast],
+      },
+    },
+    provider,
   );
 }
 
@@ -9854,7 +9899,9 @@ export function configuredModels(
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
           : {}),
-        latencyModes: builtinLatencyModesForModel(id),
+        latencyModes: builtinLatencyModesForModel(id, {
+          ultrafast: builtinProviderServesUltrafast(settings),
+        }),
       };
       return finalizeConfiguredModel(settings, builtinProvider, {
         id,
