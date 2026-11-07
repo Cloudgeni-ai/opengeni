@@ -212,6 +212,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   },
   github_connect_link: { allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
+  github_repository_attach: { sessionRequired: true, allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },
   social_posts_recent: { allOf: ["connections:read"] },
   social_daily_analysis_context: { allOf: ["connections:read"] },

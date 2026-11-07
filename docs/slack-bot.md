@@ -296,6 +296,8 @@ This read does not consume or change the website draft. Draft text, goals, uploa
 
 The first message does not list connectors, repositories or the Sandbox Environment. New interactions leave `slack_interactions.session_defaults_line` null. An interaction bound before that change may still carry a frozen line; a repair or a control update of its acknowledgement keeps those bytes and their post-ledger identity rather than conflicting with a message Slack already shows.
 
+When a task turns out to need a repository it was not started with, the agent can ask for one with `github_repository_attach`. The request is an ordinary tool approval card in the task's thread (Approve once and Reject, under the same rules as every Slack approval card) and in the app; once approved, the next turn clones the repository. See [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository).
+
 ### Links to another deployment
 
 Staging and production are separate deployments, and a workspace or session id from one does not exist in the other. When an accepted Slack message, the thread context imported with a mention, or the reacted message and thread context of a reaction-started task contains an Opengeni workspace or session link whose host is a different deployment under the same parent domain as this one (for example `staging.app.opengeni.ai` versus `app.opengeni.ai`), the accepted message carries a short model-context note naming that deployment. The agent then tells the person the link is for the other deployment instead of reporting the session as not found or asking for access that no grant here can give. Links to this deployment and URLs on unrelated sites are left alone.

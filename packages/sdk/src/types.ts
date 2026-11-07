@@ -2883,6 +2883,7 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.resources.removed",
+  "session.resources.added",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4419,6 +4420,7 @@ export type FirstPartyMcpToolName =
   | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
+  | "github_repository_attach"
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"

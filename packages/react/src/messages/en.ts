@@ -5961,6 +5961,8 @@ export const englishMessages = {
   "timeline.toolStep.askForHelp.running": "Asking you for help",
   "timeline.toolStep.askYou.done": "Asked you",
   "timeline.toolStep.askYou.running": "Asking you",
+  "timeline.toolStep.attachRepository.done": "Attached a code repository",
+  "timeline.toolStep.attachRepository.running": "Attaching a code repository",
   "timeline.toolStep.changeEventSource.done": "Changed an event source",
   "timeline.toolStep.changeEventSource.running": "Changing an event source",
   "timeline.toolStep.changeModel.done": "Changed the model",

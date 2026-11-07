@@ -313,6 +313,35 @@ GitHub outage proceeds bare after the bound timeout.
 Connected Machines do not receive Opengeni GitHub App credentials and continue
 to use their machine's ambient Git authentication.
 
+## An agent asking for a repository
+
+An agent that needs a repository its chat does not have can ask for one with
+the first-party `github_repository_attach` tool (`repository` as `owner/name`
+from `github_repositories_list`, and an optional `ref`). The tool is offered on
+a chat's own signed attempts with `github:use`; open Slack agent chats do not
+get it.
+
+Every call waits for a person's approval through the ordinary tool approval
+card, in the app and in the Slack thread of a chat started from Slack. The card
+is titled `Attach owner/name to this chat` and names the repository, the branch
+(`Default branch` when none was given) and the access (`Workspace GitHub App`).
+When a person removed the repository from the chat earlier, the card also says
+`Removed from this chat earlier`, and approving attaches it again. Anyone who
+can control the chat can approve, as for other tool approvals. Where nobody can
+answer (a scheduled or unattended run, or a worker of one) the call is refused.
+
+The API attaches only a call a person (or an API caller acting for the
+workspace) approved for exactly that repository and branch and that the same
+attempt is running; an agent's decision, or a call that reached the tool any
+other way, attaches nothing. The repository must be one the workspace GitHub
+App offers now, the same catalog and permission as the repository picker, and
+neither archived nor empty. It is attached to the chat's own repositories as
+`optional` on the requested branch or its default branch, with a
+`session.resources.added` event, and the next turn clones it at
+`repos/github.com/<owner>/<name>`. A turn already running keeps the
+credentials it started with. Asking for a repository the chat already has
+changes nothing.
+
 ## Operational notes
 
 - Signed setup state (GitHub App setup, Codex sign-in and similar round trips)
