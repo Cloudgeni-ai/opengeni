@@ -1122,7 +1122,7 @@ test("a chat its owner's machine isn't allowed for offers Allow in place of Retr
     ...failure,
     failureCode: "machine_access_required",
     reason:
-      "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now. Its owner can allow it for this chat.",
+      "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
   };
   // Someone who can't allow it reads the reason and keeps Retry for once it is.
   const viewer = await render(<FailedSessionBanner failure={machineFailure} actions={actions} />);

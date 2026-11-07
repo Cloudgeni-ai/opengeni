@@ -77,7 +77,7 @@ describe("a turn whose personal machine isn't allowed", () => {
       const payload = agentRunFailurePayload(failure);
       expect(payload).toEqual({
         error:
-          "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now. Its owner can allow it for this chat.",
+          "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
         code: MACHINE_ACCESS_REQUIRED_CODE,
         retryable: false,
       });

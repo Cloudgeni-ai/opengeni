@@ -378,6 +378,9 @@ export async function resolveMachineEnrollmentForTurn(
         throw new PersonalMachineAccessRequiredError(sandbox.name, { cause: error });
       throw error;
     }
+    // No admitted route: the attempt holds no approval for this machine (or
+    // the machine was removed, where the web app offers no Allow because the
+    // chat no longer lists it as its machine).
     if (!route) throw new PersonalMachineAccessRequiredError(sandbox.name);
     return route;
   }

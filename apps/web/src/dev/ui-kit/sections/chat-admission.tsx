@@ -116,7 +116,7 @@ const BEFORE_SENDING: { part: string; label: string; access: SessionMachineAcces
 /* A turn the database refused because the chat's machine isn't allowed for it. */
 const MACHINE_ACCESS_FAILURE = {
   reason:
-    "Machine access needed: this chat isn’t allowed to use “Laptop” right now. Its owner can allow it for this chat.",
+    "Machine access needed: this chat isn’t allowed to use “Laptop” right now.",
   failureCode: "machine_access_required",
   failedAt: "2026-10-28T11:52:00Z",
   consecutiveRecoveryCount: null,

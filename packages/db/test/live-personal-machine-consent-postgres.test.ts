@@ -1220,6 +1220,11 @@ describe("the owner's own machine runs their turns wherever they have it on", ()
         executionGeneration: second.turn.executionGeneration,
       }),
     ).toMatchObject({ enrollment: { id: f.enrollmentId } });
+    // The transient capability that let the check read the receipt is gone.
+    const [leftover] = await shared.admin`select count(*)::int as count
+      from opengeni_private.personal_resource_delegation_capabilities
+      where capability_kind = 'resolve'`;
+    expect(leftover).toMatchObject({ count: 0 });
 
     // The approval was for that message only.
     await completeTurn(f.workspaceId, session.id, second);

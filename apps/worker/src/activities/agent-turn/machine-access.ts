@@ -6,8 +6,11 @@ export const MACHINE_ACCESS_REQUIRED_CODE = "machine_access_required";
 /**
  * The fixed reasons the database gives when a turn's approval for its owner's
  * personal Connected Machine is missing, used up, revoked or expired. Any
- * other refusal (a scope mismatch, a moved chat, a stale attempt) is a real
- * fault and keeps its own classification.
+ * other refusal keeps its own classification. The pre-turn check also raises
+ * "no longer live" when the turn lost the machine some other way (another
+ * person's turn, a superseded attempt, a chat that moved off the machine);
+ * none of those is retryable either, and approving the chat's current machine
+ * is the way forward there too.
  */
 const MACHINE_ACCESS_REFUSALS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   [
@@ -42,8 +45,8 @@ export class PersonalMachineAccessRequiredError extends Error {
     const name = machineName?.trim() || null;
     super(
       name
-        ? `Machine access needed: this chat isn’t allowed to use “${name}” right now. Its owner can allow it for this chat.`
-        : "Machine access needed: this chat isn’t allowed to use its machine right now. Its owner can allow it for this chat.",
+        ? `Machine access needed: this chat isn’t allowed to use “${name}” right now.`
+        : "Machine access needed: this chat isn’t allowed to use its machine right now.",
       options,
     );
     this.name = "PersonalMachineAccessRequiredError";

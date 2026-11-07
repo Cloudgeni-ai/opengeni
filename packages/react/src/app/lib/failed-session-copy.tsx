@@ -110,7 +110,7 @@ const COMPACTION_FAILURE =
 /** The worker's code for a turn whose personal machine isn't allowed in this chat. */
 export const MACHINE_ACCESS_REQUIRED_CODE = "machine_access_required";
 const MACHINE_ACCESS_REQUIRED =
-  "Machine access needed: this chat isn’t allowed to use its machine right now. Its owner can allow it for this chat.";
+  "Machine access needed: this chat isn’t allowed to use its machine right now.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
