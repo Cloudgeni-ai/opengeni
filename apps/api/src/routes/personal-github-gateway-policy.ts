@@ -347,10 +347,9 @@ export async function inspectPersonalGitHubPush(input: {
   }
   const forced: ReceivePackCommand[] = [];
   if (updates.length > 0) {
+    // Past the inspection limit the commits before the cut still count.
     const pack =
-      prefix.complete && request.packOffset < raw.length
-        ? readPackCommits(raw.subarray(request.packOffset))
-        : null;
+      request.packOffset < raw.length ? readPackCommits(raw.subarray(request.packOffset)) : null;
     for (const update of updates) {
       const fastForward = await isFastForward(update, pack?.commits ?? null, input.isAncestor);
       if (!fastForward) forced.push(update);
