@@ -279,6 +279,10 @@ import {
   githubRepositoryResourceRef,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
+import {
+  GITHUB_REPOSITORY_ATTACH_TOOL_NAME,
+  attachApprovedSessionRepository,
+} from "../session-repository-attach";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
   canonicalPersonalGitHubConnection,
@@ -1633,6 +1637,55 @@ export function buildOpenGeniMcpServer(
               repositoryWithScheduledTaskResource(repository),
             ),
           });
+        } catch (error) {
+          if (error instanceof GitHubAppConfigurationError) {
+            throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`, {
+              cause: error,
+            });
+          }
+          throw error;
+        }
+      },
+    );
+  }
+
+  // The agent's own chat only, from a signed attempt; a person approves each
+  // call in the chat, and the API attaches only a call a person approved.
+  if (can("github:use") && sessionId !== null && attemptClaims !== null) {
+    const attempt = attemptClaims;
+    server.registerTool(
+      GITHUB_REPOSITORY_ATTACH_TOOL_NAME,
+      {
+        description:
+          "Ask to attach a repository the workspace GitHub App offers to this chat. A person approves it in the chat; once approved it is cloned at repos/github.com/<owner>/<name> when the next turn starts, with this chat's GitHub App access. Find it with github_repositories_list.",
+        inputSchema: {
+          repository: z4
+            .string()
+            .min(1)
+            .max(512)
+            .describe("owner/name, as listed by github_repositories_list"),
+          ref: z4
+            .string()
+            .min(1)
+            .max(255)
+            .optional()
+            .describe("Branch to check out; defaults to the repository's default branch."),
+        },
+      },
+      async ({ repository, ref }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+        try {
+          return json(
+            await attachApprovedSessionRepository(deps, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              turnId: attempt.turnId,
+              attemptId: attempt.attemptId,
+              repository,
+              ref,
+            }),
+          );
         } catch (error) {
           if (error instanceof GitHubAppConfigurationError) {
             throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`, {

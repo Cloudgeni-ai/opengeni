@@ -2856,7 +2856,11 @@ export function nativeConnectionCapabilityRecommendations(
       actions: ["connect", "inspect"],
       metadata: {
         endpointPath: "/v1/workspaces/{workspaceId}/github/app",
-        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        firstPartyMcpTools: [
+          "github_connect_link",
+          "github_repositories_list",
+          "github_repository_attach",
+        ],
         recommendationOnly: true,
       },
     }),

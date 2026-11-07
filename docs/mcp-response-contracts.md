@@ -207,6 +207,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
+| First-party: `github_repository_attach` | Mutation | Bounded attach result (status, repository, ref, mount path, message); attaches only a call a person approved |
 | First-party: `x_accounts_list`, `reddit_accounts_list`, `social_connections_list`, `social_posts_recent` | List | Existing bounded provider/account or aggregate list result |
 | First-party: `x_search_live`, `x_mentions_live`, `x_thread_fetch`, `reddit_search_live`, `reddit_mentions_live`, `reddit_thread_fetch` | Read/list | Existing bounded provider result; the exact connection must match the tool namespace |
 | First-party: `x_posts_sync`, `reddit_posts_sync` | Mutation | Existing bounded sync result; writes the durable social-post store and requires an exact provider-matching connection |
