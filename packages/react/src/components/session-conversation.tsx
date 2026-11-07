@@ -1,4 +1,5 @@
 import {
+  OpenGeniApiError,
   resolveWorkspaceVoiceInputEnabled,
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
@@ -786,7 +787,12 @@ function ConversationView({
                     await control.reject(approval.id, undefined, { throwOnError: true });
                   }}
                   responding={control.responding}
-                  error={control.error}
+                  // A 409 means it was already decided: nothing to show.
+                  error={
+                    control.error instanceof OpenGeniApiError && control.error.status === 409
+                      ? null
+                      : control.error
+                  }
                 />
               ) : null}
               <ProviderRecoveryNotice

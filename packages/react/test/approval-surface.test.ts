@@ -795,6 +795,52 @@ describe("ApprovalSurface: approve or decline all", () => {
     expect(sent).toEqual(["a", "b"]);
   });
 
+  test("the run's progress stays to its last action and never takes focus from where the person went", async () => {
+    const gates = new Map<string, ReturnType<typeof deferred<void>>>();
+    const props = {
+      loadReview: async (value: PendingApproval) => reviewOf(value.id),
+      onApprove: (value: PendingApproval) => {
+        const gate = deferred<void>();
+        gates.set(value.id, gate);
+        return gate.promise;
+      },
+      onReject: noDecision,
+    };
+    const frame = () =>
+      act(async () => await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    const progress = () => mounted!.container.querySelector("[data-og-approval-bulk-progress]");
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, { ...props, approvals: [item("a"), item("b")] }),
+    );
+    await settle();
+    const approveAll = buttonNamed("Approve all 2")!;
+    approveAll.focus();
+    await act(async () => approveAll.click());
+    await settle();
+    await frame();
+    expect(document.activeElement).toBe(progress());
+    // The host removes each action as its decision lands.
+    await act(async () => gates.get("a")!.resolve());
+    await mounted.rerender(createElement(ApprovalSurface, { ...props, approvals: [item("b")] }));
+    await settle();
+    expect(progress()?.textContent).toContain("Approving 2 of 2…");
+    expect(document.activeElement).toBe(progress());
+    expect(mounted.container.textContent).not.toContain("1 actions");
+    // The person moves on while the last decision is sent.
+    const elsewhere = document.createElement("textarea");
+    document.body.append(elsewhere);
+    try {
+      elsewhere.focus();
+      await act(async () => gates.get("b")!.resolve());
+      await settle();
+      await frame();
+      expect(progress()).toBeNull();
+      expect(document.activeElement).toBe(elsewhere);
+    } finally {
+      elsewhere.remove();
+    }
+  });
+
   test("an unreadable review or lost arguments can be declined in bulk, never approved", async () => {
     const approved: string[] = [];
     const declined: string[] = [];

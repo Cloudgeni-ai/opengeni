@@ -425,14 +425,17 @@ export function ApprovalSurface({
     setBulkFailures(null);
     // Keep keyboard focus in the stack once the progress replaces the buttons.
     const refocus = surface.current?.contains(document.activeElement) ?? false;
+    let focused = false;
     const failures: BulkFailure[] = [];
     for (const [index, { approval, title }] of snapshot.entries()) {
       if (!mountedRef.current) break;
       const current = approvalsRef.current.find((candidate) => candidate.id === approval.id);
       if (!current || !dequal(current, approval)) continue;
       setBulk({ decision, index, length: snapshot.length });
-      if (refocus && index === 0)
+      if (refocus && !focused) {
+        focused = true;
         requestAnimationFrame(() => bulkProgress.current?.focus({ preventScroll: true }));
+      }
       try {
         // Each action is its own decision through the host's ordinary path.
         await (decision === "approve" ? onApprove(current) : onReject(current));
@@ -453,11 +456,15 @@ export function ApprovalSurface({
       setBulkFailures({ decision, items: failures });
       setSelectedId(failures[0]!.id);
     }
-    requestAnimationFrame(() => {
-      const root = surface.current;
-      if (root && !root.contains(document.activeElement))
-        root.querySelector<HTMLElement>("h3")?.focus({ preventScroll: true });
-    });
+    // Only take focus back if it was in the stack and has been lost since;
+    // never from wherever the person moved during the run.
+    if (refocus)
+      requestAnimationFrame(() => {
+        const root = surface.current;
+        const active = document.activeElement;
+        if (root && (!active || active === document.body))
+          root.querySelector<HTMLElement>("h3")?.focus({ preventScroll: true });
+      });
   };
   const waitingIds = new Set(approvals.map((approval) => approval.id));
   const shownFailures = bulkFailures?.items.filter((item) => waitingIds.has(item.id)) ?? [];
@@ -478,17 +485,22 @@ export function ApprovalSurface({
       className={cn("og-root box-border w-full min-w-0 space-y-2 py-2", className)}
       data-og-approval-surface=""
     >
-      {approvals.length > 1 && (
+      {/* The run's progress stays while its last action is decided. */}
+      {(approvals.length > 1 || bulk) && (
         <nav
           aria-label={t("approvalSurface.actionsToReview")}
           className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-og-xs text-og-fg-muted"
         >
-          <span className="inline-flex items-center gap-1.5 font-medium text-og-fg">
-            <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
-            {t("approvalSurface.lengthActionsAreWaitingFor", {
-              length: approvals.length,
-            })}
-          </span>
+          {approvals.length > 1 ? (
+            <span className="inline-flex items-center gap-1.5 font-medium text-og-fg">
+              <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
+              {t("approvalSurface.lengthActionsAreWaitingFor", {
+                length: approvals.length,
+              })}
+            </span>
+          ) : (
+            <span />
+          )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {bulk ? (
               <span
@@ -532,29 +544,31 @@ export function ApprovalSurface({
                 )}
               </div>
             ) : null}
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                aria-label={t("approvalSurface.previousAction")}
-                disabled={selectedIndex === 0}
-                onClick={() => setSelectedId(approvals[selectedIndex - 1]!.id)}
-                className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-              >
-                <ChevronLeftIcon className="size-4" aria-hidden="true" />
-              </button>
-              <span className="tabular-nums" aria-live="polite">
-                {selectedIndex + 1} {t("approvalSurface.ofLength", { length: approvals.length })}
-              </span>
-              <button
-                type="button"
-                aria-label={t("approvalSurface.nextAction")}
-                disabled={selectedIndex === approvals.length - 1}
-                onClick={() => setSelectedId(approvals[selectedIndex + 1]!.id)}
-                className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-              >
-                <ChevronRightIcon className="size-4" aria-hidden="true" />
-              </button>
-            </div>
+            {approvals.length > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  aria-label={t("approvalSurface.previousAction")}
+                  disabled={selectedIndex === 0}
+                  onClick={() => setSelectedId(approvals[selectedIndex - 1]!.id)}
+                  className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                >
+                  <ChevronLeftIcon className="size-4" aria-hidden="true" />
+                </button>
+                <span className="tabular-nums" aria-live="polite">
+                  {selectedIndex + 1} {t("approvalSurface.ofLength", { length: approvals.length })}
+                </span>
+                <button
+                  type="button"
+                  aria-label={t("approvalSurface.nextAction")}
+                  disabled={selectedIndex === approvals.length - 1}
+                  onClick={() => setSelectedId(approvals[selectedIndex + 1]!.id)}
+                  className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                >
+                  <ChevronRightIcon className="size-4" aria-hidden="true" />
+                </button>
+              </div>
+            )}
           </div>
         </nav>
       )}
