@@ -23,11 +23,13 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 // Every field a composer can save in a draft must survive "save, then Send".
-// Send is fenced on the saved draft, and each draft field the fence forgot (or
-// read differently from the request) made every Send with that field set fail
-// with a draft conflict, while the person saw only "changed in another tab".
-// The cases below are keyed by the contract schemas, so a field added to a
-// draft without a case here fails this file before it can break Send.
+// Send carries its own content and is never refused over the draft. After it
+// is accepted, the draft is cleared when it is still at the revision the Send
+// was composed from, or when it holds exactly what was sent. Each Send below
+// names the revision before its own save, so only the content comparison can
+// clear the draft: a field compared differently on the two sides would leave a
+// sent message behind as the draft. The cases are keyed by the contract
+// schemas, so a field added to a draft without a case here fails this file.
 
 const SECRET = "draft-save-then-send-every-field-secret";
 let shared: SharedTestDatabase | null = null;
@@ -320,6 +322,8 @@ describe("every draft field survives save, then Send", () => {
       const saved = await f.request("PUT", "/new-session-draft", saveBody);
       expect(saved.status, await saved.clone().text()).toBe(200);
       const revision = ((await saved.json()) as { revision: number }).revision;
+      // Composed before the save landed: only the content says it was sent.
+      const basis = saveBody.expectedRevision;
 
       const created = await f.request("POST", "/sessions", {
         initialMessage: base.text,
@@ -330,7 +334,7 @@ describe("every draft field survives save, then Send", () => {
         ...create,
         clientEventId: crypto.randomUUID(),
         idempotencyKey: crypto.randomUUID(),
-        expectedNewSessionDraftRevision: revision,
+        expectedNewSessionDraftRevision: basis,
       });
       expect(created.status, await created.clone().text()).toBe(202);
 
@@ -396,10 +400,17 @@ describe("every draft field survives save, then Send", () => {
       const loaded = await f.request("GET", draftPath);
       expect(loaded.status, await loaded.clone().text()).toBe(200);
       const base = { text: "Follow up", annotations: [], resources: [] };
+      const first = await f.request("PUT", draftPath, {
+        ...base,
+        expectedRevision: ((await loaded.json()) as { revision: number }).revision,
+      });
+      expect(first.status, await first.clone().text()).toBe(200);
+      // Composed before the field was saved: only the content says it was sent.
+      const basis = ((await first.json()) as { revision: number }).revision;
       const saved = await f.request("PUT", draftPath, {
         ...base,
         ...draft,
-        expectedRevision: ((await loaded.json()) as { revision: number }).revision,
+        expectedRevision: basis,
       });
       expect(saved.status, await saved.clone().text()).toBe(200);
       const revision = ((await saved.json()) as { revision: number }).revision;
@@ -407,7 +418,7 @@ describe("every draft field survives save, then Send", () => {
       const submitted = await f.request("POST", `${draftPath}/submit`, {
         ...base,
         ...create,
-        expectedDraftRevision: revision,
+        expectedDraftRevision: basis,
         clientEventId: crypto.randomUUID(),
         delivery: "send",
       });

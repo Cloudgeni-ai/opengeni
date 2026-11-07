@@ -3,6 +3,7 @@ import { waitFor } from "@opengeni/testing/process";
 import type { SessionListChangeSource, SessionListNotification } from "@opengeni/db";
 import {
   subscribeSessionListHints,
+  type DraftsChangedHint,
   type SessionListHint,
   type SessionListHintIds,
 } from "../src/http/session-list-hints";
@@ -21,7 +22,7 @@ function fixture(
     },
     async close() {},
   };
-  const frames: SessionListHint[] = [];
+  const frames: (SessionListHint | DraftsChangedHint)[] = [];
   const reads: string[][] = [];
   const errors: unknown[] = [];
   const stop = subscribeSessionListHints({
@@ -280,4 +281,27 @@ test("Site conversations travel separately so ordinary lists can ignore them", a
   } finally {
     f.stop();
   }
+});
+
+test("a draft change reaches only its author's streams, names no content, and is not a list change", async () => {
+  const hints = fixture(async (ids) => ids.filter((id) => id !== "lost-access"));
+  await waitFor(() => hints.frames.length === 1);
+  hints.frames.length = 0;
+  // A colleague's draft in the same workspace: never this viewer's business.
+  hints.change("shared-chat", { subjectId: "colleague", all: false, draft: true });
+  hints.change("shared-chat", { subjectId: "viewer", all: false, draft: true });
+  hints.change("lost-access", { subjectId: "viewer", all: false, draft: true });
+  hints.change(null, { subjectId: "viewer", all: false, draft: true });
+  await waitFor(() => hints.frames.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(hints.frames).toEqual([
+    {
+      type: "workspace.drafts.changed",
+      workspaceId: "workspace",
+      sessionIds: ["shared-chat"],
+      newSession: true,
+    },
+  ]);
+  expect(hints.errors).toEqual([]);
+  hints.stop();
 });

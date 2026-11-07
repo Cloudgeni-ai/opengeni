@@ -13,6 +13,19 @@ export type SessionListHint = {
   siteSessionIds?: string[];
 };
 
+/**
+ * The viewer's own drafts changed on another device: their composer drafts in
+ * `sessionIds`, and their new-chat draft when `newSession` is true. Drafts are
+ * private to their author, so only that author's streams receive this, and it
+ * carries no content: the device reads its own draft again.
+ */
+export type DraftsChangedHint = {
+  type: "workspace.drafts.changed";
+  workspaceId: string;
+  sessionIds: string[];
+  newSession: boolean;
+};
+
 /** Authorized hint IDs; a plain array has no Site conversations. */
 export type SessionListHintIds = string[] | { sessionIds: string[]; siteSessionIds: string[] };
 
@@ -22,7 +35,7 @@ export function subscribeSessionListHints(options: {
   workspaceId: string;
   subjectId: string;
   authorizeIds: (ids: string[]) => Promise<SessionListHintIds>;
-  write: (hint: SessionListHint) => Promise<unknown>;
+  write: (hint: SessionListHint | DraftsChangedHint) => Promise<unknown>;
   fail: (error: unknown) => void;
   intervalMs: number;
 }): () => void {
@@ -33,6 +46,8 @@ export function subscribeSessionListHints(options: {
   let flushing = false;
   let flushPending = false;
   const ids = new Set<string>();
+  const draftIds = new Set<string>();
+  let newSessionDraft = false;
   let tail = Promise.resolve();
   const emit = (available: boolean, sessionIds: string[] | null, siteSessionIds: string[] = []) =>
     options.write({
@@ -60,6 +75,8 @@ export function subscribeSessionListHints(options: {
       all = false;
       flushPending = false;
       ids.clear();
+      draftIds.clear();
+      newSessionDraft = false;
       // LISTEN has committed: reconciliation now covers any missed history.
       // A disconnected source immediately restores the legacy polling path.
       enqueue(() => emit(available, null));
@@ -72,13 +89,45 @@ export function subscribeSessionListHints(options: {
       (change.subjectId !== null && change.subjectId !== options.subjectId)
     )
       return;
+    if (change.draft) {
+      // Only the author's own draft, never a colleague's.
+      if (change.subjectId !== options.subjectId) return;
+      if (change.sessionId === null) newSessionDraft = true;
+      else if (draftIds.size < 512) draftIds.add(change.sessionId);
+      return;
+    }
     // The existing reconcile-all hint replaces an oversized transient ID set;
     // it never exposes IDs whose authorization has not been checked.
     all ||= change.all || (ids.size >= 512 && !!change.sessionId && !ids.has(change.sessionId));
     if (all) ids.clear();
     else if (change.sessionId) ids.add(change.sessionId);
   });
+  const flushDrafts = () => {
+    if (!draftIds.size && !newSessionDraft) return;
+    const observedGeneration = generation;
+    const pendingIds = [...draftIds];
+    const newSession = newSessionDraft;
+    draftIds.clear();
+    newSessionDraft = false;
+    enqueue(async () => {
+      if (observedGeneration !== generation || !connected) return;
+      // A chat the author can no longer open is not named, even to them.
+      const authorized = pendingIds.length ? await options.authorizeIds(pendingIds) : [];
+      if (stopped || observedGeneration !== generation || !connected) return;
+      const sessionIds = Array.isArray(authorized)
+        ? authorized
+        : [...authorized.sessionIds, ...authorized.siteSessionIds];
+      if (!sessionIds.length && !newSession) return;
+      await options.write({
+        type: "workspace.drafts.changed",
+        workspaceId: options.workspaceId,
+        sessionIds,
+        newSession,
+      });
+    });
+  };
   const flush = () => {
+    flushDrafts();
     if (stopped || !connected || (!all && !ids.size)) return;
     if (flushing) {
       flushPending = true;
@@ -116,5 +165,6 @@ export function subscribeSessionListHints(options: {
     clearInterval(timer);
     unsubscribe();
     ids.clear();
+    draftIds.clear();
   };
 }

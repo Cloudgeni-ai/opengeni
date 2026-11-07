@@ -1,6 +1,7 @@
 import type {
   StreamConnectionState,
   WorkspaceControlEvent,
+  WorkspaceDraftsChangedEvent,
   WorkspaceInteractionRevisionEvent,
   WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
@@ -30,6 +31,11 @@ export type OpenGeniContextValue = {
   workspaceInteractionConnectionState: StreamConnectionState | "idle" | "error";
   /** Absent on older/custom hosts: retain the existing polling fallback. */
   workspaceSessionListEvent?: WorkspaceSessionListEvent | null;
+  /**
+   * The latest "your drafts changed on another device" hint. Absent on older
+   * or custom hosts: composers then keep their draft until they reload it.
+   */
+  workspaceDraftsEvent?: WorkspaceDraftsChangedEvent | null;
   registerSessionReconciler: (
     sessionId: string,
     key: string,
@@ -158,6 +164,7 @@ function useEmbeddedClientRefinement<TClient extends object>(
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
     workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
     workspaceSessionListEvent: context?.workspaceSessionListEvent ?? null,
+    workspaceDraftsEvent: context?.workspaceDraftsEvent ?? null,
     workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
@@ -187,6 +194,7 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
     workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
     workspaceSessionListEvent: context?.workspaceSessionListEvent ?? null,
+    workspaceDraftsEvent: context?.workspaceDraftsEvent ?? null,
     workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,

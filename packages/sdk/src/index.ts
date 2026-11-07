@@ -646,6 +646,7 @@ export { streamWorkspaceInteractionRevisions } from "./interaction-revision-stre
 export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-revision-stream";
 export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
 export type {
+  WorkspaceDraftsChangedEvent,
   WorkspaceLiveEvent,
   WorkspaceSessionListEvent,
   WorkspaceLiveStreamOptions,

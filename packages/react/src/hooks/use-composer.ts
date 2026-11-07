@@ -836,7 +836,8 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerControllerState {
   const t = useOpenGeniText();
-  const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
+  const { client, workspaceId, registerSessionReconciler, workspaceDraftsEvent } =
+    useEmbeddedSession(options);
   const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
   if (!durableDrafts && !options.initialPolicy) {
@@ -1417,6 +1418,21 @@ export function useComposer(
     }
     void loadDraft(false);
   }, [durableDrafts, loadDraft, sessionId]);
+  // This person's draft here changed on another of their devices. Read it
+  // again: a composer that isn't being typed in shows it, one being typed in
+  // keeps its text and saves on top of it (see `loadDraft`).
+  useEffect(() => {
+    if (
+      !sessionId ||
+      !durableDrafts ||
+      !workspaceDraftsEvent ||
+      workspaceDraftsEvent.workspaceId !== workspaceId ||
+      !workspaceDraftsEvent.sessionIds.includes(sessionId)
+    ) {
+      return;
+    }
+    void loadDraft(false);
+  }, [durableDrafts, loadDraft, sessionId, workspaceDraftsEvent, workspaceId]);
   // After long background / sleep the in-memory revision is often stale while
   // a prior autosave already advanced the server. Soft-reload on wake so the
   // next keystroke does not OCC against a dead revision.
@@ -1570,6 +1586,32 @@ export function useComposer(
   );
 
   /**
+   * Take the draft an accepted Send left. The server clears the draft only
+   * while it still holds what was sent; a newer draft saved on another device
+   * stays, and this composer shows it once the sent message has left the box,
+   * unless something new is being typed here.
+   */
+  const followAcceptedDraft = useCallback(
+    (next: ComposerDraft): void => {
+      adoptDraftBase(next);
+      if (!composerDraftHasContent(next)) return;
+      setTimeout(() => {
+        if (
+          targetKeyRef.current !== targetKey ||
+          draftRef.current?.revision !== next.revision ||
+          valueRef.current !== "" ||
+          restoredResourcesRef.current.length > 0 ||
+          annotationsRef.current.length > 0
+        ) {
+          return;
+        }
+        applyDraft(next);
+      }, 0);
+    },
+    [adoptDraftBase, applyDraft, targetKey],
+  );
+
+  /**
    * Take the session's one draft slot. The server accepts a durable send only
    * with exactly the content saved at the revision it names, so a send holds
    * the slot from its save through its submit: no autosave and no other send
@@ -1594,13 +1636,11 @@ export function useComposer(
   /**
    * Save the draft now. The caller holds the draft slot.
    *
-   * A save refused as made against an old revision re-reads the draft before
-   * it counts as a conflict. The same content, or content this page wrote itself (a save
-   * whose reply was lost, or one that landed after the composer remounted),
-   * is not another tab: the save just moves to the current revision. An
-   * explicit choice (Send, Keep mine) saves the person's content over
-   * whatever is there. Only an autosave that meets someone else's edit
-   * stops and offers Keep mine / Use other draft.
+   * A save refused as made against an old revision re-reads the draft and
+   * saves again on top of it. A composer saves only what is being typed in
+   * it, so the latest typing wins, wherever it happened; a composer that is
+   * not being typed in follows the latest draft instead (see `loadDraft`).
+   * Only a draft that keeps changing through every re-read is reported.
    */
   const saveDraftInSlot = useCallback(
     async (
@@ -1609,7 +1649,6 @@ export function useComposer(
       // Receives this call's own failure (never a later autosave's), so a send
       // blocked by it keeps its real cause.
       onFailure?: (problem: Error) => void,
-      intent: "autosave" | "explicit" = "autosave",
     ): Promise<boolean> => {
       const owned = () =>
         targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
@@ -1641,7 +1680,6 @@ export function useComposer(
         for (let reread = 0; ; reread += 1) {
           let problem: Error;
           try {
-            rememberDraftWrite(writesKey, draftContentKey(request));
             const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
             settledWritesRef.current.set(writesKey, {
               revision: saved.revision,
@@ -1669,9 +1707,6 @@ export function useComposer(
             adoptDraftBase(remote);
             return true;
           }
-          if (intent !== "explicit" && !recentDraftWrites.get(writesKey)?.includes(remoteContent)) {
-            return fail(problem);
-          }
           draftRef.current = remote;
           setDraft(remote);
           request = { ...request, expectedRevision: remote.revision };
@@ -1687,7 +1722,6 @@ export function useComposer(
     async (
       payload: SaveComposerDraftRequest,
       onFailure?: (problem: Error) => void,
-      intent: "autosave" | "explicit" = "autosave",
     ): Promise<boolean> => {
       const owner = { targetKey, generation: targetGeneration.current };
       if (!sessionId || !durableDrafts || targetKeyRef.current !== owner.targetKey) {
@@ -1695,7 +1729,7 @@ export function useComposer(
       }
       const release = await acquireDraftSlot();
       try {
-        return await saveDraftInSlot(payload, owner, onFailure, intent);
+        return await saveDraftInSlot(payload, owner, onFailure);
       } finally {
         release();
       }
@@ -1953,7 +1987,6 @@ export function useComposer(
               (problem) => {
                 persistFailure = problem;
               },
-              "explicit",
             ))
           ) {
             // An update that blocks the draft save holds the send like any
@@ -1962,7 +1995,10 @@ export function useComposer(
               notSubmitted = true;
               throw persistFailure;
             }
-            throw new ComposerStateError(t("hooks.useComposer.theMessageDraftCouldNot"));
+            // Otherwise the save only keeps the draft in step. Send carries
+            // what is in the box and goes ahead from the draft as last seen.
+            setError(null);
+            setDraftConflict(null);
           }
           expectedDraftRevision = draftRef.current?.revision;
         }
@@ -2018,7 +2054,7 @@ export function useComposer(
               throw cause;
             });
           acceptedResult = result;
-          adoptDraftBase(result.draft);
+          followAcceptedDraft(result.draft);
           releaseDraftSlot?.();
         } else {
           acceptedEvent = await client
@@ -2115,7 +2151,7 @@ export function useComposer(
     })();
   }, [
     acquireDraftSlot,
-    adoptDraftBase,
+    followAcceptedDraft,
     client,
     durableDrafts,
     formatError,
@@ -2386,7 +2422,7 @@ export function useComposer(
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),
           });
-          adoptDraftBase(result.draft);
+          followAcceptedDraft(result.draft);
           return result;
         }
         if (operation.delivery === "steer") {
@@ -2538,15 +2574,21 @@ export function useComposer(
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload) {
           releaseDraftSlot = await acquireDraftSlot();
+          let saveFailure = null as Error | null;
           if (
             !(await saveDraftInSlot(
               payload,
               { targetKey: ownedTargetKey, generation: ownedGeneration },
-              undefined,
-              "explicit",
+              (problem) => {
+                saveFailure = problem;
+              },
             ))
           ) {
-            return false;
+            // Only an outage holds the message; otherwise it is sent from the
+            // draft as last seen, carrying what is in the box.
+            if (!saveFailure || isTransientServiceFailure(saveFailure)) return false;
+            setError(null);
+            setDraftConflict(null);
           }
         }
         if (
@@ -2665,7 +2707,7 @@ export function useComposer(
       onSent,
       restoredResources,
       annotations,
-      adoptDraftBase,
+      followAcceptedDraft,
       saveDraftInSlot,
       sending,
       sessionId,
@@ -3310,11 +3352,7 @@ export function useComposer(
       setError(null);
       const payload = currentDraftPayload();
       if (payload) {
-        await persistPayload(
-          { ...payload, expectedRevision: remote.revision },
-          undefined,
-          "explicit",
-        );
+        await persistPayload({ ...payload, expectedRevision: remote.revision }, undefined);
       }
     },
     [
@@ -3661,15 +3699,18 @@ function draftSignature(payload: SaveComposerDraftRequest): string {
   return JSON.stringify(content);
 }
 
+/** Whether a draft holds anything to show in the composer. */
+function composerDraftHasContent(draft: ComposerDraft): boolean {
+  return (
+    draft.text.length > 0 ||
+    (draft.annotations ?? []).length > 0 ||
+    draft.resources.length > 0 ||
+    draft.sourceTurnId !== null
+  );
+}
+
 /** Re-reads a save makes after "draft changed" before giving up on it. */
 const DRAFT_CONFLICT_REREADS = 3;
-
-/**
- * The draft content this page recently wrote, per chat. It outlives a
- * composer remount, so a save that lands after the composer re-read the
- * draft is still recognised as this page's own write.
- */
-const recentDraftWrites = new Map<string, string[]>();
 
 /** The revision and content of a composer's latest accepted save. */
 type SettledDraftWrite = { revision: number; content: string };
@@ -3719,7 +3760,6 @@ function saveLeftDraft(
         ...left.payload,
         expectedRevision: Math.max(settled?.revision ?? base, base),
       };
-      rememberDraftWrite(chatKey, content);
       const saved = await left.client.saveComposerDraft(left.workspaceId, left.sessionId, request);
       settledWrites.set(chatKey, { revision: saved.revision, content });
     })
@@ -3728,12 +3768,6 @@ function saveLeftDraft(
       if (leftDraftSaves.get(chatKey) === save) leftDraftSaves.delete(chatKey);
     });
   leftDraftSaves.set(chatKey, save);
-}
-
-function rememberDraftWrite(chatKey: string, content: string): void {
-  const writes = (recentDraftWrites.get(chatKey) ?? []).filter((entry) => entry !== content);
-  writes.push(content);
-  recentDraftWrites.set(chatKey, writes.slice(-8));
 }
 
 /** Draft content as the server stores it, for comparing a save with a read. */

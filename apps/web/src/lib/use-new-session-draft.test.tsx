@@ -261,13 +261,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function conflict(): OpenGeniApiError {
+function conflict(currentRevision = 5): OpenGeniApiError {
   return new OpenGeniApiError(
     409,
     JSON.stringify({
       code: "NEW_SESSION_DRAFT_CONFLICT",
       message: "draft changed",
-      currentRevision: 5,
+      currentRevision,
     }),
   );
 }
@@ -565,7 +565,9 @@ describe("useNewSessionDraft", () => {
       },
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = {
           ...remote(request.expectedRevision + 1, request),
           selectionHistory: history,
@@ -596,14 +598,19 @@ describe("useNewSessionDraft", () => {
       selectedProjectChannelId: PROJECT_A,
     });
 
+    // The latest choice wins: the stale save moves onto the newer revision.
     await actRun(() => second.result.current.selectProject(null));
-    expect(await actRun(() => second.result.current.draft.flush())).toBeNull();
-    expect(requests).toHaveLength(2);
+    expect(await actRun(() => second.result.current.draft.flush())).not.toBeNull();
+    expect(requests).toHaveLength(3);
     expect(requests[1]).toMatchObject({
       expectedRevision: 0,
       selectedProjectChannelId: null,
     });
-    expect(second.result.current.draft.conflict).not.toBeNull();
+    expect(requests[2]).toMatchObject({
+      expectedRevision: 1,
+      selectedProjectChannelId: null,
+    });
+    expect(second.result.current.draft.conflict).toBeNull();
 
     await first.unmount();
     await second.unmount();
@@ -634,7 +641,9 @@ describe("useNewSessionDraft", () => {
       getNewSessionDraft: async () => authoritative,
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = {
           ...remote(request.expectedRevision + 1, request),
           selectionHistory: history,
@@ -666,10 +675,12 @@ describe("useNewSessionDraft", () => {
     await actRun(() =>
       second.result.current.setValue({ ...second.result.current.value, text: "stale tab edit" }),
     );
-    expect(await actRun(() => second.result.current.draft.flush())).toBeNull();
-    expect(requests).toHaveLength(2);
+    // The latest typing wins: the stale save moves onto the newer revision.
+    expect(await actRun(() => second.result.current.draft.flush())).not.toBeNull();
+    expect(requests).toHaveLength(3);
     expect(requests[1]).toMatchObject({ expectedRevision: 1, text: "stale tab edit" });
-    expect(second.result.current.draft.conflict).not.toBeNull();
+    expect(requests[2]).toMatchObject({ expectedRevision: 2, text: "stale tab edit" });
+    expect(second.result.current.draft.conflict).toBeNull();
 
     await first.unmount();
     await second.unmount();
@@ -1241,7 +1252,9 @@ describe("useNewSessionDraft", () => {
       getNewSessionDraft: async () => authoritative,
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = remote(authoritative.revision + 1, request);
         return authoritative;
       },
@@ -1291,7 +1304,7 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("Send stops retrying persistent draft conflicts and keeps the visible message", async () => {
+  test("Send goes ahead from the last-seen draft when saving keeps conflicting", async () => {
     let reads = 0;
     let saves = 0;
     const hook = await renderDraftHook(
@@ -1308,9 +1321,14 @@ describe("useNewSessionDraft", () => {
     );
     await flush();
     await actRun(() => hook.result.current.setValue(editable({ text: "do not lose this" })));
-    expect(await actRun(() => hook.result.current.draft.flushForSend())).toBeNull();
-    expect(saves).toBe(3);
+    const basis = await actRun(() => hook.result.current.draft.flushForSend());
+    // Send carries the message itself; the draft it was typed over is the basis.
+    expect(basis?.revision).toBe(hook.result.current.draft.revision);
+    // Bounded: a few rebased saves per attempt, never an endless loop.
+    expect(saves).toBeGreaterThan(0);
+    expect(saves).toBeLessThanOrEqual(9);
     expect(hook.result.current.value.text).toBe("do not lose this");
+    expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
   });
 
@@ -1579,7 +1597,8 @@ describe("useNewSessionDraft", () => {
     expect(requests).toHaveLength(1);
     expect(hook.result.current.value.text).toBe("keep this local");
     expect(hook.result.current.draft.revision).toBe(3);
-    expect(hook.result.current.draft.conflict?.message).toContain("another client");
+    // Nothing to resolve: the person's typing stays and saves on top.
+    expect(hook.result.current.draft.conflict).toBeNull();
 
     const preserved = await actRun(() => hook.result.current.draft.flushForSend());
     expect(preserved?.revision).toBe(4);
@@ -1588,7 +1607,7 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("unchanged sent text never overwrites a newer sibling draft after create", async () => {
+  test("after create, a newer sibling draft is kept and the form shows it", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     let reads = 0;
     const hook = await renderDraftHook(
@@ -1609,11 +1628,10 @@ describe("useNewSessionDraft", () => {
     if (!flushed) throw new Error("Expected the submitted draft to flush");
 
     const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
-    expect(acknowledged).toBeNull();
-    expect(hook.result.current.draft.isCurrentSignature(flushed.signature)).toBe(true);
+    expect(acknowledged).toEqual({ kind: "followed" });
+    expect(hook.result.current.value.text).toBe("sibling's next draft");
+    // The sent text is never saved over the sibling's newer draft.
     expect(requests).toHaveLength(1);
-    // The route navigates to the accepted session without rebasing the sent
-    // text over the sibling's newer draft.
     await hook.unmount();
   });
 
@@ -1741,7 +1759,7 @@ describe("useNewSessionDraft", () => {
     expect(requests).toHaveLength(2);
 
     const acknowledged = await actRun(async () => {
-      staleAutosave.reject(conflict());
+      staleAutosave.reject(conflict(2));
       return await acknowledgement;
     });
     expect(acknowledged).toEqual({

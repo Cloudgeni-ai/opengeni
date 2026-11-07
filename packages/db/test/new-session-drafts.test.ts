@@ -613,45 +613,60 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect((rejected[0]!.reason as NewSessionDraftConflictError).currentRevision).toBe(1);
   });
 
-  test("rejects same-revision create content that is not the exact saved draft", async () => {
-    const context = await fixture();
-    const saved = await saveDraft(context, 0, {
-      text: "exact outside composer",
-      model: "scripted-model",
-      reasoningEffort: "high",
-      latencyMode: "priority",
-    });
-
-    await expect(
+  test("clears the draft a Send came from, and keeps a newer one from another device", async () => {
+    const seed = (
+      context: Awaited<ReturnType<typeof fixture>>,
+      expectedRevision: number,
+      sentText: string,
+    ) =>
       withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
         db.transaction((tx) =>
           seedNewSessionDraftInTransaction(tx, {
             workspaceId: context.grant.workspaceId!,
             subjectId: context.subjectId,
-            expectedRevision: saved.revision,
+            expectedRevision,
             expectedSnapshot: {
-              text: saved.text,
+              text: sentText,
               resources: [],
               tools: [],
               toolsProvided: false,
-              model: "different-model",
+              model: "scripted-model",
               reasoningEffort: "high",
               latencyMode: "priority",
               options: {},
             },
           }),
         ),
-      ),
-    ).rejects.toMatchObject({
-      name: "NewSessionDraftConflictError",
-      currentRevision: saved.revision,
-    });
-    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
-      revision: saved.revision,
-      text: "exact outside composer",
+      );
+    const policy = {
       model: "scripted-model",
       reasoningEffort: "high",
       latencyMode: "priority",
+    } as const;
+
+    // At the revision the Send came from, typing after that save was sent too.
+    const atBasis = await fixture();
+    const saved = await saveDraft(atBasis, 0, { text: "draft before", ...policy });
+    await expect(seed(atBasis, saved.revision, "draft before, then more")).resolves.toBe(true);
+    expect(await readDraft(atBasis.grant.workspaceId!, atBasis.subjectId)).toMatchObject({
+      revision: saved.revision + 1,
+      text: "",
+    });
+
+    // Moved on, but it holds exactly what was sent.
+    const sameContent = await fixture();
+    const sent = await saveDraft(sameContent, 0, { text: "the message", ...policy });
+    await expect(seed(sameContent, sent.revision - 1, "the message")).resolves.toBe(true);
+    expect((await readDraft(sameContent.grant.workspaceId!, sameContent.subjectId))?.text).toBe("");
+
+    // Another device saved something newer: it stays as the draft.
+    const newer = await fixture();
+    const mine = await saveDraft(newer, 0, { text: "mine", ...policy });
+    const theirs = await saveDraft(newer, mine.revision, { text: "theirs", ...policy });
+    await expect(seed(newer, mine.revision, "mine")).resolves.toBe(false);
+    expect(await readDraft(newer.grant.workspaceId!, newer.subjectId)).toMatchObject({
+      revision: theirs.revision,
+      text: "theirs",
     });
   });
 
