@@ -1,4 +1,5 @@
 import { ApprovalSurface, type PendingApproval } from "@opengeni/react";
+import { useState } from "react";
 import { SecretsUiProvider } from "@opengeni/react/session-ui";
 import {
   OpenGeniApiError,
@@ -205,6 +206,30 @@ const DELETE_CONNECTIONS = ["Linear", "Notion", "Slack", "Jira"].map((name) =>
   ),
 );
 
+// Three pushes a worker made in a row, each asking first.
+const PUSHES = [5163, 2048, 9310].map((bytes, index) =>
+  scene(
+    `push-${index}`,
+    "ref_create",
+    { repository: "Cloudgeni-ai/opengeni", bytes },
+    {
+      context: { kind: "generic", title: "Push to Cloudgeni-ai/opengeni" },
+      reason: "This action asks first by default.",
+    },
+  ),
+);
+
+// Waiting on a connection only its owner may approve: this person can decline it.
+const OWNER_ONLY = (() => {
+  const base = scene(
+    "owner-only",
+    "mcp_github__create_pull_request",
+    { owner: "acme", repo: "site", title: "Update pricing page", head: "pricing", base: "main" },
+    { reason: "Only the owner of this GitHub account can approve this action." },
+  );
+  return { ...base, review: { ...base.review!, availableActions: ["reject"] } } as Scene;
+})();
+
 const SCENES = [
   SEND_EMAIL,
   TRASH,
@@ -213,6 +238,8 @@ const SCENES = [
   APP_ACTION,
   LEGACY,
   ...DELETE_CONNECTIONS,
+  ...PUSHES,
+  OWNER_ONLY,
 ];
 
 const loadReview = async (approval: PendingApproval): Promise<ToolActionReview> => {
@@ -251,6 +278,35 @@ function Surface({
       onApprove={async () => wait(900)}
       onReject={async () => wait(900)}
     />
+  );
+}
+
+/**
+ * Decided actions leave, as the server's events remove them; `failing` ones
+ * refuse their decision and stay waiting. Reset puts every action back.
+ */
+function DecidingSurface({ scenes, failing = [] }: { scenes: Scene[]; failing?: string[] }) {
+  const [decided, setDecided] = useState<ReadonlySet<string>>(() => new Set());
+  const decide = async (approval: PendingApproval) => {
+    await wait(700);
+    if (failing.includes(approval.id))
+      throw new OpenGeniApiError(403, "Only the owner of this GitHub account can approve this.");
+    setDecided((current) => new Set(current).add(approval.id));
+  };
+  const waiting = scenes.filter((entry) => !decided.has(entry.approval.id));
+  return waiting.length ? (
+    <ApprovalSurface
+      approvals={waiting.map((entry) => entry.approval)}
+      loadReview={loadReview}
+      loadDetails={loadDetails}
+      onViewDetails={() => undefined}
+      onApprove={decide}
+      onReject={decide}
+    />
+  ) : (
+    <button type="button" className="text-sm underline" onClick={() => setDecided(new Set())}>
+      Reset
+    </button>
   );
 }
 
@@ -322,6 +378,42 @@ export default function ChatApprovalsSection() {
               <Surface scenes={[SEND_EMAIL]} />
             </ChatFrame>
           </KitBlock>
+        ) : null}
+
+        {showPart("approve-all") ? (
+          <KitBlock
+            title="Several waiting at once"
+            description="Approve all sends one decision per action through the ordinary approval path. It counts only actions this person may approve; one that is refused stays waiting and is named."
+          >
+            <ChatFrame
+              events={[
+                ...lead(
+                  "Push the three fixes to their branches.",
+                  "Each push asks first. They're waiting for you.",
+                ),
+                kitEvent("session.requiresAction", {
+                  approvals: PUSHES.map((entry) => entry.approval),
+                }),
+              ]}
+              height={640}
+            >
+              <DecidingSurface scenes={PUSHES} />
+            </ChatFrame>
+          </KitBlock>
+        ) : null}
+
+        {showPart("approve-all-states") ? (
+          <StatesGrid title="Several waiting at once" columns={2}>
+            <StateCell label="Three waiting" align="stretch">
+              <DecidingSurface scenes={PUSHES} />
+            </StateCell>
+            <StateCell label="One only its owner can approve" align="stretch">
+              <DecidingSurface scenes={[...PUSHES.slice(0, 2), OWNER_ONLY]} />
+            </StateCell>
+            <StateCell label="One is refused" align="stretch">
+              <DecidingSurface scenes={PUSHES} failing={[PUSHES[1]!.approval.id]} />
+            </StateCell>
+          </StatesGrid>
         ) : null}
 
         {showPart("resuming") ? (

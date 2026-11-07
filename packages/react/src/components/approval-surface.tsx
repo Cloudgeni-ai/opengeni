@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { dequal } from "dequal";
-import { ChevronLeftIcon, ChevronRightIcon, ShieldCheckIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, LoaderCircleIcon, ShieldCheckIcon } from "lucide-react";
 import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
@@ -88,6 +96,64 @@ function reviewUndecidable(review: ToolActionReview | undefined): review is Tool
   );
 }
 
+type ReviewLoader = NonNullable<ApprovalSurfaceProps["loadReview"]>;
+/** What one read of an approval's review settled to, as its card shows it. */
+type ReviewOutcome =
+  | { kind: "review"; review: ToolActionReview }
+  | { kind: "legacy" }
+  | { kind: "denied" }
+  | { kind: "failed" };
+type ReviewRead = {
+  approval: PendingApproval;
+  loader: ReviewLoader;
+  promise: Promise<ToolActionReview | null | undefined>;
+  /** The card has used this read; its next read (a retry) asks again. */
+  consumed: boolean;
+};
+
+function reviewOutcome(
+  approval: PendingApproval,
+  settled: { review: ToolActionReview | null | undefined } | { error: unknown },
+): ReviewOutcome {
+  if ("error" in settled) {
+    const { error } = settled;
+    if (error instanceof OpenGeniApiError && error.status === 404) return { kind: "legacy" };
+    if (error instanceof OpenGeniApiError && (error.status === 401 || error.status === 403))
+      return { kind: "denied" };
+    return { kind: "failed" };
+  }
+  const { review } = settled;
+  if (review === null || review === undefined) return { kind: "legacy" };
+  return review.id === approval.id ? { kind: "review", review } : { kind: "failed" };
+}
+
+/**
+ * Which bulk decisions include an approval: exactly the buttons its own card
+ * offers without asking for anything more. `outcome` is undefined while its
+ * review is still being read, which includes it in neither.
+ */
+export function bulkApprovalDecisions(
+  approval: PendingApproval,
+  review: { loader: boolean; outcome?: ReviewOutcome | undefined },
+): { approve: boolean; reject: boolean } {
+  // A server's question is answered on its own card; it can only be declined in bulk.
+  if (approval.elicitation) return { approve: false, reject: true };
+  const recoverable = approval.arguments !== undefined;
+  if (!review.loader) return { approve: recoverable, reject: true };
+  const outcome = review.outcome;
+  if (!outcome || outcome.kind === "denied") return { approve: false, reject: false };
+  if (outcome.kind === "legacy") return { approve: recoverable, reject: true };
+  if (outcome.kind === "failed") return { approve: false, reject: true };
+  const saved = outcome.review;
+  if (saved.status !== "pending") return { approve: false, reject: false };
+  return {
+    approve: saved.availableActions.includes("approve"),
+    reject: saved.availableActions.includes("reject"),
+  };
+}
+
+type BulkFailure = { id: string; title: string; cause: unknown };
+
 /** Hosts provide decisions; this surface never mutates the approved payload. */
 export function ApprovalSurface({
   approvals,
@@ -120,6 +186,109 @@ export function ApprovalSurface({
     onSelectedApprovalChange?.(id);
   };
   const surface = useRef<HTMLElement>(null);
+  // Every read of a waiting approval's review goes through one ledger, so the
+  // card and the bulk buttons see the same facts and the card's first read is
+  // never repeated. A card's later read (a retry) asks again.
+  const readsRef = useRef(new Map<string, ReviewRead>());
+  const [outcomes, setOutcomes] = useState<
+    Record<
+      string,
+      {
+        approval: PendingApproval;
+        loader: ReviewLoader;
+        outcome: ReviewOutcome;
+      }
+    >
+  >({});
+  const startRead = useCallback((approval: PendingApproval, loader: ReviewLoader) => {
+    let promise: Promise<ToolActionReview | null | undefined>;
+    try {
+      promise = Promise.resolve(loader(approval));
+    } catch (cause) {
+      promise = Promise.reject(cause);
+    }
+    const read: ReviewRead = { approval, loader, promise, consumed: false };
+    readsRef.current.set(approval.id, read);
+    const settle = (settled: Parameters<typeof reviewOutcome>[1]) => {
+      // Only the latest read of an approval may answer.
+      if (readsRef.current.get(approval.id) !== read) return;
+      setOutcomes((current) => ({
+        ...current,
+        [approval.id]: {
+          approval,
+          loader,
+          outcome: reviewOutcome(approval, settled),
+        },
+      }));
+    };
+    promise.then(
+      (review) => settle({ review }),
+      (cause: unknown) => settle({ error: cause }),
+    );
+    return read;
+  }, []);
+  const sharedLoadReview = useMemo<ReviewLoader | undefined>(
+    () =>
+      loadReview
+        ? (approval) => {
+            const read = readsRef.current.get(approval.id);
+            if (
+              read &&
+              !read.consumed &&
+              read.loader === loadReview &&
+              dequal(read.approval, approval)
+            ) {
+              read.consumed = true;
+              return read.promise;
+            }
+            const fresh = startRead(approval, loadReview);
+            fresh.consumed = true;
+            return fresh.promise;
+          }
+        : undefined,
+    [loadReview, startRead],
+  );
+  // With two or more waiting, read every review: the bulk buttons include an
+  // action only when its own card would offer that decision. One alone has no
+  // bulk buttons, so only its card reads it.
+  useEffect(() => {
+    const live = new Set(approvals.map((approval) => approval.id));
+    for (const id of readsRef.current.keys()) if (!live.has(id)) readsRef.current.delete(id);
+    setOutcomes((current) =>
+      Object.keys(current).every((id) => live.has(id))
+        ? current
+        : Object.fromEntries(Object.entries(current).filter(([id]) => live.has(id))),
+    );
+    if (!loadReview || approvals.length < 2) return;
+    for (const approval of approvals) {
+      if (approval.elicitation) continue;
+      const read = readsRef.current.get(approval.id);
+      if (read && read.loader === loadReview && dequal(read.approval, approval)) continue;
+      startRead(approval, loadReview);
+    }
+  }, [approvals, loadReview, startRead]);
+  const [bulk, setBulk] = useState<{
+    decision: "approve" | "reject";
+    index: number;
+    length: number;
+  } | null>(null);
+  const bulkRef = useRef(false);
+  const [bulkFailures, setBulkFailures] = useState<{
+    decision: "approve" | "reject";
+    items: BulkFailure[];
+  } | null>(null);
+  // The bulk run reads the latest waiting list between decisions.
+  const approvalsRef = useRef(approvals);
+  useLayoutEffect(() => {
+    approvalsRef.current = approvals;
+  }, [approvals]);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   useEffect(() => {
     if (pending && !approvals.some((approval) => approval.id === pending.id)) {
       pendingRef.current = null;
@@ -142,7 +311,7 @@ export function ApprovalSurface({
     decision: "approve" | "reject",
     answer?: McpElicitationAnswer,
   ) => {
-    if (responding || pendingRef.current) return;
+    if (responding || pendingRef.current || bulkRef.current) return;
     pendingRef.current = approval.id;
     setPending({ id: approval.id, decision });
     setDecisionError(null);
@@ -160,6 +329,75 @@ export function ApprovalSurface({
       }
     }
   };
+  const bulkEligible = {
+    approve: [] as PendingApproval[],
+    reject: [] as PendingApproval[],
+  };
+  for (const approval of approvals) {
+    const read = outcomes[approval.id];
+    const outcome =
+      read && read.loader === loadReview && dequal(read.approval, approval)
+        ? read.outcome
+        : undefined;
+    const decisions = bulkApprovalDecisions(approval, {
+      loader: Boolean(loadReview),
+      outcome,
+    });
+    if (decisions.approve) bulkEligible.approve.push(approval);
+    if (decisions.reject) bulkEligible.reject.push(approval);
+  }
+  const titleOf = (approval: PendingApproval) => {
+    const read = outcomes[approval.id];
+    return read?.outcome.kind === "review" && dequal(read.approval, approval)
+      ? read.outcome.review.title
+      : pendingApprovalReview(approval, {
+          formatToolName: messages.formatToolName,
+          approveLabel: messages.approve,
+        }).title;
+  };
+  const decideAll = async (decision: "approve" | "reject") => {
+    if (responding || pendingRef.current || bulkRef.current) return;
+    // The actions the person saw, as they saw them. One that arrives meanwhile
+    // waits for its own decision; one that changes or goes is skipped.
+    const snapshot = bulkEligible[decision].map((approval) => ({
+      approval,
+      title: titleOf(approval),
+    }));
+    if (snapshot.length < 2) return;
+    bulkRef.current = true;
+    setDecisionError(null);
+    setBulkFailures(null);
+    const failures: BulkFailure[] = [];
+    for (const [index, { approval, title }] of snapshot.entries()) {
+      if (!mountedRef.current) break;
+      const current = approvalsRef.current.find((candidate) => candidate.id === approval.id);
+      if (!current || !dequal(current, approval)) continue;
+      setBulk({ decision, index, length: snapshot.length });
+      try {
+        // Each action is its own decision through the host's ordinary path.
+        await (decision === "approve" ? onApprove(current) : onReject(current));
+      } catch (cause) {
+        // Already decided elsewhere: nothing is left to do for it.
+        if (cause instanceof OpenGeniApiError && cause.status === 409) continue;
+        failures.push({ id: approval.id, title, cause });
+      }
+    }
+    bulkRef.current = false;
+    if (!mountedRef.current) return;
+    setBulk(null);
+    if (failures.length) {
+      setBulkFailures({ decision, items: failures });
+      setSelectedId(failures[0]!.id);
+    }
+    requestAnimationFrame(() => {
+      const root = surface.current;
+      if (root && !root.contains(document.activeElement))
+        root.querySelector<HTMLElement>("h3")?.focus({ preventScroll: true });
+    });
+  };
+  const waitingIds = new Set(approvals.map((approval) => approval.id));
+  const shownFailures = bulkFailures?.items.filter((item) => waitingIds.has(item.id)) ?? [];
+  const bulkBusy = Boolean(responding || pending || bulk);
   const errorText = decisionError
     ? formatError(decisionError.cause)
     : error instanceof Error
@@ -179,30 +417,74 @@ export function ApprovalSurface({
         >
           <span className="inline-flex items-center gap-1.5 font-medium text-og-fg">
             <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
-            {t("approvalSurface.lengthActionsAreWaitingFor", { length: approvals.length })}
+            {t("approvalSurface.lengthActionsAreWaitingFor", {
+              length: approvals.length,
+            })}
           </span>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              aria-label={t("approvalSurface.previousAction")}
-              disabled={selectedIndex === 0}
-              onClick={() => setSelectedId(approvals[selectedIndex - 1]!.id)}
-              className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-            >
-              <ChevronLeftIcon className="size-4" aria-hidden="true" />
-            </button>
-            <span className="tabular-nums" aria-live="polite">
-              {selectedIndex + 1} {t("approvalSurface.ofLength", { length: approvals.length })}
-            </span>
-            <button
-              type="button"
-              aria-label={t("approvalSurface.nextAction")}
-              disabled={selectedIndex === approvals.length - 1}
-              onClick={() => setSelectedId(approvals[selectedIndex + 1]!.id)}
-              className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-            >
-              <ChevronRightIcon className="size-4" aria-hidden="true" />
-            </button>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {bulk ? (
+              <span
+                role="status"
+                className="inline-flex min-h-8 items-center gap-1.5 [@media(pointer:coarse)]:min-h-11"
+                data-og-approval-bulk-progress=""
+              >
+                <LoaderCircleIcon aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+                {t(
+                  bulk.decision === "approve"
+                    ? "approvalSurface.approvingIndexOfLength"
+                    : "approvalSurface.decliningIndexOfLength",
+                  { index: bulk.index + 1, length: bulk.length },
+                )}
+              </span>
+            ) : bulkEligible.approve.length > 1 || bulkEligible.reject.length > 1 ? (
+              <div className="flex items-center gap-1" data-og-approval-bulk="">
+                {bulkEligible.reject.length > 1 && (
+                  <button
+                    type="button"
+                    disabled={bulkBusy}
+                    onClick={() => void decideAll("reject")}
+                    className="inline-flex min-h-8 items-center rounded-og-md px-2 font-medium hover:bg-og-hover hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                  >
+                    {t("approvalSurface.declineAll")}
+                  </button>
+                )}
+                {bulkEligible.approve.length > 1 && (
+                  <button
+                    type="button"
+                    disabled={bulkBusy}
+                    onClick={() => void decideAll("approve")}
+                    className="inline-flex min-h-8 items-center rounded-og-md border border-og-border bg-og-surface-1 px-2.5 font-medium text-og-fg hover:border-og-border-strong hover:bg-og-hover disabled:cursor-not-allowed disabled:opacity-55 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                  >
+                    {t("approvalSurface.approveAll", {
+                      length: bulkEligible.approve.length,
+                    })}
+                  </button>
+                )}
+              </div>
+            ) : null}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                aria-label={t("approvalSurface.previousAction")}
+                disabled={selectedIndex === 0}
+                onClick={() => setSelectedId(approvals[selectedIndex - 1]!.id)}
+                className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              >
+                <ChevronLeftIcon className="size-4" aria-hidden="true" />
+              </button>
+              <span className="tabular-nums" aria-live="polite">
+                {selectedIndex + 1} {t("approvalSurface.ofLength", { length: approvals.length })}
+              </span>
+              <button
+                type="button"
+                aria-label={t("approvalSurface.nextAction")}
+                disabled={selectedIndex === approvals.length - 1}
+                onClick={() => setSelectedId(approvals[selectedIndex + 1]!.id)}
+                className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              >
+                <ChevronRightIcon className="size-4" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </nav>
       )}
@@ -211,13 +493,13 @@ export function ApprovalSurface({
           <ApprovalRequest
             key={approval.id}
             approval={approval}
-            loadReview={loadReview}
+            loadReview={sharedLoadReview}
             loadDetails={loadDetails}
             messages={messages}
             custom={renderApproval?.(approval)}
             onViewDetails={onViewDetails}
             submitting={pending?.id === approval.id ? pending.decision : null}
-            disabled={Boolean(responding || pending)}
+            disabled={bulkBusy}
             onApprove={() => void decide(approval, "approve")}
             onAnswer={(content) =>
               approval.elicitation
@@ -231,6 +513,30 @@ export function ApprovalSurface({
           />
         ))}
       </div>
+      {shownFailures.length > 0 && bulkFailures && (
+        <ul
+          role="alert"
+          className="m-0 list-none space-y-1 p-0 px-1 text-og-sm text-og-status-failed"
+        >
+          {shownFailures.map((item) => (
+            <li key={item.id}>
+              <button
+                type="button"
+                aria-current={item.id === selected.id || undefined}
+                onClick={() => setSelectedId(item.id)}
+                className="min-h-8 text-left underline-offset-4 hover:underline [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              >
+                {t(
+                  bulkFailures.decision === "approve"
+                    ? "approvalSurface.couldnTApproveTitle"
+                    : "approvalSurface.couldnTDeclineTitle",
+                  { title: item.title, error: formatError(item.cause) },
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {errorText && (
         <p role="alert" className="m-0 px-1 text-og-sm text-og-status-failed">
           {errorText}

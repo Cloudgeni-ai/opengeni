@@ -599,3 +599,187 @@ describe("ApprovalSurface", () => {
     expect(rejected).toEqual([approval.id]);
   });
 });
+
+describe("ApprovalSurface: approve or decline all", () => {
+  const item = (id: string): PendingApproval => ({
+    id,
+    name: "projects.update",
+    arguments: { projectId: id },
+  });
+  const reviewOf = (id: string, overrides: Partial<ToolActionReview> = {}): ToolActionReview => ({
+    ...savedReview(`Update ${id}`),
+    id,
+    ...overrides,
+  });
+  const buttons = () => [...mounted!.container.querySelectorAll("button")];
+  const buttonNamed = (label: string) => buttons().find((value) => value.textContent === label);
+  const settle = async () => {
+    for (let index = 0; index < 4; index++) await act(async () => await Promise.resolve());
+  };
+
+  test("offers one decision per action only with two or more it can include, reading each review once", async () => {
+    const reads: string[] = [];
+    const loadReview = async (value: PendingApproval) => {
+      reads.push(value.id);
+      return reviewOf(value.id);
+    };
+    const props = { loadReview, onApprove: noDecision, onReject: noDecision };
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, { ...props, approvals: [item("a")] }),
+    );
+    await settle();
+    expect(buttonNamed("Approve all 1")).toBeUndefined();
+    expect(buttonNamed("Decline all")).toBeUndefined();
+    await mounted.rerender(
+      createElement(ApprovalSurface, { ...props, approvals: [item("a"), item("b"), item("c")] }),
+    );
+    await settle();
+    expect(buttonNamed("Approve all 3")).not.toBeUndefined();
+    expect(buttonNamed("Decline all")).not.toBeUndefined();
+    // The selected card and the bulk buttons share one read of each review.
+    expect(reads.toSorted()).toEqual(["a", "b", "c"]);
+  });
+
+  test("includes only actions this person may decide, each through its own decision", async () => {
+    const reviews: Record<string, () => Promise<ToolActionReview>> = {
+      a: async () => reviewOf("a"),
+      owner: async () => reviewOf("owner", { availableActions: ["reject"] }),
+      denied: async () => {
+        throw new OpenGeniApiError(403, "Access denied");
+      },
+      between: async () => reviewOf("between", { availableActions: [] }),
+      b: async () => reviewOf("b"),
+    };
+    const question: PendingApproval = {
+      ...item("question"),
+      elicitation: {
+        round: 1,
+        server: "Linear",
+        mode: "form",
+        message: "Which team?",
+        requestedSchema: { type: "object", properties: {} },
+      } as never,
+    };
+    const approved: string[] = [];
+    const declined: string[] = [];
+    const approvals = [
+      item("a"),
+      item("owner"),
+      item("denied"),
+      item("between"),
+      question,
+      item("b"),
+    ];
+    const render = () =>
+      createElement(ApprovalSurface, {
+        approvals,
+        loadReview: (value) => reviews[value.id]!(),
+        onApprove: (value) => {
+          approved.push(value.id);
+        },
+        onReject: (value) => {
+          declined.push(value.id);
+        },
+      });
+    mounted = await renderComponent(render());
+    await settle();
+    expect(buttonNamed("Approve all 2")).not.toBeUndefined();
+    await act(async () => buttonNamed("Approve all 2")!.click());
+    await settle();
+    expect(approved).toEqual(["a", "b"]);
+    expect(declined).toEqual([]);
+    await act(async () => buttonNamed("Decline all")!.click());
+    await settle();
+    // Decline reaches what each card can decline, never one it can't decide.
+    expect(declined).toEqual(["a", "owner", "question", "b"]);
+  });
+
+  test("keeps going past a failure, which stays waiting, selected and named", async () => {
+    const approvals = [item("a"), item("b"), item("c")];
+    const approved: string[] = [];
+    const props = {
+      loadReview: async (value: PendingApproval) => reviewOf(value.id),
+      onApprove: async (value: PendingApproval) => {
+        if (value.id === "b") throw new OpenGeniApiError(422, "Only its owner can approve this");
+        approved.push(value.id);
+      },
+      onReject: noDecision,
+    };
+    mounted = await renderComponent(createElement(ApprovalSurface, { ...props, approvals }));
+    await settle();
+    await act(async () => buttonNamed("Approve all 3")!.click());
+    await settle();
+    expect(approved).toEqual(["a", "c"]);
+    // The server removes what it decided; the failed one is still waiting.
+    await mounted.rerender(createElement(ApprovalSurface, { ...props, approvals: [item("b")] }));
+    await settle();
+    const alert = mounted.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Couldn't approve Update b");
+    expect(mounted.container.querySelector('[data-approval-id="b"]')).not.toBeNull();
+    expect(buttonNamed("Approve action")?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a run decides what was shown: arrivals wait, resolved or changed ones are skipped", async () => {
+    const gates = new Map<string, ReturnType<typeof deferred<void>>>();
+    const sent: string[] = [];
+    const props = {
+      loadReview: async (value: PendingApproval) => reviewOf(value.id),
+      onApprove: (value: PendingApproval) => {
+        sent.push(value.id);
+        const gate = deferred<void>();
+        gates.set(value.id, gate);
+        return gate.promise;
+      },
+      onReject: noDecision,
+    };
+    const start = [item("a"), item("b"), item("c"), item("d")];
+    mounted = await renderComponent(createElement(ApprovalSurface, { ...props, approvals: start }));
+    await settle();
+    await act(async () => buttonNamed("Approve all 4")!.click());
+    await settle();
+    expect(sent).toEqual(["a"]);
+    expect(mounted.container.textContent).toContain("Approving 1 of 4…");
+    // Every card waits while the run sends.
+    expect(buttonNamed("Approve action")?.hasAttribute("disabled")).toBe(true);
+    // Meanwhile: b is decided elsewhere, c's facts change, e arrives.
+    const changed = { ...item("c"), arguments: { projectId: "other" } };
+    await mounted.rerender(
+      createElement(ApprovalSurface, {
+        ...props,
+        approvals: [item("a"), changed, item("d"), item("e")],
+      }),
+    );
+    await act(async () => gates.get("a")!.resolve());
+    await settle();
+    expect(sent).toEqual(["a", "d"]);
+    // Already decided elsewhere is not a failure.
+    await act(async () => gates.get("d")!.reject(new OpenGeniApiError(409, "Already decided")));
+    await settle();
+    expect(sent).toEqual(["a", "d"]);
+    expect(mounted.container.querySelector('[role="alert"]')).toBeNull();
+    expect(mounted.container.textContent).not.toContain("Approving");
+  });
+
+  test("leaving the chat stops a run", async () => {
+    const sent: string[] = [];
+    const gate = deferred<void>();
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [item("a"), item("b")],
+        onApprove: (value) => {
+          sent.push(value.id);
+          return gate.promise;
+        },
+        onReject: noDecision,
+      }),
+    );
+    await act(async () => buttonNamed("Approve all 2")!.click());
+    const current = mounted;
+    mounted = null;
+    await current.unmount();
+    gate.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toEqual(["a"]);
+  });
+});
