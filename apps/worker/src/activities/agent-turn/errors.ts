@@ -1,6 +1,7 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { findPersonalMachineAccessRequiredError } from "./machine-access";
 import {
   isSandboxProcessStartFailure,
   SANDBOX_MACHINE_RESTARTING_CODE,
@@ -2289,6 +2290,13 @@ function classifyAgentRunFailurePayload(
       code: backendNotServed.code,
       retryable: false,
     };
+  }
+  // The chat's personal machine isn't allowed for this turn. Its cause is the
+  // database's refusal, which is not a database fault: the machine's owner
+  // allows it again, and retrying without that gives the same answer.
+  const machineAccess = findPersonalMachineAccessRequiredError(error);
+  if (machineAccess) {
+    return { error: machineAccess.message, code: machineAccess.code, retryable: false };
   }
   // A checkpoint (compaction) request only summarizes history: it runs no
   // tools and its output is discarded unless it completes. A stream that ended

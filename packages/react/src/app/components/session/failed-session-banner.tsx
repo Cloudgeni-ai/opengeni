@@ -1,6 +1,6 @@
 import { AlertTriangleIcon } from "lucide-react";
 import { Link } from "../../lib/navigation";
-import { useEffect, useRef, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
 import { failedSessionCopy } from "../../lib/failed-session-copy";
@@ -29,6 +29,13 @@ import {
 
 const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: false };
 
+/** Allow the chat's own machine for it and continue; see `FailedSessionBanner`'s `allowMachine`. */
+export type AllowMachineAction = {
+  machineName: string;
+  /** Resolves to an error to show, or null once the chat is allowed and continuing. */
+  onAllow: () => Promise<string | null>;
+};
+
 /** Presentation only: admission, billing and retry identity remain with their owners. */
 export function FailedSessionBanner({
   failure,
@@ -50,6 +57,7 @@ export function FailedSessionBanner({
   analyticsKey,
   shownInTimeline = false,
   codexUsage,
+  allowMachine,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -92,6 +100,12 @@ export function FailedSessionBanner({
    * "Continue at reset" switch in place of Retry.
    */
   codexUsage?: CodexUsageChoice | undefined;
+  /**
+   * The chat's own machine isn't allowed for it and the person viewing owns
+   * it: Allow approves it for this chat and continues. Resolves to an error
+   * to show, or null once allowed.
+   */
+  allowMachine?: AllowMachineAction | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
@@ -106,7 +120,9 @@ export function FailedSessionBanner({
     dailyLimit,
     compaction,
     creditRefusal,
+    machineAccess,
   } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
+  const machineAllow = machineAccess && !structuralFailure ? allowMachine : undefined;
   // Offer the switch until the composer selects a model that can run. An
   // own-key or API stop has one fix, never another model.
   const switchTo =
@@ -124,18 +140,20 @@ export function FailedSessionBanner({
       : null;
   const headline = codexUsageFailure
     ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
-    : freeModelLimit
-      ? freeModelDailyLimitReason({
-          modelChanged,
-          canBuyCredits: offerCredits,
-          canConnectModel: offerConnect,
-          subscriptions,
-          canChooseModel: hasModelPicker ?? canChooseModel,
-        })
-      : creditRefusal && !offerCredits
-        ? // Without billing access the one fix is asking an owner.
-          creditRefusalHeadline(t, creditRefusal, false)
-        : reason;
+    : machineAllow
+      ? `Machine access needed: this chat isn’t allowed to use “${machineAllow.machineName}” right now.`
+      : freeModelLimit
+        ? freeModelDailyLimitReason({
+            modelChanged,
+            canBuyCredits: offerCredits,
+            canConnectModel: offerConnect,
+            subscriptions,
+            canChooseModel: hasModelPicker ?? canChooseModel,
+          })
+        : creditRefusal && !offerCredits
+          ? // Without billing access the one fix is asking an owner.
+            creditRefusalHeadline(t, creditRefusal, false)
+          : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -148,7 +166,9 @@ export function FailedSessionBanner({
   };
   // Retry would only hit the same limit: the switch runs the turn again
   // once the limit resets. Another model from the picker continues at once.
-  const retryActions = codexUsageFailure ? (
+  const retryActions = machineAllow ? (
+    <AllowMachineButton action={machineAllow} />
+  ) : codexUsageFailure ? (
     <>
       <ContinueAtResetSwitch {...codexUsageFailure} />
       {codexUsageFailure.error ? (
@@ -311,6 +331,48 @@ function BuyCreditsLink({
         Add credits
       </Link>
     </Button>
+  );
+}
+
+/** The one way forward when the chat's own machine isn't allowed for it. */
+function AllowMachineButton({ action }: { action: AllowMachineAction }) {
+  const pending = useRef(false);
+  const [allowing, setAllowing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function allow() {
+    if (pending.current) return;
+    pending.current = true;
+    setAllowing(true);
+    setError(null);
+    try {
+      setError(await action.onAllow());
+    } catch {
+      setError("Couldn’t allow the machine for this chat. Try again.");
+    } finally {
+      pending.current = false;
+      setAllowing(false);
+    }
+  }
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        disabled={allowing}
+        aria-busy={allowing}
+        onClick={() => {
+          noteTurnFailureAction("allow_machine");
+          void allow();
+        }}
+      >
+        {allowing ? "Allowing…" : "Allow for this chat"}
+      </Button>
+      {error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {error}
+        </p>
+      ) : null}
+    </>
   );
 }
 

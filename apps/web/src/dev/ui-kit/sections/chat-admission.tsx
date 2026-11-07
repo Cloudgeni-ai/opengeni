@@ -1,6 +1,7 @@
 import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
 import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/react/session-ui";
 import { Button } from "@opengeni/react/ui/button";
+import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { showPart } from "./chat-shared";
@@ -112,9 +113,22 @@ const BEFORE_SENDING: { part: string; label: string; access: SessionMachineAcces
   },
 ];
 
+/* A turn the database refused because the chat's machine isn't allowed for it. */
+const MACHINE_ACCESS_FAILURE = {
+  reason: "Machine access needed: this chat isn’t allowed to use “Laptop” right now.",
+  failureCode: "machine_access_required",
+  failedAt: "2026-10-28T11:52:00Z",
+  consecutiveRecoveryCount: null,
+};
+const MACHINE_ACCESS_FAILED: { part: string; label: string; owner: boolean }[] = [
+  { part: "machine-access-owner", label: "Your machine, not allowed here", owner: true },
+  { part: "machine-access-member", label: "Someone else's machine", owner: false },
+];
+
 export default function ChatAdmissionSection() {
   const shown = STATES.filter((state) => showPart(state.part));
   const beforeSending = BEFORE_SENDING.filter((state) => showPart(state.part));
+  const machineAccessFailed = MACHINE_ACCESS_FAILED.filter((state) => showPart(state.part));
   return (
     <KitSection sectionKey="chat-admission">
       {beforeSending.length > 0 ? (
@@ -171,6 +185,21 @@ export default function ChatAdmissionSection() {
                   onRecheck={async () => {}}
                 />
               </div>
+            </StateCell>
+          ))}
+        </StatesGrid>
+      ) : null}
+      {machineAccessFailed.length > 0 ? (
+        <StatesGrid title="A turn the machine wasn't allowed for" columns={1}>
+          {machineAccessFailed.map((state) => (
+            <StateCell key={state.part} label={state.label} align="stretch">
+              <FailedSessionBanner
+                failure={MACHINE_ACCESS_FAILURE}
+                actions={{ onRetry: async () => true, retryBlocker: null }}
+                allowMachine={
+                  state.owner ? { machineName: "Laptop", onAllow: async () => null } : undefined
+                }
+              />
             </StateCell>
           ))}
         </StatesGrid>
