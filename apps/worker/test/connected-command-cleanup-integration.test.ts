@@ -45,6 +45,8 @@ import {
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
+  CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+  connectedOutputRetryMs,
   reconcileConnectedMachineBackgroundCommands as reconcile,
   reconcileConnectedCommandOutputReleases as releaseOutput,
 } from "../src/activities/sandbox-lease";
@@ -1257,6 +1259,87 @@ test("the reaper sends nothing to a runner that reports its own inventory, in an
       await parkSession(fixture.identity.sessionId);
     }
   }
+});
+
+test("output never captured a day after its command exited is recorded unavailable, not retried forever", async () => {
+  // An inventory runner (compute sandbox) is never contacted; a legacy
+  // Connected Machine is tried and does not answer. Either way, uncaptured
+  // output past the runner's retention stops being swept, while captured
+  // output and fresh output keep their retry.
+  for (const [kind, age, captured] of [
+    ["sandbox", "expired", false],
+    ["sandbox", "fresh", false],
+    ["sandbox", "expired", true],
+    ["machine", "expired", false],
+    ["machine", "fresh", false],
+  ] as const) {
+    const fixture = await terminalOutputFixture({ kind });
+    try {
+      if (captured)
+        await recordConnectedCommandOutputConsumption(client.db, {
+          ...fixture.identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+      const settledAt =
+        age === "expired"
+          ? new Date(Date.now() - CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS - 60_000)
+          : new Date(Date.now() - CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS + 60 * 60_000);
+      await shared.admin`update session_background_commands set settled_at=${settledAt} where id=${fixture.identity.commandId}`;
+      await fixture.due();
+      const rpc = kind === "machine" ? noRunnerRpc() : fixture.rpc;
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+      const row = await fixture.stored();
+      expect(row.reconcile_claim_id).toBeNull();
+      expect(row.output_release_observed_at).toBeNull();
+      if (age === "expired" && !captured) {
+        expect(row.output_unavailable_at).toBeInstanceOf(Date);
+        expect(row.output_consumed_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_unavailable");
+        // No longer an obligation: a later pass does not claim it again.
+        await shared.admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z' where id=${fixture.identity.commandId}`;
+        await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+        expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
+      } else {
+        expect(row.output_unavailable_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_retry");
+        expect(row.reconcile_after.getTime()).toBeGreaterThan(Date.now());
+        expect(row.output_consumed_at === null).toBe(!captured);
+      }
+      if (kind === "sandbox") expect(fixture.operations).toEqual([]);
+    } finally {
+      await parkSession(fixture.identity.sessionId);
+    }
+  }
+});
+
+test("an inventory runner's output recheck backs off to an hour; a legacy runner keeps its schedule", async () => {
+  const fixture = await terminalOutputFixture({ kind: "sandbox" });
+  try {
+    await shared.admin`update session_background_commands set reconcile_attempts=20 where id=${fixture.identity.commandId}`;
+    await fixture.due();
+    const before = Date.now();
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    const row = await fixture.stored();
+    expect(row.last_reconcile_outcome).toBe("output_retry");
+    const delay = row.reconcile_after.getTime() - before;
+    expect(delay).toBeGreaterThan(59 * 60_000);
+    expect(delay).toBeLessThan(61 * 60_000);
+  } finally {
+    await parkSession(fixture.identity.sessionId);
+  }
+  // The legacy schedule is unchanged: 30 s doubling to five minutes.
+  const reaper = { sandboxLeaseReaperPeriodMs: 30_000 };
+  expect(
+    [1, 2, 3, 4, 5, 6, 50].map((attempts) =>
+      connectedOutputRetryMs(reaper, { reconcileAttempts: attempts }),
+    ),
+  ).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 300_000, 300_000]);
+  expect(
+    [1, 4, 7, 8, 9, 1244].map((attempts) =>
+      connectedOutputRetryMs(reaper, { reconcileAttempts: attempts }, 60 * 60_000),
+    ),
+  ).toEqual([30_000, 240_000, 1_920_000, 3_600_000, 3_600_000, 3_600_000]);
 });
 
 test("a retired compute sandbox's output obligation settles once, with no request", async () => {

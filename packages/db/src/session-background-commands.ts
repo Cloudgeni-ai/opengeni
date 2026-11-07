@@ -323,7 +323,35 @@ export async function recordConnectedCommandOutputRelease(
 
 /** Publish success is only a retry milestone. Stop retrying only after an exact
  * native absence observation, or record pre-capture loss explicitly as missing
- * output. Neither outcome is a model-completion acknowledgement. */
+ * output. Neither outcome is a model-completion acknowledgement.
+ *
+ * A retry may carry `uncapturedOutputExpiresAfterMs`: output that was never
+ * captured, from a command that settled exited at least that long ago, is
+ * then recorded unavailable in the same update instead of being retried
+ * again. Its runner keeps a completed operation's output only for a bounded
+ * time, so such an obligation can no longer be met and would otherwise be
+ * swept forever. Returns the recorded outcome, or null when this claim no
+ * longer owns the row. */
+export async function settleConnectedCommandOutputRetry(
+  db: Database,
+  input: {
+    claim: ConnectedCommandOutputClaim;
+    retryAfterMs: number;
+    uncapturedOutputExpiresAfterMs?: number;
+  },
+): Promise<"retry" | "unavailable" | null> {
+  const expiresAfterMs = input.uncapturedOutputExpiresAfterMs;
+  if (expiresAfterMs !== undefined && (!Number.isSafeInteger(expiresAfterMs) || expiresAfterMs < 0))
+    throw new Error("Connected command output expiry is invalid");
+  const outcome = await settleConnectedCommandOutputClaim(db, {
+    claim: input.claim,
+    outcome: "retry",
+    retryAfterMs: input.retryAfterMs,
+    ...(expiresAfterMs !== undefined ? { uncapturedOutputExpiresAfterMs: expiresAfterMs } : {}),
+  });
+  return outcome === null ? null : outcome === "unavailable" ? "unavailable" : "retry";
+}
+
 export async function settleConnectedCommandOutputReleaseClaim(
   db: Database,
   input: {
@@ -332,6 +360,18 @@ export async function settleConnectedCommandOutputReleaseClaim(
     retryAfterMs: number;
   },
 ): Promise<boolean> {
+  return (await settleConnectedCommandOutputClaim(db, input)) !== null;
+}
+
+async function settleConnectedCommandOutputClaim(
+  db: Database,
+  input: {
+    claim: ConnectedCommandOutputClaim;
+    outcome: "published" | "not_retained" | "unavailable" | "retry";
+    retryAfterMs: number;
+    uncapturedOutputExpiresAfterMs?: number;
+  },
+): Promise<"published" | "not_retained" | "unavailable" | "retry" | null> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
     throw new Error("Connected command output retry delay is invalid");
   const released = input.outcome === "not_retained";
@@ -342,21 +382,33 @@ export async function settleConnectedCommandOutputReleaseClaim(
       sessionIds: [input.claim.sessionId],
     });
     const command = schema.sessionBackgroundCommands;
+    const retryAt = new Date(Date.now() + input.retryAfterMs);
+    // Evaluated on the row being updated, against the database clock.
+    const expired =
+      input.outcome === "retry" && input.uncapturedOutputExpiresAfterMs !== undefined
+        ? sql`(${command.outputConsumedAt} is null and ${command.settledAt} is not null
+            and ${command.settledAt} <= now() - make_interval(secs => ${input.uncapturedOutputExpiresAfterMs / 1000}))`
+        : null;
     const rows = await tx
       .update(command)
       .set({
         ...(released ? { outputReleaseObservedAt: new Date() } : {}),
         ...(input.outcome === "unavailable" ? { outputUnavailableAt: new Date() } : {}),
-        reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+        ...(expired ? { outputUnavailableAt: sql`case when ${expired} then now() end` } : {}),
+        reconcileAfter: expired
+          ? sql`case when ${expired} then now() else ${retryAt.toISOString()}::timestamptz end`
+          : retryAt,
         reconcileClaimId: null,
         reconcileClaimedAt: null,
-        lastReconcileOutcome: released
-          ? "output_released"
-          : input.outcome === "published"
-            ? "output_ack_published"
-            : input.outcome === "unavailable"
-              ? "output_unavailable"
-              : "output_retry",
+        lastReconcileOutcome: expired
+          ? sql`case when ${expired} then 'output_unavailable' else 'output_retry' end`
+          : released
+            ? "output_released"
+            : input.outcome === "published"
+              ? "output_ack_published"
+              : input.outcome === "unavailable"
+                ? "output_unavailable"
+                : "output_retry",
         updatedAt: new Date(),
       })
       .where(
@@ -371,8 +423,12 @@ export async function settleConnectedCommandOutputReleaseClaim(
               : []),
         ),
       )
-      .returning({ id: command.id });
-    return rows.length === 1;
+      .returning({
+        id: command.id,
+        unavailable: sql<boolean>`${command.outputUnavailableAt} is not null`,
+      });
+    if (rows.length !== 1) return null;
+    return input.outcome === "retry" && rows[0]!.unavailable ? "unavailable" : input.outcome;
   });
 }
 

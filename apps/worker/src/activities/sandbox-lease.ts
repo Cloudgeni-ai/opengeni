@@ -113,6 +113,7 @@ import {
   connectedCommandReconciliationRetryMs,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
+  settleConnectedCommandOutputRetry,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
@@ -1654,6 +1655,7 @@ type ConnectedCommandReconciliationOutcome =
   | "settled_exited"
   | "settled_lost"
   | "output_unavailable"
+  | "output_expired"
   | "output_ack_published"
   | "output_released"
   | "output_runner_reports"
@@ -2213,14 +2215,27 @@ type ConnectedOutputReleaseLookups = {
   modes: Map<string, Promise<ConnectedRunnerReleaseMode | null>>;
 };
 
-function connectedOutputRetryMs(
-  settings: ActivityServices["settings"],
+/** A runner keeps a completed operation's output only for a bounded time
+ * (an hour by default, and a bounded number of operations), so output not
+ * captured a day after its command exited can no longer be collected: it is
+ * recorded unavailable instead of being retried forever. */
+export const CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS = 24 * 60 * 60_000;
+
+const CONNECTED_OUTPUT_RETRY_MAX_MS = 5 * 60_000;
+/** A runner that reports its own inventory collects its output itself while
+ * it talks; the database recheck only notices that it retired, so it backs
+ * off further. */
+const CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS = 60 * 60_000;
+
+export function connectedOutputRetryMs(
+  settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
   claim: { reconcileAttempts: number },
+  maxMs = CONNECTED_OUTPUT_RETRY_MAX_MS,
 ): number {
   return Math.min(
-    5 * 60_000,
+    maxMs,
     Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
-      2 ** Math.min(4, claim.reconcileAttempts - 1),
+      2 ** Math.min(16, claim.reconcileAttempts - 1),
   );
 }
 
@@ -2258,19 +2273,31 @@ export async function releaseClaimedConnectedCommandOutput(
   const mode = await modeLookup;
   if (mode !== "legacy") {
     const retired = mode === "retired";
-    const outcome = !retired ? "retry" : claim.receipt ? "not_retained" : "unavailable";
+    if (!retired) {
+      const recorded = await settleConnectedCommandOutputRetry(db, {
+        claim,
+        retryAfterMs: connectedOutputRetryMs(
+          settings,
+          claim,
+          CONNECTED_OUTPUT_INVENTORY_RECHECK_MAX_MS,
+        ),
+        uncapturedOutputExpiresAfterMs: CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+      }).catch(() => null);
+      recordConnectedCommandReconciliation(
+        observability,
+        recorded === "unavailable" ? "output_expired" : "output_runner_reports",
+      );
+      return;
+    }
+    const outcome = claim.receipt ? "not_retained" : "unavailable";
     await settleConnectedCommandOutputReleaseClaim(db, {
       claim,
       outcome,
-      retryAfterMs: retired ? 0 : connectedOutputRetryMs(settings, claim),
+      retryAfterMs: 0,
     }).catch(() => false);
     recordConnectedCommandReconciliation(
       observability,
-      outcome === "retry"
-        ? "output_runner_reports"
-        : outcome === "not_retained"
-          ? "output_released"
-          : "output_unavailable",
+      outcome === "not_retained" ? "output_released" : "output_unavailable",
     );
     return;
   }
@@ -2374,11 +2401,15 @@ export async function releaseClaimedConnectedCommandOutput(
       );
       return;
     }
-    await settleConnectedCommandOutputReleaseClaim(db, {
+    const recorded = await settleConnectedCommandOutputRetry(db, {
       claim,
-      outcome: "retry",
       retryAfterMs: connectedOutputRetryMs(settings, claim),
-    }).catch(() => false);
+      uncapturedOutputExpiresAfterMs: CONNECTED_OUTPUT_CAPTURE_EXPIRY_MS,
+    }).catch(() => null);
+    if (recorded === "unavailable") {
+      recordConnectedCommandReconciliation(observability, "output_expired");
+      return;
+    }
     observability.warn("sandbox reaper: connected-command output release deferred", {
       commandId: claim.commandId,
       error: errorMessage(error),
