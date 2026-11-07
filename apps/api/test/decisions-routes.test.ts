@@ -133,7 +133,7 @@ describe("stateless inference HTTP authority and validation", () => {
   });
   test("invalid question types, empty questions/criteria, missing input and invalid tenant labels are rejected", async () => {
     const h = harness();
-    for (const body of [
+    for (const invalidBody of [
       { questions: validDecision.questions },
       { ...validDecision, tenantLabel: "" },
       { ...validDecision, tenantLabel: "x".repeat(257) },
@@ -147,7 +147,7 @@ describe("stateless inference HTTP authority and validation", () => {
           await h.application.request(`/v1/workspaces/${WORKSPACE}/decisions`, {
             method: "POST",
             headers: { authorization: await bearer(), "content-type": "application/json" },
-            body: JSON.stringify(body),
+            body: JSON.stringify(invalidBody),
           })
         ).status,
       ).toBe(400);
