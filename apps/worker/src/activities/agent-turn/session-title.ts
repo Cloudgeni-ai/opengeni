@@ -10,7 +10,6 @@ import type {
   GenerateSessionTitleOptions,
   OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { SESSION_TITLE_INSTRUCTIONS_EXCERPT_MAX_CHARACTERS } from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -44,25 +43,6 @@ export function sessionTitlePromptFor(initialMessage: string, turnPrompt: string
   if (!opener) return turnPrompt;
   if (!latest || latest.includes(opener)) return initialMessage;
   return `${opener}\n\n${latest}`;
-}
-
-/**
- * The start of the chat's own instructions, most specific layer first
- * (session instructions, the agent revision's instructions, the agent's
- * identity, the workspace identity). The title request uses it only for its
- * language, when the person's messages have none of their own (only a link,
- * file or code). Opengeni's built-in instructions are never part of it, so a
- * chat without its own instructions gets no excerpt.
- */
-export function sessionTitleInstructionsExcerpt(
-  layers: readonly (string | null | undefined)[],
-): string | undefined {
-  for (const layer of layers) {
-    const text = layer?.replace(/\s+/gu, " ").trim();
-    if (!text) continue;
-    return Array.from(text).slice(0, SESSION_TITLE_INSTRUCTIONS_EXCERPT_MAX_CHARACTERS).join("");
-  }
-  return undefined;
 }
 
 export function shouldRequestMissingSessionTitle(input: {
@@ -237,7 +217,6 @@ export function sessionTitleGenerationOptions(input: {
   resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
   modelName: string;
   serviceTier: GenerateSessionTitleOptions["serviceTier"] | null | undefined;
-  instructionsExcerpt?: string | undefined;
   signal: AbortSignal;
 }): GenerateSessionTitleOptions {
   const { resolvedModel, serviceTier } = input;
@@ -253,7 +232,6 @@ export function sessionTitleGenerationOptions(input: {
     modelName: input.modelName,
     ...(serviceTier ? { serviceTier } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
-    ...(input.instructionsExcerpt ? { instructionsExcerpt: input.instructionsExcerpt } : {}),
     signal: input.signal,
   };
 }

@@ -25,7 +25,6 @@ import {
   routeAllowsSessionTitleRequests,
   SESSION_TITLE_MODEL_TOOL_NAME,
   sessionTitleGenerationOptions,
-  sessionTitleInstructionsExcerpt,
   sessionTitleReasoningEffort,
   sessionTitleRoute,
   sessionTitleToolPlan,
@@ -64,52 +63,6 @@ describe("sessionTitlePromptFor", () => {
       "Summarize the quarterly report",
     );
     expect(sessionTitlePromptFor("Plan the release", "  ")).toBe("Plan the release");
-  });
-});
-
-describe("sessionTitleInstructionsExcerpt", () => {
-  test("takes the most specific non-empty instruction layer, whitespace collapsed", () => {
-    expect(
-      sessionTitleInstructionsExcerpt([
-        "  \n ",
-        "Du er en assistent for elektrikere.\n\nSvar alltid på norsk.",
-        "You are a helpful assistant.",
-        null,
-      ]),
-    ).toBe("Du er en assistent for elektrikere. Svar alltid på norsk.");
-  });
-
-  test("is bounded to whole characters and absent without the chat's own instructions", () => {
-    const excerpt = sessionTitleInstructionsExcerpt([`${"æ".repeat(499)}👩🏽‍💻 rest`]);
-    expect(Array.from(excerpt!).length).toBe(500);
-    expect(excerpt).not.toContain("�");
-    expect(sessionTitleInstructionsExcerpt([null, undefined, " "])).toBeUndefined();
-  });
-
-  test("reaches the title request options only when present", () => {
-    const signal = new AbortController().signal;
-    expect(
-      sessionTitleGenerationOptions({
-        resolvedModel: null,
-        modelName: "scripted-model",
-        serviceTier: null,
-        instructionsExcerpt: "Svar alltid på norsk.",
-        signal,
-      }),
-    ).toEqual({
-      modelName: "scripted-model",
-      instructionsExcerpt: "Svar alltid på norsk.",
-      signal,
-    });
-    expect(
-      sessionTitleGenerationOptions({
-        resolvedModel: null,
-        modelName: "scripted-model",
-        serviceTier: null,
-        instructionsExcerpt: undefined,
-        signal,
-      }),
-    ).toEqual({ modelName: "scripted-model", signal });
   });
 });
 

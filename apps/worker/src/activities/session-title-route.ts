@@ -23,11 +23,6 @@ import { sessionTitleReasoningEffort, type SessionTitleRoute } from "./agent-tur
 export const SessionTitleRequest = z.object({
   version: z.literal(1),
   prompt: z.string().max(16_000),
-  /**
-   * The start of the chat's own instructions, a language sample for messages
-   * with none of their own. Requests admitted before it existed omit it.
-   */
-  instructionsExcerpt: z.string().max(4_000).optional(),
   policy: TurnExecutionPolicyV1,
   providerId: z.string(),
   modelId: z.string(),
