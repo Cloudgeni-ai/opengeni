@@ -167,6 +167,17 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 # can never mask a missing or different zig. Idempotent.
 "$TOOLS" zigbuild
 
+# The pinned rg and jq each agent embeds and appends to its commands' PATH
+# (agent/crates/opengeni-agent/build.rs). Verified against the manifest.
+SHELL_TOOLS_DIR="$STAGE_DIR/shell-tools"
+SHELL_TOOLS_MARKER='Third-party notices for the shell tools Opengeni ships'
+shell_tools_targets=()
+for target in $TARGETS; do shell_tools_targets+=(--target "$target"); done
+(
+  cd "$REPO_ROOT"
+  bun scripts/fetch-shell-tools.ts --out "$SHELL_TOOLS_DIR" "${shell_tools_targets[@]}"
+)
+
 for target in $TARGETS; do
   case "$target" in
     x86_64-unknown-linux-musl) bun_target=bun-linux-x64 ;;
@@ -214,9 +225,14 @@ for target in $TARGETS; do
     cd "$AGENT_DIR"
     OPENGENI_EMBEDDED_BROWSERD="$browserd" \
     OPENGENI_EMBEDDED_COMPUTER_NATIVE="$computer_native" \
+    OPENGENI_EMBEDDED_SHELL_TOOLS="$SHELL_TOOLS_DIR" \
       cargo zigbuild --locked --release --target "$target" -p opengeni-agent
   )
   cp "$AGENT_DIR/target/$target/release/opengeni-agent" "$STAGE_DIR/opengeni-agent-$target"
+  # The embedded notices travel only with the embedded tools.
+  if ! grep -aqF "$SHELL_TOOLS_MARKER" "$STAGE_DIR/opengeni-agent-$target"; then
+    log "the $target agent does not carry the pinned rg and jq"; exit 1
+  fi
   for component in $COMPONENTS; do
     asset="$component-$target"
     test -s "$STAGE_DIR/$asset"
