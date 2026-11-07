@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
 import {
   packBoundary,
@@ -129,6 +130,291 @@ describe("receive-pack reading", () => {
 
   test("is not a receive-pack request", () => {
     expect(parseReceivePackRequest(Buffer.from("garbage"))).toBeNull();
+  });
+
+  test("a pack cut short still gives the commits before the cut", () => {
+    writeFileSync(join(root, "large.bin"), randomBytes(256 * 1024));
+    git(["add", "large.bin"]);
+    const tree = git(["write-tree"]).toString().trim();
+    const large = git(["commit-tree", tree, "-m", "large", "-p", commits.main!]).toString().trim();
+    git(["rm", "-q", "--cached", "large.bin"]);
+    const body = pushBody(
+      [{ old: commits.main!, next: large, ref: "refs/heads/main" }],
+      [large, `^${commits.main!}`],
+    );
+    const request = parseReceivePackRequest(body)!;
+    const cut = readPackCommits(body.subarray(request.packOffset, body.byteLength - 1024))!;
+    expect(cut.commits.get(large)).toEqual([commits.main!]);
+  });
+});
+
+/**
+ * Exactly what git 2.47.3 sent for `git push -u origin test/gh-gateway-e2e`
+ * of a new branch from a `--depth 1` clone, the way managed sandboxes clone:
+ * a `shallow` line first, then the command carrying the capabilities.
+ */
+const CAPTURED_SHALLOW_NEW_BRANCH_PUSH = Buffer.from(
+  "MDAzNXNoYWxsb3cgNDZlZGIyOTkwOWFkNTUzN2YwZDY3YmMzMTY3OTMzNjNiMDdiZGJmZgowMGJlMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCBiNjY3NGRlN2RmNTE2MjIxODJhOTA4MjJiYjYwMGNhYzkwMGUzNTk2IHJlZnMvaGVhZHMvdGVzdC9naC1nYXRld2F5LWUyZQAgcmVwb3J0LXN0YXR1cy12MiBzaWRlLWJhbmQtNjRrIHF1aWV0IG9iamVjdC1mb3JtYXQ9c2hhMSBhZ2VudD1naXQvMi40Ny4zMDAwMFBBQ0sAAAACAAAAA5QKeJx9ykEOAiEMAMA7r+DuhVIoNDFmvwK0jR7WNWv9v77AOY+fqlGFjFbNiZooi2YoGQxWF9PcszHQEOsjvMapT4+FVGZmTjykVmyWhNpcCNQYkXCmNmWahfHx+3FGj1ff/BahcUkVGTBe0k9Yx74/3PVPCe/wBVJbLTKqA3icMzQwMDMxUUhkqJghqZRorfU7QZVF/9ve9q6DM/1aDSGSxQxbKiLD98zIPTwnae7LXyfvu03XYfgDAE9GF7MyeJwr5gIAAPIAfknW7Ijalv21IeNXM0bsMGV+Z7By",
+  "base64",
+);
+
+describe("pushes from a shallow clone", () => {
+  test("read the capabilities from the first command, after the shallow lines", () => {
+    const request = parseReceivePackRequest(CAPTURED_SHALLOW_NEW_BRANCH_PUSH)!;
+    expect(request.commands).toEqual([
+      {
+        oldOid: ZERO_OID,
+        newOid: "b6674de7df51622182a90822bb600cac900e3596",
+        ref: "refs/heads/test/gh-gateway-e2e",
+      },
+    ]);
+    expect(request.capabilities).toEqual([
+      "report-status-v2",
+      "side-band-64k",
+      "quiet",
+      "object-format=sha1",
+      "agent=git/2.47.3",
+    ]);
+    const pack = readPackCommits(CAPTURED_SHALLOW_NEW_BRANCH_PUSH.subarray(request.packOffset))!;
+    expect(pack.commits.get("b6674de7df51622182a90822bb600cac900e3596")).toEqual([
+      "46edb29909ad5537f0d67bc316793363b07bdbff",
+    ]);
+  });
+
+  for (const gzip of [false, true]) {
+    test(`a captured new branch goes through without asking${gzip ? " (gzip)" : ""}`, async () => {
+      const { calls, decide } = recordingDecider({ kind: "allow" });
+      const result = await inspectPersonalGitHubPush({
+        body: stream(
+          gzip ? gzipSync(CAPTURED_SHALLOW_NEW_BRANCH_PUSH) : CAPTURED_SHALLOW_NEW_BRANCH_PUSH,
+        ),
+        gzip,
+        repositoryFullName: "Cloudgeni-ai/opengeni",
+        isAncestor: async () => {
+          throw new Error("not needed");
+        },
+        identity,
+        decide,
+      });
+      expect(result).toMatchObject({ kind: "forward", requestId: null });
+      expect(calls).toEqual([]);
+    });
+  }
+});
+
+/**
+ * A smart-HTTP Git server (`git http-backend`) that records every
+ * receive-pack request body exactly as the Git client sent it.
+ */
+function recordingGitServer(projectRoot: string) {
+  const pushes: Array<{ body: Buffer; gzip: boolean }> = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url);
+      const body = Buffer.from(await request.arrayBuffer());
+      const gzip = request.headers.get("content-encoding")?.toLowerCase() === "gzip";
+      if (url.pathname.endsWith("/git-receive-pack")) pushes.push({ body, gzip });
+      const child = Bun.spawn(["git", "http-backend"], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_PROJECT_ROOT: projectRoot,
+          GIT_HTTP_EXPORT_ALL: "1",
+          PATH_INFO: url.pathname,
+          QUERY_STRING: url.searchParams.toString(),
+          REQUEST_METHOD: request.method,
+          CONTENT_TYPE: request.headers.get("content-type") ?? "",
+          CONTENT_LENGTH: String(body.byteLength),
+          HTTP_CONTENT_ENCODING: gzip ? "gzip" : "",
+          HTTP_GIT_PROTOCOL: request.headers.get("git-protocol") ?? "",
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      child.stdin.write(body);
+      child.stdin.end();
+      const output = Buffer.from(await new Response(child.stdout).arrayBuffer());
+      await child.exited;
+      const split = output.indexOf("\r\n\r\n");
+      const headers = new Headers();
+      let status = 200;
+      for (const line of output.subarray(0, split).toString("latin1").split("\r\n")) {
+        const colon = line.indexOf(":");
+        if (colon < 1) continue;
+        const name = line.slice(0, colon).trim();
+        const value = line.slice(colon + 1).trim();
+        if (name.toLowerCase() === "status") status = Number.parseInt(value, 10);
+        else headers.append(name, value);
+      }
+      return new Response(output.subarray(split + 4), { status, headers });
+    },
+  });
+  return { server, pushes };
+}
+
+describe("pushes a real Git client sends from a shallow clone", () => {
+  let workRoot = "";
+  let server: ReturnType<typeof Bun.serve> | null = null;
+  const captured: Record<string, { body: Buffer; gzip: boolean }> = {};
+  let provider = "";
+  const branchTips: Record<string, string> = {};
+
+  beforeAll(async () => {
+    workRoot = mkdtempSync(join(tmpdir(), "opengeni-push-capture-"));
+    const projectRoot = join(workRoot, "provider");
+    provider = join(projectRoot, "acme", "widgets.git");
+    mkdirSync(provider, { recursive: true });
+    const environment = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t",
+    };
+    // Asynchronous: the recording server runs in this process.
+    const run = async (cwd: string, args: string[]) => {
+      const child = Bun.spawn(["git", ...args], {
+        cwd,
+        env: environment,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      if (exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+      return stdout.trim();
+    };
+    await run(provider, ["init", "-q", "--bare", "--initial-branch=main"]);
+    await run(provider, ["config", "http.receivepack", "true"]);
+    // Some history, so the clone below is genuinely shallow.
+    const seed = join(workRoot, "seed");
+    await run(workRoot, ["init", "-q", "--initial-branch=main", seed]);
+    for (const text of ["one", "two", "three"]) {
+      writeFileSync(join(seed, "file.txt"), `${text}\n`);
+      await run(seed, ["add", "file.txt"]);
+      await run(seed, ["commit", "-q", "-m", text]);
+    }
+    await run(seed, ["push", "-q", provider, "main"]);
+    const recording = recordingGitServer(projectRoot);
+    server = recording.server;
+    const remote = `http://127.0.0.1:${server.port}/acme/widgets.git`;
+    const client = join(workRoot, "client");
+    await run(workRoot, ["clone", "-q", "--depth", "1", remote, client]);
+    expect(await run(client, ["rev-parse", "--is-shallow-repository"])).toBe("true");
+    const push = async (name: string, args: string[]) => {
+      const before = recording.pushes.length;
+      await run(client, ["push", "-q", "origin", ...args]);
+      expect(recording.pushes.length).toBe(before + 1);
+      captured[name] = recording.pushes[before]!;
+    };
+    const commitText = async (text: string) => {
+      writeFileSync(join(client, "file.txt"), `${text}\n`);
+      await run(client, ["add", "file.txt"]);
+      await run(client, ["commit", "-q", "-m", text]);
+      return await run(client, ["rev-parse", "HEAD"]);
+    };
+    await run(client, ["checkout", "-q", "-b", "topic"]);
+    branchTips.topic = await commitText("topic");
+    await push("newBranch", ["-u", "topic"]);
+    await run(client, ["checkout", "-q", "main"]);
+    branchTips.main = await commitText("four");
+    await push("fastForward", ["main"]);
+    await run(client, ["checkout", "-q", "topic"]);
+    await run(client, ["commit", "-q", "--amend", "-m", "topic rewritten"]);
+    await push("forcePush", ["--force", "topic"]);
+    await push("deletion", [":topic"]);
+  }, 60_000);
+
+  afterAll(() => {
+    server?.stop(true);
+    if (workRoot) rmSync(workRoot, { recursive: true, force: true });
+  });
+
+  /** The provider repository answers ancestry, as GitHub's compare does. */
+  const isAncestor = async (base: string, head: string) => {
+    try {
+      execFileSync("git", ["-C", provider, "merge-base", "--is-ancestor", base, head], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const inspectCaptured = async (name: string, gzip: boolean, decide: GatewayDecider) => {
+    const sent = captured[name]!;
+    const plain = sent.gzip ? gunzipSync(sent.body) : sent.body;
+    expect(plain.subarray(4, 12).toString("latin1")).toBe("shallow ");
+    return await inspectPersonalGitHubPush({
+      body: stream(gzip ? gzipSync(plain) : plain),
+      gzip,
+      repositoryFullName: "acme/widgets",
+      isAncestor,
+      identity,
+      decide,
+    });
+  };
+
+  for (const gzip of [false, true]) {
+    const label = gzip ? " (gzip)" : "";
+
+    test(`a new branch and a fast-forward go through without asking${label}`, async () => {
+      const { calls, decide } = recordingDecider({ kind: "allow" });
+      expect(await inspectCaptured("newBranch", gzip, decide)).toMatchObject({
+        kind: "forward",
+        requestId: null,
+      });
+      expect(await inspectCaptured("fastForward", gzip, decide)).toMatchObject({
+        kind: "forward",
+        requestId: null,
+      });
+      expect(calls).toEqual([]);
+    });
+
+    test(`a force push and a deletion still ask${label}`, async () => {
+      const { calls, decide } = recordingDecider({
+        kind: "refuse",
+        status: 403,
+        waiting: true,
+        message: "Waiting for approval.",
+      });
+      const forced = await inspectCaptured("forcePush", gzip, decide);
+      const deleted = await inspectCaptured("deletion", gzip, decide);
+      expect(calls.map((call) => call.title)).toEqual([
+        "Force-push topic on acme/widgets",
+        "Delete topic on acme/widgets",
+      ]);
+      expect(calls.every((call) => call.action.alwaysAsk)).toBe(true);
+      for (const result of [forced, deleted]) {
+        expect(result.kind).toBe("respond");
+        if (result.kind !== "respond") continue;
+        const text = Buffer.from(await result.response.arrayBuffer()).toString("latin1");
+        expect(text).toContain("ng refs/heads/topic waiting for approval");
+      }
+    });
+  }
+
+  test("the captured commands are the pushes that were made", () => {
+    const commandsOf = (name: string) => {
+      const sent = captured[name]!;
+      return parseReceivePackRequest(sent.gzip ? gunzipSync(sent.body) : sent.body)!.commands;
+    };
+    expect(commandsOf("newBranch")).toEqual([
+      { oldOid: ZERO_OID, newOid: branchTips.topic!, ref: "refs/heads/topic" },
+    ]);
+    expect(commandsOf("fastForward")[0]!.newOid).toBe(branchTips.main!);
+    expect(commandsOf("deletion")[0]!.newOid).toBe(ZERO_OID);
   });
 });
 

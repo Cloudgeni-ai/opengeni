@@ -37,12 +37,19 @@ function readPktLine(
   return { payload: body.subarray(offset + 4, offset + length), next: offset + length };
 }
 
-/** Parse the command list at the start of a receive-pack request. Null when it is not one. */
+/**
+ * Parse the command list at the start of a receive-pack request. Null when it
+ * is not one.
+ *
+ * Read as Git's own receive-pack reads it: a push from a shallow clone (the
+ * way managed sandboxes clone) lists its `shallow <oid>` lines first, so the
+ * capabilities, after a NUL, are on the first command line rather than the
+ * first line.
+ */
 export function parseReceivePackRequest(body: Uint8Array): ReceivePackRequest | null {
   const commands: ReceivePackCommand[] = [];
-  let capabilities: string[] = [];
+  const capabilities: string[] = [];
   let offset = 0;
-  let first = true;
   for (;;) {
     const line = readPktLine(body, offset);
     if (!line) return null;
@@ -50,18 +57,16 @@ export function parseReceivePackRequest(body: Uint8Array): ReceivePackRequest | 
     if (line.payload === null) break;
     let text = Buffer.from(line.payload).toString("utf8");
     if (text.endsWith("\n")) text = text.slice(0, -1);
-    if (first) {
-      const nul = text.indexOf("\0");
-      if (nul >= 0) {
-        capabilities = text
-          .slice(nul + 1)
-          .split(" ")
-          .filter((value) => value.length > 0);
-        text = text.slice(0, nul);
-      }
-      first = false;
-    }
     if (text.startsWith("shallow ")) continue;
+    const nul = text.indexOf("\0");
+    if (nul >= 0) {
+      for (const capability of text.slice(nul + 1).split(" ")) {
+        if (capability.length > 0 && !capabilities.includes(capability)) {
+          capabilities.push(capability);
+        }
+      }
+      text = text.slice(0, nul);
+    }
     if (text === "push-cert") return null;
     const [oldOid, newOid, ref, ...extra] = text.split(" ");
     if (!oldOid || !newOid || !ref || extra.length > 0) return null;
@@ -128,8 +133,10 @@ export function receivePackRejection(
 /**
  * Commit objects in a pack and their parents. Deltified commits are
  * resolved when their base is in the pack; a commit whose base is not (a
- * thin pack) is reported in `unresolvedDeltas`. Null when the data is not a
- * readable version 2 or 3 pack.
+ * thin pack) is reported in `unresolvedDeltas`. A pack cut short (a push past
+ * the inspection limit) gives the commits before the cut; Git writes commits
+ * first. Every commit is identified by hashing its content, so a partial read
+ * only ends the walk early. Null when the data is not a version 2 or 3 pack.
  */
 export function readPackCommits(
   pack: Uint8Array,
@@ -149,8 +156,8 @@ export function readPackCommits(
   const entries: Entry[] = [];
   const byOffset = new Map<number, Entry>();
   let cursor = 12;
-  try {
-    for (let index = 0; index < count; index += 1) {
+  for (let index = 0; index < count; index += 1) {
+    try {
       const start = cursor;
       let byte = data[cursor++]!;
       const type = (byte >> 4) & 7;
@@ -168,7 +175,7 @@ export function readPackCommits(
         entry.baseOid = data.toString("hex", cursor, cursor + 20);
         cursor += 20;
       }
-      if (cursor > data.length) return null;
+      if (cursor > data.length) break;
       entry.dataOffset = cursor;
       const inflated = inflateSync(data.subarray(cursor), { info: true }) as unknown as {
         engine: { bytesWritten: number };
@@ -176,9 +183,9 @@ export function readPackCommits(
       cursor += inflated.engine.bytesWritten;
       entries.push(entry);
       byOffset.set(start, entry);
+    } catch {
+      break;
     }
-  } catch {
-    return null;
   }
 
   const inflate = (entry: Entry): Buffer => inflateSync(data.subarray(entry.dataOffset));
