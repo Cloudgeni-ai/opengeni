@@ -20,7 +20,6 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Automations on the phone: the workspace's list with each one's newest run,
@@ -42,7 +41,7 @@ export interface AutomationList {
   sources: EventSource[];
 }
 
-type AutomationsClient = Pick<
+export type AutomationsClient = Pick<
   OpenGeniClient,
   "listScheduledTasks" | "listScheduledTaskRuns" | "listEventSources"
 >;
@@ -114,6 +113,11 @@ export function cachedAutomationList(workspaceId: string): AutomationList | unde
   return lists.get(workspaceId);
 }
 
+/** Keep a freshly read list. */
+export function keepAutomationList(workspaceId: string, list: AutomationList): void {
+  lists.set(workspaceId, list);
+}
+
 /** Put one changed automation into the kept list (after a switch, Run now or edit elsewhere). */
 export function rememberAutomation(workspaceId: string, task: ScheduledTask): void {
   const list = lists.get(workspaceId);
@@ -132,45 +136,6 @@ export function forgetAutomation(workspaceId: string, taskId: string): void {
     ...list,
     entries: list.entries.filter((entry) => entry.task.id !== taskId),
   });
-}
-
-export interface AutomationListState {
-  list: AutomationList | undefined;
-  /** The last read failed; the kept list (if any) still shows. */
-  error: Error | null;
-  refresh(): Promise<void>;
-}
-
-/** The workspace's automations, from the kept list first, refreshed on demand. */
-export function useAutomationList(
-  client: AutomationsClient,
-  workspaceId: string,
-): AutomationListState {
-  const [list, setList] = useState<AutomationList | undefined>(() =>
-    cachedAutomationList(workspaceId),
-  );
-  const [error, setError] = useState<Error | null>(null);
-  const current = useRef(workspaceId);
-  current.current = workspaceId;
-  useEffect(() => {
-    setList(cachedAutomationList(workspaceId));
-    setError(null);
-  }, [workspaceId]);
-  const refresh = useCallback(async () => {
-    const target = workspaceId;
-    try {
-      const next = await loadAutomationList(client, target);
-      lists.set(target, next);
-      if (current.current !== target) return;
-      setList(next);
-      setError(null);
-    } catch (caught) {
-      if (current.current !== target) return;
-      setList(cachedAutomationList(target));
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-    }
-  }, [client, workspaceId]);
-  return { list, error, refresh };
 }
 
 /* ----------------------------------------------------------------------------

@@ -10,13 +10,13 @@ import {
   automationPermissions,
   automationStateWord,
   lastRunWords,
-  useAutomationList,
   type AutomationEntry,
 } from "@/automations";
 import { WorkspaceGate } from "@/meetings";
 import { SettingsList } from "@/settings-list";
 import type { SettingsRow, SettingsSection } from "@/settings-model";
 import { AppThemeProvider } from "@/theme";
+import { useAutomationList } from "@/use-automation-list";
 
 /** How often an open list re-reads, so a run that starts or finishes shows up. */
 const REFRESH_MS = 30_000;
