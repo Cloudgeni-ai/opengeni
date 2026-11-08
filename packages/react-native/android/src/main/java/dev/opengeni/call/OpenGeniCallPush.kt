@@ -53,9 +53,13 @@ object OpenGeniCallPush {
           ),
         )
       }
+      // Settled elsewhere: stop the ring. The phone that answered keeps its
+      // call; its own app ends it.
       "ended" ->
-        SystemCalls.endIncoming(
-          context.applicationContext, callId, message.text("reason") ?: "remoteEnded")
+        if (IncomingCalls.get(callId)?.state == "ringing") {
+          SystemCalls.endIncoming(
+            context.applicationContext, callId, message.text("reason") ?: "remoteEnded")
+        }
       else -> return false
     }
     return true
