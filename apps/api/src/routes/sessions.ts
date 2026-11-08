@@ -1593,20 +1593,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       relatedSessionAccessFor(c),
     );
     if (!session) throw new HTTPException(404, { message: "session not found" });
-    const [policy, toolsContext] = await readSessionResponsePair(
-      db,
-      () => loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session], true),
-      () => workspaceSessionEffectiveToolsContext(deps, workspaceId, grant.subjectId, [session]),
+    const policy = await loadEffectivePolicyContext(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      [session],
+      false,
     );
     c.header("Cache-Control", "private, no-store");
-    return c.json(
-      sessionWithEffectiveToolPolicy(
-        policy.codexPointers(session),
-        policy.workspaceServerIds,
-        policy.workspaceDefaultServerIds,
-        toolsContext,
-      ),
-    );
+    return c.json(sessionResponse(session, policy));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -7458,7 +7453,7 @@ async function loadEffectivePolicyContext(
   sessions: readonly Session[],
   compact: boolean,
 ): Promise<EffectivePolicyContext> {
-  // Resolve the compact policy and account pointers independently.
+  // Both projections read the same workspace row; hydrate it once.
   const workspaceRead = requireWorkspace(deps.db, workspaceId);
   void workspaceRead.catch(() => undefined);
   const [policy, codexPointers, toolsContext] = await Promise.all([
@@ -7472,7 +7467,13 @@ async function loadEffectivePolicyContext(
     loadCodexSessionPointerProjection(deps.db, workspaceId, sessions),
     compact
       ? undefined
-      : workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
+      : workspaceSessionEffectiveToolsContext(
+          deps,
+          workspaceId,
+          subjectId,
+          sessions,
+          workspaceRead,
+        ),
   ]);
   return { ...policy, codexPointers, toolsContext };
 }
