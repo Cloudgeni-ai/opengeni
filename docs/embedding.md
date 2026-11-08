@@ -1319,9 +1319,11 @@ fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
 `dispatcher`; it is not a bypass for destination policy.
 
 Private integration targets are denied by default. A self-hosted operator may
-explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
-trusted internal MCP/OAuth endpoints; local/test already has the narrow
-loopback escape needed by fixtures. Keep credential resolution outside the
+set `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS` to exact trusted
+hosts, optionally restricted by port; see [private destinations](workspace-integrations.md#trusted-private-network-destinations).
+The older `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` opens all
+private targets and is not needed for this list. Local/test retains its existing
+private-network escape. Keep credential resolution outside the
 pinned final transport so headers are attached only to the exact request URL
 that the broker audience-checks.
 
