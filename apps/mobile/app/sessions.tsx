@@ -227,7 +227,12 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {searching ? null : <MeetingsRow />}
+        {searching ? null : (
+          <>
+            <MeetingsRow />
+            <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
+          </>
+        )}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -377,15 +382,45 @@ function WorkspaceResultRow(props: {
 
 /* The rail's Meetings entry, saying so while a recording is running. */
 function MeetingsRow() {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
   const recorder = useMeetingRecorder();
   const live = isCapturing(recorder);
   return (
-    <Pressable
-      accessibilityRole="button"
+    <RailRow
+      icon="audio-lines"
+      label="Meetings"
       accessibilityLabel={live ? "Meetings, recording now" : "Meetings"}
       onPress={() => router.push("/meetings")}
+      accessory={live ? <RecordingNow /> : null}
+    />
+  );
+}
+
+function RecordingNow() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
+      <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
+    </View>
+  );
+}
+
+/** A workspace page above the chats (Meetings, Automations), as on the web's rail. */
+function RailRow(props: {
+  icon: "audio-lines" | "zap";
+  label: string;
+  accessibilityLabel?: string;
+  accessory?: React.ReactNode;
+  onPress: () => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel ?? props.label}
+      onPress={props.onPress}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
@@ -398,14 +433,11 @@ function MeetingsRow() {
         backgroundColor: pressed ? c.hover : "transparent",
       })}
     >
-      <Icon name="audio-lines" size={16} color={c["fg-muted"]} />
-      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>Meetings</Text>
-      {live ? (
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
-          <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
-        </View>
-      ) : null}
+      <Icon name={props.icon} size={16} color={c["fg-muted"]} />
+      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>
+        {props.label}
+      </Text>
+      {props.accessory}
       <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
@@ -425,7 +457,7 @@ function SectionHeader(props: {
         alignItems: "center",
         gap: 6,
         paddingHorizontal: 4,
-        marginBottom: 2,
+        marginBottom: 4,
       }}
     >
       <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
