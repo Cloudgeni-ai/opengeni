@@ -8,7 +8,8 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
-Session responses for chat reads, lists and mutations omit `instructions`, `skills`
+The current SDK sends `X-OpenGeni-Session-Response: chat` on every request. Session
+responses for chat reads, lists and mutations then omit `instructions`, `skills`
 and `effectiveTools`. Console/mobile chat views and embedded conversations use this
 small response. The console's Agent tool details and “create agent from chat” read
 `client.getSessionConfiguration(workspaceId, sessionId)` explicitly. SDK consumers
@@ -17,7 +18,11 @@ needing the former full payload use the same method, or
 `sessions:control` and access to the session. The packaged relay refuses that read
 and `model-context` when `createSession` makes setup server-owned. This does not
 change stored configuration, worker input or agent-facing MCP reads. Older APIs
-retain their old response until upgraded.
+retain their old response until upgraded. Requests without the header retain the
+historical full response for previously shipped clients. Custom browser relays
+must set this header themselves, not let a browser choose the legacy response.
+The packaged relay does this automatically. This is an additive rollout; a future
+default change requires a separate compatibility decision after old clients migrate.
 
 For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
 allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response

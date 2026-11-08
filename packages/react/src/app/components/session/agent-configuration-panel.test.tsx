@@ -22,6 +22,7 @@ const context = {
     getAgentLearningSettings,
     saveAgentLearningSettings: mock(async () => ({})),
     getSessionConfiguration: mock(async () => session()),
+    getSessionTenancyCreateCapabilities: mock(async () => ({ canCreatePrivate: true })),
   },
   workspaces: [
     {
@@ -50,12 +51,16 @@ const context = {
   captureWorkspaceInvocation: () => ({}),
   ownsWorkspaceInvocation: () => true,
 };
-mock.module("../../app-context", () => ({ useAppContext: () => context }));
+mock.module("../../app-context", () => ({
+  useAppContext: () => context,
+  useOptionalAppContext: () => context,
+}));
 mock.module("../../lib/navigation", () => ({ useNavigate: () => navigate }));
 mock.module("sonner", () => ({
   toast: Object.assign(() => 0, { error: () => 0, success: () => 0 }),
 }));
 const { AgentConfigurationPanel } = await import("./agent-configuration-panel");
+const { NewAgentPage } = await import("../agents/agent-form-page");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -310,6 +315,33 @@ test("Storage keeps a chat active only where the deployment archives idle chats"
     expect(storageSection()).toBeNull();
   } finally {
     context.clientConfig = clientConfig;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("create agent from chat prefills instructions from the explicit configuration read", async () => {
+  const read = context.client.getSessionConfiguration;
+  read.mockClear();
+  read.mockImplementationOnce(async () =>
+    session({ title: "Support", instructions: "Use the approved guide." }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<NewAgentPage workspaceId={workspaceId} sourceSessionId={sessionId} />),
+    );
+    await settle();
+    expect(read).toHaveBeenCalledWith(workspaceId, sessionId);
+    expect([...container.querySelectorAll("textarea")].map((element) => element.value)).toContain(
+      "Use the approved guide.",
+    );
+    expect([...container.querySelectorAll("input")].map((element) => element.value)).toContain(
+      "Support",
+    );
+  } finally {
     await act(async () => root.unmount());
     container.remove();
   }

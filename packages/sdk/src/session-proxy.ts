@@ -7,6 +7,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_BROWSER_RESPONSE_HEADERS,
+  OPENGENI_SESSION_RESPONSE_HEADER,
 } from "./types";
 import type {
   AccessGrant,
@@ -1246,6 +1247,8 @@ function isChatCompletions(route: readonly string[]): boolean {
 /** The browser's neutral request headers. */
 function forwardedHeaders(request: Request, jsonBody: boolean): Headers {
   const headers = new Headers();
+  // A browser cannot opt back into the legacy full-configuration response.
+  headers.set(OPENGENI_SESSION_RESPONSE_HEADER, "chat");
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);

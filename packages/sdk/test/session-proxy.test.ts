@@ -304,6 +304,23 @@ async function rejection(promise: Promise<unknown>): Promise<OpenGeniApiError> {
 }
 
 describe("createSessionProxyHandler", () => {
+  test("the relay enforces compact responses even when a browser requests legacy configuration", async () => {
+    const { upstream, handler } = setup();
+    for (const headers of [{}, { "x-opengeni-session-response": "full" }]) {
+      const response = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(upstream.requests).toHaveLength(2);
+    for (const request of upstream.requests) {
+      expect(request.headers.get("x-opengeni-session-response")).toBe("chat");
+    }
+  });
+
   test("old APIs keep conversation bootstrap while artifact capability fails closed", async () => {
     const upstream = upstreamServer();
     let supported = false;
@@ -491,6 +508,7 @@ describe("createSessionProxyHandler", () => {
       `${API}/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
     expect(request!.headers.get("authorization")).toBe("Bearer og_org_key");
+    expect(request!.headers.get("x-opengeni-session-response")).toBe("chat");
     expect(
       JSON.parse(decodeURIComponent(request!.headers.get("x-opengeni-external-actor")!)),
     ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });

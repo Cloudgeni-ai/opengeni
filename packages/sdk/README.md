@@ -254,7 +254,10 @@ For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
 pin rules and cursors, returning `SessionListEntry` records. Entries include
 display/rename titles, creator, lifecycle, personal state, hierarchy counts and
 the model and reasoning effort shown with a row; prompts and the rest of the
-execution configuration remain on `getSession`. Older APIs return
+execution configuration are read explicitly with `getSessionConfiguration`
+(requires `sessions:control` and session access). Current SDK clients request the
+compact session response with `X-OpenGeni-Session-Response: chat` on all requests;
+previously shipped clients without this header retain their full response. Older APIs return
 full pages that the SDK projects locally. Unknown filters/cursors still fail
 explicitly rather than returning an unfiltered result.
 

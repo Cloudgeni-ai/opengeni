@@ -160,10 +160,15 @@ async function request(
   method: string,
   path: string,
   body?: unknown,
+  compact = true,
 ): Promise<{ status: number; json: any }> {
   const response = await target.request(path, {
     method,
-    headers: { authorization: bearer, "content-type": "application/json" },
+    headers: {
+      authorization: bearer,
+      "content-type": "application/json",
+      ...(compact ? { "x-opengeni-session-response": "chat" } : {}),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
@@ -345,6 +350,71 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
+  test("previous clients retain full create, detail, list and mutation response bodies", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const base = `/v1/workspaces/${grant.workspaceId}/sessions`;
+    for (const compact of [false, true]) {
+      const created = await request(
+        target,
+        bearer,
+        "POST",
+        base,
+        {
+          initialMessage: "hello",
+          resources: [],
+          instructions: "Keep this configuration.",
+          skills: [
+            {
+              files: [
+                {
+                  path: "SKILL.md",
+                  content:
+                    "---\nname: compatibility\ndescription: Compatibility\n---\nRetained skill body.",
+                },
+              ],
+            },
+          ],
+        },
+        compact,
+      );
+      expect(created.status).toBe(202);
+      const path = `${base}/${created.json.id}`;
+      const detail = await request(target, bearer, "GET", path, undefined, compact);
+      const list = await request(target, bearer, "GET", base, undefined, compact);
+      const mutation = await request(
+        target,
+        bearer,
+        "PUT",
+        `${path}/agent`,
+        {
+          agent: { identity: "Compatible" },
+          expectedVersion: created.json.toolPolicyVersion,
+        },
+        compact,
+      );
+      expect(detail.status).toBe(200);
+      expect(list.status).toBe(200);
+      expect(mutation.status).toBe(200);
+      for (const session of [created.json, detail.json, ...list.json, mutation.json]) {
+        if (compact) {
+          for (const field of ["instructions", "skills", "effectiveTools"]) {
+            expect(Object.hasOwn(session, field)).toBe(false);
+          }
+        } else {
+          // These are unchanged prior-client expressions, not today's optional types.
+          expect(session.instructions).toBe("Keep this configuration.");
+          expect(session.skills.map((skill: { name: string }) => skill.name)).toEqual([
+            "compatibility",
+          ]);
+          expect(session.effectiveTools.tools.length).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
   test("chat reads omit large configuration; explicit configuration requires control permission", async () => {
     if (!available) return;
     const grant = await fixture();
@@ -395,15 +465,11 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(
       (await request(target, await humanBearer(stranger), "GET", `${path}/configuration`)).status,
     ).not.toBe(200);
-    // Same annotations as the chat read: reconstruct its former full wire shape.
-    const beforeBytes = Buffer.byteLength(
-      JSON.stringify({
-        ...detail.json,
-        instructions: full.instructions,
-        skills: full.skills,
-        effectiveTools: full.effectiveTools,
-      }),
-    );
+    // Measure actual prior-client and compact responses with identical annotations.
+    const legacyDetail = await request(target, reader, "GET", path, undefined, false);
+    expect(legacyDetail.status).toBe(200);
+    expect(legacyDetail.json.instructions).toBe(instructions);
+    const beforeBytes = Buffer.byteLength(JSON.stringify(legacyDetail.json));
     const afterBytes = Buffer.byteLength(JSON.stringify(detail.json));
     expect(beforeBytes - afterBytes).toBeGreaterThan(200_000);
     console.info(
@@ -827,6 +893,30 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
     expect(children.length).toBe(1);
     expect(children[0]!.agent).toMatchObject({ source: "inherited", from: "none" });
     expect(children[0]!.agent?.capabilities.knowledge).toBe(false);
+
+    for (const compact of [false, true]) {
+      for (const id of [root.id, children[0]!.id]) {
+        const lineage = await request(
+          parentTarget,
+          await humanBearer(grant),
+          "GET",
+          `/v1/workspaces/${grant.workspaceId}/sessions/${id}/lineage`,
+          undefined,
+          compact,
+        );
+        expect(lineage.status).toBe(200);
+        const sessions = [
+          ...lineage.json.ancestors,
+          ...lineage.json.children.map((node: any) => node.session),
+        ];
+        expect(sessions.length).toBeGreaterThan(0);
+        for (const session of sessions) {
+          expect(Object.hasOwn(session, "instructions")).toBe(!compact);
+          expect(Object.hasOwn(session, "skills")).toBe(!compact);
+          expect(Object.hasOwn(session, "effectiveTools")).toBe(!compact);
+        }
+      }
+    }
 
     const narrowed = await callMcpTool(server, "session_create", {
       initialMessage: "leaf work",

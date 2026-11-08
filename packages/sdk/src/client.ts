@@ -945,6 +945,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_RESPONSE_HEADER,
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
@@ -12581,6 +12582,7 @@ export class OpenGeniClient {
       ...extra,
       ...(sdkVersion ? { [OPENGENI_SDK_VERSION_HEADER]: sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      [OPENGENI_SESSION_RESPONSE_HEADER]: "chat",
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
     const headerNames = Object.keys(headers).map((key) => key.toLowerCase());

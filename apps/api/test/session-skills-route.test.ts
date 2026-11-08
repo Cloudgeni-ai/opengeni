@@ -178,7 +178,11 @@ async function putSkills(
     `/v1/workspaces/${grant.workspaceId}/sessions/${sessionId}/skills`,
     {
       method: "PUT",
-      headers: { authorization: bearer, "content-type": "application/json" },
+      headers: {
+        authorization: bearer,
+        "content-type": "application/json",
+        "x-opengeni-session-response": "chat",
+      },
       body: JSON.stringify(body),
     },
   );
