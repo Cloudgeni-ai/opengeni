@@ -23,7 +23,7 @@ import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { currentAgentCall, finishAgentCall } from "../agent-calls";
-import { personLabel, resolveMember } from "./notification-tools";
+import { personLabel, requireMember } from "./notification-tools";
 
 type JsonResult = (value: unknown) => {
   content: { type: "text"; text: string }[];
@@ -137,12 +137,7 @@ export function registerAgentCallTools(input: RegisterAgentCallToolsInput): void
       let member = false;
       let who = "The person";
       if (recipient) {
-        const found = await resolveMember(deps, grant.workspaceId, recipient);
-        if (!found) {
-          throw new Error(
-            `${recipient} is not a member of this workspace (or the name matches more than one member). Use their email.`,
-          );
-        }
+        const found = await requireMember(deps, grant.workspaceId, recipient);
         if (found.subjectId !== owner.subjectId) {
           callee = found.subjectId;
           member = true;

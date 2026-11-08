@@ -115,6 +115,28 @@ export async function resolveMember(
   return byName.length === 1 ? toMember(byName[0]!) : null;
 }
 
+/** A failed lookup must give the agent exact recipients it can retry with. */
+export async function requireMember(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  recipient: string,
+): Promise<Member> {
+  const member = await resolveMember(deps, workspaceId, recipient);
+  if (member) return member;
+  const members = await listWorkspaceMembers(deps.db, workspaceId);
+  const choices = members.map(
+    (each) =>
+      `- ${JSON.stringify(each.subjectLabel?.trim() || each.subjectId)}: recipient=${JSON.stringify(each.subjectId)}`,
+  );
+  throw new Error(
+    `${recipient} is not a member of this workspace (or the name matches more than one member). ` +
+      "Retry with the exact recipient ID of the intended member below.\n" +
+      (choices.length > 0
+        ? `Workspace members:\n${choices.join("\n")}`
+        : "No workspace members are available."),
+  );
+}
+
 /** How a person is named to other members: their member name, else their profile. */
 export async function personLabel(
   deps: ApiRouteDeps,
@@ -222,12 +244,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
             "This session works for no person, so it cannot notify other members of the workspace.",
           );
         }
-        member = await resolveMember(deps, grant.workspaceId, recipient);
-        if (!member) {
-          throw new Error(
-            `${recipient} is not a member of this workspace (or the name matches more than one member). Use their email.`,
-          );
-        }
+        member = await requireMember(deps, grant.workspaceId, recipient);
         if (member.subjectId === owner.subjectId) {
           member = null;
         } else if (
