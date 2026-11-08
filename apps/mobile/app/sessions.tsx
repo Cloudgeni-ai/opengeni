@@ -3,7 +3,9 @@ import type { Channel, Session, Workspace } from "@opengeni/sdk";
 import {
   fontStyle,
   Icon,
+  SessionAvatar,
   SessionRowList,
+  type SessionAvatarClient,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
@@ -296,7 +298,13 @@ function Sessions() {
         ) : null}
         {sections.map((section) => (
           <View key={section.key} style={{ marginTop: 16 }}>
-            <SectionHeader icon="folder" name={section.name} count={section.sessions.length} />
+            <SectionHeader
+              icon="folder"
+              name={section.name}
+              count={section.sessions.length}
+              project={projects.find((project) => project.id === section.channelId)}
+              client={client}
+            />
             <SessionRowList
               sessions={section.sessions}
               models={models}
@@ -450,9 +458,13 @@ function SectionHeader(props: {
   icon: "pin" | "folder" | "message-square";
   name: string;
   count: number;
+  /** A project shows its avatar, as in the web sidebar; the folder without one. */
+  project?: Channel | undefined;
+  client?: SessionAvatarClient | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const project = props.project;
   return (
     <View
       style={{
@@ -463,7 +475,18 @@ function SectionHeader(props: {
         marginBottom: 4,
       }}
     >
-      <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
+      {project?.avatar ? (
+        <SessionAvatar
+          avatar={project.avatar}
+          name={project.name}
+          workspaceId={project.workspaceId}
+          seed={project.id}
+          size="xs"
+          client={props.client}
+        />
+      ) : (
+        <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
+      )}
       <Text
         accessibilityRole="header"
         numberOfLines={1}
