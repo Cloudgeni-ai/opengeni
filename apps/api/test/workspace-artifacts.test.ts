@@ -1180,6 +1180,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
       if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
+      expect(JSON.parse(createdText.text).artifactReference).toBe(
+        `[Open Site](artifact:${created.artifact.id})`,
+      );
       expect(
         JSON.parse(createdText.text).warnings.map((warning: { code: string }) => warning.code),
       ).toEqual(["page_heavy"]);
@@ -1248,6 +1251,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       );
       expect(JSON.parse(sourceText.text).downloads.source).toBeNull();
       expect(JSON.parse(sourceText.text)).not.toHaveProperty("html");
+      expect(JSON.parse(sourceText.text).artifactReference).toBe(
+        `[Open Site](artifact:${created.artifact.id})`,
+      );
 
       const publishedResult = await mcp.callTool({
         name: "artifacts_publish",
@@ -1262,6 +1268,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!publishedText || publishedText.type !== "text")
         throw new Error("missing MCP publish result");
       const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
+      expect(JSON.parse(publishedText.text).artifactReference).toBe(
+        `[Open Site](artifact:${published.artifact.id})`,
+      );
       expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);

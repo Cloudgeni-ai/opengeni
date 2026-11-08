@@ -2689,7 +2689,10 @@ function registerSandboxFileArtifactTool(
       if (artifactId !== undefined) {
         if (!visibility)
           throw new Error("Pass visibility with artifactId to change who can open that file.");
-        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+        return json({
+          ...(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility })),
+          artifactReference: `[Open file](artifact:${artifactId})`,
+        });
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call
@@ -2706,15 +2709,17 @@ function registerSandboxFileArtifactTool(
             ? operationId
             : null,
       });
-      return json(
-        await publishSandboxFileArtifact(deps, {
-          grant,
-          session,
-          path: path!,
-          visibility,
-          executionMachine,
-        }),
-      );
+      const receipt = await publishSandboxFileArtifact(deps, {
+        grant,
+        session,
+        path: path!,
+        visibility,
+        executionMachine,
+      });
+      return json({
+        ...receipt,
+        artifactReference: `[Open file](artifact:${receipt.artifact.artifactId})`,
+      });
     },
   );
 }
@@ -3774,7 +3779,7 @@ function registerGoalTools(
           goal.metadata.reportDeliveriesV1 ?? [],
         ).map((delivery) => ({
           ...delivery,
-          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+          artifactReference: `[Open report](artifact:${delivery.artifactId})`,
         })),
         handoff: reply?.trim()
           ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
@@ -3934,8 +3939,10 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
-    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
+    ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
+    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+  });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
@@ -4031,6 +4038,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
+        artifactReference: `[Open Site](artifact:${artifactId})`,
       });
     },
   );
