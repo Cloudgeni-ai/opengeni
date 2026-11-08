@@ -1,10 +1,11 @@
+import type { ChatClient } from "@opengeni/sdk";
 // Keeps a parent session's view of its sub-sessions' waits current. The
 // workspace's live session-list hints (the same ones that move the orange dot
 // in the rail, batched by the server) re-read the tree when they name a
 // sub-session, and this session's agent answering or steering one re-reads it
 // once that call has run, so a card appears and clears without waiting for
 // the lineage poll.
-import type { LineageNode, SessionEvent } from "@opengeni/sdk";
+import type { ChatLineageNode as LineageNode, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EmbeddedSessionEventClientLike } from "../../client";
@@ -62,7 +63,7 @@ export function useLineagePollInterval(workspaceId: string): {
  * open item re-reads even if the tree read raced the answer.
  */
 export function useDescendantRequestsRefresh(options: {
-  client: EmbeddedSessionEventClientLike;
+  client: EmbeddedSessionEventClientLike<ChatClient>;
   workspaceId: string;
   sessionId: string;
   events: SessionEvent[];

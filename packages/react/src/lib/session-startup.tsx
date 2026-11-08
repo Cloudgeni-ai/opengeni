@@ -6,7 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 
 export const SESSION_STARTUP_GRACE_MS = 60_000;
 

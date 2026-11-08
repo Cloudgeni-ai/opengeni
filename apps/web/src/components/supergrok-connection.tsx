@@ -3,6 +3,7 @@ import {
   subscriptionAccountName,
   subscriptionPoolQueryPrefix,
 } from "./models/use-subscription-account-pool";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
 import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
@@ -52,7 +53,7 @@ export function useSuperGrokSubscriptions({
   client,
   enabled: readEnabled = true,
 }: SubscriptionScope & {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   /** False for people who can't read these accounts: nothing is read. */
   enabled?: boolean;
 }) {

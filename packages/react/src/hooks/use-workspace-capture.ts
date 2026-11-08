@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   GetWorkspaceCaptureResponse,
   SessionEvent,
@@ -84,7 +85,7 @@ function captureManifestForResponse(
   return value as WorkspaceCaptureManifest;
 }
 
-export type UseWorkspaceCaptureOptions = ClientOverride & {
+export type UseWorkspaceCaptureOptions = ClientOverride<ChatClient> & {
   /** Live event log (usually `useSessionEvents().events`) — a
    *  `workspace.revision.captured` for a NEWER revision refreshes the manifest. */
   events?: SessionEvent[] | undefined;

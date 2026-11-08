@@ -66,6 +66,19 @@ External workspace routes resolve their organization-local mapping before native
 workspace authorization. All native-workspace HTTP middleware shares the same
 route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
+HTTP session responses with `Accept: application/json; opengeni-session=chat` use
+`apps/api/src/routes/session-chat-response.ts` to omit operator instructions, skill
+bodies and the full effective-tool catalog. SDK `client.withSessionResponse("chat")` selects
+this signal and compact return types; the default remains the full SDK contract.
+The console/mobile and packaged React chat's owned clients opt in and the browser
+relay enforces it; public hooks/providers preserve the supplied client's choice.
+Clients without the preference retain the full response.
+Using `Accept` avoids a new CORS request-header requirement on older APIs. Explicit
+`GET .../sessions/:sessionId/configuration` reads retain those fields under
+session-control authority; internal runtime/MCP session projections are unchanged.
+The dependency-free `packages/contracts/src/browser-response-headers.ts` owns the
+browser response-header contract, re-exported by the SDK and shared by API CORS
+and the packaged relay. History reads warn once when required headers are unreadable.
 Bounded HTTP reads reuse successful workspace admission within the exact
 Request and database handle; each caller still checks its own permission.
 Session GETs also reuse the existing request-local authority-fact reader, not

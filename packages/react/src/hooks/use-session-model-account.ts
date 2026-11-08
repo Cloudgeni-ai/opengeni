@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useState } from "react";
 import type {
   ModelAccountPreferences,
@@ -51,7 +52,7 @@ export type ModelAccountClientLike = {
   ) => Promise<ModelAccountPreferences>;
 };
 
-export type UseSessionModelAccountOptions = ClientOverride &
+export type UseSessionModelAccountOptions = ClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     sessionId: string;
     /** Scope choices, including Automatic, to this provider. Omit for a whole-session reset. */

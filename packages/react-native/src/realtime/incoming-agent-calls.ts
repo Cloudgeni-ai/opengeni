@@ -1,4 +1,5 @@
 import type { AgentCall, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type {
   NativeCallAdapter,
@@ -24,7 +25,7 @@ export function incomingEndReason(call: Pick<AgentCall, "state">): NativeIncomin
 }
 
 export type IncomingAgentCallsOptions = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   callAdapter: NativeCallAdapter | null;
   /** Prepare local call data/transport while ringing; never claim or start voice here. */
   onRinging?(call: NativeIncomingCall): void;

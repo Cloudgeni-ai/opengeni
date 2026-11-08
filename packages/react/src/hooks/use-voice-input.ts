@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, RecordingTranscriptVersion } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import {
   OpenGeniRecordingsClient,
@@ -106,8 +107,8 @@ export type UseVoiceInputOptions = {
   automaticRetryDelayMilliseconds?: number | undefined;
 };
 
-type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
-  Partial<Pick<OpenGeniClient, "requestJson">>;
+type VoiceInputClient = Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>;
 
 /** A dictation's speech, as recorded. */
 export type VoiceInputAudio = {

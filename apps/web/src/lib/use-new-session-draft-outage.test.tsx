@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { NewSessionDraft, OpenGeniClient, SaveNewSessionDraftRequest } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useState } from "react";
@@ -19,7 +20,10 @@ registerDom();
 const WORKSPACE = "00000000-0000-4000-8000-0000000000a1";
 const FAST = { delaysMs: [5, 5], reconnectIntervalMs: 20 };
 
-type DraftClient = Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDraft" | "getFile">;
+type DraftClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "getNewSessionDraft" | "saveNewSessionDraft" | "getFile"
+>;
 
 function editable(overrides: Partial<NewSessionDraftEditable> = {}): NewSessionDraftEditable {
   return {

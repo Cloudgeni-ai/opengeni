@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { SESSION_EVENT_TYPES, type SessionEvent, type SessionTurn } from "@opengeni/sdk";
 import type { EmbeddedSessionClientLike } from "../client";
 import {
@@ -39,7 +40,7 @@ export async function resolveLatestQuestion(
     resumeSequence,
     options,
   }: {
-    client: EmbeddedSessionClientLike;
+    client: EmbeddedSessionClientLike<ChatClient>;
     workspaceId: string;
     sessionId: string;
     isCurrent: () => boolean;

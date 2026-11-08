@@ -1,4 +1,4 @@
-import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/react/session-ui";
 import { Button } from "@opengeni/react/ui/button";
 import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";

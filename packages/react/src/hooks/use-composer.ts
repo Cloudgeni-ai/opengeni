@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   type ComposerDraft,
@@ -64,7 +65,7 @@ export type InitialComposerDraft = {
  */
 export type ComposerBusySend = "queue" | "steer";
 
-export type UseComposerOptions = EmbeddedSessionClientOverride &
+export type UseComposerOptions = EmbeddedSessionClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     /**
      * Whether the viewer can buy credits or upgrade the plan. When false, a

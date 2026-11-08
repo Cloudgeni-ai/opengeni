@@ -1,9 +1,10 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { ScheduledTask } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseScheduledTasksOptions = ClientOverride & {
+export type UseScheduledTasksOptions = ClientOverride<ChatClient> & {
   limit?: number | undefined;
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;

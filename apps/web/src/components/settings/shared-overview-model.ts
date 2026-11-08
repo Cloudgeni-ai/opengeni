@@ -5,6 +5,7 @@ import {
   type VaultAvailability,
   type VaultSummary,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -34,7 +35,7 @@ import {
    -------------------------------------------------------------------------- */
 
 export type SharedOverviewClient = AvailableHereClient &
-  Pick<OpenGeniBrowserClient, "listOrganizationMachines" | "listOrganizationRigs">;
+  Pick<ChatClient<OpenGeniBrowserClient>, "listOrganizationMachines" | "listOrganizationRigs">;
 
 /** What the page lists, in the order "Couldn't load" names them. */
 export const SHARED_KINDS = ["machine", "rig", "vault", "skills", "knowledge"] as const;

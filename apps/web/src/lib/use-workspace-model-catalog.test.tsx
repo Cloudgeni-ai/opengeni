@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
@@ -10,7 +11,9 @@ import {
 import { notifyCreditBalanceChanged } from "@opengeni/react/app/lib/credit-balance-events";
 import { invalidateSharedQueries, retainSharedQueries } from "@opengeni/react/app/lib/shared-query";
 
-const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
+const context: { client: ChatClient<OpenGeniBrowserClient> } = {
+  client: {} as ChatClient<OpenGeniBrowserClient>,
+};
 
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
@@ -23,7 +26,7 @@ afterEach(() => document.body.replaceChildren());
 describe("useWorkspaceModelCatalog", () => {
   test("revisits reuse the catalog and global Models refresh invalidates it", async () => {
     const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
-    context.client = { getWorkspaceModelCatalog } as unknown as OpenGeniBrowserClient;
+    context.client = { getWorkspaceModelCatalog } as unknown as ChatClient<OpenGeniBrowserClient>;
     const release = retainSharedQueries(context.client);
     const first = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), {});
     await first.unmount();
@@ -41,7 +44,7 @@ describe("useWorkspaceModelCatalog", () => {
 
   test("settled usage and returning to the app refresh funding without reopening the picker", async () => {
     const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
-    context.client = { getWorkspaceModelCatalog } as unknown as OpenGeniBrowserClient;
+    context.client = { getWorkspaceModelCatalog } as unknown as ChatClient<OpenGeniBrowserClient>;
     const hook = await renderHook(
       ({ revision }: { revision: number }) => useWorkspaceModelCatalog("workspace-a", revision),
       { revision: 0 },
@@ -58,7 +61,7 @@ describe("useWorkspaceModelCatalog", () => {
   });
   test("confirmed credits refresh funding for an already mounted composer", async () => {
     const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
-    context.client = { getWorkspaceModelCatalog } as unknown as OpenGeniBrowserClient;
+    context.client = { getWorkspaceModelCatalog } as unknown as ChatClient<OpenGeniBrowserClient>;
     const hook = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), {});
     expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(1);
     await actRun(() => notifyCreditBalanceChanged("account-a"));
@@ -83,7 +86,7 @@ describe("useWorkspaceModelCatalog", () => {
               finish = resolve;
             }),
       ),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const hook = await renderHook(
       ({ workspaceId }: { workspaceId: string }) => useWorkspaceModelCatalog(workspaceId),
       { workspaceId: "workspace-a" },
@@ -109,7 +112,7 @@ describe("useWorkspaceModelCatalog", () => {
           return await new Promise<never>(() => undefined);
         },
       ),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const hook = await renderHook(
       ({ workspaceId }: { workspaceId: string }) => useWorkspaceModelCatalog(workspaceId),

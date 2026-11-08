@@ -1,4 +1,5 @@
 import type { BillingCheckoutStatus, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 
 /*
@@ -78,7 +79,7 @@ export function ClientPaymentPageActivity({
   children: ReactNode;
 }) {
   const readCheckout = useMemo((): PaymentPageActivity["readCheckout"] => {
-    const reader = client as Partial<Pick<OpenGeniClient, "getBillingCheckout">> | null;
+    const reader = client as Partial<Pick<ChatClient<OpenGeniClient>, "getBillingCheckout">> | null;
     if (typeof reader?.getBillingCheckout !== "function") return undefined;
     if (accountPending) {
       // Settles only when the card stops this check, which it does once the

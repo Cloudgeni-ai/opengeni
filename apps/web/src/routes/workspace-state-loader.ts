@@ -4,9 +4,10 @@ import type {
   WorkspaceInstructionPolicyHead,
   WorkspaceStateResponse,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type WorkspaceStateClient = Pick<OpenGeniClient, "getWorkspaceState">;
+type WorkspaceStateClient = Pick<ChatClient<OpenGeniClient>, "getWorkspaceState">;
 
 type WorkspaceStateLoad = {
   client: WorkspaceStateClient;
@@ -146,7 +147,7 @@ export function useWorkspaceStateInventory(
   };
 }
 
-type CompanyProfileClient = Pick<OpenGeniClient, "listCompanyProfile">;
+type CompanyProfileClient = Pick<ChatClient<OpenGeniClient>, "listCompanyProfile">;
 
 type CompanyProfileInventoryLoad = {
   client: CompanyProfileClient;

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -264,7 +265,7 @@ test("all providers share one client-scoped request and refresh invalidation", a
       reads++;
       return { pools: [pooledLimitsFixture("workspace")], checkedAt: new Date().toISOString() };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const release = retainSharedQueries(client);
   await act(async () =>
     root.render(
@@ -294,7 +295,7 @@ test("workspace loading and failure show no pool until available accounts are es
   });
   const client = {
     getWorkspaceSubscriptionUsagePools: () => pending,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () =>
     root.render(
       <ul>

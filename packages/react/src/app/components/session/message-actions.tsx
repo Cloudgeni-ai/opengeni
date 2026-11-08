@@ -1,4 +1,5 @@
 import { GitForkIcon } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { AgentMessageItem, UserMessageItem } from "../../../session";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { SessionFeedback } from "../feedback";
@@ -6,7 +7,7 @@ import { SessionFeedback } from "../feedback";
 /** Host-owned actions share the timeline's existing Copy hover/focus row. */
 export default function MessageActions(props: {
   item: AgentMessageItem | UserMessageItem;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   sessionId: string;
   mayRate: boolean;

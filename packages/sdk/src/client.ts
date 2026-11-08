@@ -719,6 +719,11 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  ChatSession,
+  ChatSessionListResponse,
+  ChatSessionLineageResponse,
+  SessionResponseMode,
+  SessionConfiguration,
   SessionStatus,
   WorkClaimSubjectType,
   SessionBackgroundCommandListResponse,
@@ -945,6 +950,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
@@ -1424,7 +1430,58 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
   };
 }
 
+type ChatSessionMethods =
+  | "createSession"
+  | "getSession"
+  | "updateSession"
+  | "updateSessionToolPolicy"
+  | "updateSessionAgent"
+  | "updateSessionSkills"
+  | "removeSessionResources"
+  | "listSessions"
+  | "listSessionPage"
+  | "updateSessionPin"
+  | "updateSessionAttention"
+  | "updateSessionArchive"
+  | "updateSessionRetention"
+  | "updateSessionUnattended"
+  | "getSessionLineage"
+  | "updateSessionChannel";
+type ClientCloneMethods = "withHeaders" | "asUser" | "asService";
+type ChatResult<Result> =
+  Result extends Promise<infer Value>
+    ? Promise<
+        Value extends Session
+          ? Omit<Value, "instructions" | "skills" | "effectiveTools"> &
+              Partial<Pick<Value, "instructions" | "skills" | "effectiveTools">>
+          : Value extends Session[]
+            ? ChatSession[]
+            : Value extends SessionListResponse
+              ? ChatSessionListResponse
+              : Value extends SessionLineageResponse
+                ? ChatSessionLineageResponse
+                : Value
+      >
+    : Result extends OpenGeniClient
+      ? ChatClient<Result>
+      : Result;
+
+/** Explicit compact session methods; every other SDK method keeps its existing signature. */
+export type ChatClient<Client extends OpenGeniClient = OpenGeniClient> = Omit<
+  Client,
+  ChatSessionMethods | ClientCloneMethods
+> & {
+  [Method in Extract<
+    keyof Client,
+    ChatSessionMethods | ClientCloneMethods
+  >]: Client[Method] extends (...args: infer Args) => infer Result
+    ? (...args: Args) => ChatResult<Result>
+    : never;
+};
+
 export class OpenGeniClient {
+  protected sessionResponse: SessionResponseMode = "full";
+  private readonly responseClients = new Map<SessionResponseMode, this>();
   get toolGatewayMode(): "target" | "catalog" {
     return this.options.toolGatewayMode ?? "target";
   }
@@ -1440,6 +1497,7 @@ export class OpenGeniClient {
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
+  private warnedMissingResponseHeaders = false;
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
   /** Dynamic typed tool facade backed by the canonical workspace gateway. */
@@ -1774,6 +1832,20 @@ export class OpenGeniClient {
     return await this.sharedRead(
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
+      options,
+    );
+  }
+
+  /** Full operator configuration. Requires sessions:control; not needed to open a chat. */
+  async getSessionConfiguration(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionConfiguration> {
+    const path = `${sessionPath(workspaceId, sessionId)}/configuration`;
+    return await this.sharedRead(
+      path,
+      (signal) => this.requestJson<SessionConfiguration>("GET", path, undefined, {}, { signal }),
       options,
     );
   }
@@ -3284,6 +3356,38 @@ export class OpenGeniClient {
       return body as SessionEventCompactResult;
     }
     const events = body as SessionEvent[];
+    const requiredHeaders = [
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Page-Max-Bytes",
+      "X-OpenGeni-Page-Truncated",
+      "X-OpenGeni-Event-Mode",
+      "X-OpenGeni-Event-Direction",
+      "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Forensic-Exact",
+      ...(events.length ? ["X-OpenGeni-Covered-First", "X-OpenGeni-Covered-Last"] : []),
+      ...(listOptions?.presentedToolCalls === "include" && !options.latest
+        ? [SESSION_EVENT_CONVERSATION_FILTER_HEADER]
+        : []),
+      ...(response.headers.get("X-OpenGeni-Has-More") === "true"
+        ? [
+            response.headers.get("X-OpenGeni-Event-Direction") === "after"
+              ? "X-OpenGeni-Next-After"
+              : "X-OpenGeni-Next-Before",
+          ]
+        : []),
+    ];
+    const missingHeaders = requiredHeaders.filter((name) => response.headers.get(name) === null);
+    if (missingHeaders.length && !this.warnedMissingResponseHeaders) {
+      this.warnedMissingResponseHeaders = true;
+      console.warn(
+        "[Opengeni] History response headers are missing or unreadable: " +
+          missingHeaders.join(", ") +
+          ". History paging and conversation filtering may be degraded. " +
+          "For a relay, preserve OPENGENI_BROWSER_RESPONSE_HEADERS from @opengeni/sdk " +
+          "and include them in Access-Control-Expose-Headers. Older APIs may not provide them.",
+      );
+    }
     const integerHeader = (name: string): number | null => {
       const raw = response.headers.get(name);
       if (raw === null) return null;
@@ -12515,6 +12619,20 @@ export class OpenGeniClient {
     }
     client.serviceInitiatorHeader = this.serviceInitiatorHeader;
     client.serviceContextHeader = this.serviceContextHeader;
+    client.sessionResponse = this.sessionResponse;
+    return client;
+  }
+
+  /** Opt another client into compact session reads without changing existing readers. */
+  withSessionResponse(mode: "chat"): ChatClient<this>;
+  withSessionResponse(mode: "full"): this;
+  withSessionResponse(mode: SessionResponseMode): this | ChatClient<this> {
+    if (this.sessionResponse === mode) return this;
+    const existing = this.responseClients.get(mode);
+    if (existing) return existing;
+    const client = this.withHeaders({});
+    client.sessionResponse = mode;
+    this.responseClients.set(mode, client);
     return client;
   }
 
@@ -13159,7 +13277,8 @@ export class OpenGeniClient {
           method,
           headers: {
             ...headers,
-            Accept: "application/json",
+            Accept:
+              this.sessionResponse === "chat" ? OPENGENI_SESSION_CHAT_ACCEPT : "application/json",
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

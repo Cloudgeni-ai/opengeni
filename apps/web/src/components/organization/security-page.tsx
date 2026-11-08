@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
@@ -211,7 +212,7 @@ const RESIDENCY_DESCRIPTION = "Models and features run only in the EU. Others ar
 
 type ResidencyRowProps = {
   client: Pick<
-    OpenGeniBrowserClient,
+    ChatClient<OpenGeniBrowserClient>,
     "getOrganizationInferenceResidency" | "updateOrganizationInferenceResidency"
   >;
   identity: OrganizationAdminIdentity;
@@ -426,7 +427,7 @@ export function PrivateChatsRow({
   identity,
   onAccessChanged,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
   /** Reloads which workspaces the person can see after Personal workspaces change. */
   onAccessChanged?: () => void;
@@ -648,7 +649,7 @@ function AgentAdminAccessRow({
   client,
   identity,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "agent-admin-access");
@@ -785,7 +786,7 @@ export function OwnMachinesRow({
   client,
   identity,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "own-machines");
@@ -887,7 +888,7 @@ function RetentionRow({
   identity,
   canEdit,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
   canEdit: boolean;
 }) {

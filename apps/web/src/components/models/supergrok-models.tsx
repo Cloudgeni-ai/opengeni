@@ -1,4 +1,5 @@
 import { SubscriptionAccountPoolRows, subscriptionListedCount } from "./subscription-account-rows";
+import type { ChatClient } from "@opengeni/sdk";
 import { SubscriptionAccountPage } from "./subscription-account-detail";
 import type { SuperGrokAccount } from "@opengeni/sdk";
 import {
@@ -231,7 +232,7 @@ export function SuperGrokAccountPage({
   grok: SuperGrokSubscriptions;
   accountId: string;
   places: SuperGrokPlaces;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
 }) {
   return (
     <SubscriptionAccountPage
@@ -272,7 +273,7 @@ export function SuperGrokAccessPage({
 }: {
   grok: SuperGrokSubscriptions;
   accountId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationName?: string | undefined;
   onClose: () => void;
 }) {

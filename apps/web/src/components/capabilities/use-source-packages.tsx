@@ -8,6 +8,7 @@
  * looks lives here.
  */
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -91,7 +92,7 @@ export function useSourcePackages({
   restoreFocusFallbackRef,
   onManageSkills,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   /** Skill authority: install, update and remove imported Skills (documents:manage). */

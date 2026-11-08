@@ -45,6 +45,22 @@ function chat(unattended: boolean) {
 
 class PreviewClient extends MockOpenGeniClient {
   unattended = params.get("unattended") !== "off";
+  configurationFailed = false;
+  async getSessionConfiguration() {
+    if (params.get("configuration") === "error" && !this.configurationFailed) {
+      this.configurationFailed = true;
+      throw new Error("Fixture configuration read failure");
+    }
+    return {
+      ...(chat(this.unattended) as object),
+      instructions: "",
+      skills: [],
+      effectiveTools: {
+        tools: [{ name: "web_search", capability: "webSearch", visibility: "upfront" }],
+        mcpServers: [],
+      },
+    } as never;
+  }
   async getAgentLearningSettings(_workspaceId: string, scope: string) {
     return {
       ownerKey: scope,

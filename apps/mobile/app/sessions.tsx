@@ -1,5 +1,5 @@
 import { groupSessionsByProject } from "@opengeni/react/session-list-model";
-import type { Channel, Session, Workspace } from "@opengeni/sdk";
+import type { Channel, ChatSession as Session, Workspace } from "@opengeni/sdk";
 import {
   fontStyle,
   Icon,

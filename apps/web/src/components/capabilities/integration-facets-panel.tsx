@@ -10,6 +10,7 @@ import {
   SlidersHorizontalIcon,
   Trash2Icon,
 } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
@@ -92,7 +93,7 @@ export function IntegrationFacetsPanel({
   canManage,
   refreshRevision,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;

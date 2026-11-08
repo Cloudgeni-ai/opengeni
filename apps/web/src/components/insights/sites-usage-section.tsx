@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { InsightsSiteUsageQuery } from "@opengeni/contracts/insights-usage";
 
 import { Section } from "@opengeni/react/ui/section";
@@ -16,7 +17,10 @@ export function SitesUsageSection({
   workspaceId,
   range,
 }: {
-  client: Pick<OpenGeniBrowserClient, "getWorkspaceInsightsSiteUsage" | "getSitePlatformUsage">;
+  client: Pick<
+    ChatClient<OpenGeniBrowserClient>,
+    "getWorkspaceInsightsSiteUsage" | "getSitePlatformUsage"
+  >;
   workspaceId: string;
   /** `null` for a custom range, which model costs by Site can't follow. */
   range: InsightsSiteUsageQuery["range"] | null;

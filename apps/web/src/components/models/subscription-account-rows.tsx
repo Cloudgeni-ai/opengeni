@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRowSkeleton } from "@opengeni/react/ui/list-row";
@@ -19,7 +20,7 @@ export type SubscriptionRowsPool<T extends Account> = {
   loadError: string | null;
   unavailable: boolean;
   inherited: boolean;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string | undefined;
   refresh: () => Promise<void>;
   pending?: unknown;

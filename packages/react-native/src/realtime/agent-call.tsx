@@ -1,4 +1,5 @@
 import { useSession, useSessionEvents, useTurnQueue } from "@opengeni/react/session";
+import type { ChatClient } from "@opengeni/sdk";
 import { useRealtimeModelSelection } from "@opengeni/react/session-realtime";
 import { OpenGeniApiError, type EffectiveSessionControl, type OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -73,7 +74,7 @@ export type NativeAgentCallContextValue = {
 };
 
 export type NativeOutsideCallContext = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   /** The session the request named (Phone recents), or null (Siri, a control, a shortcut). */
   requested: string | null;
@@ -84,7 +85,7 @@ export type NativeOutsideCallContext = {
 };
 
 export type NativeAgentCallProviderProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   /** No calls start until the host has a workspace. */
   workspaceId: string | null;
   /** Whether the user's workspace can use Codex voice models. */

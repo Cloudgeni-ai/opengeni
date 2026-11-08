@@ -2,6 +2,7 @@
 // (30 s, faster while the page is open, and on focus) keeps both in step;
 // any action refreshes immediately.
 import { accessContextHasInbox } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BillingCreditNotification,
   InboxItem,
@@ -21,8 +22,8 @@ type InboxState = {
   loading: boolean;
 };
 
-type InboxClient = Pick<OpenGeniClient, "listInbox"> &
-  Partial<Pick<OpenGeniClient, "markBillingCreditNotificationRead">>;
+type InboxClient = Pick<ChatClient<OpenGeniClient>, "listInbox"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "markBillingCreditNotificationRead">>;
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, test } from "bun:test";
 import { useMemo } from "react";
 import type { WorkspaceSessionListEvent } from "@opengeni/sdk";
@@ -19,7 +20,7 @@ const hint = (
   ...(siteSessionIds ? { siteSessionIds } : {}),
 });
 
-const context: OpenGeniContextValue = {
+const context: OpenGeniContextValue<ChatClient> = {
   client: fakeClient({}),
   workspaceId: WORKSPACE_ID,
   workspaceControlEvent: null,

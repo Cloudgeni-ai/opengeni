@@ -4,6 +4,7 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -308,7 +309,7 @@ export function BrowserAccountsSignedOutPanel(props: {
 }
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    "Draft changed" (409 DRAFT_CHANGED) on a composer draft save.
 
@@ -238,7 +239,7 @@ async function mountFollowing(server: ReturnType<typeof draftServer>) {
     return null;
   }
   function Harness({ event }: { event: WorkspaceDraftsChangedEvent | null }) {
-    const value = useMemo<OpenGeniContextValue>(
+    const value = useMemo<OpenGeniContextValue<ChatClient>>(
       () => ({
         client: server.client,
         workspaceId: WORKSPACE_ID,

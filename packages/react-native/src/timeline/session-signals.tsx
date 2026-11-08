@@ -1,4 +1,8 @@
-import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  ChatLineageNode as LineageNode,
+  SessionBackgroundCommand,
+} from "@opengeni/sdk";
 import type { UseGoalResult } from "@opengeni/react/session";
 import {
   sessionAgentAttention,

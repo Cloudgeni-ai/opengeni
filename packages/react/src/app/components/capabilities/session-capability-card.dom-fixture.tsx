@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "../../../timeline";
-import type { Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
+import type { ChatSession as Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 
 const catalogItem = CapabilityCatalogItem.parse({
   id: "example",

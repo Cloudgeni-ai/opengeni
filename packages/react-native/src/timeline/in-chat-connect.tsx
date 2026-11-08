@@ -1,4 +1,5 @@
 import { useOpenGeniText } from "@opengeni/react/messages";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   authNeededPresentation,
   canFinishPreparedMcpSetup,
@@ -152,7 +153,7 @@ export function useNativeInChatConnect({
   items,
   options,
 }: {
-  client: OpenGeniClient | undefined;
+  client: ChatClient<OpenGeniClient> | undefined;
   workspaceId: string;
   sessionId: string;
   items: readonly TimelineItem[];
@@ -968,7 +969,7 @@ function ScopedConnectSetup({
 /* -------------------------------------------------- reviewed integration -- */
 
 type CardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
@@ -1294,7 +1295,7 @@ export function NativePreparedMcpSetupCard({
   canConfigure,
   options,
 }: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   item: AuthNeededItem;
@@ -1361,7 +1362,7 @@ function PreparedSetup({
   options,
 }: {
   controller: ConnectController;
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   onRestart: (previousId: string) => void;
