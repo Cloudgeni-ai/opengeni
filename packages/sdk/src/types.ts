@@ -5911,8 +5911,8 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
 
-/** Current clients request the chat projection; older clients retain the full response. */
-export const OPENGENI_SESSION_RESPONSE_HEADER = "x-opengeni-session-response" as const;
+/** JSON content negotiation for the chat projection, using the existing CORS-safe Accept header. */
+export const OPENGENI_SESSION_CHAT_ACCEPT = "application/json; opengeni-session=chat" as const;
 
 /**
  * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
@@ -5934,7 +5934,6 @@ export const OPENGENI_BROWSER_REQUEST_HEADERS = [
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_CORRELATION_HEADER,
   OPENGENI_SDK_VERSION_HEADER,
-  OPENGENI_SESSION_RESPONSE_HEADER,
   "x-opengeni-session-csrf",
   // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
   "x-opengeni-session-id",

@@ -9,6 +9,7 @@ import {
 let browser: Browser;
 let api: ReturnType<typeof Bun.serve>;
 let web: ReturnType<typeof Bun.serve>;
+let legacyAccept: string | null = null;
 
 beforeAll(async () => {
   const bundle = await Bun.build({
@@ -21,12 +22,29 @@ beforeAll(async () => {
     port: 0,
     hostname: "127.0.0.1",
     fetch(request) {
+      const legacy = new URL(request.url).pathname.startsWith("/legacy/");
       const headers = new Headers({
         "Access-Control-Allow-Origin": web.url.origin,
-        "Access-Control-Allow-Headers": OPENGENI_BROWSER_REQUEST_HEADERS.join(", "),
+        // The historical API allowlist: a new SDK must not require a new header
+        // before it can even receive the older API's full session response.
+        "Access-Control-Allow-Headers": legacy
+          ? "Accept, Authorization, Content-Type, X-OpenGeni-Api-Contract, X-OpenGeni-Sdk-Version, X-OpenGeni-Correlation-Id"
+          : OPENGENI_BROWSER_REQUEST_HEADERS.join(", "),
         "Access-Control-Allow-Methods": "GET, OPTIONS",
       });
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
+      if (legacy) {
+        legacyAccept = request.headers.get("accept");
+        return Response.json(
+          {
+            id: "session",
+            instructions: "legacy instructions",
+            skills: [{ name: "legacy" }],
+            effectiveTools: { tools: [] },
+          },
+          { headers },
+        );
+      }
       if (!new URL(request.url).pathname.startsWith("/hidden/")) {
         headers.set("Access-Control-Expose-Headers", OPENGENI_BROWSER_RESPONSE_HEADERS.join(", "));
       }
@@ -59,6 +77,7 @@ beforeAll(async () => {
       return new Response(
         `<!doctype html><html><body><script type="module">
       import { OpenGeniBrowserClient } from '/sdk.js';
+      window.readLegacy = async () => new OpenGeniBrowserClient({ baseUrl: ${JSON.stringify(api.url.origin)} + '/legacy' }).getSession('workspace', 'session');
       window.runCase = async (mode) => {
         const client = new OpenGeniBrowserClient({ baseUrl: ${JSON.stringify(api.url.origin)} + '/' + mode });
         const options = { before: 100, presentedToolCalls: 'include' };
@@ -83,6 +102,19 @@ afterAll(async () => {
   await browser?.close();
   api?.stop(true);
   web?.stop(true);
+});
+
+test("new browser SDK reads an older API through its unchanged CORS allowlist", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.goto(web.url.origin, { waitUntil: "networkidle" });
+    const session = await page.evaluate(() => (window as any).readLegacy());
+    expect(session.instructions).toBe("legacy instructions");
+    expect(session.skills.map((skill: { name: string }) => skill.name)).toEqual(["legacy"]);
+    expect(legacyAccept).toBe("application/json; opengeni-session=chat");
+  } finally {
+    await page.close();
+  }
 });
 
 test("real browser CORS filtering warns once; the exported exposure list restores paging", async () => {

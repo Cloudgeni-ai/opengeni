@@ -934,7 +934,6 @@ export function createAppComposition(
       // browser sign-in returns.
       "X-OpenGeni-Desktop-App",
       "X-OpenGeni-Session-Csrf",
-      "X-OpenGeni-Session-Response",
       // Session scope for a session proxy; the API itself ignores it.
       "X-OpenGeni-Session-Id",
       // Set by Site bridges on every bridged request (Site Data frame clamp).

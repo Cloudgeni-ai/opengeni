@@ -7418,8 +7418,10 @@ function commandConflictResponse(c: Context, error: unknown): Response {
 }
 
 function compactSessionResponse(c: Context): boolean {
-  c.header("Vary", "X-OpenGeni-Session-Response", { append: true });
-  return c.req.header("x-opengeni-session-response") === "chat";
+  c.header("Vary", "Accept", { append: true });
+  return (c.req.header("accept") ?? "")
+    .split(",")
+    .some((value) => value.trim() === "application/json; opengeni-session=chat");
 }
 
 type EffectivePolicyContext = {

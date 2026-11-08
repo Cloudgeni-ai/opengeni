@@ -7,7 +7,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_BROWSER_RESPONSE_HEADERS,
-  OPENGENI_SESSION_RESPONSE_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
 } from "./types";
 import type {
   AccessGrant,
@@ -1247,14 +1247,20 @@ function isChatCompletions(route: readonly string[]): boolean {
 /** The browser's neutral request headers. */
 function forwardedHeaders(request: Request, jsonBody: boolean): Headers {
   const headers = new Headers();
-  // A browser cannot opt back into the legacy full-configuration response.
-  headers.set(OPENGENI_SESSION_RESPONSE_HEADER, "chat");
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
   if (jsonBody) headers.set("content-type", "application/json");
-  if (!headers.has("accept")) headers.set("accept", "application/json");
+  // A browser cannot opt back into the legacy full-configuration response.
+  // Accept already crosses older CORS hosts; don't introduce a new request header.
+  const accept = headers.get("accept");
+  if (!accept?.split(",").some((value) => value.trim() === OPENGENI_SESSION_CHAT_ACCEPT)) {
+    headers.set(
+      "accept",
+      accept ? `${accept}, ${OPENGENI_SESSION_CHAT_ACCEPT}` : OPENGENI_SESSION_CHAT_ACCEPT,
+    );
+  }
   return headers;
 }
 

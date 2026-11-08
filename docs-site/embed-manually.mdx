@@ -101,7 +101,7 @@ the SDK warns once per client when the required metadata is unreadable.
 
 ### Session data and operator configuration
 
-The current SDK sends `X-OpenGeni-Session-Response: chat`; session reads, lists and
+The current SDK sends `Accept: application/json; opengeni-session=chat`; session reads, lists and
 mutation responses then omit `instructions`, `skills` and `effectiveTools`. The
 chat does not need these to render. An authorized settings
 page or server-side SDK caller can explicitly use
@@ -115,10 +115,12 @@ backend instead. These are response projections only: the agent's stored instruc
 skills and model input do not change. Upgrade the API as well as the SDK; older
 APIs still return their historical full session payloads.
 
-Previously shipped clients that send no header keep the historical full response.
-The packaged browser relay always sets the compact header itself, even for older
+Previously shipped clients without this Accept preference keep the historical full response.
+The packaged browser relay always adds the compact preference itself, even for older
 browser clients. A custom relay must do the same; never pass a browser's choice
 through as a way to read the legacy configuration.
+The existing `Accept` header works with older APIs' CORS allowlists; they ignore
+the new preference and continue to return the full response.
 
 ## Choose what your agent can do
 

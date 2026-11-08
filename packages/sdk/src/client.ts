@@ -945,7 +945,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   OPENGENI_SDK_VERSION_HEADER,
-  OPENGENI_SESSION_RESPONSE_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
@@ -12582,7 +12582,6 @@ export class OpenGeniClient {
       ...extra,
       ...(sdkVersion ? { [OPENGENI_SDK_VERSION_HEADER]: sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-      [OPENGENI_SESSION_RESPONSE_HEADER]: "chat",
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
     const headerNames = Object.keys(headers).map((key) => key.toLowerCase());
@@ -13190,7 +13189,7 @@ export class OpenGeniClient {
           method,
           headers: {
             ...headers,
-            Accept: "application/json",
+            Accept: OPENGENI_SESSION_CHAT_ACCEPT,
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

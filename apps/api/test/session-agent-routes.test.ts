@@ -167,7 +167,7 @@ async function request(
     headers: {
       authorization: bearer,
       "content-type": "application/json",
-      ...(compact ? { "x-opengeni-session-response": "chat" } : {}),
+      ...(compact ? { accept: "application/json; opengeni-session=chat" } : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });

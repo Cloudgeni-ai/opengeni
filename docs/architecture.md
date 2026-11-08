@@ -64,10 +64,11 @@ External workspace routes resolve their organization-local mapping before native
 workspace authorization. All native-workspace HTTP middleware shares the same
 route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
-HTTP session responses with `X-OpenGeni-Session-Response: chat` use
+HTTP session responses with `Accept: application/json; opengeni-session=chat` use
 `apps/api/src/routes/session-chat-response.ts` to omit operator instructions, skill
 bodies and the full effective-tool catalog. The SDK sends this signal by default
-and the browser relay enforces it; older clients without it retain the full response. Explicit
+and the browser relay enforces it; older clients without it retain the full response.
+Using `Accept` avoids a new CORS request-header requirement on older APIs. Explicit
 `GET .../sessions/:sessionId/configuration` reads retain those fields under
 session-control authority; internal runtime/MCP session projections are unchanged.
 The dependency-free `packages/contracts/src/browser-response-headers.ts` owns the

@@ -4,7 +4,7 @@ import { OpenGeniClient } from "../src/client";
 import {
   OPENGENI_BROWSER_RESPONSE_HEADERS,
   OPENGENI_BROWSER_REQUEST_HEADERS,
-  OPENGENI_SESSION_RESPONSE_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
 } from "../src/index";
 import { OPENGENI_BROWSER_RESPONSE_HEADERS as browserHeaders } from "../src/browser";
 import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
@@ -123,7 +123,7 @@ test("configuration is an explicit read and does not populate the ordinary sessi
   const client = new OpenGeniClient({
     baseUrl: "https://api.example.test",
     fetch: async (url, init) => {
-      expect(new Headers(init?.headers).get(OPENGENI_SESSION_RESPONSE_HEADER)).toBe("chat");
+      expect(new Headers(init?.headers).get("accept")).toBe(OPENGENI_SESSION_CHAT_ACCEPT);
       paths.push(String(url));
       return Response.json(
         String(url).endsWith("/configuration")
@@ -137,5 +137,5 @@ test("configuration is an explicit read and does not populate the ordinary sessi
   );
   expect((await client.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBeUndefined();
   expect(paths).toHaveLength(2);
-  expect(OPENGENI_BROWSER_REQUEST_HEADERS).toContain(OPENGENI_SESSION_RESPONSE_HEADER);
+  expect(OPENGENI_BROWSER_REQUEST_HEADERS).toContain("accept");
 });

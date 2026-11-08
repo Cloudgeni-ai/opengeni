@@ -181,7 +181,7 @@ async function putSkills(
       headers: {
         authorization: bearer,
         "content-type": "application/json",
-        "x-opengeni-session-response": "chat",
+        accept: "application/json; opengeni-session=chat",
       },
       body: JSON.stringify(body),
     },

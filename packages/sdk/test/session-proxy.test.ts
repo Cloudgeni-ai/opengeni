@@ -306,7 +306,7 @@ async function rejection(promise: Promise<unknown>): Promise<OpenGeniApiError> {
 describe("createSessionProxyHandler", () => {
   test("the relay enforces compact responses even when a browser requests legacy configuration", async () => {
     const { upstream, handler } = setup();
-    for (const headers of [{}, { "x-opengeni-session-response": "full" }]) {
+    for (const headers of [{}, { accept: "application/json" }]) {
       const response = await handler(
         new Request(
           `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
@@ -317,7 +317,7 @@ describe("createSessionProxyHandler", () => {
     }
     expect(upstream.requests).toHaveLength(2);
     for (const request of upstream.requests) {
-      expect(request.headers.get("x-opengeni-session-response")).toBe("chat");
+      expect(request.headers.get("accept")).toContain("application/json; opengeni-session=chat");
     }
   });
 
@@ -508,7 +508,7 @@ describe("createSessionProxyHandler", () => {
       `${API}/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
     expect(request!.headers.get("authorization")).toBe("Bearer og_org_key");
-    expect(request!.headers.get("x-opengeni-session-response")).toBe("chat");
+    expect(request!.headers.get("accept")).toContain("application/json; opengeni-session=chat");
     expect(
       JSON.parse(decodeURIComponent(request!.headers.get("x-opengeni-external-actor")!)),
     ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });

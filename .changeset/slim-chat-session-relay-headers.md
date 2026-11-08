@@ -5,8 +5,9 @@
 ---
 
 Keep operator instructions, skill bodies and the full tool catalog out of default
-chat session responses from current clients, through one explicit request header.
-Previously shipped clients without that header keep their full responses. Settings and server-side integrations can explicitly read
+chat session responses from current clients, through JSON content negotiation on
+the existing Accept header. Previously shipped clients without that preference
+keep their full responses. Settings and server-side integrations can explicitly read
 the full configuration with `getSessionConfiguration` and session-control authority.
 Server-owned session relays refuse browser configuration and model-context reads.
 
