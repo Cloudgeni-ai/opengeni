@@ -52,6 +52,19 @@ enum OpenGeniCallAudio {
 
   // MARK: When the microphone may open
 
+  /// Whether WebRTC runs its audio through the call audio device (built with
+  /// the config plugin's `call.iosAudioDevice`), which honours the gate below.
+  static var callAudioDeviceInstalled: Bool {
+    guard let options = NSClassFromString("WebRTCModuleOptions") as AnyObject?,
+      let device = NSClassFromString("OpenGeniCallAudioDevice"),
+      options.responds(to: NSSelectorFromString("sharedInstance")),
+      let shared = options.perform(NSSelectorFromString("sharedInstance"))?
+        .takeUnretainedValue() as? NSObject,
+      let current = shared.value(forKey: "audioDevice") as? NSObject
+    else { return false }
+    return current.isKind(of: device)
+  }
+
   /// Posted (on any thread) when `microphoneAllowed` may have changed.
   static let gateDidChange = Notification.Name("OpenGeniCallAudioGateDidChange")
 
