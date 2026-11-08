@@ -118,7 +118,7 @@ and timestamps; it never sorts messages or tools. Compare against the original
 baseline with full lifecycle events enabled on the candidate, so correctness
 cost is included rather than hidden.
 
-## Measured result
+## Initial consolidation measurement (`8fcb210`)
 
 On the disposable PostgreSQL 17 fixture, four alternating A/B/B/A invocations,
 each with two 30-step turns after a warmup, gave 120 measured steps per revision.
@@ -146,3 +146,26 @@ median 99.18 → 107.25 ms, p90 151.04 → 156.89 ms. Median statements fell 113
 and every candidate call still had its three lifecycle events. The combined
 change therefore reduces database work and the controlled-RTT gap, but is not
 claimed to improve zero-RTT latency; extra correct observations are not free.
+
+## Ordering-correct refresh (`831ccab`)
+
+After restoring the absorbed observations' ordering/drain barrier and removing
+the redundant immediate-append timer, the same fixture was rerun with 120 steps
+per revision per transport. The controlled-delay run alternated candidate and
+baseline (B/A/B/A); direct loopback used A/B/B/A.
+
+| Measurement | Original baseline | Candidate |
+| --- | ---: | ---: |
+| Controlled delay: combined gap mean / median | 303.62 / 295.49 ms | 277.90 / 269.90 ms |
+| Controlled delay: combined gap p90 | 353.89 ms | 318.52 ms |
+| Controlled delay: statements per step, median | 113 | 105 |
+| Loopback: combined gap mean / median | 130.67 / 123.10 ms | 154.14 / 146.78 ms |
+| Loopback: combined gap p90 | 177.54 ms | 203.21 ms |
+| Loopback: statements per step, median | 113 | 106 |
+| Lifecycle triplets per 31-call turn, both transports | 1 | 31 |
+
+The controlled-delay mean improved 8.5%, while loopback worsened 18.0%. This
+refresh supersedes the initial timing figures for the corrected implementation;
+it does not establish a universal speedup. Ordered requests retained the same
+normalization digest above. The ordering fix must not be removed to recover
+apparent performance: subsequent events and finalization owe those observations.
