@@ -450,6 +450,8 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
+  /** This server can hold an incoming connection until Answer. Requires a gated audio device. */
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider:
@@ -507,7 +509,7 @@ export type RealtimeVoiceSettings = {
 export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
-export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeState = "preparing" | "active" | "ended";
 export type SessionRealtimeEndReason =
   | "user_stop"
   | "browser_unload"
@@ -535,6 +537,7 @@ export type BeginSessionRealtimeRequest = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  incomingCall?: { callId: string; device: string; answered?: boolean | undefined } | undefined;
 };
 
 export type RenewSessionRealtimeRequest = {

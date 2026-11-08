@@ -32,6 +32,7 @@ function abortError(message: string): Error {
 }
 
 export type RealtimeModelOption = {
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider: WorkspaceRealtimeModelCatalogItem["provider"];
@@ -624,6 +625,9 @@ export function useSessionRealtime(options: {
   const prepare = useCallback(async () => {
     await controllerRef.current?.prepare?.();
   }, []);
+  const prepareIncoming = useCallback(async (input: { callId: string; device: string }) => {
+    await controllerRef.current?.prepareIncoming?.(input);
+  }, []);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -654,7 +658,7 @@ export function useSessionRealtime(options: {
   const canStart =
     controllerRef.current !== null &&
     controllerModelRef.current === model &&
-    ["idle", "error"].includes(snapshot.status) &&
+    (["idle", "error"].includes(snapshot.status) || snapshot.mode?.state === "preparing") &&
     admissionBlocker === null;
 
   return {
@@ -668,6 +672,7 @@ export function useSessionRealtime(options: {
     /** @deprecated Replies play without a mounted element; rendering this ref has no effect. */
     audioRef,
     prepare,
+    prepareIncoming,
     start,
     stop,
     retry,

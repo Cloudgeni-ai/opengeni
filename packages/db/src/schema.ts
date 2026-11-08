@@ -5944,6 +5944,9 @@ export const sessionRealtimeModes = pgTable(
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
+    // A non-active provider connection prepared for one ringing phone.
+    incomingCallId: uuid("incoming_call_id"),
+    incomingCallDevice: text("incoming_call_device"),
     // The voice owner's account intent, copied onto every turn this lease admits.
     connectionAccountIntent: jsonb(
       "connection_account_intent",
@@ -5990,9 +5993,17 @@ export const sessionRealtimeModes = pgTable(
     activeLease: index("session_realtime_modes_active_lease_idx")
       .on(table.leaseExpiresAt, table.workspaceId, table.sessionId)
       .where(sql`${table.state} = 'active'`),
+    incomingCall: index("session_realtime_modes_incoming_call_idx")
+      .on(table.incomingCallId)
+      .where(sql`${table.incomingCallId} is not null`),
+    incomingCallValid: check(
+      "session_realtime_modes_incoming_call_check",
+      sql`(${table.incomingCallId} is null and ${table.incomingCallDevice} is null and ${table.state} <> 'preparing')
+        or (${table.incomingCallId} is not null and ${table.incomingCallDevice} is not null and length(${table.incomingCallDevice}) between 1 and 300)`,
+    ),
     stateValid: check(
       "session_realtime_modes_state_check",
-      sql`${table.state} in ('active', 'ended')`,
+      sql`${table.state} in ('preparing', 'active', 'ended')`,
     ),
     modelValid: check(
       "session_realtime_modes_model_check",
@@ -6034,7 +6045,7 @@ export const sessionRealtimeModes = pgTable(
     ),
     terminalValid: check(
       "session_realtime_modes_terminal_check",
-      sql`(${table.state} = 'active' and ${table.endedAt} is null and ${table.endReason} is null)
+      sql`(${table.state} in ('preparing', 'active') and ${table.endedAt} is null and ${table.endReason} is null)
         or (${table.state} = 'ended' and ${table.endedAt} is not null and ${table.endReason} is not null)`,
     ),
   }),

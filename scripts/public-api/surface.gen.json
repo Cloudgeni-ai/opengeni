@@ -12817,6 +12817,10 @@
       "shape": {
         "$": "object",
         "$.browserInstanceId": "string!",
+        "$.incomingCall": "object?",
+        "$.incomingCall.answered": "boolean?",
+        "$.incomingCall.callId": "string!",
+        "$.incomingCall.device": "string!",
         "$.model": "ref(SessionRealtimeModel)!",
         "$.operationId": "string!",
         "$.ownerKey": "string!"
@@ -29146,7 +29150,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"active\\\"\",\"\\\"ended\\\"\"]"
+        "$": "enum=[\"\\\"active\\\"\",\"\\\"ended\\\"\",\"\\\"preparing\\\"\"]"
       }
     },
     "SessionRealtimeStopInstruction": {
@@ -35168,6 +35172,7 @@
         "$.customVoice": "boolean?",
         "$.description": "string!",
         "$.id": "ref(SessionRealtimeModel)!",
+        "$.incomingPreparation": "boolean?",
         "$.label": "string!",
         "$.languages": "array?",
         "$.languages[]": "string",
