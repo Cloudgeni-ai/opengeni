@@ -5591,7 +5591,15 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. Initial session creation adds content-free
+critical path. The cumulative queue milestone includes time queued behind an
+active turn and session holds, not just worker dispatch delay. Likewise,
+acceptance-to-provider-dispatch excludes only this turn's own provider think
+time: earlier turns' provider and tool work can occur while this turn waits.
+Correlate a slow turn's start with its predecessor's completion and historical
+queue-hold evidence before attributing these samples to platform saturation.
+The per-request pre-dispatch metric has a different boundary and does not
+include that earlier work. Histogram quantiles cannot be subtracted to recover
+a per-turn preparation duration. Initial session creation adds content-free
 `api.session_create.authorization|body_read|site_origin|core_create|response_projection`
 child spans within the existing HTTP span. Authorization still precedes body
 handling and creation; response policy projection remains outside the create
