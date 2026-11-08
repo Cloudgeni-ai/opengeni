@@ -1,5 +1,14 @@
 # Modular prompt changelog
 
+Integration discovery now reports an enabled connection-backed MCP excluded by
+the chat's tool selection as unavailable, rather than treating the absent turn
+account binding as a reason to connect. The catalog result explains the chat
+selection and does not offer a Connect card. Consequently `tool_search` no longer
+adds "Not connected yet" for that result on native or generic routes. No system
+or developer prompt bytes, tool schemas, historical messages, catalog authority,
+or account bindings change; only new discovery results change. An account truly
+missing from an included connector retains its setup path.
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and
