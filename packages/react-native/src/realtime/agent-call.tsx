@@ -425,7 +425,13 @@ function ActiveAgentCall(
   const incomingPreparationAttempted = useRef(false);
   useEffect(() => {
     if (!canStart || !selection.catalogReady) return;
-    if (voice.incomingPreparation && props.target.ringing && props.target.answeredCallId && props.target.incomingDevice) {
+    if (
+      props.callAdapter?.incoming?.connectsBeforeAnswer === true &&
+      voice.incomingPreparation &&
+      props.target.ringing &&
+      props.target.answeredCallId &&
+      props.target.incomingDevice
+    ) {
       if (incomingPreparationAttempted.current) return;
       incomingPreparationAttempted.current = true;
       void prepareIncoming({
@@ -442,6 +448,7 @@ function ActiveAgentCall(
     props.target.answeredCallId,
     props.target.incomingDevice,
     voice.incomingPreparation,
+    props.callAdapter?.incoming?.connectsBeforeAnswer,
   ]);
   const onCallStartingRef = useRef(props.onCallStarting);
   onCallStartingRef.current = props.onCallStarting;

@@ -5994,10 +5994,13 @@ export const sessionRealtimeModes = pgTable(
       .on(table.leaseExpiresAt, table.workspaceId, table.sessionId)
       .where(sql`${table.state} = 'active'`),
     incomingCall: index("session_realtime_modes_incoming_call_idx")
-      .on(table.incomingCallId).where(sql`${table.incomingCallId} is not null`),
-    incomingCallValid: check("session_realtime_modes_incoming_call_check",
+      .on(table.incomingCallId)
+      .where(sql`${table.incomingCallId} is not null`),
+    incomingCallValid: check(
+      "session_realtime_modes_incoming_call_check",
       sql`(${table.incomingCallId} is null and ${table.incomingCallDevice} is null and ${table.state} <> 'preparing')
-        or (${table.incomingCallId} is not null and length(${table.incomingCallDevice}) between 1 and 300)`),
+        or (${table.incomingCallId} is not null and ${table.incomingCallDevice} is not null and length(${table.incomingCallDevice}) between 1 and 300)`,
+    ),
     stateValid: check(
       "session_realtime_modes_state_check",
       sql`${table.state} in ('preparing', 'active', 'ended')`,

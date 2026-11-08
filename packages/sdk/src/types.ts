@@ -418,7 +418,6 @@ export type SessionRealtimeInboundEntry = {
 };
 
 export type SyncSessionRealtimeLedgerRequest = {
-  setupTiming?: { answerToOpeningMs: number; openingToFirstAudioMs: number; answerToFirstAudioMs: number } | undefined;
   browserInstanceId: string;
   ownerKey: string;
   expectedVersion: number;
@@ -451,7 +450,7 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
-  /** This server can hold a track-free incoming connection until Answer. */
+  /** This server can hold an incoming connection until Answer. Requires a gated audio device. */
   incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;

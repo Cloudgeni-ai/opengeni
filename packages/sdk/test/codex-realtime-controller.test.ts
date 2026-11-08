@@ -335,51 +335,190 @@ function dispatchProviderMessage(events: RTCDataChannel, payload: string): void 
 }
 
 describe("Codex realtime browser controller", () => {
-  test("incoming provider preconnection sends no microphone or context until acceptance", async () => {
+  test("incoming provider preconnection uses gated audio but holds context and remote output until acceptance", async () => {
     const browser = browserFixture();
     const calls: string[] = [];
-    Object.defineProperty(browser.peer, "addTransceiver", { value: () => ({
-      sender: { replaceTrack: async (track: MediaStreamTrack) => { expect(track).toBe(browser.track as unknown as MediaStreamTrack); calls.push("attach"); } },
-    }) });
-    let current = mode({ state: "preparing", leaseExpiresAt: new Date(Date.now() + 40_000).toISOString() });
+    Object.defineProperty(browser.peer, "addTransceiver", {
+      value: () => ({
+        sender: {
+          replaceTrack: async (track: MediaStreamTrack) => {
+            expect(track).toBe(browser.track as unknown as MediaStreamTrack);
+            calls.push("attach");
+          },
+        },
+      }),
+    });
+    let current = mode({
+      state: "preparing",
+      leaseExpiresAt: new Date(Date.now() + 40_000).toISOString(),
+    });
     const controller = createCodexRealtimeController({
-      workspaceId: WORKSPACE_ID, sessionId: SESSION_ID,
-      storage: storageFixture(), remoteAudio: browser.remoteAudio,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
       createPeerConnection: () => browser.peer,
-      getUserMedia: async () => { calls.push("microphone"); return browser.media; },
+      getUserMedia: async () => {
+        calls.push("microphone");
+        return browser.media;
+      },
       ...noIntervals(),
       client: {
         beginSessionRealtime: async (_w, _s, request) => {
           calls.push(request.incomingCall?.answered ? "accept" : "prepare");
-          current = { ...current, operationId: request.operationId, browserInstanceId: request.browserInstanceId,
-            ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}) };
+          current = {
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+            ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}),
+          };
           return { mode: current, replay: false };
         },
         negotiateCodexRealtimeWebrtc: async () => {
           calls.push("provider");
-          return { sdp: ANSWER, version: "v3", model: "gpt-live-1-boulder-alpha", connectionId: CONNECTION_ID,
-            connectionEpoch: 1, startupFenceSequence: 0, modeVersion: 1, replay: false };
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: CONNECTION_ID,
+            connectionEpoch: 1,
+            startupFenceSequence: 0,
+            modeVersion: 1,
+            replay: false,
+          };
         },
-        activateCodexRealtimeConnection: async () => { calls.push("activate"); return { mode: current, replay: false }; },
-        syncSessionRealtimeLedger: async () => { calls.push("sync"); return { accepted: [], outbound: [], lastSequence: 0 }; },
+        activateCodexRealtimeConnection: async () => {
+          calls.push("activate");
+          return { mode: current, replay: false };
+        },
+        syncSessionRealtimeLedger: async () => {
+          calls.push("sync");
+          return { accepted: [], outbound: [], lastSequence: 0 };
+        },
         heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
         endSessionRealtime: async () => ({ mode: { ...current, state: "ended" }, replay: false }),
       },
     });
-    const preparing = controller.prepareIncoming!({ callId: "11111111-1111-4111-8111-111111111111", device: "phone" });
-    await eventually(() => browser.calls.includes("setRemoteDescription:answer"), "provider did not connect during ring");
-    expect(calls).toEqual(["prepare", "provider"]);
+    const preparing = controller.prepareIncoming!({
+      callId: "11111111-1111-4111-8111-111111111111",
+      device: "phone",
+    });
+    await eventually(
+      () => browser.calls.includes("setRemoteDescription:answer"),
+      "provider did not connect during ring",
+    );
+    expect(calls).toEqual(["prepare", "microphone", "attach", "provider"]);
     expect(browser.sent).toEqual([]);
     expect(controller.snapshot().mode?.state).toBe("preparing");
+    browser.dispatchRemoteTrack();
+    dispatchProviderMessage(
+      browser.events,
+      JSON.stringify({ type: "session.started", session: { id: "held-provider" } }),
+    );
+    await Promise.resolve();
+    expect(calls).not.toContain("sync");
+    expect(browser.sent).toEqual([]);
+    expect(browser.remoteMedia.getTracks()[0]!.enabled).toBe(false);
     expect(browser.calls).not.toContain("audio.play");
     await controller.start();
     await preparing;
     expect(calls).toEqual(expect.arrayContaining(["accept", "microphone", "attach", "activate"]));
-    expect(calls.indexOf("attach")).toBeGreaterThan(calls.indexOf("accept"));
+    expect(calls.indexOf("attach")).toBeLessThan(calls.indexOf("accept"));
+    expect(calls.filter((call) => call === "microphone")).toHaveLength(1);
     expect(controller.snapshot().status).toBe("active");
+    expect(browser.remoteMedia.getTracks()[0]!.enabled).toBe(true);
     await controller.stop();
     controller.close();
   });
+  test.each(["begin", "provider", "accept"] as const)(
+    "retiring incoming preparation during %s fences late completion and ends its mode",
+    async (phase) => {
+      const browser = browserFixture();
+      const calls: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let current = mode({
+        state: "preparing",
+        leaseExpiresAt: new Date(Date.now() + 40_000).toISOString(),
+      });
+      const controller = createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage: storageFixture(),
+        remoteAudio: browser.remoteAudio,
+        createPeerConnection: () => browser.peer,
+        getUserMedia: async () => browser.media,
+        ...noIntervals(),
+        client: {
+          beginSessionRealtime: async (_w, _s, request) => {
+            const step = request.incomingCall?.answered ? "accept" : "begin";
+            calls.push(step);
+            if (phase === step) await gate;
+            current = {
+              ...current,
+              operationId: request.operationId,
+              browserInstanceId: request.browserInstanceId,
+              ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}),
+            };
+            return { mode: current, replay: false };
+          },
+          negotiateCodexRealtimeWebrtc: async () => {
+            calls.push("provider");
+            if (phase === "provider") await gate;
+            return {
+              sdp: ANSWER,
+              version: "v3",
+              model: "gpt-live-1-boulder-alpha",
+              connectionId: CONNECTION_ID,
+              connectionEpoch: 1,
+              startupFenceSequence: 0,
+              modeVersion: 1,
+              replay: false,
+            };
+          },
+          activateCodexRealtimeConnection: async () => {
+            calls.push("activate");
+            return { mode: current, replay: false };
+          },
+          syncSessionRealtimeLedger: async () => {
+            calls.push("sync");
+            return { accepted: [], outbound: [] };
+          },
+          heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+          endSessionRealtime: async (_w, _s, _id, request) => {
+            calls.push(`end:${request.expectedVersion}`);
+            return { mode: { ...current, state: "ended" }, replay: false };
+          },
+        },
+      });
+      const preparing = controller.prepareIncoming!({
+        callId: "11111111-1111-4111-8111-111111111111",
+        device: "phone",
+      }).catch(() => undefined);
+      let answering: Promise<void> | undefined;
+      if (phase === "accept") {
+        await eventually(
+          () => browser.calls.includes("setRemoteDescription:answer"),
+          "provider did not connect",
+        );
+        answering = controller.start().catch(() => undefined);
+      }
+      await eventually(() => calls.includes(phase), `did not reach ${phase}`);
+      controller.close();
+      release();
+      await preparing;
+      await answering;
+      expect(calls.some((call) => call.startsWith("end:"))).toBe(true);
+      if (phase === "accept") expect(calls).toContain("end:2");
+      expect(calls).not.toContain("activate");
+      expect(calls).not.toContain("sync");
+      expect(browser.sent).toEqual([]);
+      expect(browser.calls).toContain("peer.close");
+      if (phase !== "begin") expect(browser.calls).toContain("track.stop");
+    },
+  );
   test("ring preparation owns only one local peer and survives an empty lifecycle until disposal", async () => {
     const browser = rotatingBrowserFixture();
     const controller = createCodexRealtimeController({

@@ -2437,13 +2437,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
-        if (parsed.setupTiming) {
-          deps.observability?.info("Realtime first audio timing", {
-            realtimeId,
-            connectionId: parsed.connectionId,
-            ...parsed.setupTiming,
-          });
-        }
         return c.json({ accepted: result.accepted, outbound: result.outbound });
       } catch (error) {
         throw sessionRealtimeHttpError(error);

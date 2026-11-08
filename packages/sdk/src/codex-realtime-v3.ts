@@ -69,8 +69,6 @@ export type CodexRealtimeV3BridgeSnapshot = {
 };
 
 export type CodexRealtimeV3BridgeOptions = {
-  /** Monotonic client timestamp of acceptance; only supplied for capable servers. */
-  answeredAt?: number | undefined;
   events: RTCDataChannel;
   connectionId: string;
   connectionEpoch: number;
@@ -152,9 +150,6 @@ export function createCodexRealtimeV3Bridge(
     | { providerSessionId: string; providerEventId?: string | null | undefined }
     | undefined;
   let providerStartedAccepted = false;
-  let openingSentAt: number | null = null;
-  let firstAudioObserved = false;
-  let pendingSetupTiming: SyncSessionRealtimeLedgerRequest["setupTiming"];
   let clientAckThroughSequence: number | null = null;
   let pendingInbound: PendingInbound[] = [];
   let pendingInboundCount = 0;
@@ -264,7 +259,6 @@ export function createCodexRealtimeV3Bridge(
   }
 
   const hasWork = (): boolean =>
-    pendingSetupTiming !== undefined ||
     pendingInbound.length > 0 ||
     (!providerStartedAccepted && providerStarted !== undefined) ||
     clientAckThroughSequence !== null ||
@@ -276,11 +270,10 @@ export function createCodexRealtimeV3Bridge(
       const batch = pendingInbound.splice(0, CODEX_REALTIME_V3_SYNC_MAX_ENTRIES);
       const startup = providerStartedAccepted ? undefined : providerStarted;
       const acknowledgedByClient = clientAckThroughSequence;
-      const setupTiming = pendingSetupTiming;
       const poll = forceSync;
       forceSync = false;
       flushRequestedWhileRunning = false;
-      if (batch.length === 0 && !startup && acknowledgedByClient === null && !poll && !setupTiming) break;
+      if (batch.length === 0 && !startup && acknowledgedByClient === null && !poll) break;
 
       let result: SyncSessionRealtimeLedgerResponse;
       try {
@@ -288,7 +281,6 @@ export function createCodexRealtimeV3Bridge(
           ...options.owner,
           connectionId: options.connectionId,
           connectionEpoch: options.connectionEpoch,
-          ...(setupTiming ? { setupTiming } : {}),
           ...(batch.length === 0 ? {} : { entries: batch.map(({ entry }) => entry) }),
           ...(startup ? { providerStarted: startup } : {}),
           ...(acknowledgedByClient === null
@@ -301,7 +293,6 @@ export function createCodexRealtimeV3Bridge(
         pendingInbound = [...batch, ...pendingInbound];
         throw error;
       }
-      if (pendingSetupTiming === setupTiming) pendingSetupTiming = undefined;
 
       const acceptedAfterSync = new Set(acceptedDelegationItemIds);
       const pendingAfterSync = new Map(pendingDelegations);
@@ -405,7 +396,6 @@ export function createCodexRealtimeV3Bridge(
           entry.delegationItemId !== null &&
             connectionDelegationItemIds.has(entry.delegationItemId),
         );
-        if (entry.payload.source === "agent_call" && openingSentAt === null) openingSentAt = performance.now();
         sentSequences.add(entry.sequence);
         if (
           entry.kind === "session_update" &&
@@ -557,18 +547,6 @@ export function createCodexRealtimeV3Bridge(
       }
     } else if (event.type === "output_audio.delta") {
       speaking = true;
-      if (!firstAudioObserved && openingSentAt !== null && options.answeredAt !== undefined) {
-        firstAudioObserved = true;
-        const now = performance.now();
-        if (now - options.answeredAt <= 3_600_000) {
-          pendingSetupTiming = {
-            answerToOpeningMs: Math.max(0, openingSentAt - options.answeredAt),
-            openingToFirstAudioMs: Math.max(0, now - openingSentAt),
-            answerToFirstAudioMs: Math.max(0, now - options.answeredAt),
-          };
-          durable = true;
-        }
-      }
     } else if (event.type === "turn.done" || event.type === "transcript.segment") {
       speaking = false;
       if (event.transcript.length > 0 && !finalizedTurnIds.has(event.turnId)) {

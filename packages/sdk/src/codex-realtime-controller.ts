@@ -326,7 +326,6 @@ export type CreateCodexRealtimeControllerOptions = {
 
 export type RealtimeControllerTransportStarter = (input: {
   prepared?: PreparedRealtimeWebrtc | undefined;
-  deferMicrophone?: boolean | undefined;
   client: CodexRealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
@@ -342,7 +341,7 @@ export type RealtimeControllerTransportStarter = (input: {
   /** Voice settings for this connection, when the host supplied them. */
   voiceSettings?: RealtimeVoiceSettings | undefined;
   signal: AbortSignal;
-  media?: MediaStream | undefined;
+  media: MediaStream;
   onEventsCreated(events: RTCDataChannel): void;
   onAudibleOutputState(state: CodexRealtimeAudibleOutputState): void;
   onMicrophoneEnded(): void;
@@ -353,6 +352,7 @@ export type CodexRealtimeController = {
   /** Prepare local transport only. Does not capture audio or begin a server/provider call. */
   prepare?(): Promise<void>;
   /** Connect a ringing phone without microphone or provider context delivery. */
+  /** Only for hosts whose audio device sends silence and blocks capture/playback until Answer. */
   prepareIncoming?(input: { callId: string; device: string }): Promise<void>;
   snapshot(): CodexRealtimeControllerSnapshot;
   subscribe(listener: (snapshot: CodexRealtimeControllerSnapshot) => void): () => void;
@@ -630,7 +630,6 @@ export function createCodexRealtimeController(
     callId: string;
     device: string;
     answered: boolean;
-    answeredAt?: number | undefined;
     accepted: Promise<void>;
     accept(): void;
     task: Promise<void> | null;
@@ -679,6 +678,7 @@ export function createCodexRealtimeController(
   };
 
   const transitionEnded = (message = "Realtime mode ended"): void => {
+    incoming = null;
     stopping = false;
     connectionTask = null;
     closeBrowserResources();
@@ -1140,9 +1140,7 @@ export function createCodexRealtimeController(
       }
       const localPreparation = preparation;
       const [media, prepared] = await Promise.all([
-        currentMode.state === "preparing"
-          ? undefined
-          : ensureMicrophone(replaceMicrophone, abort.signal),
+        ensureMicrophone(replaceMicrophone, abort.signal),
         localPreparation
           ? abortable(localPreparation.task, abort.signal).catch((error) => {
               localPreparation.abort.abort(error);
@@ -1157,7 +1155,6 @@ export function createCodexRealtimeController(
       const operationId = randomUUID();
       const commonTransportInput = {
         prepared,
-        deferMicrophone: currentMode.state === "preparing",
         client: options.client,
         workspaceId: options.workspaceId,
         sessionId: options.sessionId,
@@ -1219,22 +1216,34 @@ export function createCodexRealtimeController(
         // No bridge exists yet, so neither context nor delivery acknowledgments
         // can reach the provider before this exact phone wins the answer.
         await abortable(ring.accepted, abort.signal);
-        const [accepted, media] = await Promise.all([
-          options.client.beginSessionRealtime(options.workspaceId, options.sessionId, {
+        const accepted = await options.client.beginSessionRealtime(
+          options.workspaceId,
+          options.sessionId,
+          {
             operationId: record.operationId,
             browserInstanceId: record.browserInstanceId,
             ownerKey: record.ownerKey,
             model,
             incomingCall: { callId: ring.callId, device: ring.device, answered: true },
-          }),
-          ensureMicrophone(false, abort.signal),
-        ]);
+          },
+        );
         if (accepted.mode.state !== "active") throw new Error("Incoming call was not accepted");
+        if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+          await options.client
+            .endSessionRealtime(options.workspaceId, options.sessionId, accepted.mode.id, {
+              browserInstanceId: record.browserInstanceId,
+              ownerKey: record.ownerKey,
+              expectedVersion: accepted.mode.version,
+              reason: "browser_unload",
+            })
+            .catch(() => undefined);
+          throw abort.signal.reason ?? new DOMException("Incoming call was retired", "AbortError");
+        }
         currentMode = accepted.mode;
         publish({ mode: currentMode });
-        if (!connected.attachMicrophone)
-          throw new Error("Prepared transport cannot attach the microphone");
-        await connected.attachMicrophone(media);
+        // The native audio device switches from generated silence to capture
+        // on system-call acceptance. The negotiated sender remains unchanged.
+        clearNegotiationTimer();
       }
       if (
         closed ||
@@ -1296,7 +1305,6 @@ export function createCodexRealtimeController(
       const previous = active;
       let bridge!: CodexRealtimeV3Bridge;
       bridge = createCodexRealtimeV3Bridge({
-        answeredAt: incoming?.answeredAt,
         events: connected.events,
         connectionId: connected.connectionId,
         connectionEpoch: connected.connectionEpoch,
@@ -1399,18 +1407,29 @@ export function createCodexRealtimeController(
       transitionEnded();
       return null;
     }
-    if (closed || stopping) {
-      await options.client.endSessionRealtime(options.workspaceId, options.sessionId, response.mode.id, {
-        browserInstanceId: record.browserInstanceId, ownerKey: record.ownerKey,
-        expectedVersion: response.mode.version, reason: "browser_unload",
-      }).catch(() => undefined);
+    if (closed || stopping || owner !== record) {
+      await options.client
+        .endSessionRealtime(options.workspaceId, options.sessionId, response.mode.id, {
+          browserInstanceId: record.browserInstanceId,
+          ownerKey: record.ownerKey,
+          expectedVersion: response.mode.version,
+          reason: "browser_unload",
+        })
+        .catch(() => undefined);
       return null;
     }
     if (incoming && !incoming.answered && response.mode.state !== "preparing") {
-      await options.client.endSessionRealtime(options.workspaceId, options.sessionId, response.mode.id, {
-        browserInstanceId: record.browserInstanceId, ownerKey: record.ownerKey,
-        expectedVersion: response.mode.version, reason: "browser_unload",
-      });
+      await options.client.endSessionRealtime(
+        options.workspaceId,
+        options.sessionId,
+        response.mode.id,
+        {
+          browserInstanceId: record.browserInstanceId,
+          ownerKey: record.ownerKey,
+          expectedVersion: response.mode.version,
+          reason: "browser_unload",
+        },
+      );
       throw new Error("Server did not prepare the incoming call");
     }
     publish({ mode: response.mode, realtimeId: response.mode.id });
@@ -1592,7 +1611,10 @@ export function createCodexRealtimeController(
   const controller: CodexRealtimeController = {
     prepare,
     prepareIncoming: async (input) => {
-      if (incoming) { await incoming.task; return; }
+      if (incoming) {
+        await incoming.task;
+        return;
+      }
       if (closed || stopping || active || !["idle", "error"].includes(state.status)) return;
       if (options.startTransport && !options.prepareWebrtc) return;
       let accept!: () => void;
@@ -1618,11 +1640,11 @@ export function createCodexRealtimeController(
     },
     start: async () => {
       if (incoming) {
-        incoming.answeredAt ??= performance.now();
         incoming.answered = true;
         incoming.accept();
-        try { await incoming.task; }
-        catch (error) {
+        try {
+          await incoming.task;
+        } catch (error) {
           // A failed speculative connection does not consume the accepted call.
           // Starting normally claims it with the existing answer path.
           if (incoming || closed || stopping) throw error;
@@ -1852,6 +1874,7 @@ export function createCodexRealtimeController(
           .catch(() => undefined);
       }
       closed = true;
+      incoming = null;
       stopping = false;
       closeBrowserResources();
       listeners.clear();

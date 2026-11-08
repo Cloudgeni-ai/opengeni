@@ -30,6 +30,7 @@ import {
   renderRealtimeHumanInputRequestContext,
 } from "./session-realtime-mirror";
 import { claimAnsweredAgentCallForRealtimeInTransaction } from "./agent-calls";
+import { endSessionRealtimePreparationsInTransaction } from "./session-realtime-preparation";
 import * as schema from "./schema";
 
 export { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
@@ -418,6 +419,14 @@ export async function beginSessionRealtimeInTransaction(
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
 
+  await endSessionRealtimePreparationsInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    expiredBefore: now,
+    reason: "lease_expired",
+    now,
+  });
+
   let active = await loadActiveRowForUpdate(db, input.workspaceId, input.sessionId);
   const eventIds: string[] = [];
   let workflowWakeRevision: number | null = null;
@@ -485,6 +494,14 @@ export async function beginSessionRealtimeInTransaction(
         .where(eq(schema.sessionRealtimeModes.id, operation.id))
         .returning();
       if (!promoted) throw new Error("Failed to accept incoming realtime mode");
+      await endSessionRealtimePreparationsInTransaction(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        callId: call.id,
+        exceptModeId: promoted.id,
+        reason: "browser_unload",
+        now,
+      });
       return publishStartedRealtimeMode(db, input, promoted, session, now, eventIds);
     }
     return {
@@ -511,8 +528,16 @@ export async function beginSessionRealtimeInTransaction(
   const incomingCall = input.incomingCall
     ? await loadIncomingCall(db, { ...input, incomingCall: input.incomingCall })
     : null;
-  if (incomingCall && ((incomingCall.state !== "ringing" &&
-    !(incomingCall.state === "answered" && incomingCall.answeredBy === input.incomingCall!.device)) || incomingCall.ringUntil <= now)) {
+  if (
+    incomingCall &&
+    (incomingCall.realtimeId ||
+      (incomingCall.state !== "ringing" &&
+        !(
+          incomingCall.state === "answered" &&
+          incomingCall.answeredBy === input.incomingCall!.device
+        )) ||
+      incomingCall.ringUntil <= now)
+  ) {
     throw new SessionRealtimeConflictError(
       "REALTIME_NOT_ACTIVE",
       "Incoming call is no longer ringing",
@@ -578,28 +603,33 @@ async function publishStartedRealtimeMode(
     now,
   );
   eventIds.push(event.id);
-  const answeredCall = await claimAnsweredAgentCallForRealtimeInTransaction(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    calleeSubjectId: input.ownerSubjectId,
-    realtimeId: row.id,
-    callId: input.incomingCall?.callId,
-  });
-  if (answeredCall) {
-    await mirrorSessionRealtimeContextInTransaction(db, {
+  const mirrorAnsweredCall = async () => {
+    const answeredCall = await claimAnsweredAgentCallForRealtimeInTransaction(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      calleeSubjectId: input.ownerSubjectId,
       realtimeId: row.id,
-      sourceKind: "agent_call",
-      sourceId: answeredCall.id,
-      channel: "speakable",
-      text: renderRealtimeAgentCallContext({ reason: answeredCall.reason }),
-      payload: { callId: answeredCall.id, trigger: "realtime_start" },
-      now,
+      callId: input.incomingCall?.callId,
     });
-  }
+    if (answeredCall) {
+      await mirrorSessionRealtimeContextInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: row.id,
+        sourceKind: "agent_call",
+        sourceId: answeredCall.id,
+        channel: "speakable",
+        text: renderRealtimeAgentCallContext({ reason: answeredCall.reason }),
+        payload: { callId: answeredCall.id, trigger: "realtime_start" },
+        now,
+      });
+    }
+  };
+  // A prepared mode reserves sequence one for its opening. Ordinary starts
+  // preserve their existing human-input-before-opening delivery order.
+  if (row.incomingCallId) await mirrorAnsweredCall();
   const pendingHumanInputs = await db
     .select({
       id: schema.sessionHumanInputRequests.id,
@@ -645,6 +675,7 @@ async function publishStartedRealtimeMode(
       now,
     });
   }
+  if (!row.incomingCallId) await mirrorAnsweredCall();
   return {
     mode: mapRealtimeMode(row),
     replay: false,
@@ -864,6 +895,13 @@ export async function settleExpiredSessionRealtimeInTransaction(
   session: SessionRow,
   now = new Date(),
 ): Promise<SessionRow> {
+  await endSessionRealtimePreparationsInTransaction(db, {
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    expiredBefore: now,
+    reason: "lease_expired",
+    now,
+  });
   const row = await loadActiveRowForUpdate(db, session.workspaceId, session.id);
   if (!row || row.leaseExpiresAt > now) return session;
   const expired = await endWithEvent(db, session, row, "lease_expired", now);
@@ -881,6 +919,12 @@ export async function endSessionRealtimeForPrivateTransitionInTransaction(
   session: SessionRow,
   now = new Date(),
 ): Promise<{ eventId: string; workflowWakeRevision: number } | null> {
+  await endSessionRealtimePreparationsInTransaction(db, {
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    reason: "authority_revoked",
+    now,
+  });
   const row = await loadActiveRowForUpdate(db, session.workspaceId, session.id);
   if (!row) return null;
   const ended = await endWithEvent(

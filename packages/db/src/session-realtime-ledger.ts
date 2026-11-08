@@ -474,7 +474,10 @@ export async function claimSessionRealtimeConnectionInTransaction(
   }
   if (staleRotationError) throw staleRotationError;
   if (mode.state === "preparing" && (promotionMode !== "staged" || input.rotate)) {
-    throw new SessionRealtimeConflictError("REALTIME_NOT_ACTIVE", "Ringing connections must wait for acceptance");
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Ringing connections must wait for acceptance",
+    );
   }
   if (mode.connectionEpoch !== input.expectedConnectionEpoch) {
     throw new SessionRealtimeConflictError(
@@ -769,7 +772,10 @@ export async function activateSessionRealtimeConnectionInTransaction(
     });
   }
   if (mode.state !== "active") {
-    throw new SessionRealtimeConflictError("REALTIME_NOT_ACTIVE", "Incoming call has not been accepted");
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Incoming call has not been accepted",
+    );
   }
 
   const [connection] = await db

@@ -9778,11 +9778,6 @@ export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundE
 
 export const SyncSessionRealtimeLedgerRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
-    setupTiming: z.object({
-      answerToOpeningMs: z.number().nonnegative().max(3_600_000),
-      openingToFirstAudioMs: z.number().nonnegative().max(3_600_000),
-      answerToFirstAudioMs: z.number().nonnegative().max(3_600_000),
-    }).strict().optional(),
     expectedVersion: primitives.positiveInteger,
     connectionId: primitives.uuid,
     connectionEpoch: primitives.positiveInteger,

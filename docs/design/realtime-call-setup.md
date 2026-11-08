@@ -31,7 +31,7 @@ separated retrospectively. The new `Realtime setup phase completed` logs report
 owner, candidates, lease, history, token, config, pre-dispatch fence, provider
 call, and release durations under the request trace ID, with no request content.
 
-## Design
+## Local setup and configuration cache
 
 - The native call host resolves the existing client/workspace-scoped catalog
   before a call. Ringing mounts the same call component that Answer will use,
@@ -62,26 +62,50 @@ call, and release durations under the request trace ID, with no request content.
   leases are always checked live. Pending authenticated fetches are not shared:
   their lease and cancellation belong to the initiating request.
 
-## Why not create the provider call while ringing?
+## Provider preconnection with a gated native audio device
 
-Not in this change. The existing begin operation claims an answered call and
-freezes authority; starting it during ring changes session ownership and may
-block normal agent work. Provider call creation also commits subscription work
-and sends session context before a person accepts. Several ringing phones would
-create several provider calls, including declined, timed-out and losing answers.
-Closing the local peer does not prove remote creation was cancelled, particularly
-when an HTTP outcome is unknown. The implemented provider protocol has no proven
-transport-only prepare/hold/release contract for suppressing the opening without
-losing or changing model-visible output.
+Provider preconnection requires both server catalog support and
+`callAdapter.incoming.connectsBeforeAnswer === true`. That native capability is
+true only when the installed WebRTC audio device generates silence without
+capturing the microphone or playing remote audio before system-call acceptance.
+Without either capability, including existing clients and ungated Android hosts,
+the local preparation path above remains unchanged: provider connection and
+microphone acquisition start on Answer. The server currently advertises this
+capability only for the connected Codex provider tested below.
 
-This is a deliberate semantic boundary, not a one-second claim. A cached config
-removes one observed 0.92–1.30 second round trip; ring preparation removes the
-post-answer catalog/session-loading waterfall and local offer work. Provider
-creation alone was 0.84–2.12 seconds, before media connection and actual speech.
-Reaching one second reliably needs a verified provider-level held-call contract
-(single ownership, explicit release on Answer, terminal cleanup and accounting)
-or a faster provider path. Model instructions, initial items, opening behavior
-and transcript injection are unchanged here.
+A ringing phone admits a `preparing` realtime mode tied to its exact call and
+device. Preparing modes emit no call-start/end events and never pause ordinary
+chat work. Multiple ringing phones prepare independently. The controller uses
+the native device's gated stream before negotiating; it never relies on a late
+null-track replacement. Remote tracks stay disabled as a second output gate.
+No context bridge exists until acceptance, so neither context appends nor their
+delivery acknowledgments can leave the phone during ringing. Durable updates
+accumulate for each prepared mode.
+
+After the phone wins the ordinary answer claim, an owner-proven begin replay
+atomically promotes its mode, claims the answered call, and mirrors the unchanged
+opening. The opening has the reserved first ledger sequence; ring-time updates
+follow it. Connection activation and bridge creation happen only after promotion.
+Ordinary starts retain their existing opening/context ordering. Cancellation,
+decline, timeout, answering elsewhere, disposal, and late HTTP completion retire
+the unused mode and local transport without presenting an accepted call. Preparing
+leases cannot extend the ring deadline; expiry and private-session transitions
+also retire abandoned preparations under the session lock.
+
+This intentionally spends a provider session on every capable ringing phone,
+including declined/unanswered calls, for at most its ring lifetime. The device
+closes WebRTC on settlement; the server closes its connection ledger. There is no
+provider-side cancellation guarantee for an HTTP call whose outcome is unknown.
+The extra subscription occupancy is accepted in exchange for moving provider
+creation and media connection before Answer. Model instructions, rendered text,
+initial-item projection and transcript injection are unchanged.
+
+This is not a one-second production claim. Cached configuration removes one
+observed 0.92–1.30 second round trip; provider creation alone was 0.84–2.12 seconds
+in the historical sample. The real-provider generated-silence experiment below
+measured 1.71 seconds after simulated Answer, excluding native answer/promotion
+round trips and physical speaker latency. Device and deployed-server measurements
+remain necessary after the native audio-device release is installed.
 
 ## Verification boundaries
 
@@ -123,11 +147,10 @@ This establishes a transport gate in Chromium, not a native implementation.
 The installed react-native-webrtc version has no JavaScript generated-audio-track
 API. Its native factory accepts a custom RTCAudioDevice on iOS or AudioDeviceModule
 on Android, but those replace a shared audio-device implementation and need native
-implementation and device validation. Muting a getUserMedia track is not equivalent:
-it would still acquire a microphone before Answer. The preconnection prototype
-must remain unshipped until a genuinely generated silent-input path works on both
-native platforms and its answer, timeout, cancellation and ownership cleanup are
-verified. Local SDP preparation remains independent of that prerequisite.
+implementation and device validation. Muting a normal getUserMedia track is not
+equivalent: it would still acquire a microphone before Answer. Preconnection is
+therefore gated on the native device's explicit capability rather than enabled
+for all WebRTC hosts. Local SDP preparation remains independent of that capability.
 
 ### Null-track hold bisection
 
@@ -159,9 +182,9 @@ The late microphone is therefore not broken: every non-rotation sample transmitt
 the known phrase successfully. The observed change in autonomous opening behavior
 lies between zero and two seconds without early RTP; this is an experimental bound,
 not an established provider timeout or a documented protocol guarantee. The
-generated-silence hold above avoids it, but has no existing cross-platform native
-implementation. A full 20–30 second null-track ringing gate is not supported by
-these results, so provider preconnection remains unshipped.
+generated-silence hold above avoids it, but requires a native audio device rather
+than the ordinary cross-platform JavaScript adapter. A full 20–30 second null-track
+ringing gate is not supported by these results and is not shipped.
 
 The broker and upstream Codex client expose call creation, not an existing-call
 SDP-update operation. As a separate control, a fresh offer after a 20-second hold

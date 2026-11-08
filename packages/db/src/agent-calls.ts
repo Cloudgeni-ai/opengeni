@@ -1,7 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
-import { agentCallHostPhones, agentCalls, sessionRealtimeModes, sessionRealtimeConnections } from "./schema";
+import { agentCallHostPhones, agentCalls } from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
+import { endSessionRealtimePreparationsInTransaction } from "./session-realtime-preparation";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
 // callee's opted-in phones until its deadline; the first answer wins, and a
@@ -307,12 +308,17 @@ export async function settleAgentCall(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scoped) => {
-      const [target] = await scoped.select({ sessionId: agentCalls.sessionId }).from(agentCalls)
-        .where(and(eq(agentCalls.workspaceId, input.workspaceId), eq(agentCalls.id, input.callId))).limit(1);
+      const [target] = await scoped
+        .select({ sessionId: agentCalls.sessionId })
+        .from(agentCalls)
+        .where(and(eq(agentCalls.workspaceId, input.workspaceId), eq(agentCalls.id, input.callId)))
+        .limit(1);
       if (!target) return null;
       // Match realtime promotion's session -> mode -> call lock order.
       await lockSessionEventWriteRows(scoped, {
-        workspaceId: input.workspaceId, controlLock: "share", sessionIds: [target.sessionId],
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [target.sessionId],
       });
       const conditions = [
         eq(agentCalls.workspaceId, input.workspaceId),
@@ -343,18 +349,16 @@ export async function settleAgentCall(
         .where(and(...conditions))
         .returning();
       if (row) {
-        const ended = await scoped.update(sessionRealtimeModes).set({
-          state: "ended", endReason: "browser_unload", endedAt: sql`now()`, updatedAt: sql`now()`,
-          version: sql`${sessionRealtimeModes.version} + 1`,
-        }).where(and(
-          eq(sessionRealtimeModes.incomingCallId, row.id), eq(sessionRealtimeModes.state, "preparing"),
-          input.outcome === "answered"
-            ? sql`${sessionRealtimeModes.incomingCallDevice} is distinct from ${row.answeredBy}` : undefined,
-        )).returning({ id: sessionRealtimeModes.id });
-        for (const mode of ended) {
-          await scoped.update(sessionRealtimeConnections).set({ state: "closed", closedAt: sql`now()`, updatedAt: sql`now()` })
-            .where(and(eq(sessionRealtimeConnections.realtimeId, mode.id), sql`${sessionRealtimeConnections.state} in ('negotiating', 'ready', 'active')`));
-        }
+        await endSessionRealtimePreparationsInTransaction(scoped, {
+          workspaceId: input.workspaceId,
+          sessionId: row.sessionId,
+          callId: row.id,
+          ...(input.outcome === "answered" && row.answeredBy
+            ? { exceptDevice: row.answeredBy }
+            : {}),
+          reason: input.outcome === "missed" ? "lease_expired" : "browser_unload",
+          now: row.endedAt!,
+        });
       }
       return row ? mapCall(row) : null;
     },
