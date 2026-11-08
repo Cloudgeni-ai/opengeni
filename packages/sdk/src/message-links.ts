@@ -4,6 +4,7 @@
  * Agents write these forms (tool receipts and bundled Skills teach them):
  *
  * - `artifact:<file uuid>` — a retained workspace file (exports, published files, images).
+ * - `artifact:<32-hex id>` — a live editable document, workbook, or presentation.
  * - `sandbox:<path>[:<line>]` — a file in the session's sandbox or Connected Machine.
  * - `session:<session uuid>` — another chat in the same workspace. Each host opens it
  *   its own way (an in-app route, the phone app's chat screen) on its own deployment.
@@ -19,7 +20,12 @@
  */
 export type OpenGeniLinkTarget =
   | { kind: "file"; fileId: string; workspaceId: string | null; fromSession?: string }
-  | { kind: "editable-artifact"; artifactId: string; workspaceId: string; fromSession?: string }
+  | {
+      kind: "editable-artifact";
+      artifactId: string;
+      workspaceId: string | null;
+      fromSession?: string;
+    }
   | { kind: "site"; artifactId: string; workspaceId: string; fromSession?: string }
   | { kind: "sandbox-file"; path: string; line: number | null }
   | { kind: "session"; sessionId: string; workspaceId: string | null };
@@ -112,6 +118,11 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
   if (!href) return null;
   const fileId = parseRetainedFileReference(href);
   if (fileId) return { kind: "file", fileId, workspaceId: null };
+  if (openGeniLinkScheme(href) === "artifact") {
+    const id = href.slice("artifact:".length);
+    if (EDITABLE_ID.test(id))
+      return { kind: "editable-artifact", artifactId: id.toLowerCase(), workspaceId: null };
+  }
   const sessionId = parseSessionReference(href);
   if (sessionId) return { kind: "session", sessionId, workspaceId: null };
   if (openGeniLinkScheme(href) === "sandbox" || href.startsWith(LEGACY_WORKSPACE_PREFIX)) {

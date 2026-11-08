@@ -245,7 +245,7 @@ export function viewerLinkResolver(input: {
 }): OpenGeniLinkResolver {
   return (target) => {
     if (target.kind !== "editable-artifact" && target.kind !== "site") return null;
-    if (target.workspaceId !== input.workspaceId) return null;
+    if (target.workspaceId !== null && target.workspaceId !== input.workspaceId) return null;
     return { open: () => input.open({ kind: target.kind, artifactId: target.artifactId }) };
   };
 }

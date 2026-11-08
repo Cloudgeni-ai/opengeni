@@ -9,11 +9,12 @@ import {
   Outlet,
   Link,
 } from "@tanstack/react-router";
-import { WorkspaceDock } from "@opengeni/react";
+import { OpenGeniLinkProvider, WorkspaceDock } from "@opengeni/react";
 import { MarkdownText } from "@opengeni/react/app/components/markdown";
 import { ArtifactLinkBoundary } from "@opengeni/react/app/components/session/artifact-link-boundary";
 import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
 import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
+import { useWorkspaceAppLinkResolver } from "@opengeni/react/app/lib/session-artifact-navigation";
 // The web app backs the shared session UI's links with its router; this
 // fixture renders those components under its own TanStack router the same way.
 import "../src/navigation-host";
@@ -69,6 +70,7 @@ function DockPreview() {
   return <Preview />;
 }
 function Session() {
+  const resolveLink = useWorkspaceAppLinkResolver(workspaceId);
   const [activeTab, setActiveTab] = useState(opened ? "artifacts" : "files");
   const [collapsed, setCollapsed] = useState(!opened);
   return (
@@ -93,16 +95,21 @@ function Session() {
         >
           <div className="flex h-full flex-col bg-bg p-8 text-fg">
             <h1 className="mb-8 text-lg font-semibold">Build a project overview</h1>
-            <MarkdownText
-              text={[
-                `Your Site is ready. [Open Project overview](/workspaces/${workspaceId}/artifacts/${siteId})`,
-                `[Open Alpha document](/workspaces/${workspaceId}/artifacts/editable/${documentId})`,
-                `[Open Alpha spreadsheet](/workspaces/${workspaceId}/artifacts/editable/${spreadsheetId})`,
-                `[Open Alpha presentation](/workspaces/${workspaceId}/artifacts/editable/${presentationId})`,
-                `[Open unknown artifact](/workspaces/${workspaceId}/artifacts/editable/${unknownEditableId})`,
-                `[Open retained file](/workspaces/${workspaceId}/artifacts/files/${fileId})`,
-              ].join("\n\n")}
-            />
+            <OpenGeniLinkProvider resolveLink={resolveLink}>
+              <MarkdownText
+                text={[
+                  `Your Site is ready. [Open Project overview](/workspaces/${workspaceId}/artifacts/${siteId})`,
+                  `[Open Alpha document](/workspaces/${workspaceId}/artifacts/editable/${documentId})`,
+                  `[Open Alpha spreadsheet](/workspaces/${workspaceId}/artifacts/editable/${spreadsheetId})`,
+                  `[Open Alpha presentation](/workspaces/${workspaceId}/artifacts/editable/${presentationId})`,
+                  `[Open short document](artifact:${documentId})`,
+                  `[Open short spreadsheet](artifact:${spreadsheetId})`,
+                  `[Open short presentation](artifact:${presentationId})`,
+                  `[Open unknown artifact](/workspaces/${workspaceId}/artifacts/editable/${unknownEditableId})`,
+                  `[Open retained file](/workspaces/${workspaceId}/artifacts/files/${fileId})`,
+                ].join("\n\n")}
+              />
+            </OpenGeniLinkProvider>
           </div>
         </ArtifactLinkBoundary>
       }
