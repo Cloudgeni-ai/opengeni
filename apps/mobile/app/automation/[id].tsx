@@ -58,6 +58,8 @@ function Automation({ workspaceId }: { workspaceId: string }) {
   const [starting, setStarting] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const gone = useRef(false);
+  /** The switch's write still going, so Run now waits for a resume to land. */
+  const switching = useRef<Promise<void> | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -132,7 +134,15 @@ function Automation({ workspaceId }: { workspaceId: string }) {
   const next = nextRunWords(t, task, now);
   const sources = cached?.sources ?? [];
 
-  const setOn = async (turnOn: boolean) => {
+  const setOn = (turnOn: boolean) => {
+    const write = switchTo(turnOn);
+    switching.current = write;
+    void write.finally(() => {
+      if (switching.current === write) switching.current = null;
+    });
+  };
+
+  const switchTo = async (turnOn: boolean) => {
     const before = task;
     // The switch moves at once (a finished run-once one starts listening
     // again); a refusal puts it back and says why.
@@ -163,6 +173,8 @@ function Automation({ workspaceId }: { workspaceId: string }) {
     if (starting) return;
     setStarting(true);
     try {
+      // Turned on a moment ago: the server takes the run once the resume has landed.
+      await switching.current;
       await client.triggerScheduledTask(workspaceId, task.id);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
         () => undefined,
@@ -225,7 +237,7 @@ function Automation({ workspaceId }: { workspaceId: string }) {
           ...(statusSubtitle ? { subtitle: statusSubtitle } : {}),
           value: on,
           disabled: !may.canManage,
-          onChange: (value) => void setOn(value),
+          onChange: (value) => setOn(value),
         },
         {
           kind: "info",
@@ -238,7 +250,8 @@ function Automation({ workspaceId }: { workspaceId: string }) {
   ];
 
   const actions: SettingsRow[] = [];
-  if (may.canRun) {
+  // Like the web, a paused or finished automation doesn't take a run.
+  if (may.canRun && on) {
     actions.push({
       kind: "action",
       id: "run-now",
