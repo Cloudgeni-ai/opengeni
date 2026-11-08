@@ -12,4 +12,23 @@ android {
     versionCode 1
     versionName '1.0.0'
   }
+  // Ringing agents' calls from a push needs the app's Firebase messaging,
+  // which expo-notifications brings. Without it, calls still work as system
+  // calls; only incoming agent calls are off.
+  if (rootProject.findProject(':expo-notifications') != null) {
+    sourceSets {
+      main.java.srcDirs += 'src/push/java'
+    }
+  }
+}
+
+dependencies {
+  // Self-managed system calls (Telecom). 1.0.x builds with compileSdk 36.
+  implementation 'androidx.core:core-telecom:1.0.1'
+  implementation 'androidx.core:core:1.13.1'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+  if (rootProject.findProject(':expo-notifications') != null) {
+    implementation project(':expo-notifications')
+    implementation 'com.google.firebase:firebase-messaging:25.0.1'
+  }
 }

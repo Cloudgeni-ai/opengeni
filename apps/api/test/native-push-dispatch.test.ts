@@ -8,6 +8,7 @@ import {
   nativePushInterruptionLevel,
   nativePushCategory,
   nativePushData,
+  nativeFcmMessage,
   nativePushRingsCall,
 } from "../src/native-push-dispatch";
 import {
@@ -193,6 +194,39 @@ describe("native push presentation", () => {
     });
     expect(nativePushInterruptionLevel(ring)).toBe("time-sensitive");
     expect(nativePushData(ring)).toMatchObject({ callId: ring.callId, ringUntil: ring.ringUntil });
+  });
+
+  test("an Android call ring carries the call for the ring screen and expires with the ring", () => {
+    const ring = {
+      ...payload,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      title: "Deploy watcher",
+      body: "Production is down",
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    const message = nativeFcmMessage(
+      { token: "fcm-token-123", payload: ring },
+      Date.parse("2026-10-26T18:00:10.500Z"),
+    );
+    expect(message.android).toEqual({ priority: "HIGH", collapse_key: ring.callId, ttl: "29s" });
+    // An app without system calls still shows the ordinary notification.
+    expect(message.data.title).toBe("Deploy watcher is calling");
+    expect(message.data.message).toBe("Production is down");
+    expect(JSON.parse(message.data.opengeniCall!)).toEqual({
+      type: "ring",
+      callId: ring.callId,
+      sessionId: payload.sessionId,
+      workspaceId: payload.workspaceId,
+      subjectId: "user:abc",
+      title: "Deploy watcher",
+      reason: "Production is down",
+      ringUntil: ring.ringUntil,
+    });
+
+    const notice = nativeFcmMessage({ token: "fcm-token-123", payload });
+    expect(notice.android).toEqual({ priority: "HIGH", collapse_key: payload.sessionId });
+    expect(notice.data.opengeniCall).toBeUndefined();
   });
 });
 
