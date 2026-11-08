@@ -315,6 +315,7 @@ describe("attempt-local initial wire dispatch clock", () => {
     expect(published).toEqual([
       {
         type: "agent.model.request",
+        occurredAt: expect.any(Date),
         payload: {
           phase: "first_byte",
           provider: "azure",

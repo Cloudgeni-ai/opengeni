@@ -1115,6 +1115,7 @@ export async function runTurnStreamAttempt(
               ]),
           {
             type: "agent.model.request",
+            occurredAt: new Date(),
             payload: {
               phase: "started",
               provider: streamProvider,
@@ -1465,6 +1466,7 @@ export async function runTurnStreamAttempt(
       await publishFallbackProviderEvents([
         {
           type: "agent.model.request",
+          occurredAt: new Date(),
           payload: {
             phase: "first_byte",
             provider: streamProvider,
@@ -1575,6 +1577,7 @@ export async function runTurnStreamAttempt(
             await publishFallbackProviderEvents([
               {
                 type: "agent.model.request",
+                occurredAt: new Date(),
                 payload: {
                   phase: "completed",
                   provider: streamProvider,
@@ -2105,6 +2108,7 @@ export async function runTurnStreamAttempt(
         await publishFallbackProviderEvents([
           {
             type: "agent.model.request",
+            occurredAt: new Date(),
             payload: {
               phase: "failed",
               provider: streamProvider,
