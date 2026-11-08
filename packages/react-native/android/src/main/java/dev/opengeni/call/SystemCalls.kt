@@ -165,7 +165,7 @@ internal object SystemCalls {
     }
     scope.launch {
       try {
-        withTimeoutOrNull(2_000) { control.disconnect(DisconnectCause(cause)) }
+        withTimeoutOrNull(2_000) { control.disconnect(DisconnectCause(telecomCause(cause))) }
       } catch (error: Exception) {
         Log.w(TAG, "Could not end the system call", error)
       }
@@ -411,6 +411,20 @@ internal object SystemCalls {
     callActivity = WeakReference(activity)
     CallWindow.hold(activity)
   }
+
+  /**
+   * Telecom ends an app's own call only as local, remote, missed or rejected,
+   * and refuses any other cause (the call would stay open).
+   */
+  private fun telecomCause(cause: Int): Int =
+    when (cause) {
+      DisconnectCause.LOCAL,
+      DisconnectCause.REMOTE,
+      DisconnectCause.MISSED,
+      DisconnectCause.REJECTED -> cause
+      DisconnectCause.ANSWERED_ELSEWHERE -> DisconnectCause.REMOTE
+      else -> DisconnectCause.LOCAL
+    }
 
   private fun routeName(type: Int): String =
     when (type) {
