@@ -539,6 +539,7 @@ export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } f
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
+  resolveOpenGeniLinkTarget,
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,

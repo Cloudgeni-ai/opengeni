@@ -175,6 +175,7 @@ type SessionClientMethods = Pick<
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
       | "getSessionModelAccount"
+      | "getWorkspaceArtifactCurrent"
     >
   >;
 

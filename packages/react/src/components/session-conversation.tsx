@@ -712,6 +712,12 @@ function ConversationView({
           >
             <MessageTimeline
               renderMessageText={renderMessageText}
+              artifactScope={{
+                client: context.client,
+                workspaceId: context.workspaceId,
+                sessionId: sessionId ?? undefined,
+                override: resolveLink,
+              }}
               resolveLink={links}
               renderInteractiveBlock={
                 renderInteractiveBlock === false
@@ -800,7 +806,15 @@ function ConversationView({
                 recovery={providerRecovery}
               />
               {/* Links in agent questions resolve like links in its replies. */}
-              <OpenGeniLinkProvider resolveLink={links}>
+              <OpenGeniLinkProvider
+                resolveLink={links}
+                artifactScope={{
+                  client: context.client,
+                  workspaceId: context.workspaceId,
+                  sessionId: sessionId ?? undefined,
+                  override: resolveLink,
+                }}
+              >
                 <HumanInputSurface
                   className="mx-auto max-w-3xl"
                   autoFocus={false}

@@ -2797,6 +2797,13 @@ require publishing and target-domain read authority ([library](artifact-library.
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
+Workspace-aware Markdown resolves UUID `artifact:` references through the SDK's
+`resolveOpenGeniLinkTarget` before invoking the existing file/Site resolvers.
+It reads exact file metadata first (preserving historical file precedence), then
+Site metadata only on a definitive 404; the paginated catalog is not an ID lookup.
+`artifact-link-scope.tsx` owns the React lookup lifecycle and retry; native hosts
+use the same SDK helper. Explicit console paths and 32-hex editable references
+remain synchronous and existing message text is never rewritten.
 Stored-byte routes share `http/user-content.ts` ([`artifact-library.md`](artifact-library.md)).
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),

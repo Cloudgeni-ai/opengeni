@@ -36898,6 +36898,7 @@
       "ResolvedAgentCapabilities": "type",
       "ResolvedAgentConfig": "type",
       "ResolveInteractionInterventionRequest": "type",
+      "resolveOpenGeniLinkTarget": "value",
       "resolveWorkspaceTranscriptionPolicy": "value",
       "resolveWorkspaceVoiceInputEnabled": "value",
       "ResourceAuthorityScope": "type",
