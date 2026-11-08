@@ -128,7 +128,7 @@ fn a_discarded_range_of_a_mapped_file_is_found_in_this_process() {
         base.add(page * 5).write_volatile(1);
         let _ = base.add(page * 6).read_volatile();
     }
-    let found = freed(rustix::process::getpid().as_raw_nonzero().get(), &path).unwrap();
+    let found = freed(|name| File::open(format!("/proc/self/{name}")), &path).unwrap();
     // A read may map the shared zero page, which counts as present: it
     // is left out, never wrongly named.
     let length = page * pages;

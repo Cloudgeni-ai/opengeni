@@ -30,8 +30,7 @@ use std::ops::Range;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::path::Path;
 
-use rustix::process::Pid;
-
+use super::process::Procfs;
 use crate::{EngineError, ErrorKind};
 
 /// A page the kernel has in memory.
@@ -44,19 +43,19 @@ const SWAPPED: u64 = 1 << 62;
 /// Pagemap entries read at once.
 const ENTRIES_PER_READ: usize = 1 << 16;
 
-/// [`freed`] for the VMM process `pid`, clipped to the image's length, off
-/// the async runtime: the engine's
+/// [`freed`] for the VMM process whose files `procfs` opens, clipped to the
+/// image's length, off the async runtime: the engine's
 /// [`freed_memory`](crate::Engine::freed_memory).
 pub(super) fn freed_memory(
-    pid: Pid,
+    procfs: Procfs,
     memory: &Path,
 ) -> impl Future<Output = Result<Vec<Range<u64>>, EngineError>> + Send + 'static {
     const OP: &str = "freed_memory";
-    let (pid, memory) = (pid.as_raw_nonzero().get(), memory.to_owned());
+    let memory = memory.to_owned();
     async move {
         let found = tokio::task::spawn_blocking(move || {
             let image_len = std::fs::metadata(&memory)?.len();
-            let mut ranges = freed(pid, &memory)?;
+            let mut ranges = freed(|name| procfs.open(name), &memory)?;
             // A mapping past the file's end reads no image bytes.
             ranges.retain_mut(|range| {
                 range.end = range.end.min(image_len);
@@ -70,19 +69,24 @@ pub(super) fn freed_memory(
     }
 }
 
-/// The ranges of the memory image at `memory`, as mapped by process `pid`,
-/// that its guest gave back and that read as zeros now (see the module's
-/// documentation): sorted, apart, and whole pages. Empty when the process
-/// does not map that file.
-fn freed(pid: i32, memory: &Path) -> io::Result<Vec<Range<u64>>> {
+/// The ranges of the memory image at `memory`, as mapped by the process
+/// whose procfs files `open` opens by name, that its guest gave back and
+/// that read as zeros now (see the module's documentation): sorted, apart,
+/// and whole pages. Empty when the process does not map that file. `open`
+/// must hand out only the VMM's own files, never those of a process that
+/// took its number over after it exited: a VMM mapping the same image,
+/// such as one woken from the same template, would lend this image its
+/// discards.
+fn freed(open: impl Fn(&str) -> io::Result<File>, memory: &Path) -> io::Result<Vec<Range<u64>>> {
     let metadata = std::fs::metadata(memory)?;
     let file = Mapped {
         major: u64::from(rustix::fs::major(metadata.dev())),
         minor: u64::from(rustix::fs::minor(metadata.dev())),
         inode: metadata.ino(),
     };
-    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
-    let pagemap = File::open(format!("/proc/{pid}/pagemap"))?;
+    let (mut maps_file, pagemap) = (open("maps")?, open("pagemap")?);
+    let mut maps = String::new();
+    io::Read::read_to_string(&mut maps_file, &mut maps)?;
     let page = rustix::param::page_size() as u64;
     zeroed(&maps, &file, page, |start, entries| {
         read_entries(&pagemap, start, entries, page)

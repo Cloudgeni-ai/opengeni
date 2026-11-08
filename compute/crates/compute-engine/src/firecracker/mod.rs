@@ -1215,7 +1215,7 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         memory: &Path,
     ) -> impl Future<Output = Result<Vec<std::ops::Range<u64>>, EngineError>> + Send + 'static {
-        freed::freed_memory(vm.process.pid(), memory)
+        freed::freed_memory(vm.process.procfs(), memory)
     }
 
     fn last_words(&self, vm: &FirecrackerVm) -> impl Future<Output = LastWords> + Send + 'static {

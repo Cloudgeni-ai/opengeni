@@ -768,7 +768,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             {
                 Ok(freed) => freed,
                 Err(error) => {
-                    tracing::debug!(id = %self.id, %error, "memory the guest gave back not found");
+                    tracing::warn!(id = %self.id, %error, "memory the guest gave back not found");
                     Vec::new()
                 }
             }

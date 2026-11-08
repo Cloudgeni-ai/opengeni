@@ -844,7 +844,7 @@ fn merge(
     // chunks it was in change.
     let zeroed = within(&data_ranges(&out, len)?, freed, len);
     for range in &zeroed {
-        zero_range(&out, range.clone())?;
+        punch_hole(&out, range.clone())?;
     }
     out.sync_all()?;
     let mut touched: Vec<usize> = Vec::new();
@@ -880,7 +880,7 @@ fn within(ranges: &[Range<u64>], of: &[Range<u64>], len: u64) -> Vec<Range<u64>>
 /// Makes `range` of `file` read as zeros, freeing its blocks where the
 /// filesystem can.
 #[cfg(target_os = "linux")]
-fn zero_range(file: &File, range: Range<u64>) -> io::Result<()> {
+pub(crate) fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
     use rustix::fs::{FallocateFlags, fallocate};
     fallocate(
         file,
@@ -892,7 +892,7 @@ fn zero_range(file: &File, range: Range<u64>) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn zero_range(file: &File, range: Range<u64>) -> io::Result<()> {
+pub(crate) fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
     let zeros = vec![0_u8; usize::try_from(CHUNK_BYTES).unwrap_or(0)];
     let mut at = range.start;
     while at < range.end {
