@@ -334,9 +334,33 @@ export async function settleAgentCall(
         })
         .where(and(...conditions))
         .returning();
-      return row ? mapCall(row) : null;
+      if (!row) return null;
+      if (row.state === "answered" || row.state === "declined" || row.state === "cancelled") {
+        await endAgentCallRingsInTransaction(scoped, row.id);
+      }
+      return mapCall(row);
     },
   );
+}
+
+const END_RINGS_ROUTINE = "opengeni_private.end_agent_call_rings_v1(uuid)";
+
+/**
+ * Stop a settled call's ring on the callee's other phones (1344): withdraw
+ * rings not sent yet and queue an `ended` push to Android phones that rang.
+ * Does nothing while the deployment's database still withholds the routine
+ * from the runtime; those phones then ring out as before.
+ */
+async function endAgentCallRingsInTransaction(scoped: Database, callId: string): Promise<void> {
+  // A separate statement: EXECUTE is checked when a statement starts, so a
+  // guard inside the calling statement would not avoid the permission error.
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    scoped,
+    sql`select has_function_privilege(to_regprocedure(${END_RINGS_ROUTINE})::oid, 'EXECUTE')
+      as granted`,
+  );
+  if (granted?.granted !== true) return;
+  await rawRows(scoped, sql`select opengeni_private.end_agent_call_rings_v1(${callId}::uuid)`);
 }
 
 /**

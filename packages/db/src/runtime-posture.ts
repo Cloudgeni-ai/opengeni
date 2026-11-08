@@ -95,6 +95,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const;
 
 /**
@@ -127,6 +128,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, the sweeper finds nothing and sends no update messages.
  * 1240 withheld the inventory of meeting tracks not yet kept compact and
  * 1282 granted it.
+ * 1344 withholds the end of a call's ring on the other phones; until it is
+ * granted, settling a call sends no ended push and those phones ring out.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -134,6 +137,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -232,6 +236,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "recording_tracks",
     "recording_chunks",
     "recording_transcript_versions",
+  ],
+  "end_agent_call_rings_v1(uuid)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
   ],
 };
 

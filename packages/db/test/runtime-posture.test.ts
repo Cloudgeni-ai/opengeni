@@ -4369,6 +4369,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4376,6 +4377,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4456,6 +4458,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4469,7 +4472,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
     beforeOutbox.privateRoutines = beforeOutbox.privateRoutines.filter(
       (entry) =>
         entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
-        entry.name !== "ring_agent_call_v1(uuid, boolean)",
+        entry.name !== "ring_agent_call_v1(uuid, boolean)" &&
+        entry.name !== "end_agent_call_rings_v1(uuid)",
     );
     expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);
