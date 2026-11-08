@@ -221,6 +221,7 @@ export type {
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
 } from "./artifact-catalog";
 export type {
   SessionMessageSearchRequest,
@@ -539,6 +540,7 @@ export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } f
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
+  resolveOpenGeniLinkTarget,
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,

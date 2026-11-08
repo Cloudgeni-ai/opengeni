@@ -21,6 +21,38 @@ test("catalog SDK types agree with the shared contract", () => {
   expect(other).toBeNull();
 });
 
+test("UUID resolution sends one exact read with session scope and cancellation", async () => {
+  const id = "40000000-0000-4000-8000-000000000004";
+  const sessionId = "30000000-0000-4000-8000-000000000003";
+  const calls: Array<{ url: URL; session: string | null; actor: string | null }> = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    apiKey: "synthetic",
+    fetch: async (url, init) => {
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url: new URL(String(url)),
+        session: headers.get("x-opengeni-session-id"),
+        actor: headers.get("x-opengeni-external-actor"),
+      });
+      return Response.json({ kind: "site", artifactId: id });
+    },
+  }).asUser("viewer");
+  expect(await client.resolveArtifactLink("space/one", id, { sessionId })).toEqual({
+    kind: "site",
+    artifactId: id,
+  });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.url.pathname).toBe(`/v1/workspaces/space%2Fone/artifact-catalog/${id}/resolve`);
+  expect(calls[0]!.url.searchParams.get("sessionId")).toBe(sessionId);
+  expect(calls[0]!.session).toBe(sessionId);
+  expect(calls[0]!.actor).not.toBeNull();
+  const abort = new AbortController();
+  abort.abort();
+  await expect(client.resolveArtifactLink("space", id, { signal: abort.signal })).rejects.toThrow();
+  expect(calls).toHaveLength(1);
+});
+
 test("pin client sends a kind-qualified idempotent mutation and preserves actor and cancellation", async () => {
   const calls: Array<{
     url: URL;

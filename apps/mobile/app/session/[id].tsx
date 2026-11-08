@@ -22,7 +22,7 @@ import {
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
-import type { OpenGeniLinkTarget } from "@opengeni/sdk";
+import { resolveOpenGeniLinkTarget, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
@@ -264,7 +264,7 @@ function LiveSession(props: {
   const webBaseUrl = account?.baseUrl ?? null;
   // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
   const renderMarkdown = useMemo(() => {
-    const openLink = (target: OpenGeniLinkTarget) => {
+    const openResolvedLink = (target: OpenGeniLinkTarget) => {
       // Another chat opens here in the app, in the workspace the link names (or this one).
       if (target.kind === "session") {
         router.push(
@@ -290,6 +290,18 @@ function LiveSession(props: {
           `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
         );
     };
+    const openLink = (target: OpenGeniLinkTarget) => {
+      void resolveOpenGeniLinkTarget(props.client, target, props.workspaceId, {
+        sessionId: props.sessionId,
+      })
+        .then(openResolvedLink)
+        .catch((error: unknown) =>
+          Alert.alert(
+            t("markdown.openArtifact"),
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
+    };
     return createWebMarkdownRenderer({
       // Opengeni conversations open in the app; anything else in the browser.
       onLinkPress: (url) => {
@@ -304,7 +316,7 @@ function LiveSession(props: {
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, webBaseUrl, t]);
+  }, [props.client, props.workspaceId, props.sessionId, webBaseUrl, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);

@@ -1,6 +1,7 @@
 import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { type OpenGeniText } from "../messages/runtime";
+import { ArtifactLinkScopeContext, type ArtifactLinkScope } from "./artifact-link-scope";
 
 export type { OpenGeniLinkTarget };
 
@@ -100,25 +101,54 @@ export function chainLinkResolvers(
 export function OpenGeniLinkProvider({
   resolveLink,
   renderLink,
+  artifactScope,
   children,
 }: {
   resolveLink?: OpenGeniLinkResolver | null | undefined;
   renderLink?: OpenGeniLinkRenderer | null | undefined;
+  /** Exact artifact metadata reads in the current workspace, before host resolution. */
+  artifactScope?: ArtifactLinkScope | undefined;
   children: ReactNode;
 }) {
   const parent = useContext(OpenGeniLinkContext);
   const parentRenderer = useContext(OpenGeniLinkRendererContext);
+  const parentArtifactScope = useContext(ArtifactLinkScopeContext);
+  const artifactClient = artifactScope?.client;
+  const artifactWorkspaceId = artifactScope?.workspaceId;
+  const artifactSessionId = artifactScope?.sessionId;
+  const artifactOverride = artifactScope?.override;
+  const effectiveArtifactScope = useMemo(
+    () =>
+      artifactClient && artifactWorkspaceId
+        ? {
+            client: artifactClient,
+            workspaceId: artifactWorkspaceId,
+            sessionId: artifactSessionId,
+            override: chainLinkResolvers(artifactOverride, parent),
+          }
+        : parentArtifactScope,
+    [
+      artifactClient,
+      artifactWorkspaceId,
+      artifactSessionId,
+      artifactOverride,
+      parent,
+      parentArtifactScope,
+    ],
+  );
   const value = useMemo(() => chainLinkResolvers(resolveLink, parent), [resolveLink, parent]);
   const renderer = useMemo(
     () => chainLinkRenderers(renderLink, parentRenderer),
     [renderLink, parentRenderer],
   );
   return (
-    <OpenGeniLinkContext.Provider value={value}>
-      <OpenGeniLinkRendererContext.Provider value={renderer}>
-        {children}
-      </OpenGeniLinkRendererContext.Provider>
-    </OpenGeniLinkContext.Provider>
+    <ArtifactLinkScopeContext.Provider value={effectiveArtifactScope}>
+      <OpenGeniLinkContext.Provider value={value}>
+        <OpenGeniLinkRendererContext.Provider value={renderer}>
+          {children}
+        </OpenGeniLinkRendererContext.Provider>
+      </OpenGeniLinkContext.Provider>
+    </ArtifactLinkScopeContext.Provider>
   );
 }
 

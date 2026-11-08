@@ -1077,6 +1077,7 @@ function AnswerDialog({
         ) : request ? (
           // Artifact links in the question open the workspace's pages, as in the session.
           <OpenGeniLinkProvider
+            artifactScope={{ client: context.client, workspaceId: request.workspaceId }}
             resolveLink={(target) => {
               const href = openGeniConsolePath(target, request.workspaceId);
               return href ? { href } : null;

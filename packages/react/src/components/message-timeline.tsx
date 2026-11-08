@@ -103,6 +103,7 @@ import {
 } from "../older-history";
 import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
+import type { ArtifactLinkScope } from "./artifact-link-scope";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
@@ -345,6 +346,7 @@ export type MessageTimelineProps = {
    * sandbox downloads by default.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  artifactScope?: ArtifactLinkScope | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -678,6 +680,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   resolveLink,
+  artifactScope,
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
@@ -3139,7 +3142,7 @@ export function MessageTimeline({
   );
   // Agent-authored object links resolve through the host, never the console.
   return (
-    <OpenGeniLinkProvider resolveLink={resolveLink}>
+    <OpenGeniLinkProvider resolveLink={resolveLink} artifactScope={artifactScope}>
       <MessageSenderContext.Provider value={renderMessageSender}>
         <AgentIdentityProvider
           items={resolvedItems}

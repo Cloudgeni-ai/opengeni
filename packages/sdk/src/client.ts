@@ -72,6 +72,7 @@ import type {
   ArtifactCatalogKind,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
   ArtifactPinResponse,
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
@@ -8979,6 +8980,24 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/files/${fileId}${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
+      options,
+    );
+  }
+
+  /** Resolve a UUID artifact link through one authenticated workspace lookup. */
+  async resolveArtifactLink(
+    workspaceId: string,
+    artifactId: string,
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
+  ): Promise<ArtifactLinkResolution> {
+    const client = options.sessionId
+      ? this.withHeaders({ "x-opengeni-session-id": options.sessionId })
+      : this;
+    return client.requestJson<ArtifactLinkResolution>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(artifactId)}/resolve${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
+      undefined,
+      undefined,
       options,
     );
   }
