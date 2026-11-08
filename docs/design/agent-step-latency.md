@@ -169,3 +169,32 @@ refresh supersedes the initial timing figures for the corrected implementation;
 it does not establish a universal speedup. Ordered requests retained the same
 normalization digest above. The ordering fix must not be removed to recover
 apparent performance: subsequent events and finalization owe those observations.
+
+## Balanced three-version decision run
+
+To check host drift and the simpler alternative, run twelve fresh invocations in
+the order A/B/C, C/B/A, B/A/C, C/A/B. A is the original baseline, B is the corrected
+consolidation (`831ccab`, unchanged runtime in `d10aae5`), and C is lifecycle-only
+`43dd4b5` with the redundant immediate-append timer removed, without consolidation
+or observation batching. Each invocation warms a 30-step turn and measures one
+30-step turn, with direct PostgreSQL loopback and no concurrent local validation.
+
+| Direct-loopback measurement | Original | Consolidated | Lifecycle-only |
+| --- | ---: | ---: | ---: |
+| Combined gap mean | 95.90 ms | 90.59 ms | 108.87 ms |
+| Combined gap median | 90.25 ms | 85.90 ms | 108.66 ms |
+| Combined gap p90 | 132.06 ms | 118.46 ms | 132.39 ms |
+| Statements per step, median | 113 | 106 | 154 |
+| Lifecycle triplets per 31-call turn | 1 | 31 | 31 |
+
+All 120 measured steps per variant have identical normalized ordered requests.
+Consolidation improves the mean 5.5% in this balanced comparison; lifecycle-only
+regresses 13.5% and adds about forty commands per step. This is the reason for
+retaining consolidation rather than shipping the new observations alone. The
+earlier adverse measurements remain above: machine drift is material, and none
+of these local experiments proves a production timing gain.
+
+An isolated old/new publisher comparison also did not reproduce a barrier cost:
+corrected passes averaged 94.38 and 75.89 ms, versus 98.13 and 83.25 ms with the
+incorrect barrier. The profiled tool-output queue wait was 14.81 versus 15.20 ms.
+The ordering correction is required independently of these timing results.
