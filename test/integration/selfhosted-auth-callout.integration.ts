@@ -27,18 +27,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { signEnrollmentBearer } from "@opengeni/contracts";
+import { connect, nkeys, type NatsConnection, type ResponderConnection } from "@opengeni/events";
 import {
-  connect,
-  createResponderConnection,
-  nkeys,
-  type NatsConnection,
-  type ResponderConnection,
-} from "@opengeni/events";
-import {
-  AUTH_CALLOUT_SUBJECT,
-  handleAuthorizationRequest,
+  startAuthCalloutResponder,
   type AuthCalloutDeps,
 } from "../../apps/api/src/sandbox/auth-callout";
+import { reconcileLiveConnections } from "../../apps/api/src/sandbox/live-connection-authority";
 import { freePort } from "@opengeni/testing/compose";
 
 // ── A minimal in-memory DB stand-in for getEnrollment ────────────────────────
@@ -95,14 +89,23 @@ const activeEnrollments = new Map<string, number>([
   [`${WS_B}:${AGENT_B}`, 1],
 ]);
 const liveConnectionClaims = new Map<string, string>();
+const revokedEnrollments = new Set<string>();
+let databaseUnavailable = false;
 
 import { mock } from "bun:test";
 mock.module("@opengeni/db", () => ({
   recordEnrollmentExpiredCredentials: async () => undefined,
   getEnrollment: async (_db: unknown, workspaceId: string, enrollmentId: string) => {
+    if (databaseUnavailable) throw new Error("database unavailable");
     const credentialGeneration = activeEnrollments.get(`${workspaceId}:${enrollmentId}`);
     if (credentialGeneration !== undefined) {
-      return { id: enrollmentId, workspaceId, status: "active", credentialGeneration };
+      return {
+        id: enrollmentId,
+        workspaceId,
+        status: revokedEnrollments.has(`${workspaceId}:${enrollmentId}`) ? "revoked" : "active",
+        credentialGeneration,
+        connectionInstanceId: liveConnectionClaims.get(`${workspaceId}:${enrollmentId}`),
+      };
     }
     return null;
   },
@@ -138,6 +141,7 @@ function makeDeps(callout: {
     db: {} as AuthCalloutDeps["db"],
     settings: {
       enrollmentSigningSecret: SIGNING_SECRET,
+      sandboxSelfhostedEnabled: true,
     } as AuthCalloutDeps["settings"],
     callout,
   };
@@ -215,7 +219,10 @@ function natsServerLaunch(
  * with `agent.<ws>.>` permissions. The control plane connects as the same `auth` user
  * (broad, account-default permissions) so request/reply routes.
  */
-async function startNatsWithCallout(accountPublicKey: string): Promise<RunningNats> {
+async function startNatsWithCallout(
+  accountPublicKey: string,
+  kickService = true,
+): Promise<RunningNats> {
   const configDir = await mkdtemp(join(tmpdir(), "opengeni-authcallout-"));
   const [port, monitorPort] = await Promise.all([freePort(), freePort()]);
   // SINGLE-account (APP) server-config-mode auth_callout. THE load-bearing rule
@@ -240,12 +247,15 @@ http_port: ${monitorPort}
 
 accounts {
   APP: {
+    ${kickService ? 'imports: [ { service: { account: SYS, subject: "$SYS.REQ.SERVER.*.KICK" } } ]' : ""}
     users: [
       { user: auth, password: auth }
       { user: control, password: control }
     ]
   }
-  SYS: {}
+  SYS: {
+    ${kickService ? 'exports: [ { service: "$SYS.REQ.SERVER.*.KICK", accounts: [APP] } ]' : ""}
+  }
 }
 system_account: SYS
 
@@ -326,6 +336,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
   let responder: ResponderConnection;
   let accountSeed: string;
   let accountPublicKey: string;
+  let deps: AuthCalloutDeps;
 
   beforeAll(async () => {
     // Generate the callout issuer account keypair (its seed signs every JWT).
@@ -337,19 +348,13 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
 
     // Start the responder in-process as the callout `auth` user — the SAME
     // handleAuthorizationRequest the API boots, over a standalone connection.
-    const deps = makeDeps({
+    deps = makeDeps({
       accountSeed,
       accountName: "APP",
       user: "auth",
       password: "auth",
     });
-    responder = await createResponderConnection(
-      nats.url,
-      { kind: "user-password", user: "auth", pass: "auth" },
-      AUTH_CALLOUT_SUBJECT,
-      (bytes) => handleAuthorizationRequest(deps, bytes),
-      { name: "test-auth-callout" },
-    );
+    responder = await startAuthCalloutResponder(deps, nats.url);
   }, 120_000);
 
   afterAll(async () => {
@@ -360,6 +365,156 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     await responder?.close().catch(() => undefined);
     await nats?.stop().catch(() => undefined);
   }, 30_000);
+
+  test("live authority audit preserves healthy sockets and never treats a DB outage as revocation", async () => {
+    const agent = await connect({
+      servers: nats.url,
+      token: await bearerFor(WS_A, AGENT_A),
+      name: connectionName(INSTANCE_A),
+      reconnect: false,
+    });
+    try {
+      await reconcileLiveConnections(deps, responder.connection);
+      await agent.flush();
+      expect(agent.isClosed()).toBe(false);
+      databaseUnavailable = true;
+      await expect(reconcileLiveConnections(deps, responder.connection)).rejects.toThrow(
+        "database unavailable",
+      );
+      await agent.flush();
+      expect(agent.isClosed()).toBe(false);
+    } finally {
+      databaseUnavailable = false;
+      await agent.close();
+    }
+  }, 15_000);
+
+  test.each(["revoked", "removed", "generation", "runner", "disabled"])(
+    "live authority audit disconnects both silent lanes when authority is %s",
+    async (change) => {
+      const id = crypto.randomUUID();
+      const instance = crypto.randomUUID();
+      const key = `${WS_A}:${id}`;
+      activeEnrollments.set(key, 1);
+      const token = await bearerFor(WS_A, id);
+      const lanes: NatsConnection[] = [];
+      try {
+        for (let n = 0; n < 2; n++)
+          lanes.push(
+            await connect({
+              servers: nats.url,
+              token,
+              name: connectionName(instance),
+              reconnect: false,
+            }),
+          );
+        if (change === "revoked") revokedEnrollments.add(key);
+        if (change === "removed") activeEnrollments.delete(key);
+        if (change === "generation") activeEnrollments.set(key, 2);
+        if (change === "runner") liveConnectionClaims.set(key, crypto.randomUUID());
+        const auditDeps =
+          change === "disabled"
+            ? { ...deps, settings: { ...deps.settings, sandboxSelfhostedEnabled: false } }
+            : deps;
+        await reconcileLiveConnections(auditDeps, responder.connection);
+        await Promise.race([
+          Promise.all(lanes.map((lane) => lane.closed())),
+          Bun.sleep(2_000).then(() => {
+            throw new Error("revoked sockets stayed open");
+          }),
+        ]);
+        expect(lanes.every((lane) => lane.isClosed())).toBe(true);
+      } finally {
+        activeEnrollments.delete(key);
+        liveConnectionClaims.delete(key);
+        revokedEnrollments.delete(key);
+        await Promise.all(lanes.map((lane) => lane.close()));
+      }
+    },
+    15_000,
+  );
+
+  test("running responder revokes an idle connection without a client heartbeat", async () => {
+    const id = crypto.randomUUID();
+    const key = `${WS_A}:${id}`;
+    activeEnrollments.set(key, 1);
+    const agent = await connect({
+      servers: nats.url,
+      token: await bearerFor(WS_A, id),
+      name: connectionName(crypto.randomUUID()),
+      reconnect: false,
+    });
+    try {
+      activeEnrollments.delete(key);
+      await Promise.race([
+        agent.closed(),
+        Bun.sleep(8_000).then(() => {
+          throw new Error("background authority audit did not revoke idle socket");
+        }),
+      ]);
+      expect(agent.isClosed()).toBe(true);
+    } finally {
+      activeEnrollments.delete(key);
+      liveConnectionClaims.delete(key);
+      await agent.close();
+    }
+  }, 12_000);
+
+  test("agents cannot use broker authority inventory or kick services", async () => {
+    const agent = await connect({
+      servers: nats.url,
+      token: await bearerFor(WS_A, AGENT_A),
+      name: connectionName(INSTANCE_A),
+      reconnect: false,
+    });
+    try {
+      for (const subject of ["$SYS.REQ.ACCOUNT.PING.CONNZ", "$SYS.REQ.SERVER.fake.KICK"]) {
+        await expect(agent.request(subject, "{}", { timeout: 500 })).rejects.toThrow();
+      }
+      expect(agent.isClosed()).toBe(false);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  test("API restart recovers and revokes sockets admitted by its predecessor", async () => {
+    const id = crypto.randomUUID();
+    const key = `${WS_A}:${id}`;
+    activeEnrollments.set(key, 1);
+    const agent = await connect({
+      servers: nats.url,
+      token: await bearerFor(WS_A, id),
+      name: connectionName(crypto.randomUUID()),
+      reconnect: false,
+    });
+    try {
+      await responder.close();
+      await agent.flush();
+      expect(agent.isClosed()).toBe(false);
+      activeEnrollments.delete(key);
+      responder = await startAuthCalloutResponder(deps, nats.url);
+      await Promise.race([
+        agent.closed(),
+        Bun.sleep(2_000).then(() => {
+          throw new Error("replacement API missed the existing socket");
+        }),
+      ]);
+      expect(agent.isClosed()).toBe(true);
+    } finally {
+      activeEnrollments.delete(key);
+      liveConnectionClaims.delete(key);
+      await agent.close();
+    }
+  }, 12_000);
+
+  test("responder cannot admit non-expiring sockets without broker revocation configured", async () => {
+    const unconfigured = await startNatsWithCallout(accountPublicKey, false);
+    try {
+      await expect(startAuthCalloutResponder(deps, unconfigured.url)).rejects.toThrow();
+    } finally {
+      await unconfigured.stop();
+    }
+  }, 15_000);
 
   // (1) FUNCTIONAL: a valid bearer for workspace A connects + can pub/sub its
   //     exact claimed process subject, and request/reply round-trips.

@@ -27,7 +27,8 @@
 // responder error → the request is left UNANSWERED (fail-closed; the server denies
 // on its callout timeout). Bearer expiry bounds admission, not an established
 // socket. Live authority is the active enrollment and exact runner lease; revoked
-// or superseded runners cannot receive work or renew that lease.
+// or superseded runners cannot receive work or renew that lease. The responder's
+// broker-inventory audit also explicitly closes their existing sockets.
 
 import { createHash } from "node:crypto";
 import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
@@ -55,6 +56,7 @@ import {
 import type { Observability } from "@opengeni/observability";
 import { observabilityEventBusOptions } from "../observability";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
+import { connectionAuthorityName, startLiveConnectionAuthority } from "./live-connection-authority";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
@@ -173,7 +175,7 @@ export async function handleAuthorizationRequest(
   }
 
   const secret = resolveEnrollmentSigningSecret(deps.settings);
-  if (!secret) {
+  if (!secret || !deps.settings.sandboxSelfhostedEnabled) {
     // The credential plane is off for this deployment — deny rather than mint an
     // unscoped credential. (The responder should not even be running in this case,
     // but fail-closed regardless.)
@@ -283,7 +285,12 @@ export async function handleAuthorizationRequest(
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
-    name: claims.agentId,
+    name: connectionAuthorityName({
+      workspaceId: claims.workspaceId,
+      enrollmentId: claims.enrollmentId,
+      credentialGeneration: claims.credentialGeneration,
+      connectionInstanceId,
+    }),
     permissions,
     // Server-config-mode placement: the embedded user JWT's `aud` is the account
     // the user binds to (the configured `auth_callout.account`). All agents +
@@ -320,18 +327,34 @@ export async function startAuthCalloutResponder(
   deps: AuthCalloutDeps,
   natsUrl: string,
 ): Promise<ResponderConnection> {
+  let authority: Awaited<ReturnType<typeof startLiveConnectionAuthority>> | undefined;
   const connection = await createResponderConnection(
     natsUrl,
     { kind: "user-password", user: deps.callout.user, pass: deps.callout.password },
     AUTH_CALLOUT_SUBJECT,
-    (bytes) => handleAuthorizationRequest(deps, bytes),
+    (bytes) => {
+      if (!authority?.isReady()) throw new Error("live connection authority is not ready");
+      return handleAuthorizationRequest(deps, bytes);
+    },
     {
       name: "opengeni-auth-callout",
       ...(deps.observability ? observabilityEventBusOptions(deps.observability) : {}),
     },
   );
+  try {
+    authority = await startLiveConnectionAuthority(deps, connection.connection);
+  } catch (error) {
+    await connection.close();
+    throw error;
+  }
   deps.observability?.info?.("Opengeni NATS auth-callout responder started", {
     subject: AUTH_CALLOUT_SUBJECT,
   });
-  return connection;
+  return {
+    connection: connection.connection,
+    close: async () => {
+      await authority?.close();
+      await connection.close();
+    },
+  };
 }

@@ -874,6 +874,8 @@ export async function createNatsEventBus(
  * the signed authorization-response bytes which we `respond` on that inbox.
  */
 export interface ResponderConnection {
+  /** The authenticated transport, also used for broker-side authority control. */
+  connection: NatsConnection;
   /** Subscribe-and-reply on `subject`; returns an async close that drains. */
   close: () => Promise<void>;
 }
@@ -952,6 +954,7 @@ export async function createResponderConnection(
       unsubscribe();
       await nc.drain();
     },
+    connection: nc,
   };
 }
 
