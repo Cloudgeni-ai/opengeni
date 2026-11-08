@@ -418,6 +418,7 @@ export type SessionRealtimeInboundEntry = {
 };
 
 export type SyncSessionRealtimeLedgerRequest = {
+  setupTiming?: { answerToOpeningMs: number; openingToFirstAudioMs: number; answerToFirstAudioMs: number } | undefined;
   browserInstanceId: string;
   ownerKey: string;
   expectedVersion: number;
@@ -450,6 +451,8 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
+  /** This server can hold a track-free incoming connection until Answer. */
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider:
@@ -507,7 +510,7 @@ export type RealtimeVoiceSettings = {
 export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
-export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeState = "preparing" | "active" | "ended";
 export type SessionRealtimeEndReason =
   | "user_stop"
   | "browser_unload"
@@ -535,6 +538,7 @@ export type BeginSessionRealtimeRequest = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  incomingCall?: { callId: string; device: string; answered?: boolean | undefined } | undefined;
 };
 
 export type RenewSessionRealtimeRequest = {

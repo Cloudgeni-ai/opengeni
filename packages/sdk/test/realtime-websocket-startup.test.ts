@@ -294,7 +294,7 @@ describe("WebSocket startup cleanup (controlled browser primitives)", () => {
   test("success keeps caller-owned tracks live and normal stop remains idempotent", async () => {
     const f = fixture();
     const connection = await createRealtimeWebsocketTransportStarter()(f.input);
-    expect(connection.media).toBe(f.input.media);
+    expect(connection.media).toBe(f.input.media ?? null);
     expect(connection.microphoneHealthy?.()).toBe(true);
     expect(f.tracks.map((track) => track.stopCalls)).toEqual([0, 0, 0]);
     connection.stop();

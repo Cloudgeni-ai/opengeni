@@ -27,11 +27,11 @@ export type IncomingAgentCallsOptions = {
   client: OpenGeniClient;
   callAdapter: NativeCallAdapter | null;
   /** Prepare local call data/transport while ringing; never claim or start voice here. */
-  onRinging?(call: NativeIncomingCall): void;
+  onRinging?(call: NativeIncomingCall, device: string): void;
   /** Release preparation when the ring or system call ends. */
   onEnded?(callId: string): void;
   /** The person answered and the server gave the call to this phone: start voice. */
-  onAnswered(call: NativeIncomingCall): void;
+  onAnswered(call: NativeIncomingCall, device: string): void;
   /** Answering failed (offline, or the server refused). */
   onError?(error: unknown): void;
 };
@@ -55,10 +55,19 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
     /** The last state each call was handled in, so a replay does nothing. */
     const handled = new Map<string, NativeIncomingCall["state"]>();
     const preparations = new Set<string>();
+    const devices = new Map<string, string>();
+    const deviceFor = (callId: string) => {
+      let device = devices.get(callId);
+      if (!device) {
+        device = `${callId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+        devices.set(callId, device);
+      }
+      return device;
+    };
     const prepare = (call: NativeIncomingCall) => {
       if (preparations.has(call.callId)) return;
       preparations.add(call.callId);
-      latest.current.onRinging?.(call);
+      latest.current.onRinging?.(call, deviceFor(call.callId));
     };
     const release = (callId: string) => {
       if (preparations.delete(callId)) latest.current.onEnded?.(callId);
@@ -102,12 +111,12 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
       prepare(call);
       try {
         // Names this answer, so a phone that lost the race to another learns it did.
-        const device = `${call.callId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+        const device = deviceFor(call.callId);
         const result = await client.answerAgentCall(call.workspaceId, call.callId, { device });
         if (disposed || handled.get(call.callId) !== "answered") return;
         if (result.state === "answered" && result.answeredHere === true) {
           preparations.delete(call.callId);
-          latest.current.onAnswered(call);
+          latest.current.onAnswered(call, device);
           return;
         }
         incoming.endIncomingCall(call.callId, incomingEndReason(result));

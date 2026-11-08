@@ -9778,6 +9778,11 @@ export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundE
 
 export const SyncSessionRealtimeLedgerRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
+    setupTiming: z.object({
+      answerToOpeningMs: z.number().nonnegative().max(3_600_000),
+      openingToFirstAudioMs: z.number().nonnegative().max(3_600_000),
+      answerToFirstAudioMs: z.number().nonnegative().max(3_600_000),
+    }).strict().optional(),
     expectedVersion: primitives.positiveInteger,
     connectionId: primitives.uuid,
     connectionEpoch: primitives.positiveInteger,
@@ -9809,6 +9814,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    incomingPreparation: z.boolean().optional(),
     id: SessionRealtimeModel,
     label: primitives.nonEmptyString,
     provider: z.enum([
@@ -9870,7 +9876,9 @@ export type WorkspaceRealtimeModelCatalogResponse = z.infer<
   typeof WorkspaceRealtimeModelCatalogResponse
 >;
 
-export const SessionRealtimeState = /* @__PURE__ */ defineSchema(() => z.enum(["active", "ended"]));
+export const SessionRealtimeState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["preparing", "active", "ended"]),
+);
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
 
 export const SessionRealtimeEndReason = /* @__PURE__ */ defineSchema(() =>
@@ -9901,6 +9909,13 @@ export const BeginSessionRealtimeRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
     operationId: primitives.uuid,
     model: SessionRealtimeModel,
+    incomingCall: z
+      .object({
+        callId: primitives.uuid,
+        device: z.string().min(1).max(300),
+        answered: z.boolean().optional(),
+      })
+      .optional(),
   }),
 );
 export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;

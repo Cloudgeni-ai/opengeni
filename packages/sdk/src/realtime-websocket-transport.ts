@@ -83,6 +83,7 @@ const REALTIME_WIRE_CODECS: Record<RealtimeWebsocketProtocol, RealtimeWireCodec>
 /** One transport for every realtime voice provider reached over a WebSocket. */
 export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTransportStarter {
   return async (input) => {
+    if (!input.media) throw new Error("WebSocket voice requires an admitted microphone");
     // Until a connection is returned, failures own all partially started resources.
     // Successful connections keep the existing controller-owned media lifetime.
     let cleanupStartup = (): void => {};

@@ -147,6 +147,7 @@ type CallTarget = {
   answeredCallId?: string | undefined;
   /** Mounted silently to prepare reads and a local offer, not a provider call. */
   ringing?: boolean | undefined;
+  incomingDevice?: string | undefined;
 };
 
 /**
@@ -236,7 +237,7 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   useIncomingAgentCalls({
     client,
     callAdapter,
-    onRinging: (call) => {
+    onRinging: (call, device) => {
       setTarget(
         (current) =>
           current ?? {
@@ -245,18 +246,20 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
             systemTarget: call.sessionId,
             answeredCallId: call.callId,
             ringing: true,
+            incomingDevice: device,
           },
       );
     },
     onEnded: (callId) => {
       setTarget((current) => (current?.answeredCallId === callId ? null : current));
     },
-    onAnswered: (call) => {
+    onAnswered: (call, device) => {
       setTarget({
         workspaceId: call.workspaceId,
         sessionId: call.sessionId,
         systemTarget: call.sessionId,
         answeredCallId: call.callId,
+        incomingDevice: device,
       });
       setExpanded(true);
     },
@@ -418,10 +421,28 @@ function ActiveAgentCall(
   const startedRef = useRef(false);
   const { canStart, start } = call;
   const ready = canStart && selection.catalogReady && !props.target.ringing;
-  const { prepare } = realtime;
+  const { prepare, prepareIncoming } = realtime;
+  const incomingPreparationAttempted = useRef(false);
   useEffect(() => {
-    if (canStart && selection.catalogReady) void prepare().catch(() => undefined);
-  }, [canStart, prepare, selection.catalogReady]);
+    if (!canStart || !selection.catalogReady) return;
+    if (voice.incomingPreparation && props.target.ringing && props.target.answeredCallId && props.target.incomingDevice) {
+      if (incomingPreparationAttempted.current) return;
+      incomingPreparationAttempted.current = true;
+      void prepareIncoming({
+        callId: props.target.answeredCallId,
+        device: props.target.incomingDevice,
+      }).catch(() => undefined);
+    } else void prepare().catch(() => undefined);
+  }, [
+    canStart,
+    prepare,
+    prepareIncoming,
+    selection.catalogReady,
+    props.target.ringing,
+    props.target.answeredCallId,
+    props.target.incomingDevice,
+    voice.incomingPreparation,
+  ]);
   const onCallStartingRef = useRef(props.onCallStarting);
   onCallStartingRef.current = props.onCallStarting;
   useEffect(() => {
