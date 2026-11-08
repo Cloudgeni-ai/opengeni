@@ -74,9 +74,32 @@ test("focused disclosure takes priority over the paragraph moving below it", () 
   position(paragraph, 150);
   button.focus();
   const anchors = captureTimelineAnchor(scroller)!;
+  button.setAttribute("aria-expanded", "true");
   position(button, 160);
   position(paragraph, 400);
   expect(timelineAnchorCorrection(scroller, anchors)).toBe(60);
+  scroller.remove();
+});
+
+test("a focused disclosure that did not toggle leaves the reader on the content", () => {
+  const scroller = document.createElement("div");
+  scroller.innerHTML =
+    '<div data-og-group-key="turn"><p>Answer paragraph being read.</p><button aria-expanded="false">4 steps</button></div>';
+  document.body.append(scroller);
+  const button = scroller.querySelector("button")!;
+  const paragraph = scroller.querySelector("p")!;
+  position(scroller, 50, 400);
+  position(scroller.firstElementChild as HTMLElement, 80, 250);
+  position(paragraph, 100);
+  position(button, 300);
+  button.focus();
+  const anchors = captureTimelineAnchor(scroller)!;
+  // Streamed text pushed the still-closed toggle down; the paragraph held.
+  position(button, 700);
+  expect(timelineAnchorCorrection(scroller, anchors)).toBe(0);
+  // When the toggle itself opens in the commit, it keeps its place.
+  button.setAttribute("aria-expanded", "true");
+  expect(timelineAnchorCorrection(scroller, anchors)).toBe(400);
   scroller.remove();
 });
 
