@@ -3314,6 +3314,12 @@ export type RuntimeDatabasePostureOptions = {
    * migration creates them; when one is present it is checked like every other contract table.
    */
   tablesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for runtime definers (named without their argument list): a definer a later
+   * migration creates may be absent even though every table it works on already exists. When
+   * one is present it is checked like every other definer.
+   */
+  routinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -6835,10 +6841,15 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  const notYetCreatedRoutines = new Set(options.routinesCreatedByLaterMigrations ?? []);
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
       RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
-      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1 &&
+      !(
+        notYetCreatedRoutines.has(name.slice(0, name.indexOf("("))) &&
+        !posture.privateRoutines.some((routine) => routine.name === name)
+      )
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);
     }
