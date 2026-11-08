@@ -94,7 +94,7 @@ import type {
   TurnSettleInput,
 } from "./turn-context";
 import type { TurnEventPublisher } from "./model-usage";
-import { createTurnEventLane } from "./turn-event-lane";
+import { createTurnEventPublisher } from "./turn-event-lane";
 
 export type ClaimTurnDeps = {
   /** Optional read-only hint; run owns its promise even if admission later exits. */
@@ -704,7 +704,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       });
     }
   };
-  const append: TurnEventPublisher = async (events, immediate = false, mutate) => {
+  const append: TurnEventPublisher = async (events, _immediate = false, mutate, project) => {
     const inputs = events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -732,7 +732,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
             durationSeconds,
           }),
       },
-      mutate ? { rowProjection: "event", mutate } : undefined,
+      mutate || project
+        ? {
+            rowProjection: "event",
+            mutate: mutate ?? (async () => true),
+            ...(project ? { project } : {}),
+          }
+        : undefined,
     );
     if (inputs.length > 0 && !appended.accepted) {
       throw new TurnAttemptFencedError("turn execution generation was fenced");
@@ -746,22 +752,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       phase: "events_published",
       producerSeq,
     });
-    if (immediate) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
+    // The durable append and fan-out above already yielded to I/O. Returning
+    // their acknowledgement needs no additional event-loop timer.
     return appended;
   };
   // Progress receipts go out in the background; awaited appends and the
   // settlement start after the receipts issued before them.
-  const eventLane = createTurnEventLane();
-  eventing.publish = (events, immediate, mutate) =>
-    eventLane.run(() => append(events, immediate, mutate));
-  eventing.publishInBackground = (events, options) => {
-    eventLane.runInBackground(() =>
-      options?.measureDelivery ? options.measureDelivery(() => append(events)) : append(events),
-    );
-  };
-  eventing.backgroundEventsSettled = () => eventLane.backgroundSettled();
+  const publisher = createTurnEventPublisher(append);
+  eventing.publish = publisher.publish;
+  eventing.publishInBackground = publisher.publishInBackground;
+  eventing.backgroundEventsSettled = publisher.backgroundSettled;
   const settle = async (
     inputSettlement: TurnSettleInput & { requirePendingSteer?: boolean },
   ): Promise<boolean | "pending_steer_withdrawn"> => {
@@ -850,7 +850,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   };
   // The settlement's events follow the progress receipts issued before it.
   eventing.settle = ((inputSettlement: Parameters<typeof settle>[0]) =>
-    eventLane.run(() => settle(inputSettlement))) as TurnSettleFn;
+    publisher.run(() => settle(inputSettlement))) as TurnSettleFn;
   activityContext?.heartbeat({
     ...heartbeatDetails,
     phase: "turn_started",
