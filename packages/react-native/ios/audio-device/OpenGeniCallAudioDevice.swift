@@ -216,6 +216,7 @@ final class OpenGeniCallAudioDevice: NSObject, RTCAudioDevice {
     }
     guard wanted != current || (wanted == .live && unit == nil) else { return }
     generation += 1
+    NSLog("[OpenGeniCallAudioDevice] %@ -> %@", "\(current)", "\(wanted)")
     switch wanted {
     case .off:
       stopLive()
