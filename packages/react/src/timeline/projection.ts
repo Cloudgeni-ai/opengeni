@@ -2938,6 +2938,16 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   }
 }
 
+/**
+ * Some models emit a whitespace-only assistant message (often just "\n\n")
+ * around every tool call. It has nothing to read, so it never becomes a
+ * timeline row: an empty row still takes the list's row gap, and dozens of
+ * them open a blank band in a long turn. It shows up once it has text.
+ */
+function isBlankAgentMessage(item: TimelineItem): boolean {
+  return item.kind === "agent-message" && !item.text.trim();
+}
+
 export type GroupTimelineOptions = {
   /** Readable assistant prose with an independent work summary for each turn. */
   readableTurns?: boolean;
@@ -2980,6 +2990,7 @@ export function groupTimeline(
       foldSettledTurn(groups, item);
       continue;
     }
+    if (isBlankAgentMessage(item)) continue;
     groups.push({ kind: "item", item });
   }
   return groups;
@@ -3233,7 +3244,8 @@ function groupReadableTurns(
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
+      if (!liveApprovalWait && !liveStatusWait && !isBlankAgentMessage(item))
+        groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
