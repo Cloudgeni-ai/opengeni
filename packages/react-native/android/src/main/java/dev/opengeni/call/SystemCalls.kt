@@ -48,6 +48,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal object SystemCalls {
   private const val TAG = "OpenGeniCall"
   const val META_ENABLED = "dev.opengeni.call.SYSTEM_CALLS"
+  private const val ANSWER_TIMEOUT_MS = 45_000L
 
   private class Session(
     val id: String,
@@ -266,8 +267,8 @@ internal object SystemCalls {
         "failed" -> DisconnectCause.ERROR
         else -> DisconnectCause.REMOTE
       }
-    // An answered call is the app's voice call now: JavaScript ends it.
-    if (call.state == "answered") return
+    // Also an answered call: JavaScript lost the race to another phone, or
+    // the server refused the answer, so there is no voice call to run.
     end(context, id, cause)
   }
 
@@ -279,6 +280,17 @@ internal object SystemCalls {
     reportStartRoute(current)
     OpenGeniCallService.show(context, current.title, current.subtitle, null)
     IncomingCalls.answered(current.id)
+    // Voice starts within seconds of answering. An answer the app never
+    // picks up (signed out, or the app failed to start) ends rather than
+    // leaving a silent call open.
+    scope.launch {
+      delay(ANSWER_TIMEOUT_MS)
+      if (session === current && current.connectedAt == null && !current.ending) {
+        Log.w(TAG, "The answered call never connected; ending it")
+        CallEvents.send(mapOf("type" to "ended", "callId" to current.id))
+        end(context, current.id, DisconnectCause.ERROR)
+      }
+    }
   }
 
   // MARK: The call

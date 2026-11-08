@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url);
 type Entry = { $: Record<string, string>; "intent-filter"?: unknown[] };
 type Manifest = {
   manifest: {
+    $: Record<string, string>;
     "uses-permission": Entry[];
     application: Array<{
       $: Record<string, string>;
@@ -67,12 +68,17 @@ describe("Android system call config plugin", () => {
         },
       },
       {
-        $: { "android:name": plugin.MESSAGING_SERVICE, "android:exported": "false" },
+        $: {
+          "android:name": plugin.MESSAGING_SERVICE,
+          "android:exported": "false",
+          "tools:ignore": "Instantiatable",
+        },
         "intent-filter": [
           { action: [{ $: { "android:name": "com.google.firebase.MESSAGING_EVENT" } }] },
         ],
       },
     ]);
+    expect(result.$["xmlns:tools"]).toBe("http://schemas.android.com/tools");
     expect(names(application.receiver)).toEqual([plugin.RECEIVER]);
     expect(names(application.activity)).toEqual([".MainActivity", plugin.ACTIVITY]);
     expect(application.activity[1]!.$).toMatchObject({

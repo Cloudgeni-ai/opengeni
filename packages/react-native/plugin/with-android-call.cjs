@@ -65,8 +65,16 @@ function addSystemCallToManifest(manifest, { push }) {
     },
   });
   if (push) {
+    // Lint cannot follow the service's superclass into a prebuilt
+    // expo-notifications and calls it not a Service.
+    root.$ ??= {};
+    root.$["xmlns:tools"] ??= "http://schemas.android.com/tools";
     upsert(application.service, MESSAGING_SERVICE, {
-      $: { "android:name": MESSAGING_SERVICE, "android:exported": "false" },
+      $: {
+        "android:name": MESSAGING_SERVICE,
+        "android:exported": "false",
+        "tools:ignore": "Instantiatable",
+      },
       "intent-filter": [
         { action: [{ $: { "android:name": "com.google.firebase.MESSAGING_EVENT" } }] },
       ],
