@@ -40,6 +40,13 @@ generation and invalidates existing grants.
 
 ### Control transport recovery
 
+An accepted command's output reattaches from its contiguous received sequence
+when the same runner announces its ready connection, or the controller's shared
+NATS transport reconnects. The existing silence probe remains the fallback, not
+the first opportunity to recover. Reattachment never restarts the command or
+extends its execution deadline. A successor runner has a different subject and
+cannot recover work by impersonating the original process.
+
 The API/worker uses its shared NATS connection for control RPC, operation frames,
 and acknowledgements. The native supervisor treats either control- or bulk-lane
 loss, including scheduled five-minute user-JWT expiry, as a transport-generation

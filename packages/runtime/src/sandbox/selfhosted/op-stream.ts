@@ -774,6 +774,7 @@ class OpConsumer {
   private lastFrameAt: number;
   private silenceSince: number | undefined;
   private attachInFlight = false;
+  private attachHealRequested = false;
   private subscription: OpStreamSubscription | undefined;
   private ackTimer: ReturnType<typeof setInterval> | undefined;
   private settleResolve: (() => void) | undefined;
@@ -929,6 +930,8 @@ class OpConsumer {
     try {
       // Subscription BEFORE OpStart (protocol invariant): no frame can be
       // published before the consumer exists on a healthy path.
+      let attached = false;
+      let readyDuringStart = false;
       const subscribing = this.deps.transport.subscribe(
         opFrameSubject(
           this.deps.workspaceId,
@@ -937,6 +940,10 @@ class OpConsumer {
           this.deps.connectionInstanceId,
         ),
         (payload) => this.onFramePayload(payload),
+        () => {
+          if (attached) this.requestAttachHeal();
+          else readyDuringStart = true;
+        },
       );
       try {
         this.subscription = await startWall.race(subscribing);
@@ -956,6 +963,8 @@ class OpConsumer {
       await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
         throw startedOpError(error, this.startConfirmed);
       });
+      attached = true;
+      if (readyDuringStart) this.requestAttachHeal();
     } finally {
       startWall.clear();
     }
@@ -1381,7 +1390,11 @@ class OpConsumer {
    *  as a heal (the observer's `healed` breadcrumb). Failures are left to the
    *  liveness watcher — a dead link fails typed there, not here. */
   private requestAttachHeal(): void {
-    if (this.attachInFlight || this.torn) {
+    if (this.torn) {
+      return;
+    }
+    if (this.attachInFlight) {
+      this.attachHealRequested = true;
       return;
     }
     this.attachInFlight = true;
@@ -1402,6 +1415,10 @@ class OpConsumer {
       })
       .finally(() => {
         this.attachInFlight = false;
+        if (this.attachHealRequested) {
+          this.attachHealRequested = false;
+          this.requestAttachHeal();
+        }
       });
   }
 
