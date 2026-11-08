@@ -638,35 +638,6 @@ spec:
             next_step: 'Do not retry it automatically; confirm through the target system or the tool''s receipt whether the action happened.'
             description: Do not replay the operation automatically. Reconcile through the tool's durable provider receipt or idempotency boundary before retrying.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-operation-recovery.md
-        - alert: OpenGeniMcpToolLatencyHigh
-          # `tool` is bounded: a first-party Opengeni tool name, or `external` for
-          # every connector, API-integration, and custom MCP tool.
-          # Command polling permits up to 50 seconds of requested waiting. Its
-          # total-duration budget includes that wait plus 15 seconds overhead.
-          expr: |
-            (
-              histogram_quantile(
-                0.95,
-                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool!~"command_read|command_wait"}[10m]))
-              ) > 15
-              or
-              histogram_quantile(
-                0.95,
-                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool=~"command_read|command_wait"}[10m]))
-              ) > 65
-            )
-            and on(tool)
-            sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool exceed their p95 latency budget: 65 seconds for command polling, 15 seconds for other tools. "external" means a connector or custom tool rather than an Opengeni tool.'
-            headline: 'Slow tool calls: {{ "{{ $labels.tool }}" }}'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Agent tasks take noticeably longer while waiting on this tool.'
-            next_step: 'For an Opengeni tool, check the Opengeni API and database for that tool. For "external", find the slow connector in Grafana; it is usually the outside service.'
-            description: Tool duration exceeds its budget. command_read and command_wait permit up to 50 seconds of requested waiting, so their total-duration budget is 65 seconds; it does not measure actual service overhead. Other tools retain a 15-second budget. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
             (
@@ -1318,18 +1289,6 @@ spec:
             user_impact: 'No user impact; they keep sandboxes alive and cost money.'
             next_step: 'Inspect provider-binding and settlement outcomes; never assume a process exited just because it is old.'
             description: A completed/failed/cancelled owner (or a background command already asked to stop) still has a physical sandbox process after 15m. Running session background commands are session-owned and excluded. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
-        - alert: OpenGeniSandboxesHeldByIdleInteractions
-          expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},idle_bucket=~"2h_6h|gte_6h"}) > 5
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'Several sandboxes are kept running only by Browser/Computer sessions idle for 2+ hours.'
-            headline: 'Idle browser sessions keeping sandboxes running'
-            value: '{{ "{{ printf `%.0f` $value }}" }} sandboxes idle 2h+'
-            user_impact: 'No user impact; idle Browser/Computer sessions keep paid sandboxes warm.'
-            next_step: 'Check whether users are leaving Browser/Computer sessions open; end abandoned ones if cost matters.'
-            description: Interaction holders never expire by timestamp, so a box whose only holders are Browser/Computer sessions stays warm (and billed by the provider) until the session is ended or the provider deadline rotates it. Check opengeni:sandbox_leases_interaction_only:fresh_max by idle_bucket and whether sessions are being left open.
         - alert: OpenGeniSandboxDrainExpired
           expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
           for: 10m
