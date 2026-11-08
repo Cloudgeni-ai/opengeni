@@ -57,6 +57,7 @@ export default defineConfig({
     "src/session-admin-access-model.ts",
     "src/session-feedback-model.ts",
     "src/session-attention-model.ts",
+    "src/session-avatar-model.ts",
     "src/in-chat-connect-model.ts",
     "src/approval-review-model.ts",
     "src/interactive-answer-model.ts",

@@ -97,4 +97,12 @@ export {
   StatusDot,
 } from "./session-list";
 export type { SessionRowProps } from "./session-list";
+export { SessionAvatar, useNativeSessionIdentity } from "./session-avatar";
+export type {
+  NativeSessionIdentity,
+  SessionAvatarClient,
+  SessionAvatarProps,
+  SessionAvatarSize,
+  SessionIdentityClient,
+} from "./session-avatar";
 export { webColorsDark, webColorsLight } from "../ui/web-tokens.gen";

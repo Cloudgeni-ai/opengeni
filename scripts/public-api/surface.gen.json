@@ -41240,6 +41240,26 @@
       "SESSION_ATTENTION_EVENT_TYPES": "value",
       "sessionAttentionReadThroughSequence": "value"
     },
+    "@opengeni/react/session-avatar-model": {
+      "agentAvatar": "value",
+      "AgentAvatarSource": "type",
+      "agentInitialsAvatarLite": "value",
+      "forgetSessionAgent": "value",
+      "oklchToHex": "value",
+      "SESSION_AVATAR_TILE": "value",
+      "SessionAgentClient": "type",
+      "SessionAgentInfo": "type",
+      "sessionAgentRef": "value",
+      "SessionAgentRef": "type",
+      "sessionAvatarFallbackHue": "value",
+      "sessionAvatarInitials": "value",
+      "sessionAvatarTileCss": "value",
+      "sessionAvatarTileHex": "value",
+      "SessionAvatarTileTone": "type",
+      "sessionSlackAgentInfo": "value",
+      "SessionSlackAgentInfo": "type",
+      "useSessionAgentInfo": "value"
+    },
     "@opengeni/react/session-feedback-model": {
       "FeedbackClient": "type",
       "feedbackDialogCopy": "value",

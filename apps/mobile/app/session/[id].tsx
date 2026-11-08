@@ -17,6 +17,7 @@ import {
   NativeSessionScreen,
   SessionActionsButton,
   SessionHeaderTitle,
+  useNativeSessionIdentity,
   useNativeTimelineTheme,
   type NativeInChatConnectOptions,
 } from "@opengeni/react-native/timeline";
@@ -347,6 +348,8 @@ function LiveSession(props: {
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
   const title = session ? sessionDisplayTitle(session) : "";
+  // The agent's (or the chat's own) avatar beside the title, as on the web header.
+  const identity = useNativeSessionIdentity(session, props.client);
   const agentCall = useAgentCall();
   const onCall = agentCall.sessionId === props.sessionId;
   // In the call's own conversation the green phone button returns to the call,
@@ -417,10 +420,12 @@ function LiveSession(props: {
           status={paused ? "queued" : status}
           statusLabel={paused ? "Paused" : undefined}
           fullAccess={fullAccessOn}
+          avatar={identity.avatar}
+          agentName={identity.agentName}
         />
       </AppThemeProvider>
     ),
-    [fullAccessOn, paused, status, title],
+    [fullAccessOn, identity, paused, status, title],
   );
   const headerRight = useCallback(
     () =>

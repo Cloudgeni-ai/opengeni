@@ -254,6 +254,7 @@ function Sessions() {
                 <SessionRowList
                   sessions={results.chats.map((hit) => hit.session)}
                   models={models}
+                  avatarClient={client}
                   onOpen={openResult}
                   workspaceNameOf={(session) => {
                     const where = hitWorkspace.get(session.id);
@@ -287,6 +288,7 @@ function Sessions() {
             <SessionRowList
               sessions={pinned}
               models={models}
+              avatarClient={client}
               onOpen={open}
               onTogglePin={onTogglePin}
             />
@@ -298,6 +300,7 @@ function Sessions() {
             <SessionRowList
               sessions={section.sessions}
               models={models}
+              avatarClient={client}
               onOpen={open}
               onTogglePin={onTogglePin}
             />
