@@ -597,11 +597,11 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1172: created without runtime EXECUTE until its follow-up release.
+      // 1343 activates the read-only identity lookup introduced by 1172.
       {
         name: "read_external_identity_v1(uuid, text, text)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -4374,7 +4374,6 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "read_external_identity_v1(uuid, text, text)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
     ]);

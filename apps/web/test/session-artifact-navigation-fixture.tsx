@@ -10,6 +10,7 @@ import {
   Link,
 } from "@tanstack/react-router";
 import { OpenGeniLinkProvider, WorkspaceDock } from "@opengeni/react";
+import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
 import { MarkdownText } from "@opengeni/react/app/components/markdown";
 import { ArtifactLinkBoundary } from "@opengeni/react/app/components/session/artifact-link-boundary";
 import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
@@ -28,6 +29,12 @@ const spreadsheetId = "475e389ff5d34f63b308f4901f52492b";
 const presentationId = "a0cc8ea0a2284b8dbc951820d0093a08";
 const unknownEditableId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const fileId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const artifactClient: Pick<OpenGeniClient, "resolveArtifactLink"> = {
+  resolveArtifactLink: async (_workspace, id) => {
+    if (id !== fileId && id !== siteId) throw new OpenGeniApiError(404, "Not found");
+    return { artifactId: id, kind: id === siteId ? "site" : "file" };
+  },
+};
 const knownEditables = new Set([documentId, spreadsheetId, presentationId]);
 const nativeTitles: Record<string, string> = {
   [documentId]: "Native document editor",
@@ -95,7 +102,10 @@ function Session() {
         >
           <div className="flex h-full flex-col bg-bg p-8 text-fg">
             <h1 className="mb-8 text-lg font-semibold">Build a project overview</h1>
-            <OpenGeniLinkProvider resolveLink={resolveLink}>
+            <OpenGeniLinkProvider
+              resolveLink={resolveLink}
+              artifactScope={{ client: artifactClient, workspaceId, sessionId }}
+            >
               <MarkdownText
                 text={[
                   `Your Site is ready. [Open Project overview](/workspaces/${workspaceId}/artifacts/${siteId})`,
@@ -105,6 +115,8 @@ function Session() {
                   `[Open short document](artifact:${documentId})`,
                   `[Open short spreadsheet](artifact:${spreadsheetId})`,
                   `[Open short presentation](artifact:${presentationId})`,
+                  `[Open short Site](artifact:${siteId})`,
+                  `[Open short file](artifact:${fileId})`,
                   `[Open unknown artifact](/workspaces/${workspaceId}/artifacts/editable/${unknownEditableId})`,
                   `[Open retained file](/workspaces/${workspaceId}/artifacts/files/${fileId})`,
                 ].join("\n\n")}

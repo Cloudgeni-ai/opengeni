@@ -233,6 +233,21 @@ export function createTranscriptionService(input: {
     );
     return available.filter((id): id is string => id !== null);
   };
+  const modelsForProviders = (ids: readonly string[]): DictationModelOption[] => {
+    const ready = new Set(ids);
+    return providers
+      .filter((provider) => ready.has(provider.id))
+      .flatMap((provider) =>
+        dictationModels(deployment, provider)
+          .filter((model) => !chargeable(provider) || model.creditPricing)
+          .map((model) => ({
+            providerId: provider.id as DictationModelOption["providerId"],
+            providerName: provider.provider.name,
+            model: model.model,
+            name: model.name,
+          })),
+      );
+  };
   return {
     limits: () => limits,
     billing,
@@ -240,23 +255,18 @@ export function createTranscriptionService(input: {
       return Boolean(await firstAvailable(ordered(context ?? {}), context ?? {}));
     },
     availableProviderIds: readyProviderIds,
+    async availability(context) {
+      const ready = await readyProviderIds(context);
+      return {
+        available: ordered(context).some((provider) => ready.includes(provider.id)),
+        providers: ready,
+        models: modelsForProviders(ready),
+      };
+    },
     async availableModels(context) {
       // Every model a dictation may name, of each ready provider, for the
       // desktop app's per-shortcut model picker.
-      const ready = new Set(await readyProviderIds(context));
-      return providers
-        .filter((provider) => ready.has(provider.id))
-        .flatMap((provider) =>
-          dictationModels(deployment, provider)
-            // A model the deployment pays for is never served without a price.
-            .filter((model) => !chargeable(provider) || model.creditPricing)
-            .map((model) => ({
-              providerId: provider.id as DictationModelOption["providerId"],
-              providerName: provider.provider.name,
-              model: model.model,
-              name: model.name,
-            })),
-        );
+      return modelsForProviders(await readyProviderIds(context));
     },
     async selectProvider(context) {
       const candidates = ordered(context);

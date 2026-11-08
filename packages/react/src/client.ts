@@ -178,6 +178,7 @@ type SessionClientMethods<Client extends ChatClient = OpenGeniClient> = Pick<
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
       | "getSessionModelAccount"
+      | "resolveArtifactLink"
     >
   >;
 

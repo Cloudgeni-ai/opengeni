@@ -529,6 +529,10 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // provider error fields, and the provider call parameters with their source.
   // Never a provider response body, credential, account or request content.
   ["realtimeStage", /^(?:request|config|call)$/],
+  [
+    "realtimeSetupPhase",
+    /^(?:owner|candidates|lease|history|token|config|fence|provider_call|release)$/,
+  ],
   ["realtimeFailureMessage", /^[A-Za-z][A-Za-z0-9 ._:()/-]{0,159}$/],
   ["providerErrorCode", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
   ["providerErrorType", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],

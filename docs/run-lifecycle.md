@@ -143,6 +143,14 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Attempt-private secret-file deletion is best-effort work outside this join:
+after writers drain, deletion starts against every exact backend that received
+files, without resolving the current route or entering workspace capture
+admission. A pending provider deletion cannot hold activity completion or cause
+worker containment; late failures are observed. These attempt-scoped paths live
+outside the workspace and are never read by a successor. Run-credential
+generation/pointer deletion is still mandatory, successor-safe workspace work
+and remains in `credential_cleanup`; it is not detached.
 Host containment intent survives a Temporal finalization exception that masks
 its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
 exception as the cause, and the standalone entry point labels its nonzero exit
@@ -5583,7 +5591,15 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. Initial session creation adds content-free
+critical path. The cumulative queue milestone includes time queued behind an
+active turn and session holds, not just worker dispatch delay. Likewise,
+acceptance-to-provider-dispatch excludes only this turn's own provider think
+time: earlier turns' provider and tool work can occur while this turn waits.
+Correlate a slow turn's start with its predecessor's completion and historical
+queue-hold evidence before attributing these samples to platform saturation.
+The per-request pre-dispatch metric has a different boundary and does not
+include that earlier work. Histogram quantiles cannot be subtracted to recover
+a per-turn preparation duration. Initial session creation adds content-free
 `api.session_create.authorization|body_read|site_origin|core_create|response_projection`
 child spans within the existing HTTP span. Authorization still precedes body
 handling and creation; response policy projection remains outside the create

@@ -785,6 +785,34 @@ const SettingsSchema = z.object({
   teamsBotTenantId: z.string().uuid().optional(),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  integrationsPrivateNetworkAllowedHosts: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((host) => host.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .trim()
+          .toLowerCase()
+          .regex(
+            /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?(?::[0-9]{1,5})?$/,
+            "Expected an exact hostname, optionally followed by :port",
+          )
+          .refine((entry) => {
+            const [hostname, port] = entry.split(":");
+            return (
+              hostname!.length <= 253 &&
+              (port === undefined || (Number(port) > 0 && Number(port) <= 65535))
+            );
+          }, "Invalid hostname or port"),
+      )
+      .default([]),
+  ),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
   // sets for every organization. They only narrow what organizations choose:
   // Only me chats and schedules off in shared workspaces, new chats and
@@ -5963,6 +5991,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
+    ),
+    integrationsPrivateNetworkAllowedHosts: optional(
+      "OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS",
     ),
     privacyOnlyMeAllowed: optional("OPENGENI_PRIVACY_ONLY_ME_ALLOWED"),
     privacyWorkspaceDefaultRequired: optional("OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED"),

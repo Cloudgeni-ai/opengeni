@@ -77,6 +77,14 @@ session-control authority; internal runtime/MCP session projections are unchange
 The dependency-free `packages/contracts/src/browser-response-headers.ts` owns the
 browser response-header contract, re-exported by the SDK and shared by API CORS
 and the packaged relay. History reads warn once when required headers are unreadable.
+Bounded HTTP reads reuse successful workspace admission within the exact
+Request and database handle; each caller still checks its own permission.
+Session GETs also reuse the existing request-local authority-fact reader, not
+host authorization decisions. Writes and long-lived stream reauthorization
+read fresh authority. Established external identities use the shared membership
+fence and read-only lookup activated by migration 1343; first use keeps the
+exclusive provisioning path. Client configuration shares its catalog metadata
+and voice-readiness projections within the call, never across requests.
 Visibility differs from `agentAccess`; Personal Knowledge follows the verified
 active-turn user. Links never merge users.
 [Product integration](product-integration.md),
@@ -164,6 +172,12 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
+
+Connected Machine socket credentials retain their five-minute revocation bound.
+Exact runner leases fence routing and event ingestion; enrollment-token renewal
+updates future dials in place. The native supervisor owns and closes
+each generation's control and bulk socket tasks independently of retained work.
+See [Connected Machines](connected-machines.md#control-transport-recovery).
 
 API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group
 for machine heartbeat/event and Hello persistence. One member handles each
@@ -267,6 +281,11 @@ Raw-isolation rollback:
 validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
+Turn finalization joins physical writers and mandatory run-credential pointer
+cleanup, but not best-effort deletion of attempt-private secret files outside
+the workspace. That deletion uses the original recipient sessions, never route
+resolution or workspace capture admission; provider unavailability cannot keep
+an otherwise finished turn or its worker alive. See [run lifecycle](run-lifecycle.md).
 Connection-use validation follows that lifecycle order with shared read fences
 and the existing fair workspace-control queue; independent validations do not
 exclusively lock each other, while lifecycle changes still exclude validation.
@@ -1372,6 +1391,10 @@ Large or high-frequency bytes take separate paths:
 Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
 [`../packages/sdk/README.md`](../packages/sdk/README.md). Azure Live adaptation:
 `packages/sdk/src/azure-live-transport.ts` and `apps/api/src/azure-live.ts`.
+Native ringing prepares read-only session data and a microphone-free local SDP
+offer; Answer still owns admission, capture and provider creation. Provider
+configuration caching and the measured setup boundary are described in
+[`realtime call setup`](design/realtime-call-setup.md).
 
 ### 4.3 Dependency direction
 
@@ -2138,7 +2161,7 @@ behind a generic 500, so its session lookups run through
 | `packages/contracts` | `@opengeni/contracts` | Cross-boundary schemas, enums, permissions, events, capability descriptors, and tokens |
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
-| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
+| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport, deployment exact-host private-network exceptions ([configuration](workspace-integrations.md#trusted-private-network-destinations)), and shared MCP OAuth discovery semantics |
 | `packages/decisions` | `@opengeni/decisions` | Provider-neutral predicate/choice/score model interface and OpenAI/OpenRouter typed Decisions transports; no conversational fallback |
 | `packages/jev` | `@opengeni/jev` | Existing Jev client, adapter to the shared decision-model interface, and provider-neutral `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
@@ -2810,6 +2833,14 @@ require publishing and target-domain read authority ([library](artifact-library.
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
+Workspace-aware Markdown resolves UUID `artifact:` references through the SDK's
+`resolveOpenGeniLinkTarget` before invoking the existing file/Site resolvers.
+One authenticated `artifact-catalog/:id/resolve` read checks both domains with
+their existing visibility rules and returns the kind; readable files retain
+precedence on UUID collisions. The paginated catalog is not an ID lookup.
+`artifact-link-scope.tsx` owns the React lookup lifecycle and retry; native hosts
+use the same SDK helper. Explicit console paths and 32-hex editable references
+remain synchronous and existing message text is never rewritten.
 Stored-byte routes share `http/user-content.ts` ([`artifact-library.md`](artifact-library.md)).
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),

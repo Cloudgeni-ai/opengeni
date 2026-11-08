@@ -363,6 +363,7 @@ import {
   hasVerifiedOwningUserAuthorization,
   requirePermission,
   requireSessionAuthorization,
+  withSessionAuthorizationReadReuse,
   requireSessionAuthorizationListScope,
   resolveWorkspaceCatalogSettings,
   withResolvedSessionAuthorization,
@@ -751,7 +752,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // inherit workspace access without an explicit operation classification. The
   // long-lived event stream performs its own initial check and bounded
   // reauthorization below.
-  const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
+  const resolveSessionHttp: MiddlewareHandler = async (c, next) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
     // Reject malformed route identifiers before the authorization resolver
@@ -799,6 +800,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(error);
     }
     await next();
+  };
+  const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
+    // Reuse only facts for a bounded HTTP read; the host still decides each
+    // operation. Streams reauthorize over time and writers must read live facts.
+    if (c.req.method === "GET" && !c.req.path.endsWith("/events/stream")) {
+      return await withSessionAuthorizationReadReuse(() => resolveSessionHttp(c, next));
+    }
+    return await resolveSessionHttp(c, next);
   };
   app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
 
@@ -2081,6 +2090,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               { accountId: grant.accountId, workspaceId, sessionId },
               deps.codexFetch,
               {
+                onTiming: (realtimeSetupPhase, durationMs) =>
+                  deps.observability?.info("Realtime setup phase completed", {
+                    realtimeSetupPhase,
+                    durationMs: Math.round(durationMs),
+                  }),
                 onConnectionRefused: (refusal) =>
                   deps.observability?.warn(
                     "Realtime WebRTC connection refused; trying the next connected subscription",

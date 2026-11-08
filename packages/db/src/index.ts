@@ -5460,7 +5460,12 @@ export async function findActiveApiKeyByHash(
       }
       // Hash visibility proves this account. The join-table hash lane requires
       // both settings and remains bounded to this key, not sibling key scopes.
-      await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+      if (
+        (row.credentialKind === "organization" || row.credentialKind === "personal") &&
+        row.workspaceScope === "selected"
+      ) {
+        await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+      }
       const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
       return {
         ...mapApiKey(row, scopes.get(row.id)),
@@ -38373,17 +38378,14 @@ export async function getSessionForSubject(
     ) {
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
-    const [session] = await withEffectiveSessionPolicy(
-      scopedDb,
-      workspaceId,
-      await withCurrentSessionInputWait(scopedDb, workspaceId, [
-        {
-          ...row.session,
-          lastSequence: row.cursor.lastSequence,
-          meaningfulSequence: row.cursor.lastMeaningfulSequence,
-        },
-      ]),
-    );
+    // mapSessionWithControl projects the effective policy below, once.
+    const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
+      {
+        ...row.session,
+        lastSequence: row.cursor.lastSequence,
+        meaningfulSequence: row.cursor.lastMeaningfulSequence,
+      },
+    ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,

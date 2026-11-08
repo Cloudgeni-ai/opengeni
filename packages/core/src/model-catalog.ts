@@ -338,6 +338,10 @@ export async function resolveWorkspaceCatalogSettings(
     workspaceId: string;
     retainedProductModelId?: string | null;
     retainedProductModelIds?: readonly (string | null | undefined)[];
+    /** This call's already loaded metadata for the exact workspace and provider set. */
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+    /** This invocation's deployment catalog, before workspace overlays. */
+    deploymentCatalog?: ResolvedCatalogSettings;
   },
 ): Promise<ResolvedCatalogSettings> {
   // A few pure catalog tests inject the historical minimal DB port and mock the
@@ -412,21 +416,23 @@ export async function resolveWorkspaceCatalogSettings(
         )
       : []),
   ];
-  const publicCatalog = supportsOrganizationProviderReads
-    ? loadWorkspaceModelCatalogInputs(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKinds: workspaceCustomModelKinds,
-        organizationProviderKinds: [
-          "vercel_gateway",
-          "openrouter",
-          "opper",
-          "openai",
-          "azure_openai",
-          ...CLAUDE_CONNECTION_KINDS,
-        ],
-      })
-    : undefined;
+  const publicCatalog = input.catalogInputs
+    ? Promise.resolve(input.catalogInputs)
+    : supportsOrganizationProviderReads
+      ? loadWorkspaceModelCatalogInputs(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKinds: workspaceCustomModelKinds,
+          organizationProviderKinds: [
+            "vercel_gateway",
+            "openrouter",
+            "opper",
+            "openai",
+            "azure_openai",
+            ...CLAUDE_CONNECTION_KINDS,
+          ],
+        })
+      : undefined;
   const [
     resolved,
     workspaceCustomModels,
@@ -441,7 +447,7 @@ export async function resolveWorkspaceCatalogSettings(
     retainedOrganizationDirectCustomModels,
     organizationCompatibleEndpoints,
   ] = await Promise.all([
-    resolveCatalogSettings(db, envSettings),
+    input.deploymentCatalog ?? resolveCatalogSettings(db, envSettings),
     publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
       listWorkspaceProviderCustomModelsByKind(db, {
         accountId: input.accountId,

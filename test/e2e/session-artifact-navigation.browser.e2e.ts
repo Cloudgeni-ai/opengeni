@@ -264,6 +264,34 @@ test("unknown editable modality is not intercepted and opens the full-page edito
   }
 }, 60_000);
 
+for (const width of [1440, 390]) {
+  for (const kind of ["Site", "file"] as const) {
+    test(`short UUID ${kind} link resolves and opens its existing dock at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      try {
+        await page.goto(`${baseUrl}/test/session-artifact-navigation.html`);
+        const link = page.getByRole("link", { name: `Open short ${kind}`, exact: true });
+        await link.waitFor();
+        expect(await link.getAttribute("href")).toBe(
+          kind === "Site"
+            ? `/workspaces/${workspaceId}/artifacts/${siteId}`
+            : `/workspaces/${workspaceId}/artifacts/files/${fileId}`,
+        );
+        await link.click();
+        await page
+          .getByRole("heading", {
+            name: kind === "Site" ? "Project overview" : "Retained file preview",
+            exact: true,
+          })
+          .waitFor();
+        expect(page.url()).toContain(sessionPath);
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+}
+
 for (const modality of ["document", "spreadsheet", "presentation"] as const) {
   for (const width of [1440, 390]) {
     test(`short ${modality} link opens the existing dock editor at ${width}px`, async () => {

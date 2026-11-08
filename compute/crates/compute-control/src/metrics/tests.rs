@@ -34,6 +34,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             cpu_millis: 6_500,
             cpu_free_millis: 6_372,
             disk_free_mib: 90_000,
+            disk_available_mib: Some(95_000),
             disk_reclaimable_mib: 4_000,
             ready: Vec::new(),
             awake: 2,
@@ -83,6 +84,21 @@ fn only_the_leader_reports_the_fleet() {
         "compute_fleet_host_disk_reclaimable_bytes{host_name=\"hosts-a\"}",
     );
     assert_eq!(reclaimable_disk, Some(4_000.0 * 1_048_576.0));
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_booking_headroom_bytes{host_name=\"hosts-a\"}"
+        ),
+        Some(90_000.0 * 1_048_576.0)
+    );
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"hosts-a\"}"
+        ),
+        Some(95_000.0 * 1_048_576.0)
+    );
+    assert!(!text.contains("compute_fleet_host_disk_free_bytes"));
     assert_eq!(
         value(
             &text,
@@ -155,6 +171,32 @@ fn a_lost_host_is_listed_but_reports_no_capacity() {
     let text = metrics.render(&hosts);
     assert!(text.contains("compute_fleet_host_info{host_name=\"hosts-b\",state=\"lost\""));
     assert!(!text.contains("compute_fleet_host_memory_free_bytes{host_name=\"hosts-b\"}"));
+    assert!(!text.contains("compute_fleet_host_disk_available_bytes{host_name=\"hosts-b\"}"));
+}
+
+#[test]
+fn unknown_filesystem_space_is_absent_but_zero_is_a_real_reading() {
+    let metrics = Metrics::default();
+    metrics.leads(true);
+    let mut older = host(1, "older", HostState::Live);
+    older.capacity.disk_available_mib = None;
+    let mut full = host(2, "full", HostState::Live);
+    full.capacity.disk_available_mib = Some(0);
+    let text = metrics.render(&[older, full]);
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"older\"}"
+        ),
+        None
+    );
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"full\"}"
+        ),
+        Some(0.0)
+    );
 }
 
 #[test]

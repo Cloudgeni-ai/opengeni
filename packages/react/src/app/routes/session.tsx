@@ -4275,6 +4275,11 @@ function SessionChatPane(props: {
                       >
                         <MessageTimeline
                           resolveLink={resolveLink}
+                          artifactScope={{
+                            client: context.client,
+                            workspaceId: props.session.workspaceId,
+                            sessionId: props.session.id,
+                          }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                           trailingState={
@@ -4515,7 +4520,14 @@ function SessionChatPane(props: {
               {waitingSubSessions.length > 0 ? (
                 <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
-                  <OpenGeniLinkProvider resolveLink={resolveLink}>
+                  <OpenGeniLinkProvider
+                    resolveLink={resolveLink}
+                    artifactScope={{
+                      client: context.client,
+                      workspaceId: props.session.workspaceId,
+                      sessionId: props.session.id,
+                    }}
+                  >
                     <DescendantRequests
                       client={context.client}
                       workspaceId={props.session.workspaceId}

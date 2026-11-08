@@ -6,6 +6,11 @@ type Anchor = {
   text: string | null;
   top: number;
   focused?: boolean;
+  /**
+   * A focused disclosure's `aria-expanded` when captured. It anchors only the
+   * commit that opens or closes it; it is not where the reader is reading.
+   */
+  expanded?: string | null;
 };
 export type TimelineAnchor = Anchor[];
 
@@ -63,11 +68,23 @@ export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | n
   let stickyFocus: Anchor | undefined;
   // A disclosure is the reader's explicit point of interaction. In particular,
   // anchoring a paragraph below an expanding disclosure would move its button.
+  // Focus outlives that interaction, though: a toggle that stays focused while
+  // prose streams in above it, or while its row moves when the turn settles,
+  // would drag the view along with it. So a disclosure anchors only the commit
+  // in which it toggles (see timelineAnchorCorrection).
   const focused = scroller.ownerDocument.activeElement;
   if (focused instanceof HTMLElement && scroller.contains(focused) && focused !== scroller) {
     const box = focused.getBoundingClientRect();
     if (box.bottom > viewport.top && box.top < viewport.bottom) {
-      const anchor = { element: focused, key: null, text: null, top: box.top, focused: true };
+      const anchor: Anchor = {
+        element: focused,
+        key: null,
+        text: null,
+        top: box.top,
+        focused: true,
+      };
+      if (focused.hasAttribute("aria-expanded"))
+        anchor.expanded = focused.getAttribute("aria-expanded");
       const section = focused.closest("[data-og-work-section]");
       // A stuck header stays put even when its section moves. Anchor the work
       // being read beneath it instead, while still retaining its focus identity.
@@ -113,6 +130,13 @@ export function timelineAnchorCorrection(
   let blocks: HTMLElement[] | undefined;
   let groups: HTMLElement[] | undefined;
   for (const anchor of anchors) {
+    // A disclosure that did not open or close in this commit is not what the
+    // reader is looking at; the content around it is.
+    if (
+      anchor.expanded !== undefined &&
+      anchor.element.getAttribute("aria-expanded") === anchor.expanded
+    )
+      continue;
     let element: HTMLElement | undefined;
     if (
       scroller.contains(anchor.element) &&

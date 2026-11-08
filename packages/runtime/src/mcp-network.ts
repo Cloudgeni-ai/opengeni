@@ -1,5 +1,4 @@
 import { beginMcpPhase, traceparent } from "@opengeni/observability";
-import type { Settings } from "@opengeni/config";
 import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
   isNonPublicAddress,
@@ -7,6 +6,7 @@ import {
   resolvePinnedDestination,
   type DnsLookup,
   type FetchLike,
+  type OutboundNetworkSettings,
 } from "@opengeni/network";
 
 export { undiciFetch } from "@opengeni/network";
@@ -891,7 +891,7 @@ export async function boundedParallelMap<T, R>(
  * `@opengeni/runtime/mcp-network` leaf rather than the runtime root barrel.
  */
 export function guardedMcpFetch<TInput extends string | URL | Request>(
-  settings: Pick<Settings, "environment" | "integrationsAllowPrivateNetworkTargets">,
+  settings: OutboundNetworkSettings,
   fetchImpl: (input: TInput, init?: RequestInit) => Promise<Response>,
   options: {
     maxResponseBytes?: number;
@@ -1091,7 +1091,7 @@ export async function boundedMcpRequest(
 
 export async function assertMcpDestinationAllowed(
   rawUrl: string,
-  settings: Pick<Settings, "environment" | "integrationsAllowPrivateNetworkTargets">,
+  settings: OutboundNetworkSettings,
   options: { dnsLookup?: DnsLookup } = {},
 ): Promise<void> {
   await resolvePinnedDestination(rawUrl, settings, {

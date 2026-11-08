@@ -279,7 +279,12 @@ impl Running {
                 host: renewer.host,
                 attempt: renewal.attempt,
                 info,
-                capacity: capacity(&status, renewer),
+                capacity: capacity(
+                    &status,
+                    &renewer.info,
+                    &renewer.image,
+                    renewer.guest.as_deref(),
+                ),
                 held: status
                     .sandboxes
                     .iter()
@@ -571,7 +576,12 @@ impl Running {
         let Ok(status) = reading else {
             anyhow::bail!("the agent stopped");
         };
-        let capacity = capacity(&status, renewer);
+        let capacity = capacity(
+            &status,
+            &renewer.info,
+            &renewer.image,
+            renewer.guest.as_deref(),
+        );
         self.capacity = Some(capacity.clone());
         let (Some(host), Some(epoch)) = (renewer.host, renewer.lease.epoch()) else {
             return Ok(());
@@ -638,10 +648,9 @@ fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// What the host can take on, from its status; its ready clones all start
-/// from `renewer`'s image, and it builds images with `renewer`'s guest
-/// programs.
-fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
+/// What the host can take on, from its status and configured image and
+/// guest programs. The host description is refreshed when the agent starts.
+fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&str>) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
@@ -652,13 +661,14 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),
+        disk_available_mib: status.disk.as_ref().map(|disk| mib(disk.available)),
         disk_reclaimable_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.reclaimable)),
         ready: status
             .templates
             .iter()
             .filter(|template| template.ready > 0)
             .map(|template| ReadyClones {
-                image: renewer.image.clone(),
+                image: image.to_owned(),
                 vcpus: u32::from(template.vcpus),
                 memory_mib: template.memory_mib,
                 count: template.ready,
@@ -666,7 +676,7 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
             .collect(),
         awake: status.capacity.as_ref().map_or(0, |held| held.awake),
         sandboxes: u32::try_from(status.sandboxes.len()).unwrap_or(u32::MAX),
-        guest: renewer.guest.clone(),
+        guest: guest.map(str::to_owned),
         // A host of this release keeps its pointers in the service.
         pointers_in_service: true,
         // And it reads copies whose chunks are in packs (ADR 31).
@@ -676,7 +686,7 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         sets_aside: true,
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
-        info: Some(renewer.info.clone()),
+        info: Some(info.clone()),
     }
 }
 
@@ -715,6 +725,46 @@ pub fn wire_terms(terms: LeaseTerms) -> Terms {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_disk_readings_are_not_booking_headroom() {
+        use compute_protocol::host::{About, DiskStatus};
+        let info: HostInfo = serde_json::from_str(r#"{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"","memory_mib":1000,"cpu_millis":1000,"disk_mib":100000}"#).unwrap();
+        let mut status = HostStatus {
+            sandboxes: Vec::new(),
+            steps: Vec::new(),
+            available_memory: None,
+            reclaimable_memory: 0,
+            blocked: Vec::new(),
+            capacity: None,
+            cpu: None,
+            disk: None,
+            templates: Vec::new(),
+            store_stalled_ms: None,
+            unseen_activity: 0,
+            about: About::default(),
+        };
+        assert_eq!(
+            capacity(&status, &info, "image", None).disk_available_mib,
+            None
+        );
+        for available_mib in [0, 95_000] {
+            status.disk = Some(DiskStatus {
+                available: available_mib << 20,
+                booked: 90_000 << 20,
+                reserve: 1000 << 20,
+                free: 1 << 20,
+                reclaimable: 2000 << 20,
+                inodes_available: 10,
+                inodes_booked: 5,
+                inodes_free: 5,
+            });
+            let capacity = capacity(&status, &info, "image", None);
+            assert_eq!(capacity.disk_available_mib, Some(available_mib));
+            assert_eq!(capacity.disk_free_mib, 1);
+            assert_eq!(capacity.disk_reclaimable_mib, 2000);
+        }
+    }
 
     #[test]
     fn terms_survive_the_wire() {

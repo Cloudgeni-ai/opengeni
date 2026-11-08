@@ -54,6 +54,7 @@ let app: Hono;
 let bus: MemoryEventBus;
 const wakes: Array<{ sessionId: string; wakeRevision: number }> = [];
 let providerCalls = 0;
+let providerConfigReads = 0;
 const elevenLabsMints: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
 
 setDefaultTimeout(30_000);
@@ -93,6 +94,7 @@ beforeAll(async () => {
     codexFetch: async (input, init) => {
       const request = new Request(input, init);
       if (request.url.endsWith("/wham/statsig/bootstrap")) {
+        providerConfigReads += 1;
         return Response.json({
           statsigPayload: JSON.stringify({
             dynamic_configs: {
@@ -1330,6 +1332,7 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       version: "v3",
     };
     const callsBefore = providerCalls;
+    const configsBefore = providerConfigReads;
     const initialResponse = await app.request(`${base}/webrtc`, {
       method: "POST",
       headers: value.headers,
@@ -1367,6 +1370,9 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       replay: false,
     });
     expect(providerCalls).toBe(callsBefore + 2);
+    // A new physical provider call still acquires/fences its own operation,
+    // but does not fetch unchanged account-bound configuration a second time.
+    expect(providerConfigReads).toBe(configsBefore + 1);
 
     const replay = await app.request(`${base}/webrtc`, {
       method: "POST",

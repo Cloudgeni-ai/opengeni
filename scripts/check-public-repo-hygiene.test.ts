@@ -121,6 +121,17 @@ describe("public repository hygiene", () => {
     );
   });
 
+  test("Android vector drawable path data never reads as a retired label", () => {
+    const label = ["M", "12"].join("");
+    const drawn = `<vector><path android:pathData="${label},9c-1.6,0 -3,0.2z" /></vector>`;
+    expect(auditPublicText("android/src/main/res/drawable/end.xml", drawn)).toEqual([]);
+    // Other XML, and drawable text outside path data, are still checked.
+    expect(auditPublicText("android/src/main/res/values/strings.xml", drawn)).toHaveLength(1);
+    expect(
+      auditPublicText("android/src/main/res/drawable/end.xml", `<!-- ${label} -->${drawn}`),
+    ).toHaveLength(1);
+  });
+
   test("only exempts the reviewed upstream Rust field primitive", () => {
     const file = "agent/vendor/async-nats/src/lib.rs";
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
