@@ -1,4 +1,9 @@
-import type { ChatSession as Session, SessionEvent } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readFreshSessionDetail } from "../lib/session-detail-read";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
@@ -18,8 +23,8 @@ export type UseSessionOptions = EmbeddedSessionReadClientOverride &
     beginRead?: (() => number) | undefined;
   };
 
-export type UseSessionResult = {
-  session: Session | null;
+export type UseSessionResult<S extends Session = FullSession> = {
+  session: S | null;
   loading: boolean;
   error: Error | null;
   /** Monotonic revision of accepted authoritative detail reads. */
@@ -28,7 +33,7 @@ export type UseSessionResult = {
   readGeneration: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
-  updateTitle: (title: string) => Promise<Session | null>;
+  updateTitle: (title: string) => Promise<S | null>;
   /** True while a rename is in flight. */
   updating: boolean;
   mutationError: Error | null;
@@ -57,8 +62,18 @@ function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
 export function useSession(
   sessionId: string | null | undefined,
+  options?: UseSessionOptions & {
+    client?: Pick<OpenGeniClient, "getSession" | "updateSession"> | undefined;
+  },
+): UseSessionResult;
+export function useSession(
+  sessionId: string | null | undefined,
+  options: UseSessionOptions,
+): UseSessionResult<Session>;
+export function useSession(
+  sessionId: string | null | undefined,
   options: UseSessionOptions = {},
-): UseSessionResult {
+): UseSessionResult<Session> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);

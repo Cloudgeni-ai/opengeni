@@ -1,6 +1,8 @@
 import type {
   SessionEvent,
   ChatSessionLineageResponse as SessionLineageResponse,
+  SessionLineageResponse as FullSessionLineageResponse,
+  OpenGeniClient,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
@@ -24,14 +26,15 @@ export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
   beginRead?: (() => number) | undefined;
 };
 
-export type UseSessionLineageResult = {
-  lineage: SessionLineageResponse | null;
-  loading: boolean;
-  error: Error | null;
-  /** Causal generation captured when the accepted lineage read started. */
-  readGeneration: number;
-  refresh: () => Promise<void>;
-};
+export type UseSessionLineageResult<L extends SessionLineageResponse = FullSessionLineageResponse> =
+  {
+    lineage: L | null;
+    loading: boolean;
+    error: Error | null;
+    /** Causal generation captured when the accepted lineage read started. */
+    readGeneration: number;
+    refresh: () => Promise<void>;
+  };
 
 export function isLineageRefreshEvent(event: SessionEvent): boolean {
   if (event.type === "session.status.changed" || event.type === "session.created") {
@@ -71,8 +74,18 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
+  options?: UseSessionLineageOptions & {
+    client?: Pick<OpenGeniClient, "getSessionLineage"> | undefined;
+  },
+): UseSessionLineageResult;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions,
+): UseSessionLineageResult<SessionLineageResponse>;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
   options: UseSessionLineageOptions = {},
-): UseSessionLineageResult {
+): UseSessionLineageResult<SessionLineageResponse> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionLineage(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);

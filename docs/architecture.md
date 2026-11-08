@@ -68,8 +68,9 @@ HTTP session responses with `Accept: application/json; opengeni-session=chat` us
 `apps/api/src/routes/session-chat-response.ts` to omit operator instructions, skill
 bodies and the full effective-tool catalog. SDK `client.withSessionResponse("chat")` selects
 this signal and compact return types; the default remains the full SDK contract.
-The console/mobile/React chat opt in and the browser relay enforces it; clients
-without it retain the full response.
+The console/mobile and packaged React chat's owned clients opt in and the browser
+relay enforces it; public hooks/providers preserve the supplied client's choice.
+Clients without the preference retain the full response.
 Using `Accept` avoids a new CORS request-header requirement on older APIs. Explicit
 `GET .../sessions/:sessionId/configuration` reads retain those fields under
 session-control authority; internal runtime/MCP session projections are unchanged.

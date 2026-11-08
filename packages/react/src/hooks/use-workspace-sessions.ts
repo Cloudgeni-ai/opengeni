@@ -1,5 +1,7 @@
 import type {
   ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
   SessionListEntry,
   SessionListTotals,
   SiteConversationGroup,
@@ -40,7 +42,7 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   beginRead?: (() => number) | undefined;
 };
 
-export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Session> = {
+export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = FullSession> = {
   /**
    * All visible rows, with pins first. This preserves the pre-pinning hook
    * contract for consumers that only read `sessions`.
@@ -70,8 +72,14 @@ export function useWorkspaceSessions(
   options: UseWorkspaceSessionsOptions & { projection: "summary" },
 ): UseWorkspaceSessionsResult<SessionListEntry>;
 export function useWorkspaceSessions(
-  options?: UseWorkspaceSessionsOptions & { projection?: undefined },
+  options?: UseWorkspaceSessionsOptions & {
+    projection?: undefined;
+    client?: Pick<OpenGeniClient, "listSessions" | "listSessionPage"> | undefined;
+  },
 ): UseWorkspaceSessionsResult;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions & { projection?: undefined },
+): UseWorkspaceSessionsResult<Session>;
 export function useWorkspaceSessions(
   options: UseWorkspaceSessionsOptions,
 ): UseWorkspaceSessionsResult<Session | SessionListEntry>;

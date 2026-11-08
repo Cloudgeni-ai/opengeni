@@ -35,6 +35,13 @@ const chat = await chatClient.getSession(workspaceId, sessionId); // ChatSession
 const configuration = await chatClient.getSessionConfiguration(workspaceId, sessionId); // Session
 ```
 
+Public React hooks, `OpenGeniProvider` and `createEmbeddedSessionClient` honor the
+client supplied by the application; they do not switch an existing full client
+to compact responses. For a custom chat, pass `chatClient` to the provider or
+hook. Passing the compact client directly to a hook also selects its compact
+return type; existing default/full hook callers retain the full `Session` type.
+The packaged chat's own clients explicitly opt in.
+
 For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
 allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response
 headers. The API and packaged relay share the response list; server-route adapters

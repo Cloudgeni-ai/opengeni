@@ -2,6 +2,8 @@ import type {
   Channel,
   CreateChannelRequest,
   ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
   UpdateChannelRequest,
 } from "@opengeni/sdk";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
@@ -14,7 +16,7 @@ export type UseChannelsOptions = ClientOverride & {
   enabled?: boolean | undefined;
 };
 
-export type UseChannelsResult = {
+export type UseChannelsResult<S extends Session = FullSession> = {
   channels: Channel[];
   loading: boolean;
   error: Error | null;
@@ -24,7 +26,7 @@ export type UseChannelsResult = {
   reorder: (channelIds: string[]) => Promise<Channel[] | null>;
   remove: (channelId: string) => Promise<boolean>;
   /** Re-file a session into a channel; null moves it back to the inbox. */
-  moveSession: (sessionId: string, channelId: string | null) => Promise<Session | null>;
+  moveSession: (sessionId: string, channelId: string | null) => Promise<S | null>;
   mutating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
@@ -35,7 +37,13 @@ export type UseChannelsResult = {
  * ("workstreams") by work type. Pure metadata — filing a session into a
  * channel never affects execution.
  */
-export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult {
+export function useChannels(
+  options?: UseChannelsOptions & {
+    client?: Pick<OpenGeniClient, "updateSessionChannel"> | undefined;
+  },
+): UseChannelsResult;
+export function useChannels(options: UseChannelsOptions): UseChannelsResult<Session>;
+export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult<Session> {
   const { client, workspaceId } = useOpenGeni(options);
   const cache = useMemo(() => channelCacheFor(client, workspaceId), [client, workspaceId]);
   const snapshot = useSyncExternalStore(cache.subscribe, cache.getSnapshot, cache.getSnapshot);

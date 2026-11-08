@@ -83,9 +83,11 @@ export type OpenGeniProviderProps = {
 /**
  * Supplies the Opengeni client + workspace to all hooks below it. Hooks also
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
+ * Preserves the supplied client's response projection; pass an explicitly
+ * compact client for a chat-only surface.
  */
 export function OpenGeniProvider({
-  client: suppliedClient,
+  client,
   workspaceId,
   onWorkspaceControlEvent,
   onWorkspaceInteractionEvent,
@@ -98,10 +100,6 @@ export function OpenGeniProvider({
   toolDetails = "full",
   children,
 }: OpenGeniProviderProps) {
-  const client = useMemo(
-    () => suppliedClient.withSessionResponse?.("chat") ?? suppliedClient,
-    [suppliedClient],
-  );
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
     null,
   );

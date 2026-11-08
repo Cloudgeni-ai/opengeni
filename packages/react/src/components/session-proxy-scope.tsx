@@ -109,10 +109,7 @@ export function SessionProxyScope({
       }).withSessionResponse("chat"),
     [baseUrl, hasFetch],
   );
-  const client: SessionClientLike = useMemo(
-    () => suppliedClient?.withSessionResponse?.("chat") ?? suppliedClient ?? ownClient,
-    [suppliedClient, ownClient],
-  );
+  const client: SessionClientLike = suppliedClient ?? ownClient;
   const [state, setState] = useState<ScopeState>(
     workspaceId ? { status: "ready", workspaceId } : { status: "loading" },
   );

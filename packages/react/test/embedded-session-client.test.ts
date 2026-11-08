@@ -11,7 +11,7 @@ import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 import type { EmbeddedSessionClientLike } from "../src/client";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 
-test("the embedded adapter opts into compact responses without changing the host SDK client", async () => {
+test("the embedded adapter preserves the host's explicit response choice", async () => {
   const accepts: string[] = [];
   const base = new OpenGeniClient({
     baseUrl: "https://api.test",
@@ -25,9 +25,11 @@ test("the embedded adapter opts into compact responses without changing the host
       );
     },
   });
-  const embedded = createEmbeddedSessionClient(base);
+  const embedded = createEmbeddedSessionClient(base.withSessionResponse("chat"));
   expect((await embedded.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBeUndefined();
-  expect((await base.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBe("Full");
+  expect(
+    (await createEmbeddedSessionClient(base).getSession(WORKSPACE_ID, SESSION_ID)).instructions,
+  ).toBe("Full");
   expect(accepts).toEqual(["application/json; opengeni-session=chat", "application/json"]);
 });
 
