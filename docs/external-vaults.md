@@ -194,9 +194,12 @@ the way the official apps do and decrypts items itself:
   [freshness rules](#freshness-three-different-things): a cheap revision check
   refreshes them when browsing or searching after ten minutes, after two
   minutes when a reference finds nothing, and at once on Refresh.
-- **Self-hosted servers** on a private network address need
-  `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true` in both API and
-  worker; every request is otherwise DNS-pinned to public addresses. The
+- **Self-hosted servers** on a private network address need their exact hosts in
+  `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS` in both API and
+  worker; see [private destinations](workspace-integrations.md#trusted-private-network-destinations).
+  Every request remains DNS-pinned. The broader
+  `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true` also works but opens
+  all private destinations. The
   server's `/api/config` may name API and identity hosts only on the same
   site as the address entered.
 

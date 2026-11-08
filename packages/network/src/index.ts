@@ -19,6 +19,8 @@ export type DnsLookup = (hostname: string) => Promise<readonly DnsAddress[]>;
 export type OutboundNetworkSettings = {
   environment: string;
   integrationsAllowPrivateNetworkTargets: boolean;
+  /** Operator-approved exact hostnames, optionally restricted to one port. */
+  integrationsPrivateNetworkAllowedHosts?: readonly string[];
 };
 
 export type PinnedDestination = {
@@ -438,7 +440,10 @@ export async function resolvePinnedDestination(
     );
   }
 
-  const privateEscape = localTestEscape || settings.integrationsAllowPrivateNetworkTargets === true;
+  const privateEscape =
+    localTestEscape ||
+    settings.integrationsAllowPrivateNetworkTargets === true ||
+    privateNetworkHostAllowed(url, settings.integrationsPrivateNetworkAllowedHosts);
   if (
     !privateEscape &&
     (isLocalHostname(hostname) ||
@@ -450,6 +455,19 @@ export async function resolvePinnedDestination(
     );
   }
   return { url, hostname, addresses: preferIpv4Addresses(normalizedAddresses) };
+}
+
+function privateNetworkHostAllowed(url: URL, entries: readonly string[] = []): boolean {
+  const hostname = normalizeHostname(url.hostname);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  return entries.some((entry) => {
+    const [allowedHost, allowedPort, extra] = entry.trim().toLowerCase().split(":");
+    return (
+      extra === undefined &&
+      normalizeHostname(allowedHost ?? "") === hostname &&
+      (allowedPort === undefined || Number(allowedPort) === port)
+    );
+  });
 }
 
 /**

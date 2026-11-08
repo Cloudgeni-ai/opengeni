@@ -337,7 +337,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
   PRM mode, subject to reviewed provider-profile suppression. It is always
   omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
-- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
+- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless the actual destination matches the operator's `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS`, running in local/test, or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`. See [trusted private destinations](workspace-integrations.md#trusted-private-network-destinations) for the exact-host/optional-port format and redirect/DNS-pinning rules.
 - No arbitrary token passthrough: hosted MCP credentials go only to their exact bound server. Reviewed first-party API bridges may send their provider grant only to explicitly approved provider API destinations, with the same owner, resource and scope fences. Gmail's historical MCP resource identifies the local REST bridge: setup uses pinned Google OAuth metadata and a required Gmail profile check, without contacting Google's MCP preview server. Our own first-party MCP servers keep validating audience on inbound tokens.
 - Token responses stored, never logged.
 
