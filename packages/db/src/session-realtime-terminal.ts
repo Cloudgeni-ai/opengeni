@@ -18,6 +18,13 @@ import * as schema from "./schema";
 
 const MAX_TEXT_BYTES = 131_072;
 const MAX_PAYLOAD_BYTES = 131_072;
+/**
+ * What the voice model hears when a delegated turn finished without any
+ * answer text. An empty result reads as "done" with nothing to relay, and the
+ * voice model then makes an outcome up, so the absence is stated explicitly.
+ */
+export const REALTIME_DELEGATION_NO_ANSWER_TEXT =
+  "The work finished without a reply. No result or outcome was reported.";
 
 export type ProjectSessionRealtimeDelegationTerminalInput = {
   accountId: string;
@@ -97,6 +104,20 @@ function fitsRealtimePayload(value: Record<string, unknown>): boolean {
   return payloadBytes(value) <= MAX_PAYLOAD_BYTES;
 }
 
+/**
+ * The answer a completed turn gave the person. A turn that ends by waiting
+ * for input (or by completing a goal) records its answer as `reply` and leaves
+ * `output` empty, so `output` alone loses exactly the answers a voice call
+ * waits for.
+ */
+function completedTurnAnswer(terminal: Record<string, unknown>): string | null {
+  for (const key of ["output", "reply"] as const) {
+    const value = terminal[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return null;
+}
+
 function retainedEvidence(value: unknown): RetainedOutputEvidence {
   return validateRetainedOutputEvidence(value) ?? retainedOutputUnavailable();
 }
@@ -104,8 +125,8 @@ function retainedEvidence(value: unknown): RetainedOutputEvidence {
 function terminalReference(
   input: ProjectSessionRealtimeDelegationTerminalInput,
   terminal: Record<string, unknown>,
+  answer: string | null,
 ): Record<string, unknown> {
-  const output = typeof terminal.output === "string" ? terminal.output : null;
   return {
     canonicalEvent: {
       id: input.terminalEvent.id,
@@ -115,7 +136,7 @@ function terminalReference(
       truncated: true,
       reason: "realtime_ledger_limit",
       originalBytes: payloadBytes(terminal),
-      outputBytes: output === null ? null : Buffer.byteLength(output, "utf8"),
+      outputBytes: answer === null ? null : Buffer.byteLength(answer, "utf8"),
       fullEvidence: retainedEvidence(input.retainedOutputEvidence),
     },
   };
@@ -136,8 +157,7 @@ export function buildSessionRealtimeDelegationTerminalProjection(
   }
   const terminal = input.terminalEvent.payload;
   if (input.turnStatus === "completed") {
-    const output =
-      typeof terminal.output === "string" ? terminal.output : "Delegated turn completed.";
+    const output = completedTurnAnswer(terminal) ?? REALTIME_DELEGATION_NO_ANSWER_TEXT;
     const exactPayload = {
       status: input.turnStatus,
       turnId: input.turnId,
@@ -160,7 +180,7 @@ export function buildSessionRealtimeDelegationTerminalProjection(
         turnId: input.turnId,
         terminalEventId: input.terminalEvent.id,
         terminalEventType: input.terminalEvent.type,
-        terminal: terminalReference(input, terminal),
+        terminal: terminalReference(input, terminal, completedTurnAnswer(terminal)),
       }),
     };
   }
@@ -196,7 +216,11 @@ export function buildSessionRealtimeDelegationTerminalProjection(
       turnId: input.turnId,
       terminalEventId: input.terminalEvent.id,
       terminalEventType: input.terminalEvent.type,
-      terminal: terminalReference(input, terminal),
+      terminal: terminalReference(
+        input,
+        terminal,
+        typeof terminal.output === "string" ? terminal.output : null,
+      ),
     }),
   };
 }
