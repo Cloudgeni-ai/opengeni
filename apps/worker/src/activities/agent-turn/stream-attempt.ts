@@ -1064,40 +1064,43 @@ export async function runTurnStreamAttempt(
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
       enterModelRequestStage("dispatch_checkpoint");
       await checkpointBeforeProviderDispatch();
-      if (
-        providerPublishesNativeRequestEvents ||
-        eventing.firstModelRequestPreparationRecorded ||
-        eventing.firstModelRequestPreparationStartedAt === null
-      ) {
+      if (providerPublishesNativeRequestEvents) {
         enterModelRequestStage("transport");
         return;
       }
       enterModelRequestStage("request_audit");
       sandboxState.firstProviderRequestStarted = true;
-      eventing.firstModelRequestPreparationRecorded = true;
-      const preparationDurationMs = Math.max(
-        0,
-        performance.now() - eventing.firstModelRequestPreparationStartedAt,
-      );
-      recordTurnStartupPhase(observability, {
-        phase: "model_request_preparation",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: "completed",
-        durationSeconds: preparationDurationMs / 1_000,
-        count: turnTools.length,
-      });
+      const preparationDurationMs =
+        !eventing.firstModelRequestPreparationRecorded &&
+        eventing.firstModelRequestPreparationStartedAt !== null
+          ? Math.max(0, performance.now() - eventing.firstModelRequestPreparationStartedAt)
+          : null;
+      if (preparationDurationMs !== null) {
+        eventing.firstModelRequestPreparationRecorded = true;
+        recordTurnStartupPhase(observability, {
+          phase: "model_request_preparation",
+          provider: turnExecutionPolicy.providerId,
+          backend: activeSandboxBackend ?? groupBoxBackend,
+          outcome: "completed",
+          durationSeconds: preparationDurationMs / 1_000,
+          count: turnTools.length,
+        });
+      }
       const auditStartedAt = performance.now();
       let auditOutcome: "completed" | "failed" = "completed";
       try {
         await eventing.publish!([
-          {
-            type: "turn.startup.phase.completed",
-            payload: {
-              phase: "model_preparation",
-              durationMs: Math.round(preparationDurationMs),
-            },
-          },
+          ...(preparationDurationMs === null
+            ? []
+            : [
+                {
+                  type: "turn.startup.phase.completed" as const,
+                  payload: {
+                    phase: "model_preparation",
+                    durationMs: Math.round(preparationDurationMs),
+                  },
+                },
+              ]),
           {
             type: "agent.model.request",
             payload: {
@@ -1116,14 +1119,16 @@ export async function runTurnStreamAttempt(
         auditOutcome = "failed";
         throw error;
       } finally {
-        recordTurnStartupPhase(observability, {
-          phase: "model_request_audit",
-          provider: turnExecutionPolicy.providerId,
-          backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: auditOutcome,
-          durationSeconds: (performance.now() - auditStartedAt) / 1_000,
-          count: turnTools.length,
-        });
+        if (preparationDurationMs !== null) {
+          recordTurnStartupPhase(observability, {
+            phase: "model_request_audit",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            outcome: auditOutcome,
+            durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+            count: turnTools.length,
+          });
+        }
       }
       // The required audit itself may have consumed the remaining window.
       // This awaited observer still owns the literal pre-fetch boundary.

@@ -35,6 +35,84 @@ function sourceAst(path: string) {
 }
 
 describe("attempt-local initial wire dispatch clock", () => {
+  test("generic transports publish all three lifecycle phases for every model request, but startup once", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = (name: string) => {
+      const node = parsed.nodes.find(
+        (candidate) =>
+          candidate.type === "VariableDeclarator" &&
+          candidate.id.type === "Identifier" &&
+          candidate.id.name === name,
+      );
+      if (node?.type !== "VariableDeclarator" || !node.init) throw new Error(`Missing ${name}`);
+      return parsed.source.slice(node.init.start, node.init.end);
+    };
+    const completed = parsed.nodes.find(
+      (node) =>
+        node.type === "IfStatement" &&
+        parsed.source.slice(node.test.start, node.test.end).replace(/\s+/g, " ") ===
+          "!providerPublishesNativeRequestEvents && fallbackProviderRequestLifecycleStartedAt !== null",
+    );
+    if (!completed) throw new Error("Missing completion publisher");
+    const source = `
+      const providerPublishesNativeRequestEvents = false;
+      const sandboxState = {};
+      const recordTurnStartupPhase = () => {};
+      const observability = {};
+      const turnExecutionPolicy = { providerId: "gateway" };
+      const activeSandboxBackend = "none";
+      const groupBoxBackend = "none";
+      const turnTools = [];
+      const streamProvider = "gateway";
+      const activeTurnId = "turn";
+      const input = { attemptId: "attempt" };
+      const dispatchId = "dispatch";
+      const attempt = { executionGeneration: 1 };
+      const enterModelRequestStage = () => {};
+      const checkpointBeforeProviderDispatch = async () => {};
+      const assertProviderOverloadRecoveryActive = () => {};
+      const providerTurn = {};
+      const subscriptionCoreTurnOf = () => null;
+      let fallbackProviderRequestStartedAt = null;
+      let fallbackProviderRequestLifecycleStartedAt = null;
+      const start = ${declaration("recordFallbackProviderDispatchAtWire")};
+      const firstByte = ${declaration("settleFallbackProviderFirstByte")};
+      const complete = async () => { ${parsed.source.slice(completed.start, completed.end)} };
+      return { start, firstByte, complete };
+    `;
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const callbacks = new Function(
+      "eventing",
+      new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+    )({
+      firstModelRequestPreparationRecorded: false,
+      firstModelRequestPreparationStartedAt: performance.now(),
+      initialModelWireDispatch: new InitialModelWireDispatchClock(),
+      publish: async (events: typeof published) => {
+        published.push(...events);
+      },
+    }) as {
+      start: () => Promise<void>;
+      firstByte: () => Promise<void>;
+      complete: () => Promise<void>;
+    };
+    for (let i = 0; i < 3; i++) {
+      await callbacks.start();
+      await callbacks.firstByte();
+      await callbacks.firstByte();
+      await callbacks.complete();
+      await callbacks.complete();
+    }
+    expect(
+      published
+        .filter((event) => event.type === "agent.model.request")
+        .map((event) => event.payload.phase),
+    ).toEqual(Array.from({ length: 3 }, () => ["started", "first_byte", "completed"]).flat());
+    expect(published.filter((event) => event.type === "turn.startup.phase.completed")).toHaveLength(
+      1,
+    );
+  });
+
   test("the real pre-fetch publisher refuses overload recovery when its audit outlasts the window", async () => {
     const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
     const declaration = parsed.nodes.find(
