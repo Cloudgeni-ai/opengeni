@@ -53,7 +53,12 @@ describe("realtime terminal projection", () => {
   });
 
   test("never relays an empty result", () => {
-    for (const payload of [{ output: "" }, { output: " \n", reply: "" }, {}]) {
+    for (const payload of [
+      { output: "" },
+      { output: " \n", reply: "" },
+      { output: "NO_REPLY" },
+      {},
+    ]) {
       const projected = buildSessionRealtimeDelegationTerminalProjection(withPayload(payload));
       expect(projected.text).toBe(REALTIME_DELEGATION_NO_ANSWER_TEXT);
     }

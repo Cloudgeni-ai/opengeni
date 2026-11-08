@@ -5,6 +5,7 @@ import {
   validateRetainedOutputEvidence,
   type RetainedOutputEvidence,
 } from "@opengeni/contracts";
+import { isNoReplyText } from "@opengeni/contracts/no-reply";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
@@ -108,12 +109,15 @@ function fitsRealtimePayload(value: Record<string, unknown>): boolean {
  * The answer a completed turn gave the person. A turn that ends by waiting
  * for input (or by completing a goal) records its answer as `reply` and leaves
  * `output` empty, so `output` alone loses exactly the answers a voice call
- * waits for.
+ * waits for. Blank text and the no-reply token are not answers.
  */
 function completedTurnAnswer(terminal: Record<string, unknown>): string | null {
   for (const key of ["output", "reply"] as const) {
     const value = terminal[key];
-    if (typeof value === "string" && value.trim().length > 0) return value;
+    // The no-reply token means "nothing for the person", never words to say.
+    if (typeof value === "string" && value.trim().length > 0 && !isNoReplyText(value)) {
+      return value;
+    }
   }
   return null;
 }
