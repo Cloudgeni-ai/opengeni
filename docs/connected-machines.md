@@ -41,10 +41,19 @@ generation and invalidates existing grants.
 ### Control transport recovery
 
 The API/worker uses its shared NATS connection for control RPC, operation frames,
-and acknowledgements. The native supervisor treats either control- or bulk-lane
-loss, including scheduled five-minute user-JWT expiry, as a transport-generation
-change: it reconnects, authenticates again, resubscribes, and detaches rather than
-restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+and acknowledgements. The broker's five-minute credential bounds established
+access after enrollment revocation; fresh admission checks enrollment authority.
+Ordinary enrollment-token renewal updates the next-dial bearer and the
+relay's future registrations in place, leaving accepted operations and healthy
+sockets untouched. Authority, consent, endpoint or authentication-state changes
+still replace the link.
+
+The native supervisor treats either control- or bulk-lane loss as a
+transport-generation change: it reconnects, authenticates again, resubscribes, and
+detaches rather than restarts accepted commands. Each generation owns both NATS
+connection tasks and closes them on every exit, including partial setup and
+cancelled dials. Retained RPC client clones cannot keep an old socket reconnecting
+alongside its replacement. The WebSocket/QUIC relay is a separate stream plane;
 it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
@@ -1706,7 +1715,9 @@ renewal itself cannot change ownership, scope or screen-control consent. Who can
 use a machine changes in place through **Who can use it?** (see
 [Change who can use a machine](#change-who-can-use-a-machine)), and screen
 control through its own request below; neither needs a reconnect. Updated
-credentials load into the existing process, preserving host operations.
+credentials load into the existing process. Renewal of the same credential family
+updates login/relay tokens without replacing its live NATS connections; changes
+to authority or other connection settings still reconcile through link replacement.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.

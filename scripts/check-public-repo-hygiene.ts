@@ -100,8 +100,8 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "agent/vendor/async-nats/src/lib.rs": {
-    bytes: 61_798,
-    sha256: "d87f015a7be4c3abffa9df0366e59e2b6dfd64c89bee26d2437f50f280f296fe",
+    bytes: 61_891,
+    sha256: "f453d8de7e2dfc7bf479e63c24485a45e489472ed4520e5ff5d52b2f00943572",
     // Only the signed-byte field primitive, not a string or comment.
     offsets: [9_379],
   },
