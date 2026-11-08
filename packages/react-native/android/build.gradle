@@ -52,9 +52,9 @@ dependencies {
   implementation 'androidx.core:core-telecom:1.0.1'
   implementation 'androidx.core:core:1.13.1'
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
-  // The app links both at run time.
+  // The app already has both; this links the same ones.
   if (expoNotifications != null) {
-    compileOnly expoNotifications
-    compileOnly 'com.google.firebase:firebase-messaging:25.0.1'
+    implementation expoNotifications
+    implementation 'com.google.firebase:firebase-messaging:25.0.1'
   }
 }
