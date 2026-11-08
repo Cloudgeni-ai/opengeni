@@ -132,6 +132,30 @@ pub enum MemorySource {
     Pager(PagerSpec),
 }
 
+/// Where a running VM's guest memory is in its VMM, as far as the host
+/// can tell; see [`crate::Engine::freed_memory`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuestMemory {
+    /// Mapped copy-on-write from this memory image file
+    /// ([`MemorySource::File`]).
+    File(PathBuf),
+    /// These regions of memory the VMM has no file behind and nothing
+    /// handles faults on: a VM whose pager put every page in place and
+    /// let go ([`MemorySource::Pager`]), in the regions the VMM gave it.
+    Unbacked(Vec<Region>),
+}
+
+/// One region of guest memory in the VMM's address space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Its first address in the VMM.
+    pub address: u64,
+    /// Its length in bytes.
+    pub size: u64,
+    /// Where its bytes start in the memory image.
+    pub offset: u64,
+}
+
 /// The page-fault handler process of a [`MemorySource::Pager`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PagerSpec {

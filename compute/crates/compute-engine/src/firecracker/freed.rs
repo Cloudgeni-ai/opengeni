@@ -13,9 +13,19 @@
 //! Such a mapping is private, so a page of it that is neither present nor
 //! swapped out has never been written since the discard and reads as
 //! zeros. Nothing else is: a page of the file's own mapping holds the
-//! image's bytes or the guest's, and memory not mapped from the file
-//! (a fresh boot, or a wake served by a pager) is left out, since only the
-//! file's mapping says which image bytes an address holds.
+//! image's bytes or the guest's.
+//!
+//! Memory a pager served is anonymous from the start, and Firecracker
+//! discards it with `MADV_DONTNEED`. Once the pager has put every page in
+//! place and let go of the memory, no handler supplies a missing page any
+//! more, so a page of it that is neither present nor swapped out reads as
+//! zeros, whether the guest gave it back or the image held zeros there.
+//! Which image bytes an address holds comes from the regions the VMM gave
+//! the pager ([`GuestMemory::Unbacked`]); each must still be private,
+//! writable memory with no file behind it, or none of it is named.
+//!
+//! Memory of a VM booted fresh is left out: Firecracker says nowhere where
+//! it is.
 //!
 //! This runs while the VM is paused, after its snapshot, so the guest
 //! cannot write meanwhile. Only the VMM's own devices can, and a page one
@@ -31,7 +41,7 @@ use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::path::Path;
 
 use super::process::Procfs;
-use crate::{EngineError, ErrorKind};
+use crate::{EngineError, ErrorKind, GuestMemory, Region};
 
 /// A page the kernel has in memory.
 const PRESENT: u64 = 1 << 63;
@@ -43,25 +53,29 @@ const SWAPPED: u64 = 1 << 62;
 /// Pagemap entries read at once.
 const ENTRIES_PER_READ: usize = 1 << 16;
 
-/// [`freed`] for the VMM process whose files `procfs` opens, clipped to the
-/// image's length, off the async runtime: the engine's
-/// [`freed_memory`](crate::Engine::freed_memory).
+/// [`freed`] or [`freed_unbacked`] for the VMM process whose files
+/// `procfs` opens, off the async runtime: the engine's
+/// [`freed_memory`](crate::Engine::freed_memory). A file's ranges are
+/// clipped to its length.
 pub(super) fn freed_memory(
     procfs: Procfs,
-    memory: &Path,
+    memory: &GuestMemory,
 ) -> impl Future<Output = Result<Vec<Range<u64>>, EngineError>> + Send + 'static {
     const OP: &str = "freed_memory";
-    let memory = memory.to_owned();
+    let memory = memory.clone();
     async move {
-        let found = tokio::task::spawn_blocking(move || {
-            let image_len = std::fs::metadata(&memory)?.len();
-            let mut ranges = freed(|name| procfs.open(name), &memory)?;
-            // A mapping past the file's end reads no image bytes.
-            ranges.retain_mut(|range| {
-                range.end = range.end.min(image_len);
-                range.start < range.end
-            });
-            Ok::<_, io::Error>(ranges)
+        let found = tokio::task::spawn_blocking(move || match &memory {
+            GuestMemory::File(path) => {
+                let image_len = std::fs::metadata(path)?.len();
+                let mut ranges = freed(|name| procfs.open(name), path)?;
+                // A mapping past the file's end reads no image bytes.
+                ranges.retain_mut(|range| {
+                    range.end = range.end.min(image_len);
+                    range.start < range.end
+                });
+                Ok::<_, io::Error>(ranges)
+            }
+            GuestMemory::Unbacked(regions) => freed_unbacked(|name| procfs.open(name), regions),
         })
         .await
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
@@ -93,6 +107,23 @@ fn freed(open: impl Fn(&str) -> io::Result<File>, memory: &Path) -> io::Result<V
     })
 }
 
+/// The ranges of the memory image that `regions` of the process whose
+/// procfs files `open` opens hold and that read as zeros now (see the
+/// module's documentation), as [`freed`] gives them. `open` must hand out
+/// only the VMM's own files, as for [`freed`].
+fn freed_unbacked(
+    open: impl Fn(&str) -> io::Result<File>,
+    regions: &[Region],
+) -> io::Result<Vec<Range<u64>>> {
+    let (mut maps_file, pagemap) = (open("maps")?, open("pagemap")?);
+    let mut maps = String::new();
+    io::Read::read_to_string(&mut maps_file, &mut maps)?;
+    let page = rustix::param::page_size() as u64;
+    unbacked(&maps, regions, page, |start, entries| {
+        read_entries(&pagemap, start, entries, page)
+    })
+}
+
 /// The file whose mapping holds guest memory, as `/proc/<pid>/maps` names
 /// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +143,8 @@ struct Area<'a> {
     major: u64,
     minor: u64,
     inode: u64,
+    /// The first word of what it maps, if anything is named.
+    path: &'a str,
 }
 
 impl Area<'_> {
@@ -123,6 +156,14 @@ impl Area<'_> {
     /// private and writable, as a discard leaves it.
     fn anonymous(&self) -> bool {
         self.inode == 0 && self.major == 0 && self.minor == 0 && self.perms == "rw-p"
+    }
+
+    /// Private, writable memory with no file behind it: anonymous, or
+    /// anonymous huge pages, which the kernel names after the file it
+    /// keeps them in internally. A page of it nobody wrote reads as zeros.
+    fn unbacked(&self) -> bool {
+        self.anonymous()
+            || (self.perms == "rw-p" && self.major == 0 && self.path == "/anon_hugepage")
     }
 }
 
@@ -141,6 +182,7 @@ fn parse(line: &str) -> Option<Area<'_>> {
         major: u64::from_str_radix(major, 16).ok()?,
         minor: u64::from_str_radix(minor, 16).ok()?,
         inode: inode.parse().ok()?,
+        path: fields.next().unwrap_or(""),
     })
 }
 
@@ -188,31 +230,112 @@ fn zeroed(
         if !area.start.is_multiple_of(page) || !area.end.is_multiple_of(page) {
             continue;
         }
-        let mut address = area.start;
-        while address < area.end {
-            let count = usize::try_from((area.end - address) / page)
-                .unwrap_or(usize::MAX)
-                .min(ENTRIES_PER_READ);
-            let read = entries(address, count)?;
-            if read.len() != count {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "pagemap ended early",
-                ));
-            }
-            for (index, entry) in read.into_iter().enumerate() {
-                if entry & (PRESENT | SWAPPED) != 0 {
-                    continue;
-                }
-                let start = address + index as u64 * page - distance;
-                match zeros.last_mut() {
-                    Some(last) if last.end == start => last.end += page,
-                    _ => zeros.push(start..start + page),
-                }
-            }
-            address += count as u64 * page;
-        }
+        absent(
+            area.start..area.end,
+            |address| address - distance,
+            page,
+            &mut entries,
+            &mut zeros,
+        )?;
     }
+    Ok(merged(zeros))
+}
+
+/// The image ranges that read as zeros in `regions`, from the process's
+/// `maps` and its pagemap entries, read as [`zeroed`] reads them: every
+/// page neither present nor swapped, of every region that private,
+/// writable memory with no file behind it covers whole. A region with any
+/// other mapping in it, or none, gives nothing, since what reads there is
+/// not known.
+fn unbacked(
+    maps: &str,
+    regions: &[Region],
+    page: u64,
+    mut entries: impl FnMut(u64, usize) -> io::Result<Vec<u64>>,
+) -> io::Result<Vec<Range<u64>>> {
+    let mut areas: Vec<Area<'_>> = maps.lines().filter_map(parse).collect();
+    areas.sort_by_key(|area| area.start);
+    let mut zeros: Vec<Range<u64>> = Vec::new();
+    for region in regions {
+        let Some(end) = region.address.checked_add(region.size) else {
+            continue;
+        };
+        if region.offset.checked_add(region.size).is_none()
+            || !region.address.is_multiple_of(page)
+            || !end.is_multiple_of(page)
+            || !covered(&areas, region.address..end)
+        {
+            continue;
+        }
+        absent(
+            region.address..end,
+            |address| address - region.address + region.offset,
+            page,
+            &mut entries,
+            &mut zeros,
+        )?;
+    }
+    Ok(merged(zeros))
+}
+
+/// Whether mappings with no file behind them cover all of `range`, one
+/// after another with no gap: `areas` sorted by address.
+fn covered(areas: &[Area<'_>], range: Range<u64>) -> bool {
+    let mut reached = range.start;
+    for area in areas {
+        if reached >= range.end {
+            break;
+        }
+        if area.end <= reached {
+            continue;
+        }
+        if area.start > reached || !area.unbacked() {
+            return false;
+        }
+        reached = area.end;
+    }
+    reached >= range.end && range.start < range.end
+}
+
+/// Adds to `zeros`, as image ranges `image` maps addresses to, the pages
+/// of `range` (whole pages) that the pagemap entries `entries(start,
+/// count)` reads say are neither present nor swapped out.
+fn absent(
+    range: Range<u64>,
+    image: impl Fn(u64) -> u64,
+    page: u64,
+    entries: &mut impl FnMut(u64, usize) -> io::Result<Vec<u64>>,
+    zeros: &mut Vec<Range<u64>>,
+) -> io::Result<()> {
+    let mut address = range.start;
+    while address < range.end {
+        let count = usize::try_from((range.end - address) / page)
+            .unwrap_or(usize::MAX)
+            .min(ENTRIES_PER_READ);
+        let read = entries(address, count)?;
+        if read.len() != count {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "pagemap ended early",
+            ));
+        }
+        for (index, entry) in read.into_iter().enumerate() {
+            if entry & (PRESENT | SWAPPED) != 0 {
+                continue;
+            }
+            let start = image(address + index as u64 * page);
+            match zeros.last_mut() {
+                Some(last) if last.end == start => last.end += page,
+                _ => zeros.push(start..start + page),
+            }
+        }
+        address += count as u64 * page;
+    }
+    Ok(())
+}
+
+/// `zeros` sorted, with touching and overlapping ranges joined.
+fn merged(mut zeros: Vec<Range<u64>>) -> Vec<Range<u64>> {
     zeros.sort_by_key(|range| range.start);
     let mut merged: Vec<Range<u64>> = Vec::with_capacity(zeros.len());
     for range in zeros {
@@ -221,7 +344,7 @@ fn zeroed(
             _ => merged.push(range),
         }
     }
-    Ok(merged)
+    merged
 }
 
 /// `count` pagemap entries from address `start`.

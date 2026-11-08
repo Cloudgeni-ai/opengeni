@@ -77,10 +77,18 @@ restore depend on every earlier link.
   by mapping fresh anonymous memory over it, so those ranges are the
   anonymous mappings inside the file's mapping whose pages are neither
   present nor swapped, read from `/proc/<pid>/maps` and `pagemap`. Memory
-  not mapped from a file (a fresh boot, or a wake served by the pager) is
-  not covered: its discards are not visible that way, and its image keeps
-  what it held, as before. A full snapshot reads discarded pages as zeros
-  already.
+  a pager served is anonymous; once the pager has put every page in place
+  and let go, a page of it neither present nor swapped reads as zeros.
+  Where that memory is, only the VMM's handshake with the pager says, so
+  the pager writes those regions into its done file with its launch's
+  tag (a starting pager first removes any done file an earlier one left),
+  and the host uses them only for the launch the sandbox's paged marker
+  names; until the pager has finished, nothing is named. A VM
+  booted fresh is not covered: Firecracker reports nowhere where its
+  memory is, and finding it by the shape of the process's mappings would
+  be a guess. Its image keeps what freed pages held until the sandbox is
+  next woken from an image. A full snapshot reads discarded pages as
+  zeros already.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.
 - A disk's file gives back what its guest frees. Writable drives take the

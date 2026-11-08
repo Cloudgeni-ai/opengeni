@@ -61,8 +61,8 @@ use files::checkpoint_disk;
 #[cfg(target_os = "linux")]
 pub(crate) use files::reconnect_paging;
 use files::{
-    Taken, archive_receipt, diff_files, drop_snapshot, link, paged_marker, pager_control,
-    pager_dir, pager_learned, wake_profile,
+    Taken, archive_receipt, diff_files, drop_snapshot, guest_memory, link, paged_marker,
+    pager_control, pager_dir, pager_learned, wake_profile,
 };
 pub(crate) use files::{
     clear_checkpoint, clear_local, images_of, local_copy, mark_archived, paged, recover_images,
@@ -759,21 +759,22 @@ impl<E: Engine, S: Store> Job<E, S> {
         notes::phase("snapshot");
         // Asked while the VM is still paused, so nothing the guest does
         // after can count. Without an answer the image holds those pages
-        // as before, which is only larger.
-        let freed = if kind == SnapshotKind::Diff {
-            match self
-                .engine
-                .freed_memory(&live.vm, &self.paths.snapshot.memory)
-                .await
-            {
+        // as before, which is only larger; so does a VM whose memory
+        // nothing can place, which is no fault.
+        let paths = self.paths.clone();
+        let memory = match kind {
+            SnapshotKind::Diff => blocking(move || guest_memory(&paths)).await.ok().flatten(),
+            SnapshotKind::Full => None,
+        };
+        let freed = match memory {
+            Some(memory) => match self.engine.freed_memory(&live.vm, &memory).await {
                 Ok(freed) => freed,
                 Err(error) => {
                     tracing::warn!(id = %self.id, %error, "memory the guest gave back not found");
                     Vec::new()
                 }
-            }
-        } else {
-            Vec::new()
+            },
+            None => Vec::new(),
         };
         let given_back: u64 = freed.iter().map(|range| range.end - range.start).sum();
         if given_back > 0 {
@@ -1003,6 +1004,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
         let prepared = blocking(move || {
+            // Without it, a later save would take this VM's memory for the
+            // last pager's (see `guest_memory`).
+            crate::layout::remove_durably(&paged_marker(&paths))?;
             link_kernel(&kernel, &paths)?;
             DiskWatch::fresh(&paths)
         })

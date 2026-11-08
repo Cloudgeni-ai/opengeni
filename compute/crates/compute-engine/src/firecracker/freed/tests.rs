@@ -141,3 +141,124 @@ fn a_discarded_range_of_a_mapped_file_is_found_in_this_process() {
     // SAFETY: the mapping made above, no longer used.
     unsafe { rustix::mm::munmap(base.cast(), length).unwrap() };
 }
+
+/// Two regions as a pager-served VMM holds them: anonymous memory, the
+/// kernel's view split where the guest's discards and huge pages fell.
+fn served() -> Vec<Region> {
+    vec![
+        Region {
+            address: 0x7f00_0000_0000,
+            size: 0x8000,
+            offset: 0,
+        },
+        Region {
+            address: 0x7f00_0001_0000,
+            size: 0x4000,
+            offset: 0xc000_0000,
+        },
+    ]
+}
+
+#[test]
+fn every_absent_page_of_unbacked_regions_reads_as_zeros_at_its_image_offset() {
+    let maps = "\
+7f0000000000-7f0000003000 rw-p 00000000 00:00 0 
+7f0000003000-7f0000008000 rw-p 00000000 00:00 0 
+7f0000010000-7f0000014000 rw-p 00000000 00:0f 4021                       /anon_hugepage (deleted)
+7f2000000000-7f2000100000 rw-p 00000000 00:00 0                          [heap]
+";
+    let present = [0x7f00_0000_0000, 0x7f00_0000_5000, 0x7f00_0001_1000];
+    let zeros = unbacked(maps, &served(), PAGE, entries(&present)).unwrap();
+    assert_eq!(
+        zeros,
+        vec![
+            0x1000..0x5000,
+            0x6000..0x8000,
+            0xc000_0000..0xc000_1000,
+            0xc000_2000..0xc000_4000,
+        ],
+        "absent pages at their image offsets, across the kernel's split; \
+         memory outside the regions is not the guest's"
+    );
+}
+
+#[test]
+fn a_region_not_wholly_unbacked_memory_gives_nothing() {
+    // The first region has a page of a file in it, the second is shared:
+    // an absent page of either reads from what backs it.
+    let maps = "\
+7f0000000000-7f0000004000 rw-p 00000000 00:00 0 
+7f0000004000-7f0000005000 rw-p 00000000 07:01 99                         /other
+7f0000005000-7f0000008000 rw-p 00000000 00:00 0 
+7f0000010000-7f0000014000 rw-s 00000000 00:01 7                          /memfd:guest_mem (deleted)
+";
+    let zeros = unbacked(maps, &served(), PAGE, entries(&[])).unwrap();
+    assert_eq!(zeros, Vec::<Range<u64>>::new());
+    // Nor does one the kernel maps only part of.
+    let maps = "\
+7f0000000000-7f0000004000 rw-p 00000000 00:00 0 
+7f0000005000-7f0000008000 rw-p 00000000 00:00 0 
+7f0000010000-7f0000013000 rw-p 00000000 00:00 0 
+";
+    let zeros = unbacked(maps, &served(), PAGE, entries(&[])).unwrap();
+    assert_eq!(zeros, Vec::<Range<u64>>::new());
+}
+
+#[test]
+fn a_swapped_page_of_unbacked_memory_is_never_zeros() {
+    let maps = "\
+7f0000000000-7f0000008000 rw-p 00000000 00:00 0 
+";
+    let swapped = |_: u64, count: usize| -> io::Result<Vec<u64>> {
+        Ok((0..count as u64)
+            .map(|index| if index % 2 == 0 { SWAPPED } else { PRESENT })
+            .collect())
+    };
+    let zeros = unbacked(maps, &served()[..1], PAGE, swapped).unwrap();
+    assert_eq!(zeros, Vec::<Range<u64>>::new());
+}
+
+/// On this kernel: anonymous memory as a pager leaves it, partly written,
+/// partly discarded since. Every page nothing holds is named, at the
+/// region's image offset.
+#[test]
+fn absent_pages_of_unbacked_memory_are_found_in_this_process() {
+    let page = rustix::param::page_size();
+    let pages = 16;
+    let length = page * pages;
+    // SAFETY: a fresh private anonymous mapping this test owns.
+    let base = unsafe {
+        rustix::mm::mmap_anonymous(
+            std::ptr::null_mut(),
+            length,
+            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+            rustix::mm::MapFlags::PRIVATE | rustix::mm::MapFlags::NORESERVE,
+        )
+    }
+    .unwrap()
+    .cast::<u8>();
+    // SAFETY: pages 0 to 8 lie inside the mapping made above; 2 and 3 are
+    // then discarded as Firecracker discards anonymous memory.
+    unsafe {
+        for at in 0..8 {
+            base.add(page * at).write_volatile(1);
+        }
+        rustix::mm::madvise(
+            base.add(page * 2).cast(),
+            page * 2,
+            rustix::mm::Advice::LinuxDontNeed,
+        )
+        .unwrap();
+    }
+    let region = Region {
+        address: base as u64,
+        size: length as u64,
+        offset: 1 << 30,
+    };
+    let found = freed_unbacked(|name| File::open(format!("/proc/self/{name}")), &[region]).unwrap();
+    let page = page as u64;
+    let at = |index: u64| (1 << 30) + page * index;
+    assert_eq!(found, vec![at(2)..at(4), at(8)..at(16)]);
+    // SAFETY: the mapping made above, no longer used.
+    unsafe { rustix::mm::munmap(base.cast(), length).unwrap() };
+}
