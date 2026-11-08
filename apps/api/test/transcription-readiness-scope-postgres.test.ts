@@ -253,38 +253,49 @@ test.skipIf(process.env.OPENGENI_BENCH_VOICE_READINESS !== "1")(
   30_000,
 );
 
-test("config supplies the verified grant account, not a query-supplied account", async () => {
-  const f = await fixture();
-  const token = crypto.randomUUID();
-  await createOrganizationApiKey(client.db, {
-    accountId: f.context.accountId,
-    name: "Voice fixture",
-    prefix: "fixture",
-    keyHash: createHash("sha256").update(token).digest("hex"),
-    permissions: ["workspace:admin"],
-  });
-  const observed: TranscriptionAvailabilityContext[] = [];
-  const app = createApp({
-    db: client.db,
-    bus: new MemoryEventBus(),
-    managedAuth: null,
-    settings,
-    workflowClient: {} as never,
-    transcription: {
-      ...f.service,
-      availableProviderIds: async (context) => {
-        observed.push(context);
-        return [];
+test.each(["combined", "compatibility"] as const)(
+  "config supplies the verified grant account, not a query-supplied account (%s)",
+  async (availabilityPath) => {
+    const f = await fixture();
+    const token = crypto.randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: f.context.accountId,
+      name: "Voice fixture",
+      prefix: "fixture",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:admin"],
+    });
+    const observed: TranscriptionAvailabilityContext[] = [];
+    const app = createApp({
+      db: client.db,
+      bus: new MemoryEventBus(),
+      managedAuth: null,
+      settings,
+      workflowClient: {} as never,
+      transcription: {
+        ...f.service,
+        availability:
+          availabilityPath === "combined"
+            ? async (context) => {
+                observed.push(context);
+                return { available: false, providers: [], models: [] };
+              }
+            : undefined,
+        availableProviderIds: async (context) => {
+          expect(availabilityPath).toBe("compatibility");
+          observed.push(context);
+          return [];
+        },
       },
-    },
-  });
-  const response = await app.request(
-    `/v1/config/client?workspaceId=${f.context.workspaceId}&accountId=${crypto.randomUUID()}`,
-    { headers: { authorization: `Bearer ${token}` } },
-  );
-  expect(response.status).toBe(200);
-  await response.arrayBuffer();
-  expect(observed).toHaveLength(1);
-  expect(observed[0]?.accountId).toBe(f.context.accountId);
-  expect(observed[0]?.workspaceId).toBe(f.context.workspaceId);
-});
+    });
+    const response = await app.request(
+      `/v1/config/client?workspaceId=${f.context.workspaceId}&accountId=${crypto.randomUUID()}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.accountId).toBe(f.context.accountId);
+    expect(observed[0]?.workspaceId).toBe(f.context.workspaceId);
+  },
+);
