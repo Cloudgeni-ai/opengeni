@@ -80,7 +80,7 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
 // No result survives its Request; permissions are checked at every call site.
 const readGrantsByRequest = new WeakMap<
   Request,
-  WeakMap<object, Map<string, Promise<AccessGrantAuthorization>>>
+  WeakMap<object, Map<string, AccessGrantAuthorization>>
 >();
 const accessResolvedRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
@@ -1177,19 +1177,18 @@ export async function requireAccessGrantAuthorization(
     if (!databases) readGrantsByRequest.set(c.req.raw, (databases = new WeakMap()));
     let grants = databases.get(deps.db);
     if (!grants) databases.set(deps.db, (grants = new Map()));
-    let pending = grants.get(workspaceId);
-    if (!pending) {
+    let authorization = grants.get(workspaceId);
+    if (!authorization) {
       // Keep the first caller's permission for first-use admission: a request
       // outside the default grant must not create a membership as a side effect.
-      pending = accessGrantAuthorization(context, deps, workspaceId, permission, {
+      authorization = await accessGrantAuthorization(context, deps, workspaceId, permission, {
         firstUseMembership: true,
       });
-      grants.set(workspaceId, pending);
-      void pending.catch(() => {
-        if (grants.get(workspaceId) === pending) grants.delete(workspaceId);
-      });
+      // Admission is permission-sensitive on first use. Share successes, not
+      // pending failures: a denied concurrent check cannot poison an allowed
+      // one. HTTP middleware admits before the route's read fan-out.
+      grants.set(workspaceId, authorization);
     }
-    const authorization = await pending;
     const required =
       permission ?? (accountScopedApiKeyWorkspaceAuthority(context) ? "workspace:read" : undefined);
     if (required) requirePermission(authorization.grant, required);
@@ -2428,8 +2427,9 @@ async function apiKeyAccessContext(
       // A known user reads its identity under the membership fence held
       // shared: ordered against every lifecycle writer and revoke (they hold
       // it exclusively), but not against the organization's other requests,
-      // which would otherwise authenticate one at a time. Until the read is
-      // granted (a later release), every request takes the exclusive path.
+      // which would otherwise authenticate one at a time. Migration 1343
+      // activates the read; retain the prior grant-state fallback for rolling
+      // compatibility and first-use provisioning.
       const known = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
         if (!(await externalIdentityReadGranted(tx))) return null;
         await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);

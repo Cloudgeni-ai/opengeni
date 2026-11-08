@@ -126,3 +126,17 @@ test("writers and explicit refreshes still resolve current authority", async () 
       .admin`update external_identities set status = 'active' where id = ${fixture.identity.id}`;
   }
 });
+
+test("a denied first check cannot poison another permission in the same request", async () => {
+  const app = new Hono();
+  app.get("/read", async (c) => {
+    const [denied, allowed] = await Promise.allSettled([
+      requireAccessGrant(c, fixture.deps, fixture.workspace.id, "secrets:read"),
+      requireAccessGrant(c, fixture.deps, fixture.workspace.id, "sessions:read"),
+    ]);
+    expect(denied.status).toBe("rejected");
+    expect(allowed.status).toBe("fulfilled");
+    return c.json({ ok: true });
+  });
+  expect((await app.request("/read", { headers: fixture.headers })).status).toBe(200);
+});

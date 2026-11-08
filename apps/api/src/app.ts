@@ -1699,6 +1699,7 @@ export function createAppComposition(
               accountId: grant.accountId,
               workspaceId,
               catalogInputs,
+              deploymentCatalog: resolvedCatalog,
             })
           ).settings;
           selections = await resolveCallerWorkspaceModelSelections(

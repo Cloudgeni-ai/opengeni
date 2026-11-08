@@ -340,6 +340,8 @@ export async function resolveWorkspaceCatalogSettings(
     retainedProductModelIds?: readonly (string | null | undefined)[];
     /** This call's already loaded metadata for the exact workspace and provider set. */
     catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+    /** This invocation's deployment catalog, before workspace overlays. */
+    deploymentCatalog?: ResolvedCatalogSettings;
   },
 ): Promise<ResolvedCatalogSettings> {
   // A few pure catalog tests inject the historical minimal DB port and mock the
@@ -445,7 +447,7 @@ export async function resolveWorkspaceCatalogSettings(
     retainedOrganizationDirectCustomModels,
     organizationCompatibleEndpoints,
   ] = await Promise.all([
-    resolveCatalogSettings(db, envSettings),
+    input.deploymentCatalog ?? resolveCatalogSettings(db, envSettings),
     publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
       listWorkspaceProviderCustomModelsByKind(db, {
         accountId: input.accountId,

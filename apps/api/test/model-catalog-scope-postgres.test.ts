@@ -126,6 +126,13 @@ test("subsequent catalog requests observe custom-model creation and retirement w
   expect(WorkspaceModelCatalogResponse.parse(JSON.parse(body)).models.map((m) => m.id)).toContain(
     "workspace-gateway/fixture/catalog-scope",
   );
+  const config = await app.request(`/v1/config/client?workspaceId=${grant.workspaceId}`, {
+    headers,
+  });
+  expect(config.status).toBe(200);
+  const configBody = await config.text();
+  expect(configBody).toContain("workspace-gateway/fixture/catalog-scope");
+  expect(configBody).not.toContain(credential);
   const retired = await db.deleteWorkspaceProviderCustomModel(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -141,6 +148,11 @@ test("subsequent catalog requests observe custom-model creation and retirement w
   expect(
     WorkspaceModelCatalogResponse.parse(await next.json()).models.map((m) => m.id),
   ).not.toContain("workspace-gateway/fixture/catalog-scope");
+  const nextConfig = await app.request(`/v1/config/client?workspaceId=${grant.workspaceId}`, {
+    headers,
+  });
+  expect(nextConfig.status).toBe(200);
+  expect(await nextConfig.text()).not.toContain("workspace-gateway/fixture/catalog-scope");
 });
 
 test("client configuration shares its live metadata across overlay and picker projections", async () => {
