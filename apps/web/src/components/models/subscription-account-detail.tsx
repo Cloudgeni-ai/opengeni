@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useMemo, useState } from "react";
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -100,7 +101,7 @@ export function SubscriptionAccountPage<Account extends AccountSummary>({
   renderModels?: ((account: Account) => ReactNode) | undefined;
   accountId: string;
   places: SubscriptionAccountPlaces;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
 }) {
   const listLabel = useModelsListLabel();
   const pageKey = `${provider}:${pool.organizationId ?? pool.workspaceId}:${accountId}`;
@@ -186,7 +187,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   renderModels?: ((account: Account) => ReactNode) | undefined;
   account: Account;
   places: SubscriptionAccountPlaces;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
 }) {
   const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);

@@ -124,6 +124,85 @@ function fullAppWith(port: SessionAuthorizationPort): Hono {
   });
 }
 
+test("configuration reads honor host denial under tool-policy authority", async () => {
+  if (!available) return;
+  const value = await fixture();
+  const decisions: string[] = [];
+  const app = fullAppWith({
+    authorizeSession: async ({ operation }) => {
+      decisions.push(operation);
+      return { allowed: false, reason: "not_found" };
+    },
+  });
+  const response = await app.request(
+    `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/configuration`,
+    {
+      headers: { authorization: value.authorization },
+    },
+  );
+  expect(response.status).toBe(404);
+  expect(decisions).toEqual(["session.tool_policy.write"]);
+});
+
+test("configuration reads pass live agent identity to the host's session scope", async () => {
+  if (!available) return;
+  const value = await fixture();
+  await initializeSessionStartAtomically(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.child.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+    goal: null,
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.child.id,
+    workflowId: `session-${value.child.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("test attempt was not claimed");
+  const token = await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: "worker:session-authorization-test",
+    permissions: ["sessions:read", "sessions:control"],
+    sessionId: value.child.id,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+    principalKind: "agent_attempt",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const app = appWith({
+    authorizeSession: async ({ actor, target }) => {
+      expect(actor).toMatchObject({
+        kind: "agent_attempt",
+        callerSessionId: value.child.id,
+        attemptId,
+      });
+      return target.sessionId === value.child.id
+        ? { allowed: true, relatedSessionAccess: "root" }
+        : { allowed: false, reason: "not_found" };
+    },
+  });
+  for (const [sessionId, status] of [
+    [value.child.id, 200],
+    [value.hidden.id, 404],
+  ] as const) {
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${sessionId}/configuration`,
+      {
+        headers: { authorization: `Bearer ${token}` },
+      },
+    );
+    expect(response.status).toBe(status);
+  }
+});
+
 test("workspace commands use the live host list scope and reject malformed cursors", async () => {
   if (!available || !shared) return;
   const value = await fixture();

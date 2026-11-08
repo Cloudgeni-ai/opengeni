@@ -21,6 +21,8 @@ type OpenGeniCallNativeModule = {
   getVoipToken?(): Promise<string | null>;
   takeIncomingCalls?(): Promise<RawNativeCallEvent[]>;
   endIncomingCall?(callId: string, reason: string): void;
+  // Absent in builds before the call audio device.
+  connectsBeforeAnswer?(): boolean;
   addListener(
     eventName: "onCallEvent",
     listener: (event: RawNativeCallEvent) => void,
@@ -68,6 +70,7 @@ export function createExpoCallAdapter(
                 return call ? [call] : [];
               }),
             endIncomingCall: (callId, reason) => native.endIncomingCall!(id(callId), reason),
+            connectsBeforeAnswer: native.connectsBeforeAnswer?.() === true,
           }
         : undefined,
     subscribe(listener) {

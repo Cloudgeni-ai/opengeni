@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SessionEvent,
   SessionHumanInputRequest,
@@ -31,7 +32,7 @@ export function isHumanInputEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type UseHumanInputRequestsOptions = EmbeddedHumanInputClientOverride &
+export type UseHumanInputRequestsOptions = EmbeddedHumanInputClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     /** Optional safety-net polling. Durable events drive refresh by default. */
     pollIntervalMs?: number | undefined;

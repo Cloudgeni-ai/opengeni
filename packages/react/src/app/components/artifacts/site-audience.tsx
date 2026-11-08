@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { WorkspaceArtifact } from "@opengeni/sdk";
 import { ChevronDownIcon, LayersIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
@@ -112,7 +113,7 @@ export function useArtifactAudience({
   canLimitToMe: knownCanLimitToMe,
   onChooseWhere,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   workspaceName: string;
   title: string;
@@ -315,7 +316,7 @@ export function useSiteAudience({
   ownedByCurrentUser,
   onChanged,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   workspaceName: string;
   artifact: WorkspaceArtifact;

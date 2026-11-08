@@ -123,6 +123,10 @@ pub(super) struct Taken {
     pub(super) files: SnapshotFiles,
     /// The image a diff was taken against; `None` when the snapshot is whole.
     pub(super) over: Option<Generation>,
+    /// The memory the guest gave back, which reads as zeros, as ranges of
+    /// the image (see [`compute_engine::Engine::freed_memory`]): a diff
+    /// leaves it out. Empty for a whole snapshot, which holds it as zeros.
+    pub(super) freed: Vec<std::ops::Range<u64>>,
     /// The runtime of the VMM that wrote it, which after an upgrade can be
     /// older than the engine's own.
     pub(super) runtime: String,

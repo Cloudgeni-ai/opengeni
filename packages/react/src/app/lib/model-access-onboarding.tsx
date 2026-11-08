@@ -1,4 +1,5 @@
 import { directModelProviderOfProviderId } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import { t } from "./console-text";
 import { checkoutPageReturnUrl } from "./credit-checkout";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -135,7 +136,7 @@ export function composerFallbackModel(input: {
 
 /** Select the connected model in the actor-private draft without workspace administration. */
 export async function applyConnectedModelToNewSessionDraft(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   family?: ConnectedModelFamily,
   preferredModelId?: string,
@@ -217,7 +218,7 @@ export function creditCheckoutSuccessUrl(
 
 /** Resolve the credits model for a checkout return; a catalog failure never blocks checkout. */
 export async function creditsModelForCheckout(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
 ): Promise<{ id: string; effort: string } | null> {
   try {

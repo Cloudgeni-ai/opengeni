@@ -1,4 +1,4 @@
-import type { Channel, Session } from "@opengeni/sdk";
+import type { Channel, ChatSession as Session } from "@opengeni/sdk";
 import type { PinnedSessionLists } from "@opengeni/react/session-list-model";
 
 /**

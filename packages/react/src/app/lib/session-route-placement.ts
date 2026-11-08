@@ -4,7 +4,7 @@
 // remembers itself as the last chat and reports to an embedding host. In a
 // panel beside another view (the Site view) it is not the page's chat, so it
 // keeps all of that to itself.
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 import type { SessionCreationHandoff } from "../app-context";
 
 export type SessionRoutePlacement = "page" | "panel";

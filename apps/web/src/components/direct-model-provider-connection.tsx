@@ -5,6 +5,7 @@ import {
   type CompatibleModelApi,
   type DirectModelProvider,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -41,7 +42,7 @@ export function DirectModelProviderForm({
   onConnected,
   onBusyChange,
 }: {
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   /** Required for an OpenAI-compatible endpoint, which the organization owns. */
   organizationId?: string;

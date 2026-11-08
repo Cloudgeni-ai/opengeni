@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SuperGrokAccount, SuperGrokAccountsResponse } from "@opengeni/sdk";
 import { useCallback } from "react";
 
@@ -17,7 +18,7 @@ export type SuperGrokAccountsClientLike = {
   ) => Promise<{ activated: boolean; accountId: string }>;
 };
 
-export type UseSuperGrokAccountsOptions = ClientOverride & {
+export type UseSuperGrokAccountsOptions = ClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   pollIntervalMs?: number | undefined;
   supergrokClient?: SuperGrokAccountsClientLike | undefined;

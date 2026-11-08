@@ -47,6 +47,8 @@ before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-life
 
 Worker pre-dispatch timing, nested phase boundaries and the real-PostgreSQL
 comparison harness: [startup round trips](design/turn-predispatch-round-trips.md).
+Per-step response/tool checkpoint consolidation and its production-worker
+benchmark: [agent-step latency](design/agent-step-latency.md).
 HTTP/Temporal first-request measurements, independent metadata overlap and
 unchanged-request proof: [turn startup latency](design/turn-startup-latency.md).
 Continuation account resolution reuses the claim's locked session connector
@@ -64,6 +66,19 @@ External workspace routes resolve their organization-local mapping before native
 workspace authorization. All native-workspace HTTP middleware shares the same
 route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
+HTTP session responses with `Accept: application/json; opengeni-session=chat` use
+`apps/api/src/routes/session-chat-response.ts` to omit operator instructions, skill
+bodies and the full effective-tool catalog. SDK `client.withSessionResponse("chat")` selects
+this signal and compact return types; the default remains the full SDK contract.
+The console/mobile and packaged React chat's owned clients opt in and the browser
+relay enforces it; public hooks/providers preserve the supplied client's choice.
+Clients without the preference retain the full response.
+Using `Accept` avoids a new CORS request-header requirement on older APIs. Explicit
+`GET .../sessions/:sessionId/configuration` reads retain those fields under
+session-control authority; internal runtime/MCP session projections are unchanged.
+The dependency-free `packages/contracts/src/browser-response-headers.ts` owns the
+browser response-header contract, re-exported by the SDK and shared by API CORS
+and the packaged relay. History reads warn once when required headers are unreadable.
 Bounded HTTP reads reuse successful workspace admission within the exact
 Request and database handle; each caller still checks its own permission.
 Session GETs also reuse the existing request-local authority-fact reader, not
@@ -431,6 +446,12 @@ replay. Finalization stages carry heartbeat/metric evidence
 Recoverable shutdown transactionally creates a Postgres workflow wake that
 stays unacknowledged until closed-attempt quiescence, so close/exit races cannot
 orphan recovery.
+
+Committed session wakes drain independently of recovery discovery, pause timers,
+and title migration fanout. The dispatcher heartbeats actual delivery progress
+and retries stalled attempts durably; ancillary producers use a separate
+maintenance execution. The unchanged ten-second delivery cadence recovers a
+producer that exits after commit but before signaling. See [run-lifecycle.md](run-lifecycle.md).
 
 A command stays attempt-owned until durable exact-provider-identity adoption.
 The reaper recovers missed adoption for closed legacy Modal commands under its
@@ -871,6 +892,12 @@ retention and consumer-generation acknowledgments remain engine-owned.
 Attempt-owned `run_on` commands use the same bounded observation and durable
 session-command adoption as attached exec. A running receipt transfers custody
 before the API returns; HTTP disconnection never requests a process stop.
+After a Connected Machine command's foreground consumer ends without terminal
+proof, turn cleanup retries durable stop-request adoption using the original
+enrollment, connection and operation. Cancellation and observation cannot block
+that independent handoff. Only committed ledger custody or terminal proof
+releases the writer; a failed handoff keeps it joined. Cleanup never replays the
+command, changes its route, or acknowledges retained output.
 They gain no duration limit. Unix streamed commands remain eligible
 for update handover; browser-controller holds have their own progress reason.
 The same admission proof produces bounded category/count update-blocker
@@ -1378,9 +1405,13 @@ Large or high-frequency bytes take separate paths:
 Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
 [`../packages/sdk/README.md`](../packages/sdk/README.md). Azure Live adaptation:
 `packages/sdk/src/azure-live-transport.ts` and `apps/api/src/azure-live.ts`.
-Native ringing prepares read-only session data and a microphone-free local SDP
-offer; Answer still owns admission, capture and provider creation. Provider
-configuration caching and the measured setup boundary are described in
+Native ringing prepares session data and a microphone-free local SDP offer.
+Only hosts advertising a native silent-audio gate, with matching server support,
+also establish the provider connection in a call-bound `preparing` mode. That
+mode does not pause chat work or publish call lifecycle events; Answer promotes
+the winning phone and releases its held context bridge. Other hosts still acquire
+the microphone and connect on Answer. Provider configuration caching, cleanup,
+native capability requirements and the measured setup boundary are described in
 [`realtime call setup`](design/realtime-call-setup.md).
 
 ### 4.3 Dependency direction

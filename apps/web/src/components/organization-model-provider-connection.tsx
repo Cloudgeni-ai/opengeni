@@ -1,4 +1,5 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import type { ChatClient } from "@opengeni/sdk";
 export { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
   beginIntegrationConnect,
@@ -77,7 +78,7 @@ export function useOrganizationProviderConnection({
 }: {
   organizationId: string;
   providerKind: ProviderKind;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   enabled?: boolean;
   catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
   /** Azure OpenAI: the deployment offers its own identity to organizations. */

@@ -6,6 +6,7 @@ import type {
   ResourceRef,
   SaveNewSessionDraftRequest,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { OpenGeniContext } from "../session-context";
@@ -20,7 +21,10 @@ export type NewSessionDraftEditable = Omit<SaveNewSessionDraftRequest, "expected
 
 export type UseNewSessionDraftOptions = {
   workspaceId: string;
-  client: Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDraft" | "getFile">;
+  client: Pick<
+    ChatClient<OpenGeniClient>,
+    "getNewSessionDraft" | "saveNewSessionDraft" | "getFile"
+  >;
   /** The complete browser-visible value. It must contain ready file refs only. */
   value: NewSessionDraftEditable;
   /** Apply a remote value to the controlled text/model/tool/options state. */

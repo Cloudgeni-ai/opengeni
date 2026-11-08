@@ -7,7 +7,7 @@ import type {
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
-  Session,
+  ChatSession as Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,

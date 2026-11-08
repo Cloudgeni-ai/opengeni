@@ -129,7 +129,11 @@ shell session, pending shell start, remote operation) and registration count;
 command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor. At the deadline,
+A Connected Machine operation whose foreground consumer has ended can release
+its writer through committed durable stop-request adoption on the original
+connection. Cleanup retries this handoff independently of transport observation;
+failed adoption, a cancellation request alone, or an unknown outcome cannot
+release the writer. A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The
@@ -5007,6 +5011,24 @@ interruptions so a live Pause/Steer still reaches settlement. The workflow
 records a monotonic signal version before its final activity chain and refuses to
 return when a signal arrived during that chain, closing the completion race.
 
+Committed wake delivery is independent of recovery discovery, pause timers, and
+automatic-title migration fanout. Discovery and ancillary producers have their
+own maintenance cadence/execution; neither must finish before due user wakes
+are signaled. Both cadences retain their ten-second period. The dispatcher
+activity heartbeats actual progress (service resolution, claim, and completed
+deliveries), not a liveness timer. Fifteen seconds without progress permits a
+durable activity retry, with one-second initial and thirty-second maximum retry
+backoff, rather than failing the singleton after its five-minute execution
+ceiling. A cancelled attempt checks cancellation before doing further work;
+duplicate signals remain safe because admission and acknowledgment are revision
+fenced. Signals received during retry coalesce into another sweep, and an
+outstanding signal at the history bound continues as a new execution instead of
+waiting for a later maintenance tick. The `workflow-wake-dispatcher-retain-pending-v1`
+patch preserves the old completion command when replaying pre-upgrade histories;
+already scheduled activities keep their recorded timeout and retry options.
+A provider or database outage can still
+prevent delivery; this recovery contract does not claim to remove that outage.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so terminal settlement of
@@ -5753,9 +5775,20 @@ When a Responses terminal omits its output array, completed stream items are
 reassembled by numeric `output_index`; sparse provider positions are compacted
 to the observed items rather than treated as missing output, while duplicate
 indices still fail closed.
-For generic providers, an attempt-local async context then awaits the durable
-`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
-reach the wire first. Model-preparation `started` is durable before
+For generic providers, an attempt-local async context awaits the initial durable
+`started` checkpoint at the literal pre-fetch boundary; the first request's bytes
+cannot reach the wire first. Each request, including AI SDK / AI Gateway follow-up
+calls after tools, emits its own `started`, `first_byte` and terminal event.
+Only the enclosing startup preparation receipt is once per attempt; its latch
+must not suppress later request lifecycles. Follow-up started/first-byte
+observations use the ordered background event lane: they do not add a pre-fetch
+write wait. Queued observations share batches and the next awaited checkpoint;
+completion shares the canonical usage/response transaction when usage exists.
+Activity finalization joins outstanding delivery. Background observation failures
+remain best-effort, like startup progress receipts, while every call still awaits
+its required history/admission checkpoint. See [agent-step latency](design/agent-step-latency.md)
+for the response/tool transaction boundaries and recovery invariants.
+Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

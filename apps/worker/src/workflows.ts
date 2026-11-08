@@ -56,7 +56,10 @@ export {
   type RecordingDeletionWorkflowInput,
   type RecordingTranscriptWorkflowInput,
 } from "./workflows/recordings";
-export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
+export {
+  sessionWorkflowWakeDispatcherWorkflow,
+  sessionWorkflowWakeMaintenanceWorkflow,
+} from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

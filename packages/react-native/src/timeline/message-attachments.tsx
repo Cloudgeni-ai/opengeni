@@ -1,4 +1,5 @@
 import type { OpenGeniClient, ResourceRef } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   readStoredFilePreviewUrl,
   useStoredFilePreview,
@@ -11,7 +12,7 @@ import { NativeImageViewer, type NativeViewerImage } from "./image-viewer";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useOpenGeniText } from "@opengeni/react/messages";
 
-type AttachmentClient = Pick<OpenGeniClient, "getFile" | "createFileDownloadUrl">;
+type AttachmentClient = Pick<ChatClient<OpenGeniClient>, "getFile" | "createFileDownloadUrl">;
 type FileResource = Extract<ResourceRef, { kind: "file" }>;
 
 const PREVIEW_WIDTH = 200;

@@ -265,6 +265,10 @@
       "types": "./src/session-attention-model.ts",
       "default": "./src/session-attention-model.ts"
     },
+    "./session-avatar-model": {
+      "types": "./src/session-avatar-model.ts",
+      "default": "./src/session-avatar-model.ts"
+    },
     "./in-chat-connect-model": {
       "types": "./src/in-chat-connect-model.ts",
       "default": "./src/in-chat-connect-model.ts"

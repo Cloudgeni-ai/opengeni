@@ -349,7 +349,7 @@ import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
   McpElicitationAnswer,
-  LineageNode,
+  ChatLineageNode as LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";

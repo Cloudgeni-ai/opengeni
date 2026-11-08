@@ -1,4 +1,5 @@
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -113,7 +114,7 @@ function unavailableReasonCopy(reason: OrganizationRecoveryOverview["unavailable
 }
 
 export function OrganizationRecoverySection(props: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
   managedSession: boolean;
 }) {

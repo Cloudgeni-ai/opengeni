@@ -1,4 +1,5 @@
 import type { SiteAuthAuthorizeRequest } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobeIcon, LockKeyholeIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,7 +33,10 @@ import { sitesClientConfig } from "@opengeni/react/app/lib/site-publishing";
    it only ever navigates to a Site under the deployment's Sites domain.
    -------------------------------------------------------------------------- */
 
-type SiteAuthClient = Pick<OpenGeniBrowserClient, "authorizeSiteViewer" | "getClientConfig">;
+type SiteAuthClient = Pick<
+  ChatClient<OpenGeniBrowserClient>,
+  "authorizeSiteViewer" | "getClientConfig"
+>;
 
 type Phase =
   | { kind: "idle" }

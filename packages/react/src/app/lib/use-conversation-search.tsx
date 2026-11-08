@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 export type ConversationSearchPage = Awaited<
-  ReturnType<OpenGeniBrowserClient["searchSessionMessages"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["searchSessionMessages"]>
 >;
 export type ConversationSearchMatch = ConversationSearchPage["matches"][number];
 export const SEARCH_BATCH_SIZE = 50;
@@ -78,7 +79,7 @@ export async function readConversationSearchBatch(
 }
 
 export function useConversationSearch(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   authority: string;
   workspaceId: string;
   sessionId?: string | undefined;

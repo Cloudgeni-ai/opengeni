@@ -1,4 +1,5 @@
 import { teamsAuthReturnPath } from "@/lib/teams-connect";
+import type { ChatClient } from "@opengeni/sdk";
 // The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
 // and optional connector routes share this authenticated request helper so
 // connector-only code does not increase the core session bundle.
@@ -154,7 +155,9 @@ export class AuthApiError extends Error {
  * request (the stored access key can change at runtime) and cookies ride
  * along for managed-session deployments.
  */
-export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBrowserClient {
+export function createOpenGeniClient(
+  beginSharedRead?: () => number,
+): ChatClient<OpenGeniBrowserClient> {
   const createdAtActorRevision = managedActorRevision;
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
@@ -178,7 +181,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
       handleApiContractResponse(response);
       return response;
     },
-  });
+  }).withSessionResponse("chat");
 }
 
 /**

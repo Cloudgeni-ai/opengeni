@@ -4,6 +4,7 @@
  * deployment doesn't serve the route at all.
  */
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
 import {
@@ -110,7 +111,7 @@ export function routeUnsupported(error: unknown): boolean {
 const LEGACY_TTL_MS = 5 * 60_000;
 const legacyUntil = new Map<string, number>();
 
-function legacyKey(client: OpenGeniClient, scope: UsageScope): string {
+function legacyKey(client: ChatClient<OpenGeniClient>, scope: UsageScope): string {
   return `${(client as unknown as { baseUrl?: string }).baseUrl ?? ""}|${scope.kind}`;
 }
 
@@ -126,7 +127,7 @@ function ignored(query: UsageQuery, supported: readonly UsageFilterField[]): Usa
 }
 
 export async function loadUsage(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   scope: UsageScope,
   query: UsageQuery,
   signal: AbortSignal,
@@ -206,7 +207,7 @@ export async function loadUsage(
 }
 
 export async function loadUsageCalls(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   scope: UsageScope,
   query: UsageQuery,
   signal: AbortSignal,

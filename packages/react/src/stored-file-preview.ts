@@ -1,4 +1,5 @@
 import type { FileAsset, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useState } from "react";
 
 /**
@@ -7,7 +8,7 @@ import { useCallback, useEffect, useState } from "react";
  * shows a named chip; it just cannot show the picture.
  */
 export type StoredFileClientLike = Partial<
-  Pick<OpenGeniClient, "getFile" | "createFileDownloadUrl">
+  Pick<ChatClient<OpenGeniClient>, "getFile" | "createFileDownloadUrl">
 >;
 
 /**

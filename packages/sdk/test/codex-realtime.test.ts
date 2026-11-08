@@ -143,6 +143,34 @@ function browserFixture() {
 }
 
 describe("Codex realtime browser negotiation", () => {
+  test.each([false, true])(
+    "primes an empty muted sink but never takes a live call's sink (occupied=%s)",
+    async (occupied) => {
+      const fixture = browserFixture();
+      const previous = {} as MediaStream;
+      fixture.remoteAudio.srcObject = occupied ? previous : null;
+      fixture.remoteAudio.muted = false;
+      const session = await startCodexRealtimeWebrtc({
+        ...lifecycleProof,
+        createPeerConnection: () => fixture.peer,
+        getUserMedia: async () => fixture.media,
+        negotiate: async () => negotiated,
+        remoteAudio: fixture.remoteAudio,
+        activateRemoteAudio: false,
+        primeRemoteAudio: true,
+      });
+      fixture.dispatchRemoteTrack();
+      expect(fixture.remoteMedia.getTracks()[0]!.enabled).toBe(false);
+      expect(fixture.remoteAudio.srcObject).toBe(occupied ? previous : fixture.remoteMedia);
+      expect(fixture.remoteAudio.muted).toBe(!occupied);
+      expect(fixture.calls.filter((call) => call === "audio.play")).toHaveLength(occupied ? 0 : 1);
+      session.activateRemoteAudio();
+      expect(fixture.remoteAudio.srcObject).toBe(fixture.remoteMedia);
+      expect(fixture.remoteMedia.getTracks()[0]!.enabled).toBe(true);
+      expect(fixture.remoteAudio.muted).toBe(false);
+      session.stop();
+    },
+  );
   test("prepares without a microphone, then consumes the same offer once on Answer", async () => {
     const fixture = browserFixture();
     const tracks: (MediaStreamTrack | null)[] = [];

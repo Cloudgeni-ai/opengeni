@@ -600,6 +600,16 @@ event payload for debug, not as hero UI text.
 
 ## Observability
 
+The turn worker logs expected proactive/operator requests at info level as
+`context compaction requested`, with the signal source and measured threshold.
+Only actual context-window or request-size rejection logs
+`context compaction recovery attempted` as a warning, with a distinct error code.
+These logs retain content-free token, history-footprint, and request-byte counts.
+Checkpoint failures use the existing protected failure diagnostic recorder and
+distinguish provider-request failure from an empty summary; they never log the
+provider's raw message or conversation. This classification does not change
+when compaction runs or what it sends to the model.
+
 The turn worker records `opengeni_context_compaction_starts_total{trigger}`
 immediately after the attempt-fenced `session.context.compaction.started`
 transition commits, before best-effort live fanout or any provider call. A

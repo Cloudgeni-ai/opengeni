@@ -37,6 +37,9 @@ let instance = 0;
 const prepare = async () => {
   log.push("prepare");
 };
+const prepareIncoming = async () => {
+  log.push("prepareIncoming");
+};
 const start = async () => {
   log.push("start");
 };
@@ -53,6 +56,7 @@ mock.module("../src/realtime/use-native-session-realtime", () => ({
       canStart: true,
       admissionBlocker: null,
       prepare,
+      prepareIncoming,
       start,
       stop: async () => {
         log.push("stop");
@@ -74,14 +78,23 @@ const incoming: NativeIncomingCall = {
   state: "ringing",
 };
 
-function fixture() {
+function fixture(connectsBeforeAnswer?: boolean, serverPrepares = false) {
   const listeners = new Set<(event: NativeCallEvent) => void>();
   let finishAnswer!: (value: unknown) => void;
   let catalogLoads = 0;
   const client = {
     getWorkspaceRealtimeModelCatalog: async () => {
       catalogLoads++;
-      return { models: [{ id: "gpt-live-1-boulder-alpha", label: "Live", available: true }] };
+      return {
+        models: [
+          {
+            id: "gpt-live-1-boulder-alpha",
+            label: "Live",
+            available: true,
+            incomingPreparation: serverPrepares,
+          },
+        ],
+      };
     },
     getAgentCall: async () => ({ state: "ringing" }),
     answerAgentCall: async () => {
@@ -100,6 +113,7 @@ function fixture() {
       };
     },
     incoming: {
+      connectsBeforeAnswer,
       takeIncomingCalls: async () => [],
       getVoipToken: async () => null,
       endIncomingCall() {},
@@ -148,6 +162,28 @@ function fixture() {
 }
 
 describe("native call preparation lifecycle", () => {
+  test.each([
+    [true, true, "prepareIncoming"],
+    [false, true, "prepare"],
+    [undefined, true, "prepare"],
+    [true, false, "prepare"],
+  ] as const)(
+    "preconnect requires both the native audio gate (%s) and server support (%s)",
+    async (nativeGate, serverGate, expected) => {
+      log.length = 0;
+      instance = 0;
+      const f = fixture(nativeGate, serverGate);
+      const rendered = await f.render();
+      await act(async () => f.emit({ type: "incoming", call: incoming }));
+      expect(log).toEqual([expected]);
+      expect(document.body.textContent).not.toContain("Call screen");
+      await act(async () =>
+        f.emit({ type: "incomingDeclined", call: { ...incoming, state: "declined" } }),
+      );
+      expect(log).toEqual([expected, "close:1"]);
+      await rendered.unmount();
+    },
+  );
   test("loads catalog before the call, hides ring preparation, and retains it on Answer", async () => {
     log.length = 0;
     instance = 0;

@@ -450,6 +450,8 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
+  /** This server can hold an incoming connection until Answer. Requires a gated audio device. */
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider:
@@ -507,7 +509,7 @@ export type RealtimeVoiceSettings = {
 export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
-export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeState = "preparing" | "active" | "ended";
 export type SessionRealtimeEndReason =
   | "user_stop"
   | "browser_unload"
@@ -535,6 +537,7 @@ export type BeginSessionRealtimeRequest = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  incomingCall?: { callId: string; device: string; answered?: boolean | undefined } | undefined;
 };
 
 export type RenewSessionRealtimeRequest = {
@@ -1932,6 +1935,14 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Full configuration, requested explicitly with sessions:control permission. */
+export type SessionConfiguration = Session;
+
+/** Chat rendering projection. Older servers may still include configuration. */
+export type ChatSession = Omit<Session, "instructions" | "skills" | "effectiveTools"> &
+  Partial<Pick<Session, "instructions" | "skills" | "effectiveTools">>;
+export type SessionResponseMode = "full" | "chat";
+
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
   reason:
@@ -1989,8 +2000,6 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
-  // Per-session agent persona/system instructions supplied at create; null when
-  // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2034,7 +2043,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Capability-level view of what a configured session can use; null for legacy. */
+  /** Capability-level catalog; absent on compact chat responses, null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -2158,7 +2167,7 @@ export type Session = {
 };
 
 /** Additive receipt returned by POST /sessions. */
-export type CreateSessionResponse = Session & {
+export type CreateSessionResponse<S extends ChatSession = Session> = S & {
   initialTurnId: string | null;
 };
 
@@ -2289,7 +2298,7 @@ export type SiteConversationGroup = {
   pinnedAt?: string | null;
 };
 
-export type SessionListResponse = {
+export type SessionListResponse<S extends ChatSession = Session> = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
@@ -2298,7 +2307,7 @@ export type SessionListResponse = {
   mineOnly?: true;
   /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
   sessionIdsApplied?: true;
-  pinned: Session[];
+  pinned: S[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
@@ -2317,7 +2326,7 @@ export type SessionListResponse = {
   siteGroups?: SiteConversationGroup[];
   /** True when Site rows beyond the server bound were omitted. */
   siteGroupsTruncated?: true;
-  sessions: Session[];
+  sessions: S[];
   nextCursor: string | null;
 };
 
@@ -2489,21 +2498,26 @@ export type UpdateSessionArchiveRequest = {
   expectedVersion?: number;
 };
 
-export type LineageNode = {
-  session: SessionSummary;
-  children: LineageNode[];
+export type LineageNode<S extends ChatSession = Session> = {
+  session: S;
+  children: LineageNode<S>[];
 };
 
-export type SessionLineageResponse = {
+export type SessionLineageResponse<S extends ChatSession = Session> = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
   /** What the automations continuing the requested session are waiting for. */
   sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
-  ancestors: SessionSummary[];
-  children: LineageNode[];
+  ancestors: S[];
+  children: LineageNode<S>[];
   truncated: boolean;
 };
+
+export type ChatCreateSessionResponse = CreateSessionResponse<ChatSession>;
+export type ChatSessionListResponse = SessionListResponse<ChatSession>;
+export type ChatSessionLineageResponse = SessionLineageResponse<ChatSession>;
+export type ChatLineageNode = LineageNode<ChatSession>;
 
 export type SessionTurnStatus =
   | "queued"
@@ -5905,6 +5919,9 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
 
+/** JSON content negotiation for the chat projection, using the existing CORS-safe Accept header. */
+export const OPENGENI_SESSION_CHAT_ACCEPT = "application/json; opengeni-session=chat" as const;
+
 /**
  * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
  * A host that serves the Opengeni API or its session proxy from a different origin
@@ -5929,6 +5946,8 @@ export const OPENGENI_BROWSER_REQUEST_HEADERS = [
   // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
   "x-opengeni-session-id",
 ] as const;
+
+export { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by

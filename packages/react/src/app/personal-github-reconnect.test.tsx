@@ -4,6 +4,7 @@
 // When reconnecting is needed, the person gets one lasting Reconnect toast;
 // when nothing is needed, a background read stays quiet.
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { forwardRef } from "react";
 import * as Sonner from "sonner";
 import type { ClientConfig } from "@opengeni/sdk";
@@ -102,7 +103,7 @@ function personalGitHubHost(api: {
       },
     } as Record<string, unknown>,
     { get: (target, key) => target[key as string] ?? (async () => ({})) },
-  ) as unknown as OpenGeniBrowserClient;
+  ) as unknown as ChatClient<OpenGeniBrowserClient>;
   const noop = async () => {};
   return {
     authority: "host",

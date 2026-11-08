@@ -3,7 +3,11 @@ import {
   SITE_VERSION_HEADER,
   siteConversationContext,
 } from "@opengeni/contracts/site-session-http";
-import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  SessionEvent,
+  ChatSessionListResponse as SessionListResponse,
+} from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   ArchiveIcon,

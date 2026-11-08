@@ -6,6 +6,7 @@ import {
   type ResourceAuthorityScope,
   type VaultSummary,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -21,7 +22,7 @@ import { personalExtensionOrigin } from "@/components/capabilities/catalog-prese
    -------------------------------------------------------------------------- */
 
 export type AvailableHereClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   | "listCapabilities"
   | "listMachines"
   | "listRigs"

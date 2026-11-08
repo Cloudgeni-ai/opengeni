@@ -1536,6 +1536,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {
         ...model,
+        incomingPreparation: model.id === "gpt-live-1-boulder-alpha",
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
         ...(inherited ? { organizationVoiceSettings: inherited } : {}),

@@ -165,6 +165,10 @@ export function fakeAgentsClient(
       calls.push(["getSession", workspaceId, id]);
       return { id, workspaceId, title: null, description: null, avatar: null, ...options.session };
     },
+    async getSessionConfiguration(workspaceId: string, id: string) {
+      calls.push(["getSessionConfiguration", workspaceId, id]);
+      return { id, workspaceId, title: null, description: null, avatar: null, ...options.session };
+    },
   };
 }
 

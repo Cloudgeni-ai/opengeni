@@ -38,6 +38,9 @@ const legacyBrowserUnusedMethods = [
   // Shared Insights methods are adopted by the separately owned Insights UI.
   "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
+  // The overloaded Insights call-list API predates this boundary too. Erasing
+  // type signatures must not mistake its overloads for runtime consumers.
+  "listInsightsCalls",
   // Keep the existing summary/workspace reads available to SDK callers after
   // Insights moved to getOrganizationModelUsage.
   "getOrganizationUsageSummary",
@@ -236,6 +239,9 @@ function countIdentifier(source: string, identifier: string): number {
 }
 
 function browserUnusedMethods(clientSource: string, browserSource: string): string[] {
+  // A method named in a public projection type is not a runtime call. Count
+  // references after erasing types so adding typed views cannot hide unused API.
+  const runtimeSource = new Bun.Transpiler({ loader: "ts" }).transformSync(clientSource);
   const methodNames = [
     ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
   ].map((match) => match[1]!);
@@ -243,7 +249,7 @@ function browserUnusedMethods(clientSource: string, browserSource: string): stri
     .filter(
       (methodName) =>
         countIdentifier(browserSource, methodName) === 0 &&
-        countIdentifier(clientSource, methodName) === 1,
+        countIdentifier(runtimeSource, methodName) === 1,
     )
     .sort();
 }
@@ -313,10 +319,16 @@ describe("browser client runtime surface", () => {
       readBrowserProductionSources(),
     ]);
     const baseline = browserUnusedMethods(clientSource, browserSource);
-    const extendedClient = `${clientSource}\n  async unclassifiedSdkMethod() {}\n`;
+    const extendedClient = `${clientSource}\nclass ExtraClient {\n  async unclassifiedSdkMethod() {}\n}\n`;
     expect(browserUnusedMethods(extendedClient, browserSource)).toEqual(
       [...baseline, "unclassifiedSdkMethod"].sort(),
     );
+    expect(
+      browserUnusedMethods(
+        `${extendedClient}\ntype Projection = Pick<ExtraClient, "unclassifiedSdkMethod">;`,
+        browserSource,
+      ),
+    ).toEqual([...baseline, "unclassifiedSdkMethod"].sort());
     expect(
       browserUnusedMethods(extendedClient, `${browserSource}\nclient.unclassifiedSdkMethod();`),
     ).toEqual(baseline);

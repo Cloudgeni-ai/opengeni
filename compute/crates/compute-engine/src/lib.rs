@@ -18,7 +18,9 @@ pub mod vsock;
 pub mod watchdog;
 
 use std::future::Future;
+use std::ops::Range;
 use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::time::Duration;
 
 pub use cgroup::{MemoryStats, Writes};
@@ -203,6 +205,25 @@ pub trait Engine: Send + Sync + 'static {
         files: &SnapshotFiles,
         kind: SnapshotKind,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    /// What of a paused VM's memory its guest gave back to the host and
+    /// reads as zeros now, as byte ranges of the memory image at `memory`
+    /// that the VM was restored from: sorted, apart and whole pages, and
+    /// none outside the image. A [`SnapshotKind::Diff`] leaves such pages
+    /// out, since the guest wrote none of them, so an image merged from one
+    /// holds them as zeros only if they are taken from here. Asked after
+    /// the snapshot, before the VM resumes. Only ranges that certainly read
+    /// as zeros are named; memory the engine cannot account for, such as a
+    /// VM not mapping `memory`, gives none. The future does not borrow the
+    /// VM.
+    fn freed_memory(
+        &self,
+        vm: &Self::Vm,
+        memory: &Path,
+    ) -> impl Future<Output = Result<Vec<Range<u64>>, EngineError>> + Send + 'static {
+        let _ = (vm, memory);
+        std::future::ready(Ok(Vec::new()))
+    }
 
     /// Ends the VM process and releases its host resources. Its disks and
     /// any snapshot stay on disk. Resolves only once the process has ended,

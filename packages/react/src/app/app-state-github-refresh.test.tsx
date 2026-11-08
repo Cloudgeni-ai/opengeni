@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { forwardRef } from "react";
 import * as Sonner from "sonner";
 import type { ClientConfig } from "@opengeni/sdk";
@@ -50,7 +51,7 @@ function failingGitHubHost() {
       },
     } as Record<string, unknown>,
     { get: (target, key) => target[key as string] ?? (async () => ({})) },
-  ) as unknown as OpenGeniBrowserClient;
+  ) as unknown as ChatClient<OpenGeniBrowserClient>;
   const noop = async () => {};
   const host = {
     authority: "host",

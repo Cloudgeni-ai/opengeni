@@ -1,4 +1,5 @@
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   automationNextRun,
   automationRunErrorText,
@@ -42,7 +43,7 @@ export interface AutomationList {
 }
 
 export type AutomationsClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "listScheduledTasks" | "listScheduledTaskRuns" | "listEventSources"
 >;
 

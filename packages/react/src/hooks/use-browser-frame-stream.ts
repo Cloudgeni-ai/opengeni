@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   browserFrameSocketUrl,
   decodeBrowserFrameMessage,
@@ -47,7 +48,7 @@ const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
 const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
-export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   browserSessionId: string | null;
   targetId: string | null;
   enabled?: boolean | undefined;

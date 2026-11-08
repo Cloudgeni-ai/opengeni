@@ -436,6 +436,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     );
   }
 
+  async getSessionConfiguration(workspaceId: string, sessionId: string) {
+    const session = await this.getSession(workspaceId, sessionId);
+    return { ...session, instructions: session.instructions ?? null, skills: session.skills ?? [] };
+  }
+
   async getSessionLineage(
     _workspaceId: string,
     sessionId: string,

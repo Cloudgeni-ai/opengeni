@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useState, type ReactNode } from "react";
 import {
@@ -77,7 +78,7 @@ export function ClaudeAccountUsageReadout({
   account,
   canManage,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   account: ClaudeSubscriptionAccount;

@@ -1,4 +1,5 @@
 import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { type OpenGeniText } from "../messages/runtime";
 import { ArtifactLinkScopeContext, type ArtifactLinkScope } from "./artifact-link-scope";
@@ -165,7 +166,9 @@ export function useOpenGeniLinkRenderer(): OpenGeniLinkRenderer | null {
 // Every sandbox read the proxy forwards is bounded by the API's own maximum.
 const SANDBOX_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
-type SessionLinkClient = Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "fsRead">>;
+type SessionLinkClient = Partial<
+  Pick<ChatClient<OpenGeniClient>, "createFileDownloadUrl" | "fsRead">
+>;
 
 function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);

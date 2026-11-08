@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { creationHandoffReconciled } from "./session-creation-handoff";
 import { projectSessionTimeline } from "./events";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 import type { TimelineItem } from "../../timeline";
 
 const handoff = { session: { id: "A", workspaceId: "workspace" }, clientEventId: "create-request" };

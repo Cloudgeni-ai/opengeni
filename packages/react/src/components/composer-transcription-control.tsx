@@ -2,6 +2,7 @@ import {
   COMPOSER_VOICE_INPUT_START_EVENT,
   composerVoiceEventScope,
 } from "../composer-voice-events";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ClientVoiceInputConfig,
   OpenGeniClient,
@@ -130,7 +131,8 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
 export type ComposerTranscriptionControlProps = {
   /** The SDK client. With `requestJson`, dictations are kept as recordings until heard. */
   client?:
-    | (Pick<OpenGeniClient, "transcribeAudio"> & Partial<Pick<OpenGeniClient, "requestJson">>)
+    | (Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+        Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>)
     | null
     | undefined;
   /** A recordings client, such as a host proxy. Built from `client` otherwise. */

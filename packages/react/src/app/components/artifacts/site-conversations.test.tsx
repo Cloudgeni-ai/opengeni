@@ -2,7 +2,10 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { Session, SessionListResponse } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  ChatSessionListResponse as SessionListResponse,
+} from "@opengeni/sdk";
 
 mock.module("../../app-context", () => ({ useAppContext: () => ({}) }));
 mock.module("../../lib/navigation", () => ({ useNavigate: () => () => undefined }));
@@ -60,7 +63,7 @@ test("owner can choose an existing chat, then revoke access without changing the
   const client = {
     listSessionPage: async (
       _ws: string,
-      options: { siteAccessId?: string; includePinned?: boolean },
+      options: { siteAccessId?: string; includePinned?: boolean } = {},
     ) => ({
       ...page(options.siteAccessId ? [] : [chat("someone-else", false)]),
       pinned:

@@ -68,8 +68,14 @@ describe("model-response progress for the shared capacity breaker", () => {
       new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
       "utf8",
     );
-    expect(source.replace(/\s+/g, " ")).toContain(
-      "...(subscriptionCoreTurnOf(providerTurn) ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) } : {})",
+    const normalized = source.replace(/\s+/g, " ");
+    expect(normalized).toContain(
+      "...(subscriptionCoreTurnOf(providerTurn) ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(event) } : {})",
     );
+    // The completed-event builder is always given the streamed provider response.
+    expect(normalized.match(/fallbackProviderCompletionEvents\(([^)]*)\)/g)).toEqual([
+      "fallbackProviderCompletionEvents(next.value)",
+      "fallbackProviderCompletionEvents(next.value)",
+    ]);
   });
 });

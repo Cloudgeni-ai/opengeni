@@ -6,6 +6,7 @@ import {
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
   completeSessionRealtimeConnectionInTransaction,
+  settleAgentCall,
   createDb,
   createConnection,
   createSession,
@@ -270,6 +271,100 @@ async function fixture(withConnector = false) {
 }
 
 describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
+  test("prepares provider transport over HTTP but rejects activation until the exact phone answers", async () => {
+    const value = await fixture();
+    const callId = crypto.randomUUID();
+    const [session] =
+      await shared.admin`select account_id from sessions where id=${value.sessionId}`;
+    await shared.admin`insert into agent_calls(id, account_id, workspace_id, session_id, callee_subject_id, reason, ring_until)
+      values (${callId}, ${session!.account_id}, ${value.workspaceId}, ${value.sessionId}, ${value.subjectId}, 'Opening reason', now() + interval '40 seconds')`;
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+      incomingCall: { callId, device: "phone-one" },
+    };
+    const request = (path: string, body: unknown) =>
+      app.request(path, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify(body),
+      });
+    const preparedResponse = await request(base, proof);
+    expect(preparedResponse.status).toBe(201);
+    const prepared = (await preparedResponse.json()) as {
+      mode: { id: string; version: number; state: string };
+    };
+    expect(prepared.mode.state).toBe("preparing");
+    const callsBefore = providerCalls;
+    const negotiation = {
+      realtimeId: prepared.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: prepared.mode.version,
+      expectedConnectionEpoch: 1,
+      rotate: false,
+      browserActivation: "required",
+      sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      version: "v3",
+    };
+    const negotiatedResponse = await request(`${base}/webrtc`, negotiation);
+    expect(negotiatedResponse.status).toBe(200);
+    const negotiated = (await negotiatedResponse.json()) as {
+      connectionId: string;
+      connectionEpoch: number;
+    };
+    expect(providerCalls).toBe(callsBefore + 1);
+    const activation = {
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: prepared.mode.version,
+      expectedConnectionEpoch: 1,
+      operationId: negotiation.operationId,
+      connectionEpoch: negotiated.connectionEpoch,
+    };
+    const activationPath = `${base}/${prepared.mode.id}/connections/${negotiated.connectionId}/activate`;
+    expect((await request(activationPath, activation)).status).toBe(409);
+    expect(
+      (await request(base, { ...proof, incomingCall: { ...proof.incomingCall, answered: true } }))
+        .status,
+    ).toBe(409);
+    await settleAgentCall(client.db, {
+      accountId: session!.account_id,
+      workspaceId: value.workspaceId,
+      callId,
+      calleeSubjectId: value.subjectId,
+      outcome: "answered",
+      answeredBy: "phone-one",
+    });
+    const acceptedResponse = await request(base, {
+      ...proof,
+      incomingCall: { ...proof.incomingCall, answered: true },
+    });
+    expect(acceptedResponse.status).toBe(201);
+    const accepted = (await acceptedResponse.json()) as {
+      mode: { version: number; state: string };
+    };
+    expect(accepted.mode.state).toBe("active");
+    expect(
+      (await request(activationPath, { ...activation, expectedVersion: accepted.mode.version }))
+        .status,
+    ).toBe(200);
+    const synced = await request(`${base}/${prepared.mode.id}/sync`, {
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: accepted.mode.version,
+      connectionId: negotiated.connectionId,
+      connectionEpoch: negotiated.connectionEpoch,
+      providerStarted: { providerSessionId: "prepared-provider" },
+    });
+    expect(synced.status).toBe(200);
+    const ledger = (await synced.json()) as { outbound: Array<{ payload: { source: string } }> };
+    expect(ledger.outbound[0]!.payload.source).toBe("agent_call");
+  });
   test("verified human voice admission freezes personal accounts; delegated bearers cannot borrow them", async () => {
     const userId = `voice-personal-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;

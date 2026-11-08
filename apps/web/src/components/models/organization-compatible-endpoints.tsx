@@ -6,6 +6,7 @@ import {
   type CompatibleModelReasoning,
   type ReasoningEffort,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   OrganizationCompatibleEndpoint as Endpoint,
   OrganizationCompatibleEndpointModel as CustomModel,
@@ -83,7 +84,7 @@ export function useOrganizationCompatibleEndpoints({
   organizationId,
   enabled,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   enabled: boolean;
 }) {
@@ -109,7 +110,7 @@ export type OrganizationCompatibleEndpoints = ReturnType<typeof useOrganizationC
 
 /** Replace one endpoint in the cached list (or drop it once it's disconnected). */
 function writeEndpoint(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   organizationId: string,
   next: Endpoint,
 ): void {

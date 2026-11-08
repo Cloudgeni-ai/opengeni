@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type {
   ComposerDraft,
@@ -32,7 +33,9 @@ export function savedComposerPolicy(
  */
 const OPTIONAL_METHODS = new Set(["findGoal", "updateSessionAttention", "listEventPage"]);
 
-export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
+export function fakeClient(
+  partial: Partial<SessionClientLike<ChatClient>>,
+): SessionClientLike<ChatClient> {
   const emptyDraft: ComposerDraft = {
     revision: 0,
     text: "",
@@ -100,7 +103,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
       };
     },
     ...partial,
-  } as SessionClientLike;
+  } as SessionClientLike<ChatClient>;
   if (!partial.fsListBatch) {
     target.fsListBatch = async (workspaceId, sessionId, request, options) => ({
       results: await Promise.all(

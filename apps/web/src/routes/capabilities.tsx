@@ -4,6 +4,7 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import type { ChatClient } from "@opengeni/sdk";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -255,7 +256,7 @@ function providerModeCopy(
 
 /** Keep the OAuth-return connection read alive even when the catalog read fails. */
 export function fetchOAuthReturnRows(
-  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "listCapabilities">,
   workspaceId: string,
   fetchConnections: () => Promise<ConnectionMetadata[] | null>,
 ) {

@@ -4,6 +4,7 @@
 // signing in. "Update link" refreshes what the same link shows; "Stop
 // sharing" ends it. The agent does the same through its in-chat actions.
 import type { OpenGeniClient, SessionShareLinkState } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -23,7 +24,7 @@ import { RelativeTime } from "../../../ui/relative-time";
 import { Skeleton } from "../../../ui/skeleton";
 
 type ShareChatClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "getSessionShareLink" | "createSessionShareLink" | "revokeSessionShareLink"
 >;
 

@@ -1,4 +1,5 @@
 import { useCreditExposure } from "../lib/use-analytics-exposure";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link, usePage } from "../lib/navigation";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
@@ -62,7 +63,7 @@ export function CreditRequiredPromptView({
   refusalCode = null,
   onOpenChange,
   beforeLeave,
-}: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
+}: CreditRequiredPromptProps & { client: ChatClient<OpenGeniBrowserClient> }) {
   const page = usePage();
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);

@@ -22,7 +22,7 @@ import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../sessio
 import { ModelMark } from "../../../components/model-mark";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
 import { sessionAgentRef, sessionAgentSourceLine, useSessionAgent } from "../../lib/session-agent";

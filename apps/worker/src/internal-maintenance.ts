@@ -65,6 +65,7 @@ export const SUBSCRIPTION_PLAN_MAINTENANCE_PERIOD_MS = 60_000;
 
 export const INTERNAL_MAINTENANCE_JOBS = [
   "session-workflow-wake-dispatcher",
+  "session-workflow-wake-maintenance",
   "knowledge-indexing",
   "site-auth-maintenance",
   "sandbox-lease-reaper",
@@ -210,20 +211,10 @@ export async function internalMaintenanceCadences(input: {
     });
   }
   if (jobs.has("session-workflow-wake-dispatcher")) {
-    const { repairMissedSessionWorkflowWakes } = await import("./activities/parent-wake");
     cadences.push({
       job: "session-workflow-wake-dispatcher",
       periodMs: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
-      hasWork: async () => {
-        // Registration is the dispatcher's own idempotent repair: it writes
-        // only when a producer committed work but never recorded its wake.
-        await repairMissedSessionWorkflowWakes({ db, observability });
-        return (
-          (await sessionWorkflowWakesDue(db)) ||
-          (await workspacePauseTimerDue(db)) ||
-          (await automaticSessionTitleFanoutDue(db))
-        );
-      },
+      hasWork: async () => await sessionWorkflowWakesDue(db),
       start: async () => {
         await workflow.signalWithStart(SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE, {
           taskQueue,
@@ -234,6 +225,25 @@ export async function internalMaintenanceCadences(input: {
         });
         return "started";
       },
+    });
+  }
+  if (jobs.has("session-workflow-wake-maintenance")) {
+    const { repairMissedSessionWorkflowWakes } = await import("./activities/parent-wake");
+    cadences.push({
+      job: "session-workflow-wake-maintenance",
+      periodMs: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
+      hasWork: async () => {
+        // Discovery may be slow or blocked; it is not on the delivery path.
+        // Repaired wakes are picked up by the independent delivery cadence.
+        await repairMissedSessionWorkflowWakes({ db, observability });
+        return (await workspacePauseTimerDue(db)) || (await automaticSessionTitleFanoutDue(db));
+      },
+      start: async () =>
+        await startMaintenanceWorkflowOnce(workflow, {
+          taskQueue,
+          workflowType: "sessionWorkflowWakeMaintenanceWorkflow",
+          workflowId: "opengeni-session-workflow-wake-maintenance",
+        }),
     });
   }
   if (jobs.has("knowledge-indexing")) {

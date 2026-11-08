@@ -1,4 +1,5 @@
 import { possessive } from "./possessive";
+import type { ChatClient } from "@opengeni/sdk";
 import { AccountGroupRows, groupEntry, type GroupEntry } from "./account-fold";
 import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
 import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
@@ -201,7 +202,7 @@ export interface WorkspaceModelsSnapshot {
 }
 
 async function readWorkspaceModels(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspace: ModelsWorkspace,
   claudeEnabled: boolean,
   /**
@@ -292,7 +293,7 @@ async function readWorkspaceModels(
 
 /** Reads each workspace once, through that workspace, and keeps the results by id. */
 function useWorkspaceSnapshots(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaces: readonly ModelsWorkspace[],
   claudeEnabled: boolean,
   /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
@@ -362,7 +363,7 @@ export function OrganizationModelsList({
   onOpenWorkspace,
   onConnect,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string | undefined;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;

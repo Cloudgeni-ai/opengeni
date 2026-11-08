@@ -1,9 +1,10 @@
 import type {
   FirstPartyMcpToolName,
   CapabilityCatalogItem,
-  Session,
+  ChatSession as Session,
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { ConnectCardMessage } from "./connect-card-message";
 import { type OpenGeniText } from "./messages/runtime";
@@ -29,7 +30,7 @@ export function sessionCapabilityTools(item: SessionCapabilityToolSource) {
  * policies add only this reviewed capability, with the existing CAS fence. */
 export async function attachSessionCapability(
   t: OpenGeniText,
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   item: SessionCapabilityToolSource,
@@ -115,7 +116,7 @@ export type SessionCapabilityAccessPlan = {
 
 export async function prepareSessionCapabilityAccess(
   t: OpenGeniText,
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   item: CapabilityCatalogItem,
@@ -156,7 +157,7 @@ export async function prepareSessionCapabilityAccess(
  * claim success or roll back another person's edits. Prepare a new review. */
 export async function applySessionCapabilityAccess(
   t: OpenGeniText,
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   plan: SessionCapabilityAccessPlan,
   stillCurrent: () => boolean = () => true,
 ): Promise<void> {
@@ -197,7 +198,7 @@ export async function applySessionCapabilityAccess(
  * then let the agent continue the request that asked for this connection. */
 export async function completeSessionCapabilityOAuth(
   t: OpenGeniText,
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   capabilityId: string | null,
@@ -221,7 +222,7 @@ export async function completeSessionCapabilityOAuth(
  * person just finished, so it is swallowed. Call only on verified success.
  */
 export function continueAfterCapabilitySetup(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   capabilityId: string,

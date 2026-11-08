@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, test } from "bun:test";
 import { useEffect, useMemo } from "react";
 import type {
@@ -27,7 +28,7 @@ const hint = (sessionIds: string[] | null, available = true): WorkspaceSessionLi
   sessionIds,
 });
 
-const context: OpenGeniContextValue = {
+const context: OpenGeniContextValue<ChatClient> = {
   client: fakeClient({}),
   workspaceId: WORKSPACE_ID,
   workspaceControlEvent: null,

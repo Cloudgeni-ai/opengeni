@@ -635,6 +635,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "CodexCheckpointOperationError",
   "CodexFleetShadowOperationError",
   "ComputerActionTimeoutError",
+  "ContextCompactionError",
   "CredentialRenewalOperationError",
   "CredentialReadOperationError",
   "EventPublishOperationError",
@@ -684,6 +685,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "codex_lease_loss_checkpoint_failed",
   "codex_active_credential_read_failed",
   "command_yield_timeout",
+  "compaction_provider_request_failed",
+  "compaction_summary_empty",
   "conflict",
   "control_wake_dispatch_failed",
   "fenced_event_live_publish_failed",
@@ -709,6 +712,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "memory_edit_embedding_failed",
   "memory_hybrid_vector_failed",
   "memory_save_embedding_failed",
+  "model_context_window_exceeded",
+  "model_request_size_exceeded",
   "nats_auth_callout_start_failed",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
@@ -1944,21 +1949,59 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
+      ...projectContextCompactionAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
-  return Object.fromEntries(
-    Object.entries(attributes).filter(([key, value]) => {
-      if (value === undefined) return false;
-      if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
-      const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
-      if (clientErrorField) {
-        return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
-      }
-      const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
-      return typeof value === "string" && pattern?.test(value) === true;
-    }),
-  );
+  return {
+    ...projectContextCompactionAttributes(attributes),
+    ...Object.fromEntries(
+      Object.entries(attributes).filter(([key, value]) => {
+        if (value === undefined) return false;
+        if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+        const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
+        if (clientErrorField) {
+          return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+        }
+        const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
+        return typeof value === "string" && pattern?.test(value) === true;
+      }),
+    ),
+  };
+}
+
+function projectContextCompactionAttributes(attributes: Attributes): Attributes {
+  if (attributes.op !== "context_compaction") return {};
+  const projected: Attributes = { op: "context_compaction" };
+  for (const [key, values] of [
+    ["reason", ["operator", "proactive", "overflow"]],
+    ["signalSource", ["provider", "operator", "history_footprint"]],
+    [
+      "historyFootprintDimension",
+      ["json_bytes", "rows", "json_nodes", "json_properties", "images"],
+    ],
+  ] as const) {
+    const value = attributes[key];
+    if (typeof value === "string" && (values as readonly string[]).includes(value))
+      projected[key] = value;
+  }
+  for (const key of [
+    "signalTokens",
+    "thresholdTokens",
+    "historyFootprintActual",
+    "historyFootprintThreshold",
+    "requestBytes",
+    "imageCount",
+    "imageBase64Bytes",
+    "systemBytes",
+    "toolsBytes",
+    "limitBytes",
+  ]) {
+    const value = attributes[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      projected[key] = value;
+  }
+  return projected;
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {

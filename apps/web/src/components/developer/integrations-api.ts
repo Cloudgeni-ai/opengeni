@@ -7,6 +7,7 @@ import type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEventType,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   createOrganizationWebhook,
@@ -113,7 +114,7 @@ export interface DeveloperIntegrationsApi {
 }
 
 export type WorkspaceIntegrationsClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   | "listWorkspaceWebhooks"
   | "createWorkspaceWebhook"
   | "updateWorkspaceWebhook"
@@ -161,7 +162,7 @@ export function workspaceIntegrationsApi(
 }
 
 export function organizationIntegrationsApi(
-  client: Pick<OpenGeniBrowserClient, "requestJson">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "requestJson">,
   organizationId: string,
 ): DeveloperIntegrationsApi {
   return {

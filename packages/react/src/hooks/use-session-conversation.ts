@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SendMessageInput } from "@opengeni/sdk";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { projectPendingApprovals } from "../approvals";
@@ -20,7 +21,7 @@ import { useSessionControl } from "./use-session-control";
 import { useSessionEvents } from "./use-session-events";
 import { useTurnQueue } from "./use-turn-queue";
 
-export type UseSessionConversationOptions = ClientOverride & {
+export type UseSessionConversationOptions = ClientOverride<ChatClient> & {
   /** Uploads remain subject to the client's capabilities. Defaults to true. */
   attachments?: boolean | undefined;
   /** Defaults to the client's model-selection offer. */

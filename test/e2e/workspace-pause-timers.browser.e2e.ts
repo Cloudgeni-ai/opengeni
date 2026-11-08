@@ -132,7 +132,10 @@ async function dueAndFire() {
     wakeSessionWorkflow: null,
     observability: { info() {}, warn() {}, incrementCounter() {}, observeHistogram() {} },
   } as unknown as ControlActivityServices;
-  await createWorkflowWakeActivities(async () => service).dispatchSessionWorkflowWakes();
+  // Mirror the maintenance cadence: fire due timers, then deliver their wakes.
+  const activities = createWorkflowWakeActivities(async () => service);
+  await activities.maintainSessionWorkflowWakes();
+  await activities.dispatchSessionWorkflowWakes();
 }
 
 async function setTimer(timer: { pauseInSeconds: number; pauseForSeconds?: number | null }) {

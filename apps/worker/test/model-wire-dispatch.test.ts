@@ -5,6 +5,7 @@ import { InitialModelWireDispatchClock } from "../src/activities/agent-turn/mode
 import { assertProviderOverloadRecoveryActive } from "../src/activities/agent-turn/errors";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { withModelTransportStartedObserver } from "../../../packages/runtime/src/model-preparation-diagnostics";
+import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
 
 const identity = { provider: "azure", dispatchId: "dispatch-1" };
 const firstUnixMs = Date.parse("2026-10-03T15:00:00.000Z");
@@ -34,7 +35,179 @@ function sourceAst(path: string) {
   return { source, nodes: nodes(parsed.program) };
 }
 
+test("an immediate append awaits durable publication without an extra timer", async () => {
+  const parsed = sourceAst("../src/activities/agent-turn/claim.ts");
+  const declaration = parsed.nodes.find(
+    (node) =>
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      node.id.name === "append",
+  );
+  if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+    throw new Error("Missing append");
+  const source = `
+    const db = {}, bus = {}, input = { workspaceId: "workspace", sessionId: "session", attemptId: "attempt" };
+    const attempt = { turnId: "turn", executionGeneration: 1 }, producerId = "producer";
+    let producerSeq = 0;
+    const observability = {}, heartbeatDetails = {};
+    const recordCanonicalStartupMilestones = () => {};
+    const turnLifecycleMetricsFor = () => ({ progress: () => {} });
+    const recordSessionEventAppendLatency = () => {};
+    const recordSessionEventAppendPhase = () => {};
+    const recordSessionEventPublishLatency = () => {};
+    const TurnAttemptFencedError = Error;
+    return ${parsed.source.slice(declaration.init.start, declaration.init.end)};
+  `;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const receipt = { accepted: true, events: [], canonicalStartupMilestones: [] };
+  let heartbeat = false;
+  const append = new Function(
+    "appendAndPublishTurnEventsFenced",
+    "activityContext",
+    "setTimeout",
+    new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+  )(
+    async () => {
+      await gate;
+      return receipt;
+    },
+    {
+      heartbeat: () => {
+        heartbeat = true;
+      },
+    },
+    () => {
+      throw new Error("durable publication must not wait on a timer");
+    },
+  ) as (
+    events: Array<{ type: string; payload: object }>,
+    immediate: boolean,
+  ) => Promise<typeof receipt>;
+  let settled = false;
+  const result = append([{ type: "agent.model.request", payload: {} }], true).then((value) => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(heartbeat).toBe(false);
+  release();
+  expect(await result).toBe(receipt);
+  expect(heartbeat).toBe(true);
+});
+
 describe("attempt-local initial wire dispatch clock", () => {
+  test("generic transports publish all three lifecycle phases for every model request, but startup once", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = (name: string) => {
+      const node = parsed.nodes.find(
+        (candidate) =>
+          candidate.type === "VariableDeclarator" &&
+          candidate.id.type === "Identifier" &&
+          candidate.id.name === name,
+      );
+      if (node?.type !== "VariableDeclarator" || !node.init) throw new Error(`Missing ${name}`);
+      return parsed.source.slice(node.init.start, node.init.end);
+    };
+    const completed = parsed.nodes.find(
+      (node) =>
+        node.type === "IfStatement" &&
+        parsed.source.slice(node.test.start, node.test.end).replace(/\s+/g, " ") ===
+          "!providerPublishesNativeRequestEvents && fallbackProviderRequestLifecycleStartedAt !== null",
+    );
+    if (!completed) throw new Error("Missing completion publisher");
+    const source = `
+      const providerPublishesNativeRequestEvents = false;
+      const sandboxState = {};
+      const recordTurnStartupPhase = () => {};
+      const observability = {};
+      const turnExecutionPolicy = { providerId: "gateway" };
+      const activeSandboxBackend = "none";
+      const groupBoxBackend = "none";
+      const turnTools = [];
+      const streamProvider = "gateway";
+      const activeTurnId = "turn";
+      const input = { attemptId: "attempt" };
+      const dispatchId = "dispatch";
+      const attempt = { executionGeneration: 1, providerRecoveryPolicyCode: "provider_overloaded", providerRecoveryCount: 1, providerRecoveryStartedAt: 1000 };
+      const enterModelRequestStage = () => {};
+      const checkpointBeforeProviderDispatch = async () => {};
+      const providerTurn = {};
+      const subscriptionCoreTurnOf = () => null;
+      let fallbackProviderRequestStartedAt = null;
+      let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = ${declaration("publishFallbackProviderEvents")};
+      const fallbackProviderCompletionEvents = ${declaration("fallbackProviderCompletionEvents")};
+      const responseResult = { usageReported: false };
+      const next = { value: {} };
+      const start = ${declaration("recordFallbackProviderDispatchAtWire")};
+      const firstByte = ${declaration("settleFallbackProviderFirstByte")};
+      const complete = async () => { ${parsed.source.slice(completed.start, completed.end)} };
+      return { start, firstByte, complete };
+    `;
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const lane = createTurnEventLane();
+    let recoveryNow = 1000;
+    let releaseAudit!: () => void;
+    let auditGate = Promise.resolve();
+    const append = async (events: typeof published) => {
+      await auditGate;
+      published.push(...events);
+    };
+    const callbacks = new Function(
+      "eventing",
+      "assertProviderOverloadRecoveryActive",
+      new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+    )(
+      {
+        firstModelRequestPreparationRecorded: false,
+        firstModelRequestPreparationStartedAt: performance.now(),
+        initialModelWireDispatch: new InitialModelWireDispatchClock(),
+        publish: (events: typeof published) => lane.run(() => append(events)),
+        publishInBackground: (events: typeof published) =>
+          lane.runInBackground(() => append(events)),
+      },
+      (input: Parameters<typeof assertProviderOverloadRecoveryActive>[0]) =>
+        assertProviderOverloadRecoveryActive({ ...input, now: recoveryNow }),
+    ) as {
+      start: () => Promise<void>;
+      firstByte: () => Promise<void>;
+      complete: () => Promise<void>;
+    };
+    for (let i = 0; i < 3; i++) {
+      if (i === 1) {
+        // A completed response retired recovery. An expired historical window
+        // cannot reject later healthy calls, and their audit must not block fetch.
+        recoveryNow += 16 * 60_000;
+        auditGate = new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        });
+      }
+      await callbacks.start();
+      await callbacks.firstByte();
+      await callbacks.firstByte();
+      await callbacks.complete();
+      await callbacks.complete();
+      if (i === 1) {
+        expect(published.filter((event) => event.type === "agent.model.request")).toHaveLength(3);
+        releaseAudit();
+      }
+      await lane.backgroundSettled();
+    }
+    expect(
+      published
+        .filter((event) => event.type === "agent.model.request")
+        .map((event) => event.payload.phase),
+    ).toEqual(Array.from({ length: 3 }, () => ["started", "first_byte", "completed"]).flat());
+    expect(published.filter((event) => event.type === "turn.startup.phase.completed")).toHaveLength(
+      1,
+    );
+  });
+
   test("the real pre-fetch publisher refuses overload recovery when its audit outlasts the window", async () => {
     const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
     const declaration = parsed.nodes.find(
@@ -81,6 +254,8 @@ describe("attempt-local initial wire dispatch clock", () => {
       const enterModelRequestStage = () => {};
       let fallbackProviderRequestStartedAt = null;
       let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = events => eventing.publish(events);
       ${compiled}
       return publish;
     `,
@@ -191,6 +366,7 @@ describe("attempt-local initial wire dispatch clock", () => {
       const input = { attemptId: "attempt-1" };
       const dispatchId = "dispatch-1";
       const attempt = { executionGeneration: 7 };
+      const publishFallbackProviderEvents = events => eventing.publish(events);
       ${compiled}
       return settle;
     `,
@@ -206,6 +382,7 @@ describe("attempt-local initial wire dispatch clock", () => {
     expect(published).toEqual([
       {
         type: "agent.model.request",
+        occurredAt: expect.any(Date),
         payload: {
           phase: "first_byte",
           provider: "azure",
