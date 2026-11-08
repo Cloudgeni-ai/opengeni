@@ -201,9 +201,10 @@ describe("replacing a session's Skills (real PostgreSQL)", () => {
       expectedVersion: version,
     });
     expect(replaced.status).toBe(200);
-    expect(names(replaced.json.skills)).toEqual(["quarterly-close", "board-pack"]);
+    expect(replaced.json.skills).toBeUndefined();
     expect(replaced.json.toolPolicyVersion).toBe(version + 1);
     const stored = await getSession(client.db, grant.workspaceId, session.id);
+    expect(names(stored!.skills)).toEqual(["quarterly-close", "board-pack"]);
     expect(stored?.skills[0]?.files[0]?.content).toContain("Updated steps.");
     const events = await listSessionEvents(client.db, grant.workspaceId, session.id);
     expect(events.find((event) => event.type === "session.skills.updated")?.payload).toEqual({
@@ -238,7 +239,8 @@ describe("replacing a session's Skills (real PostgreSQL)", () => {
       expectedVersion: version + 1,
     });
     expect(cleared.status).toBe(200);
-    expect(cleared.json.skills).toEqual([]);
+    expect(cleared.json.skills).toBeUndefined();
+    expect((await getSession(client.db, grant.workspaceId, session.id))!.skills).toEqual([]);
   });
 
   test("an agent can remove a Skill but not add or change one", async () => {
@@ -264,6 +266,9 @@ describe("replacing a session's Skills (real PostgreSQL)", () => {
       expectedVersion: version,
     });
     expect(removed.status).toBe(200);
-    expect(names(removed.json.skills)).toEqual(["board-pack"]);
+    expect(removed.json.skills).toBeUndefined();
+    expect(names((await getSession(client.db, grant.workspaceId, session.id))!.skills)).toEqual([
+      "board-pack",
+    ]);
   });
 });

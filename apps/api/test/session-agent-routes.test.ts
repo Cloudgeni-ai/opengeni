@@ -202,6 +202,17 @@ async function putAgent(
   );
 }
 
+async function configuration(target: Hono, grant: Grant, sessionId: string) {
+  const result = await request(
+    target,
+    await humanBearer(grant),
+    "GET",
+    `/v1/workspaces/${grant.workspaceId}/sessions/${sessionId}/configuration`,
+  );
+  expect(result.status).toBe(200);
+  return result.json;
+}
+
 function sorted(values: readonly string[]): string[] {
   return [...values].sort();
 }
@@ -334,6 +345,71 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
+  test("chat reads omit large configuration; explicit configuration requires control permission", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const instructions = "i".repeat(15_000);
+    const created = await create(target, grant, {
+      instructions,
+      skills: Array.from({ length: 18 }, (_, index) => ({
+        files: [
+          {
+            path: "SKILL.md",
+            content: `---\nname: skill-${index}\ndescription: Test skill\n---\n${"s".repeat(11_112)}`,
+          },
+        ],
+      })),
+    });
+    expect(created.status).toBe(202);
+    const id = created.json.id;
+    const path = `/v1/workspaces/${grant.workspaceId}/sessions/${id}`;
+    const full = await configuration(target, grant, id);
+    expect(full.instructions).toBe(instructions);
+    expect(full.skills).toHaveLength(18);
+    expect(full.effectiveTools.tools.length).toBeGreaterThan(0);
+    const reader = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const detail = await request(target, reader, "GET", path);
+    expect(detail.status).toBe(200);
+    const list = await request(
+      target,
+      reader,
+      "GET",
+      `/v1/workspaces/${grant.workspaceId}/sessions`,
+    );
+    expect(list.status).toBe(200);
+    for (const value of [created.json, detail.json, ...list.json]) {
+      expect(Object.hasOwn(value, "instructions")).toBe(false);
+      expect(Object.hasOwn(value, "skills")).toBe(false);
+      expect(Object.hasOwn(value, "effectiveTools")).toBe(false);
+    }
+    expect((await request(target, reader, "GET", `${path}/configuration`)).status).toBe(403);
+    const stranger = await fixture();
+    expect(
+      (await request(target, await humanBearer(stranger), "GET", `${path}/configuration`)).status,
+    ).not.toBe(200);
+    // Same annotations as the chat read: reconstruct its former full wire shape.
+    const beforeBytes = Buffer.byteLength(
+      JSON.stringify({
+        ...detail.json,
+        instructions: full.instructions,
+        skills: full.skills,
+        effectiveTools: full.effectiveTools,
+      }),
+    );
+    const afterBytes = Buffer.byteLength(JSON.stringify(detail.json));
+    expect(beforeBytes - afterBytes).toBeGreaterThan(200_000);
+    console.info(
+      JSON.stringify({ fixture: "real session API, 18 skills", beforeBytes, afterBytes }),
+    );
+  });
   test("keyed retries never adopt the new eager selection into an existing session", async () => {
     if (!available) return;
     const grant = await fixture();
@@ -460,7 +536,10 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(all.json.firstPartyMcpTools).toEqual(omitted.json.firstPartyMcpTools);
     expect(all.json.tools).toEqual(omitted.json.tools);
     expect(all.json.toolPolicy).toEqual(omitted.json.toolPolicy);
-    expect(all.json.effectiveTools.capabilities.goals).toBe(true);
+    expect(all.json.effectiveTools).toBeUndefined();
+    expect(
+      (await configuration(target, grant, all.json.id)).effectiveTools.capabilities.goals,
+    ).toBe(true);
 
     const none = await create(target, grant, { agent: { capabilities: "none" } });
     expect(none.status).toBe(202);
@@ -469,7 +548,9 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     // No workspace connectors or built-in files/docs servers; the mandatory
     // first-party server is attached at runtime.
     expect(none.json.tools).toEqual([]);
-    const names = none.json.effectiveTools.tools.map((tool: { name: string }) => tool.name);
+    const names = (await configuration(target, grant, none.json.id)).effectiveTools.tools.map(
+      (tool: { name: string }) => tool.name,
+    );
     expect(names).toContain("request_human_input");
     expect(names).not.toContain("web_search");
     expect(names).not.toContain("list_models");
@@ -528,7 +609,10 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(created.status).toBe(202);
     expect(created.json.agent.capabilities.goals).toBe(true);
     expect(created.json.agent.identity).toBe("Acme");
-    expect(created.json.instructions).toBe("Answer briefly.");
+    expect(created.json.instructions).toBeUndefined();
+    expect((await configuration(target, grant, created.json.id)).instructions).toBe(
+      "Answer briefly.",
+    );
     expect(created.json.firstPartyMcpTools).toContain("goal_complete");
   });
 
@@ -596,7 +680,8 @@ describe("PUT .../agent (real PostgreSQL)", () => {
       expectedVersion: version + 1,
     });
     expect(identity.json.agent).toMatchObject({ identity: "Helper", renderer: "markdown" });
-    expect(identity.json.instructions).toBe("One sentence.");
+    expect(identity.json.instructions).toBeUndefined();
+    expect((await configuration(target, grant, sessionId)).instructions).toBe("One sentence.");
   });
 
   test("a legacy session converts from its current effective state without widening", async () => {

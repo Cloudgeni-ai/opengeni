@@ -3,7 +3,11 @@ import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
 import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+} from "./types";
 import type {
   AccessGrant,
   AccessContext,
@@ -474,14 +478,7 @@ const FORWARDED_REQUEST_HEADERS = [
 
 /** Response headers relayed besides Opengeni's own `x-opengeni-*` metadata. */
 const RELAYED_RESPONSE_HEADERS = [
-  "content-type",
-  "content-length",
-  "content-disposition",
-  "content-range",
-  "accept-ranges",
-  "etag",
-  "last-modified",
-  "retry-after",
+  ...OPENGENI_BROWSER_RESPONSE_HEADERS,
   "cross-origin-resource-policy",
 ] as const;
 
@@ -490,6 +487,8 @@ const RELAYED_RESPONSE_HEADERS = [
  * `${method} ${route after sessions/{id}}`, or the workspace route.
  */
 const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
+  "GET configuration",
+  "GET model-context",
   "PUT agent",
   "PUT tool-policy",
   "PUT skills",
@@ -762,7 +761,9 @@ export function createSessionProxyHandler(
       ) {
         return errorJson(404, "session_not_found", "Session not found.");
       }
-      const op = inSession ? `${method} ${route.slice(2).join("/")}` : "";
+      const op = inSession
+        ? `${method === "HEAD" ? "GET" : method} ${route.slice(2).join("/")}`
+        : "";
       if (serverOwnsSetup && (SERVER_OWNED_SESSION_ROUTES.has(op) || isChatCompletions(route))) {
         return notAllowed();
       }
@@ -1266,7 +1267,10 @@ function relayResponse(
 ): Response {
   if (upstream.status === 401) warnRejectedApiKey(upstream, rejectedKeyNotice);
   const headers = new Headers({ "Cache-Control": "no-store" });
+  headers.set("Access-Control-Expose-Headers", OPENGENI_BROWSER_RESPONSE_HEADERS.join(", "));
   for (const name of RELAYED_RESPONSE_HEADERS) {
+    // The relay deliberately does not claim the upstream server's contract.
+    if (name === OPENGENI_API_CONTRACT_HEADER) continue;
     const value = upstream.headers.get(name);
     if (value !== null) headers.set(name, value);
   }

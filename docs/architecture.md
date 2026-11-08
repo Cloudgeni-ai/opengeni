@@ -64,6 +64,13 @@ External workspace routes resolve their organization-local mapping before native
 workspace authorization. All native-workspace HTTP middleware shares the same
 route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
+HTTP session responses use `apps/api/src/routes/session-chat-response.ts` to omit
+operator instructions, skill bodies and the full effective-tool catalog. Explicit
+`GET .../sessions/:sessionId/configuration` reads retain those fields under
+session-control authority; internal runtime/MCP session projections are unchanged.
+The dependency-free `packages/contracts/src/browser-response-headers.ts` owns the
+browser response-header contract, re-exported by the SDK and shared by API CORS
+and the packaged relay. History reads warn once when required headers are unreadable.
 Visibility differs from `agentAccess`; Personal Knowledge follows the verified
 active-turn user. Links never merge users.
 [Product integration](product-integration.md),

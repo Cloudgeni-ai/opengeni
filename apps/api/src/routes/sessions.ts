@@ -1,5 +1,6 @@
 import { prepareAgentChatCreate } from "../agent-chats";
 import { readSessionResponsePair } from "./session-response-reads";
+import { sessionChatResponse, type SessionChatResponse } from "./session-chat-response";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import {
@@ -427,6 +428,7 @@ import {
   setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
+  resolveSessionToolPolicy,
   workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
@@ -1283,7 +1285,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...page.pinned,
       ...page.sessions,
     ]);
-    const decorate = (session: Session): Session => {
+    const decorate = (session: Session): SessionChatResponse => {
       const activity = commandActivity.get(session.id);
       const decorated = {
         ...session,
@@ -1548,6 +1550,37 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
         },
         policy,
+      ),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/configuration", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    const [policy, toolsContext] = await readSessionResponsePair(
+      db,
+      () => loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
+      () => workspaceSessionEffectiveToolsContext(deps, workspaceId, grant.subjectId, [session]),
+    );
+    c.header("Cache-Control", "private, no-store");
+    return c.json(
+      sessionWithEffectiveToolPolicy(
+        policy.codexPointers(session),
+        policy.workspaceServerIds,
+        policy.workspaceDefaultServerIds,
+        toolsContext,
       ),
     );
   });
@@ -2644,7 +2677,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
     collect(lineage.children);
     const targets = await sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds);
-    const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
+    const decorateNodes = (nodes: ChatLineageNode[]): ChatLineageNode[] =>
       nodes.map((node) => ({
         ...node,
         session: {
@@ -6072,6 +6105,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (suffix === "/configuration" && verb === "GET") return "session.tool_policy.write";
   if (/^\/tool-reviews\/[^/]+(?:\/details)?$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
@@ -7297,7 +7331,6 @@ function commandConflictResponse(c: Context, error: unknown): Response {
 type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
-  effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
   /** The Codex session pointers by cutover disposition (see codex-session-pointers). */
   codexPointers: CodexSessionPointerProjection;
 };
@@ -7313,10 +7346,10 @@ async function loadEffectivePolicyContext(
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  // Both projections read the same workspace row; hydrate it once.
+  // Resolve the compact policy and account pointers independently.
   const workspaceRead = requireWorkspace(deps.db, workspaceId);
   void workspaceRead.catch(() => undefined);
-  const [policy, effectiveToolsContext, codexPointers] = await Promise.all([
+  const [policy, codexPointers] = await Promise.all([
     workspaceSessionToolPolicyContext(
       deps.db,
       workspaceId,
@@ -7324,20 +7357,28 @@ async function loadEffectivePolicyContext(
       subjectId,
       workspaceRead,
     ),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions, workspaceRead),
     loadCodexSessionPointerProjection(deps.db, workspaceId, sessions),
   ]);
-  return { ...policy, effectiveToolsContext, codexPointers };
+  return { ...policy, codexPointers };
 }
 
 /** The response projection of one Session: Codex pointers and effective tool policy. */
-function sessionResponse(session: Session, policy: EffectivePolicyContext): Session {
-  return sessionWithEffectiveToolPolicy(
-    policy.codexPointers(session),
-    policy.workspaceServerIds,
-    policy.workspaceDefaultServerIds,
-    policy.effectiveToolsContext,
-  );
+function sessionResponse(session: Session, policy: EffectivePolicyContext): SessionChatResponse {
+  // The compact policy is used by the composer. The full tool catalog belongs
+  // only to /configuration; don't resolve it on every chat read or mutation.
+  const { effectivePolicy } = resolveSessionToolPolicy({
+    toolPolicy: session.toolPolicy,
+    sessionTools: session.tools,
+    availableMcpServerIds: [
+      ...policy.workspaceServerIds,
+      ...session.mcpServers.map((server) => server.id),
+    ],
+    defaultMcpServerIds: policy.workspaceDefaultServerIds,
+  });
+  return sessionChatResponse({
+    ...policy.codexPointers(session),
+    effectiveToolPolicy: effectivePolicy,
+  });
 }
 
 async function withEffectivePolicy(
@@ -7345,12 +7386,17 @@ async function withEffectivePolicy(
   workspaceId: string,
   subjectId: string,
   session: Session,
-): Promise<Session> {
+): Promise<SessionChatResponse> {
   const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
   return sessionResponse(session, policy);
 }
 
-function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): LineageNode[] {
+type ChatLineageNode = Omit<LineageNode, "session" | "children"> & {
+  session: SessionChatResponse;
+  children: ChatLineageNode[];
+};
+
+function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): ChatLineageNode[] {
   return nodes.map((node) => ({
     ...node,
     session: sessionResponse(node.session as Session, policy),

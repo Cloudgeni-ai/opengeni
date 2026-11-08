@@ -10,7 +10,11 @@ import {
   type SessionProxyMessageInput,
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
-import { OPENGENI_API_CONTRACT_REVISION, type ClientConfig } from "../src/types";
+import {
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+  type ClientConfig,
+} from "../src/types";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 /** The artifact-viewer capability, or undefined when the proxy reports none. */
@@ -131,6 +135,15 @@ function upstreamServer() {
           "X-OpenGeni-Has-More": "true",
           "X-OpenGeni-Next-Before": "1",
           "X-OpenGeni-Conversation-Filter": "2",
+          "X-OpenGeni-Covered-First": "1",
+          "X-OpenGeni-Covered-Last": "1",
+          "X-OpenGeni-Page-Bytes": "200",
+          "X-OpenGeni-Page-Max-Bytes": "1048576",
+          "X-OpenGeni-Page-Truncated": "true",
+          "X-OpenGeni-Event-Mode": "forensic",
+          "X-OpenGeni-Event-Direction": "before",
+          "X-OpenGeni-Payload-Mode": "full",
+          "X-OpenGeni-Forensic-Exact": "false",
           // Upstream's own revision header must stay behind the proxy.
           "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
         },
@@ -1164,6 +1177,21 @@ describe("createSessionProxyHandler", () => {
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");
+  });
+
+  test("exposes the shared response header contract and keeps server-owned configuration closed", async () => {
+    const { handler, upstream } = setup({ createSession: (input) => input });
+    const base = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`;
+    for (const suffix of ["configuration", "model-context"]) {
+      for (const method of ["GET", "HEAD"]) {
+        expect((await handler(new Request(`${base}/${suffix}`, { method }))).status).toBe(404);
+      }
+    }
+    expect(upstream.requests).toHaveLength(0);
+    const response = await handler(new Request(`${base}/events`));
+    expect(response.headers.get("access-control-expose-headers")?.split(", ")).toEqual([
+      ...OPENGENI_BROWSER_RESPONSE_HEADERS,
+    ]);
   });
 
   test("passes unknown additive query parameters through on allowlisted reads", async () => {

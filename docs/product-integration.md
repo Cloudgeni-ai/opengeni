@@ -8,6 +8,25 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+Session responses for chat reads, lists and mutations omit `instructions`, `skills`
+and `effectiveTools`. Console/mobile chat views and embedded conversations use this
+small response. The console's Agent tool details and “create agent from chat” read
+`client.getSessionConfiguration(workspaceId, sessionId)` explicitly. SDK consumers
+needing the former full payload use the same method, or
+`GET /v1/workspaces/{workspaceId}/sessions/{sessionId}/configuration`, with
+`sessions:control` and access to the session. The packaged relay refuses that read
+and `model-context` when `createSession` makes setup server-owned. This does not
+change stored configuration, worker input or agent-facing MCP reads. Older APIs
+retain their old response until upgraded.
+
+For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
+allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response
+headers. The API and packaged relay share the response list; server-route adapters
+inherit it. Preserve those headers at every hop, including same-origin relays.
+Missing history metadata produces one SDK console warning per client, naming the
+unreadable headers and the exposure configuration to fix. See
+[the proxy guide](../docs-site/integrate/proxy-from-any-backend.mdx#headers).
+
 API and SDK/embedded requests use credits, not monthly app-plan credit.
 Connected AI subscriptions are for paid-plan app work and cannot serve API
 requests; an explicit selection returns `subscription_api_unavailable` (403),

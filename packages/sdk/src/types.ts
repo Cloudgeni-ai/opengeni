@@ -1932,6 +1932,12 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Full configuration, requested explicitly with sessions:control permission. */
+export type SessionConfiguration = Session & {
+  instructions: string | null;
+  skills: SessionSkill[];
+};
+
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
   reason:
@@ -1989,9 +1995,8 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
-  // Per-session agent persona/system instructions supplied at create; null when
-  // the session carried none. Org-visible metadata, never a timeline event.
-  instructions: string | null;
+  /** Only on explicit getSessionConfiguration reads (or older servers). */
+  instructions?: string | null | undefined;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
@@ -2000,7 +2005,8 @@ export type Session = {
    * agent can't attach one again; a person attaching it again ends its record.
    */
   removedRepositories?: SessionRemovedRepository[] | undefined;
-  skills: SessionSkill[];
+  /** Only on explicit getSessionConfiguration reads (or older servers). */
+  skills?: SessionSkill[] | undefined;
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
   toolPolicyVersion: number;
@@ -2034,7 +2040,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Capability-level view of what a configured session can use; null for legacy. */
+  /** Explicit configuration reads only: capability-level catalog; null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -5929,6 +5935,8 @@ export const OPENGENI_BROWSER_REQUEST_HEADERS = [
   // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
   "x-opengeni-session-id",
 ] as const;
+
+export { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by

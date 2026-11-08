@@ -43,6 +43,7 @@ import { codemodeSessionRequest } from "./codemode";
 import { siteFrameGuard } from "./site-frame-guard";
 import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
+import { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
@@ -943,36 +944,7 @@ export function createAppComposition(
       "X-OpenGeni-Subject",
       "X-OpenGeni-User-Activity",
     ],
-    exposeHeaders: [
-      "Accept-Ranges",
-      "Content-Range",
-      "Link",
-      "X-OpenGeni-Api-Contract",
-      "X-OpenGeni-Actor-Epoch",
-      "X-OpenGeni-Actor-State",
-      "X-OpenGeni-Browser-Frame",
-      "X-OpenGeni-Browser-Frame-Note",
-      "X-OpenGeni-Conversation-Filter",
-      "X-OpenGeni-Correlation-Id",
-      "X-OpenGeni-Covered-First",
-      "X-OpenGeni-Covered-Last",
-      "X-OpenGeni-Event-Direction",
-      "X-OpenGeni-Event-Mode",
-      "X-OpenGeni-Event-Result",
-      "X-OpenGeni-Event-Result-Mode",
-      "X-OpenGeni-Export-Next-Cursor",
-      "X-OpenGeni-Export-Truncated",
-      "X-OpenGeni-Forensic-Exact",
-      "X-OpenGeni-Has-More",
-      "X-OpenGeni-Next-After",
-      "X-OpenGeni-Next-Before",
-      "X-OpenGeni-Page-Bytes",
-      "X-OpenGeni-Page-Max-Bytes",
-      "X-OpenGeni-Page-Truncated",
-      "X-OpenGeni-Payload-Mode",
-      "X-OpenGeni-Session-Sequence",
-      "X-OpenGeni-Truncated-By",
-    ],
+    exposeHeaders: [...OPENGENI_BROWSER_RESPONSE_HEADERS],
   };
   const publicApiCors = cors({
     ...corsHeaders,
