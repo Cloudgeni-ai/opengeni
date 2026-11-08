@@ -451,7 +451,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
-  test("tiers Opengeni-owned dispatch latency tightly and without duplicate incidents", async () => {
+  test("tiers cumulative dispatch latency tightly and without duplicate incidents", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
@@ -486,6 +486,33 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(template).toContain(
       "(le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds)",
     );
+  });
+
+  test("does not attribute cumulative startup waits to worker or provider capacity alone", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const queue = ruleBlock(template, "alert", "OpenGeniTurnStartupQueueP95High");
+    expect(queue).toContain("including time queued behind an active turn");
+    expect(queue).toContain("not when the turn becomes runnable");
+    expect(queue).toContain("opengeni_turns_queued_by_hold");
+    expect(queue).toContain("Current gauges cannot explain historical samples alone");
+    expect(queue).not.toContain("before a worker picks them up");
+
+    for (const name of [
+      "OpenGeniTurnStartupProviderDispatchP95High",
+      "OpenGeniTurnStartupProviderDispatchP95Critical",
+    ]) {
+      const dispatch = ruleBlock(template, "alert", name);
+      expect(dispatch).toContain("behind an active turn");
+      expect(dispatch).toContain("preceding-turn completion");
+      expect(dispatch).toContain("Only this turn's own provider think time is excluded");
+      expect(dispatch).toContain("opengeni_model_request_pre_dispatch_stage_seconds");
+      expect(dispatch).toContain("Do not subtract histogram quantiles");
+      expect(dispatch).not.toContain("before the agent even starts thinking");
+      expect(dispatch).not.toContain("never provider think time");
+    }
   });
 
   test("alerts from durable model-aware compaction lifecycle instead of a static token guess", async () => {

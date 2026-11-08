@@ -291,16 +291,16 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'New agent turns wait more than {{ $turnStartupQueueP95Seconds }} seconds (p95) before a worker picks them up.'
+            summary: 'Accepted agent turns take more than {{ $turnStartupQueueP95Seconds }} seconds (p95) to start, including time queued behind an active turn.'
             headline: 'Agent turns waiting too long to start'
             value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Users wait longer than usual after sending a message before the agent starts working.'
-            next_step: 'Compare opengeni_turns_queued_oldest_age_seconds{hold="ready"} with the eligible turn backlog in Grafana Launch: an old ready prompt with no backlog waits before dispatch (control queue), a backlog means worker capacity.'
-            description: Durable turns are waiting too long before a worker starts them. A prompt first waits for its session's control activities, then on the turn queue; only the second shows in opengeni_turn_eligible_backlog. opengeni_turns_queued_oldest_age_seconds{hold="ready"} covers both. Inspect it, the eligible backlog, worker capacity and admission saturation before attributing this to sandbox or model latency.
+            user_impact: 'Queued messages take longer to start; the chat may still be working on its preceding turn.'
+            next_step: 'First distinguish time behind an active turn from dispatch delay. Compare opengeni_turns_queued_by_hold and opengeni_turns_queued_oldest_age_seconds{hold="ready"} with the eligible turn backlog; correlate historical slow turns with preceding-turn completion.'
+            description: This cumulative clock starts at acceptance, not when the turn becomes runnable. It includes time behind an active turn and session holds, so it does not by itself prove worker saturation. An old ready prompt with no eligible backlog waits before turn dispatch; a backlog warrants checking worker capacity and admission. Current gauges cannot explain historical samples alone.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
-        # OUR controllable latency, accepted turn -> first provider dispatch.
-        # Provider think time is excluded by construction; the warning yields
-        # to the critical tier so one incident never notifies twice.
+        # Accepted turn -> first provider dispatch includes session queue holds
+        # and work in preceding turns. Only this turn's provider think time is
+        # excluded. The warning yields to the critical tier to avoid duplicates.
         - alert: OpenGeniTurnStartupProviderDispatchP95High
           expr: |
             histogram_quantile(
@@ -322,10 +322,10 @@ spec:
             summary: 'Prompts take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) to reach the model after a user sends them.'
             headline: 'Agent turns slow to reach the model'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Users wait longer before the agent starts responding; the delay is on our side, not the model provider''s.'
-            next_step: 'Open the Turn Startup breakdown to find the slow phase (queue, database or sandbox); this is our latency, not the provider''s.'
-            description: The cumulative platform path from accepted turn to the first provider request is slow. This is Opengeni latency (queue, claim, sandbox, tools, history, request preparation), never provider think time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
-            action: Open the Turn Startup phase breakdown; compare queue, claim_and_policy, worker preparation and sandbox_establish, then check Postgres append latency and worker admission before blaming a model provider.
+            user_impact: 'Accepted messages take longer to reach their first model request; they may be queued behind work already running in the same chat.'
+            next_step: 'Compare the queue milestone first. Time behind an active turn is included; inspect historical preceding-turn completion and current queue holds before attributing the delay to platform preparation.'
+            description: Acceptance-to-dispatch includes session holds and preceding-turn work, including that earlier turn's provider and tool time. Only this turn's own provider think time is excluded. This is not the per-request pre-dispatch overhead metric. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
+            action: Separate intentional session serialization from runnable delay using queued-by-hold and eligible-backlog evidence. Then inspect claim_and_policy, worker preparation, sandbox_establish and opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupProviderDispatchP95Critical
           expr: |
@@ -343,10 +343,10 @@ spec:
             summary: 'Prompts take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) to reach the model after a user sends them.'
             headline: 'Agent turns very slow to reach the model'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds before the agent even starts thinking; many will assume it is broken.'
-            next_step: 'Open Turn Startup and Launch capacity in Grafana now and find the dominant slow phase (database, queue or sandbox start); this rarely clears on its own under load.'
-            description: Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before any model provider sees their prompt. This is Opengeni-owned latency (queue, claim, sandbox, tools, history, request preparation), not provider latency.
-            action: Open the Turn Startup phase breakdown and Launch capacity drilldowns; identify the dominant phase (claim/DB contention, queue age, sandbox establish) and follow the capacity owner's recovery path.
+            user_impact: 'Accepted messages take over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 to reach their first model request; the same chat may still be processing an earlier turn.'
+            next_step: 'Check whether slow samples waited behind an active turn. Correlate their start with preceding-turn completion, then inspect ready queue age, eligible backlog and startup phases before changing capacity.'
+            description: Acceptance-to-dispatch includes session holds and preceding-turn work, including that earlier turn's provider and tool time. Only this turn's own provider think time is excluded. A high cumulative p95 alone does not establish platform saturation or slow per-request dispatch.
+            action: Compare historical queue holds and startup phases with worker slots and opengeni_model_request_pre_dispatch_stage_seconds. A prompt starting promptly after its predecessor finishes is session serialization, not a worker-capacity incident. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
