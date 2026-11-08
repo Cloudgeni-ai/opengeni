@@ -296,6 +296,8 @@ describe("turn-capacity Prometheus alerts", () => {
         "OpenGeniApiRouteRejectionsAbnormal",
         [
           "opengeni_http_requests_total",
+          "opengeni_http_request_rejections_total",
+          'reason!="agent_attempt_caller_stale"',
           'status=~"401|403|409|422"',
           "sum by (method, route, status)",
           "[1d] offset 30m",
