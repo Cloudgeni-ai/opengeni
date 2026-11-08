@@ -54,7 +54,7 @@ use crate::cgroup::{Cgroup, MemoryStats, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
-use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+use crate::spec::{GuestMemory, MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found, LastWords};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -1213,7 +1213,7 @@ impl Engine for Firecracker {
     fn freed_memory(
         &self,
         vm: &FirecrackerVm,
-        memory: &Path,
+        memory: &GuestMemory,
     ) -> impl Future<Output = Result<Vec<std::ops::Range<u64>>, EngineError>> + Send + 'static {
         freed::freed_memory(vm.process.procfs(), memory)
     }

@@ -267,6 +267,21 @@ fn discards_survive_the_agent_and_a_finished_pager_leaves() {
     // The pager settled every page, unregistered the memory and left.
     assert!(pager.wait().unwrap().success());
     assert!(!registered_anywhere(), "memory still registered");
+    // It left the launch and the layout the handshake gave in its done
+    // file, for the host to find the guest's memory by.
+    let finished: control::Finished =
+        serde_json::from_slice(&fs::read(control.with_extension("done")).unwrap()).unwrap();
+    assert_eq!(
+        finished,
+        control::Finished {
+            tag: "image-1".into(),
+            regions: vec![control::Region {
+                address: memory.as_ptr() as u64,
+                size: LEN as u64,
+                offset: 0,
+            }],
+        }
+    );
     for page in 0..PAGES {
         let expected = if page == 1 { 0 } else { pattern(page) };
         assert!(

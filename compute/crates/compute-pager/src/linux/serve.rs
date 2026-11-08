@@ -15,6 +15,9 @@
 //! Once every byte is in the file and every page in the guest (zero pages
 //! left to the kernel), the pager unregisters the guest's memory and exits:
 //! a VM that has been awake for a while carries no pager at all.
+//! Before it exits it writes where the guest's memory is, as the VMM's
+//! handshake said, into its done file ([`control::Finished`]): the host
+//! has no other way to learn it.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -392,6 +395,20 @@ fn serve(
         .regions()
         .first()
         .map_or(0, |region| region.page_size);
+    let finished = serde_json::to_vec(&control::Finished {
+        tag: options.tag.clone(),
+        regions: pager
+            .layout()
+            .regions()
+            .iter()
+            .map(|region| control::Region {
+                address: region.base_host_virt_addr,
+                size: region.size,
+                offset: region.offset,
+            })
+            .collect(),
+    })
+    .map_err(io::Error::other)?;
     let result = pager.run(stopped, |progress| match progress {
         Progress::Prefetched => {
             status.prefetched.store(true, Ordering::Release);
@@ -410,9 +427,14 @@ fn serve(
         }
         Progress::Settled => {
             // Word for a host whose connection dropped just now, which
-            // would otherwise take the pager's exit for its death.
-            if let Err(error) = done.0.touch(&done.1) {
-                eprintln!("pager: done not recorded: {error}");
+            // would otherwise take the pager's exit for its death, and
+            // where the guest's memory is, which only the VMM's handshake
+            // said.
+            if let Err(error) = done.0.write_atomic(&done.1, &finished) {
+                eprintln!("pager: the memory's layout not recorded: {error}");
+                if let Err(error) = done.0.touch(&done.1) {
+                    eprintln!("pager: done not recorded: {error}");
+                }
             }
             status.done.store(true, Ordering::Release);
         }
