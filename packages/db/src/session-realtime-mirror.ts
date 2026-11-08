@@ -173,7 +173,7 @@ export function renderRealtimeAgentCallContext(input: { reason: string }): strin
     "<agent_call>",
     "  <status>answered</status>",
     `  <reason>${escapeXmlText(input.reason)}</reason>`,
-    "  <instruction>You phoned the person about this and they just picked up. Speak first: greet them briefly, say in one sentence why you called, then talk it through. What they ask for goes to the agent in this chat as usual.</instruction>",
+    "  <instruction>You phoned the person about this and they just picked up. Speak first, right away: greet them briefly, say in one sentence why you called, then talk it through. If they already said hello, answer them that way instead. What they ask for goes to the agent in this chat as usual.</instruction>",
     "</agent_call>",
   ].join("\n");
 }
