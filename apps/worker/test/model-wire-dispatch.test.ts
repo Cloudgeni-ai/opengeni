@@ -35,6 +35,70 @@ function sourceAst(path: string) {
   return { source, nodes: nodes(parsed.program) };
 }
 
+test("an immediate append awaits durable publication without an extra timer", async () => {
+  const parsed = sourceAst("../src/activities/agent-turn/claim.ts");
+  const declaration = parsed.nodes.find(
+    (node) =>
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      node.id.name === "append",
+  );
+  if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+    throw new Error("Missing append");
+  const source = `
+    const db = {}, bus = {}, input = { workspaceId: "workspace", sessionId: "session", attemptId: "attempt" };
+    const attempt = { turnId: "turn", executionGeneration: 1 }, producerId = "producer";
+    let producerSeq = 0;
+    const observability = {}, heartbeatDetails = {};
+    const recordCanonicalStartupMilestones = () => {};
+    const turnLifecycleMetricsFor = () => ({ progress: () => {} });
+    const recordSessionEventAppendLatency = () => {};
+    const recordSessionEventAppendPhase = () => {};
+    const recordSessionEventPublishLatency = () => {};
+    const TurnAttemptFencedError = Error;
+    return ${parsed.source.slice(declaration.init.start, declaration.init.end)};
+  `;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const receipt = { accepted: true, events: [], canonicalStartupMilestones: [] };
+  let heartbeat = false;
+  const append = new Function(
+    "appendAndPublishTurnEventsFenced",
+    "activityContext",
+    "setTimeout",
+    new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+  )(
+    async () => {
+      await gate;
+      return receipt;
+    },
+    {
+      heartbeat: () => {
+        heartbeat = true;
+      },
+    },
+    () => {
+      throw new Error("durable publication must not wait on a timer");
+    },
+  ) as (
+    events: Array<{ type: string; payload: object }>,
+    immediate: boolean,
+  ) => Promise<typeof receipt>;
+  let settled = false;
+  const result = append([{ type: "agent.model.request", payload: {} }], true).then((value) => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(heartbeat).toBe(false);
+  release();
+  expect(await result).toBe(receipt);
+  expect(heartbeat).toBe(true);
+});
+
 describe("attempt-local initial wire dispatch clock", () => {
   test("generic transports publish all three lifecycle phases for every model request, but startup once", async () => {
     const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");

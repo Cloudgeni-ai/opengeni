@@ -704,7 +704,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       });
     }
   };
-  const append: TurnEventPublisher = async (events, immediate = false, mutate, project) => {
+  const append: TurnEventPublisher = async (events, _immediate = false, mutate, project) => {
     const inputs = events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -752,9 +752,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       phase: "events_published",
       producerSeq,
     });
-    if (immediate) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
+    // The durable append and fan-out above already yielded to I/O. Returning
+    // their acknowledgement needs no additional event-loop timer.
     return appended;
   };
   // Progress receipts go out in the background; awaited appends and the

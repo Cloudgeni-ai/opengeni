@@ -41,6 +41,11 @@ represent large histories.
   awaited checkpoint absorbs that not-yet-started batch. An idle background lane
   starts immediately; there is no timer, threshold or added delay. Explicitly
   measured startup receipts keep their separate measurement boundary.
+  Absorbed observations keep their delivery barrier: concurrent later appends
+  and the background drain wait for the absorbing checkpoint to settle.
+- A durable immediate append returns after publication and heartbeat, without
+  scheduling an additional zero-delay timer. Database/network I/O already yields
+  to the event loop; the timer contributed about 1.09 ms per measured step.
 
 The live workspace/session control, authority, exact-attempt generation and
 interruption checks still run at each write/admission boundary. They cannot be
@@ -52,6 +57,27 @@ prompt change, tool schema change, history reordering or tuned constant is used.
 Post-commit acknowledgements remain outside the transaction. A lost commit
 acknowledgement never licenses a new external tool effect or advances the sink's
 watermark. Database retries replay only the idempotent persistence boundary.
+
+## Loopback CPU and await profile
+
+A separate 60-step stage-instrumented run on the consolidated implementation
+measured 99.69 ms in the two gaps per step. Request settlement occupied 66.35 ms,
+admission 8.44 ms, request construction 7.25 ms, dispatch checkpoint 1.41 ms and
+request-audit enqueue 0.028 ms. Stable history preparation itself was 0.72 ms,
+event fan-out 0.046 ms, MCP policy about 0.5 ms and authorization about 0.03 ms.
+These nested/overlapping spans are not additive. Outstanding SQL occupied a
+69.72 ms wall-time union; event inserts accounted for 24.36 ms across about four
+writes per step. Worker process CPU was 85.62 ms per step, overlapping SQL waits.
+
+An additional Bun CPU sample identified ORM query construction, prepared-request
+and inspector tool-schema cloning, and context/history JSON serialization as
+hotspots. The sampler materially increased latency, so sampled frame time is not
+an uninstrumented CPU cost estimate. The benchmark's own request serialization
+also appears in that profile. Prepared compaction prefixes and inspector copies
+serve different ownership boundaries; removing their copies without preserving
+those boundaries is not an observational optimization. No such change is part
+of this checkpoint patch. Direct-loopback costs cannot be attributed solely to
+network round trips, nor does this fixture justify caching live authority.
 
 ## Lifecycle events
 

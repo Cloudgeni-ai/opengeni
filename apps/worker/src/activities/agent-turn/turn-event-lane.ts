@@ -83,7 +83,11 @@ export function createTurnEventPublisher(append: TurnEventPublisher): {
     publish(events, immediate, mutate, project) {
       const preceding = pending?.events.splice(0) ?? [];
       pending = null;
-      return lane.run(() => append([...preceding, ...events], immediate, mutate, project));
+      const result = lane.run(() => append([...preceding, ...events], immediate, mutate, project));
+      // Moving a receipt into this commit must not remove its ordering barrier.
+      // Later appends and the background drain still owe that receipt's delivery.
+      if (preceding.length) lane.runInBackground(() => result);
+      return result;
     },
     publishInBackground(events, options) {
       // Timed startup receipts retain their own measurement boundary.
