@@ -63,6 +63,131 @@ function dependencies(
 }
 
 describe("session Codex realtime broker", () => {
+  test("a failed history read waits for outstanding configuration before releasing its caller", async () => {
+    let finishConfig!: () => void;
+    let complete = false;
+    const pending = brokerSessionCodexRealtime(
+      dependencies({
+        loadInitialItems: async () => {
+          throw Error("history failed");
+        },
+        loadProviderConfig: async () => {
+          await new Promise<void>((resolve) => {
+            finishConfig = resolve;
+          });
+          return { model: "live", architecture: "voice", version: "v3" };
+        },
+        createCall: async () => {
+          throw Error("must not create a call");
+        },
+      }),
+      { sessionId: "session-one", request },
+    ).catch((error) => {
+      complete = true;
+      return error;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(complete).toBe(false);
+    finishConfig();
+    expect((await pending).message).toBe("history failed");
+  });
+
+  test("setup timing logs retain only known phase names and finite durations", () => {
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (line: string) => {
+      logs.push(line);
+    };
+    try {
+      const observer = createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      );
+      observer.info("Realtime setup phase completed", {
+        realtimeSetupPhase: "config",
+        durationMs: 123,
+      });
+      observer.info("Realtime setup phase completed", {
+        realtimeSetupPhase: "untrusted-value",
+        durationMs: 1,
+      });
+    } finally {
+      console.log = original;
+    }
+    expect(JSON.parse(logs[0]!).realtimeSetupPhase).toBe("config");
+    expect(JSON.parse(logs[0]!).durationMs).toBe(123);
+    expect(JSON.parse(logs[1]!)).not.toHaveProperty("realtimeSetupPhase");
+  });
+
+  test("resolves token and configuration while history is loading, then sends unchanged history", async () => {
+    let finishHistory!: (items: []) => void;
+    const order: string[] = [];
+    const history = new Promise<[]>((resolve) => {
+      finishHistory = resolve;
+    });
+    const providerConfig = { model: "live", architecture: "voice", version: "v3" } as const;
+    const call = brokerSessionCodexRealtime(
+      dependencies({
+        loadInitialItems: () => {
+          order.push("history");
+          return history;
+        },
+        tokenResolver: () => ({
+          getToken: async () => {
+            order.push("token");
+            return tokenSnapshot();
+          },
+          refresh: async () => tokenSnapshot(),
+        }),
+        loadProviderConfig: async () => {
+          order.push("config");
+          finishHistory([]);
+          return providerConfig;
+        },
+        createCall: async (_auth, input, options) => {
+          order.push("call");
+          expect(input.initialItems).toEqual([]);
+          expect(options.providerConfig).toEqual(providerConfig);
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    await call;
+    expect(order).toEqual(["history", "token", "config", "call"]);
+  });
+
+  test("a config 401 refreshes exactly once before creating any call", async () => {
+    let configs = 0;
+    let refreshes = 0;
+    let calls = 0;
+    await brokerSessionCodexRealtime(
+      dependencies({
+        tokenResolver: () => ({
+          getToken: async () => tokenSnapshot(),
+          refresh: async () => {
+            refreshes++;
+            return tokenSnapshot();
+          },
+        }),
+        loadProviderConfig: async () => {
+          if (++configs === 1) throw new CodexRealtimeError("authentication", "rejected", 401);
+          return { model: "live", architecture: "voice", version: "v3" };
+        },
+        createCall: async () => {
+          calls++;
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    expect({ configs, refreshes, calls }).toEqual({ configs: 2, refreshes: 1, calls: 1 });
+  });
+
   test("binds the session pin and account to a V3 call without returning either identity", async () => {
     let selected: string | null = null;
     let capturedAuth: CodexAuthHeaders | null = null;

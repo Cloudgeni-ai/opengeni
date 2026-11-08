@@ -3,6 +3,7 @@ import type {
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
 } from "./types";
+import type { PreparedRealtimeWebrtc } from "./realtime-webrtc-preparation";
 
 export type CodexRealtimeNegotiator = (
   request: CodexRealtimeWebrtcRequest,
@@ -36,6 +37,8 @@ export type AcquireCodexRealtimeMicrophoneOptions = {
 };
 
 export type StartCodexRealtimeWebrtcOptions = {
+  /** A caller-owned local offer, consumed once; microphone capture still starts at admission. */
+  prepared?: PreparedRealtimeWebrtc | undefined;
   negotiate: CodexRealtimeNegotiator;
   /** Exact configured provider model expected from the server broker. */
   expectedModel?: CodexRealtimeWebrtcResponse["model"];
@@ -99,8 +102,10 @@ export async function startCodexRealtimeWebrtc(
   options: StartCodexRealtimeWebrtcOptions,
 ): Promise<CodexRealtimeWebrtcSession> {
   throwIfAborted(options.signal);
-  const peerConnection = (options.createPeerConnection ?? defaultPeerConnection)();
-  const events = peerConnection.createDataChannel("oai-events");
+  const prepared = options.prepared?.claim();
+  const peerConnection =
+    prepared?.peerConnection ?? (options.createPeerConnection ?? defaultPeerConnection)();
+  const events = prepared?.events ?? peerConnection.createDataChannel("oai-events");
   try {
     options.onEventsCreated?.(events);
   } catch (error) {
@@ -240,16 +245,23 @@ export async function startCodexRealtimeWebrtc(
     }
     for (const track of audioTracks) {
       track.addEventListener?.("ended", onMicrophoneEnded);
-      peerConnection.addTrack(track, media);
+      if (!prepared?.sender) peerConnection.addTrack(track, media);
     }
-
-    const offer = await peerConnection.createOffer();
-    if (offer.type !== "offer" || !offer.sdp) {
-      throw new Error("Browser did not create a WebRTC SDP offer");
+    let localSdp: string;
+    if (prepared?.sender && prepared.sdp) {
+      // The sendrecv audio section already exists; replacing its null track
+      // does not renegotiate SDP or open the microphone before Answer.
+      await prepared.sender.replaceTrack(audioTracks[0]!);
+      localSdp = peerConnection.localDescription?.sdp ?? prepared.sdp;
+    } else {
+      const offer = await peerConnection.createOffer();
+      if (offer.type !== "offer" || !offer.sdp) {
+        throw new Error("Browser did not create a WebRTC SDP offer");
+      }
+      await peerConnection.setLocalDescription(offer);
+      localSdp = peerConnection.localDescription?.sdp ?? offer.sdp;
     }
-    await peerConnection.setLocalDescription(offer);
     throwIfAborted(options.signal);
-    const localSdp = peerConnection.localDescription?.sdp ?? offer.sdp;
     const answer = await options.negotiate(
       {
         realtimeId: options.realtimeId,
