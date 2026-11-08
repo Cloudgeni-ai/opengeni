@@ -78,5 +78,12 @@ public class OpenGeniCallModule: Module {
       guard let id = UUID(uuidString: callId) else { return }
       DispatchQueue.main.async { self.center.endIncoming(id: id, reason: reason) }
     }
+
+    // Whether a ringing call may connect before it is answered: only with the
+    // call audio device, which sends silence until CallKit activates the
+    // session. WebRTC's own device would open the microphone at once.
+    Function("connectsBeforeAnswer") { () -> Bool in
+      OpenGeniCallAudio.callAudioDeviceInstalled
+    }
   }
 }

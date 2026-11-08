@@ -49,4 +49,63 @@ enum OpenGeniCallAudio {
     configuration.setValue(options(speaker: speaker).rawValue, forKey: "categoryOptions")
     unsafeBitCast(method_getImplementation(set), to: Setter.self)(type, setter, configuration)
   }
+
+  // MARK: When the microphone may open
+
+  /// Whether WebRTC runs its audio through the call audio device (built with
+  /// the config plugin's `call.iosAudioDevice`), which honours the gate below.
+  static var callAudioDeviceInstalled: Bool {
+    guard let options = NSClassFromString("WebRTCModuleOptions") as AnyObject?,
+      let device = NSClassFromString("OpenGeniCallAudioDevice"),
+      options.responds(to: NSSelectorFromString("sharedInstance")),
+      let shared = options.perform(NSSelectorFromString("sharedInstance"))?
+        .takeUnretainedValue() as? NSObject,
+      let current = shared.value(forKey: "audioDevice") as? NSObject
+    else { return false }
+    return current.isKind(of: device)
+  }
+
+  /// Posted (on any thread) when `microphoneAllowed` may have changed.
+  static let gateDidChange = Notification.Name("OpenGeniCallAudioGateDidChange")
+
+  private static let gateLock = NSLock()
+  private static var systemCall = false
+  private static var systemCallActivated = false
+
+  /// Whether a call's audio may run now. During a system (CallKit) call that
+  /// is only once CallKit has activated the audio session: an incoming call
+  /// from its answer, an outgoing call from its start. Without a system call
+  /// (the Simulator, or a call CallKit refused) the app runs its own audio.
+  /// The call audio device sends silence while this is false, so a call can
+  /// connect while the phone rings without opening the microphone.
+  static var microphoneAllowed: Bool {
+    gateLock.lock()
+    defer { gateLock.unlock() }
+    return !systemCall || systemCallActivated
+  }
+
+  /// Whether CallKit owns the audio session (a system call is ringing or live).
+  static var systemCallOwnsSession: Bool {
+    gateLock.lock()
+    defer { gateLock.unlock() }
+    return systemCall
+  }
+
+  static func setSystemCall(_ present: Bool) {
+    updateGate { if !present { systemCallActivated = false }; systemCall = present }
+  }
+
+  static func setSystemCallActivated(_ activated: Bool) {
+    updateGate { systemCallActivated = activated }
+  }
+
+  private static func updateGate(_ change: () -> Void) {
+    gateLock.lock()
+    let before = !systemCall || systemCallActivated
+    let ownedBefore = systemCall
+    change()
+    let changed = before != (!systemCall || systemCallActivated) || ownedBefore != systemCall
+    gateLock.unlock()
+    if changed { NotificationCenter.default.post(name: gateDidChange, object: nil) }
+  }
 }

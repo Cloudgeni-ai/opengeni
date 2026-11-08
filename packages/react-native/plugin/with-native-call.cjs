@@ -17,11 +17,16 @@
 // - Optionally (`call.androidSystemCall`), Android system calls: a
 //   self-managed Telecom call with a call notification, and agents' calls
 //   ringing the phone with a full-screen ring screen (with-android-call.cjs).
+// - Optionally (`call.iosAudioDevice`), Opengeni's call audio device for
+//   WebRTC: silence while a call rings, Apple's voice processing once it is
+//   answered, so a call can connect before the person picks up without the
+//   microphone opening. Needs react-native-webrtc.
 const fs = require("node:fs");
 const path = require("node:path");
 const {
   withDangerousMod,
   withInfoPlist,
+  withPodfileProperties,
   withXcodeProject,
   IOSConfig,
 } = require("expo/config-plugins");
@@ -95,6 +100,15 @@ function withCallIntentsSource(config, options) {
   });
 }
 
+/** Builds the call audio device into the OpenGeniCall pod (see its podspec), or leaves it out. */
+function withCallAudioDevice(config, enabled) {
+  return withPodfileProperties(config, (mod) => {
+    if (enabled) mod.modResults["opengeni.callAudioDevice"] = "true";
+    else delete mod.modResults["opengeni.callAudioDevice"];
+    return mod;
+  });
+}
+
 function withNativeCall(config, props) {
   const features = pluginFeatures(props);
   if (features.recording) config = withRecording(config);
@@ -102,6 +116,7 @@ function withNativeCall(config, props) {
   if (!features.call) return config;
   const options = resolveOptions(props);
   config = withCallInfoPlist(config, options);
+  config = withCallAudioDevice(config, options.iosAudioDevice);
   if (options.appIntents) config = withCallIntentsSource(config, options);
   const control = resolveControl(options.call, config.name);
   if (control) {

@@ -116,6 +116,12 @@ export interface NativeIncomingCallAdapter {
   takeIncomingCalls(): Promise<NativeIncomingCall[]>;
   /** Stop a ring that was settled elsewhere or rang out. */
   endIncomingCall(callId: string, reason: NativeIncomingCallEndReason): void;
+  /**
+   * Whether a ringing call may connect its voice session before the person
+   * answers: the phone then sends silence and plays nothing, and opens the
+   * microphone only on answer. Absent or false means connect on answer.
+   */
+  connectsBeforeAnswer?: boolean | undefined;
 }
 
 /** Native hosts can stream voice over WebRTC; WebSocket audio transports need a browser. */
