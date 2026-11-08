@@ -193,14 +193,53 @@ export function nativePushRingsCall(payload: ClaimedNativePushDelivery["payload"
 export function nativeCallPushBody(payload: ClaimedNativePushDelivery["payload"]) {
   return {
     aps: {},
-    call: {
-      callId: payload.callId,
-      sessionId: payload.sessionId,
-      workspaceId: payload.workspaceId,
-      subjectId: payload.subjectId,
-      title: payload.title ?? null,
-      reason: payload.body ?? null,
-      ringUntil: payload.ringUntil ?? null,
+    call: nativeCallRing(payload),
+  };
+}
+
+function nativeCallRing(payload: ClaimedNativePushDelivery["payload"]) {
+  return {
+    callId: payload.callId,
+    sessionId: payload.sessionId,
+    workspaceId: payload.workspaceId,
+    subjectId: payload.subjectId,
+    title: payload.title ?? null,
+    reason: payload.body ?? null,
+    ringUntil: payload.ringUntil ?? null,
+  };
+}
+
+/**
+ * The FCM message of a push. Android notifications are data messages that
+ * expo-notifications shows. A call ring also carries `opengeniCall`, which an
+ * app with Android system calls turns into the incoming-call notification and
+ * ring screen; an app without them shows the ordinary "is calling"
+ * notification from the same message. A ring that can no longer arrive while
+ * the call rings is dropped by FCM.
+ */
+export function nativeFcmMessage(
+  delivery: Pick<ClaimedNativePushDelivery, "token" | "payload">,
+  now = Date.now(),
+) {
+  const alert = nativePushAlert(delivery.payload);
+  const ring = nativePushRingsCall(delivery.payload);
+  const ringSeconds = ring
+    ? Math.max(0, Math.floor((Date.parse(delivery.payload.ringUntil ?? "") - now) / 1000))
+    : NaN;
+  return {
+    token: delivery.token,
+    android: {
+      priority: "HIGH",
+      collapse_key: ring ? delivery.payload.callId : delivery.payload.sessionId,
+      ...(Number.isFinite(ringSeconds) ? { ttl: `${ringSeconds}s` } : {}),
+    },
+    data: {
+      title: alert.title,
+      message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
+      body: JSON.stringify(nativePushData(delivery.payload)),
+      ...(ring
+        ? { opengeniCall: JSON.stringify({ type: "ring", ...nativeCallRing(delivery.payload) }) }
+        : {}),
     },
   };
 }
@@ -409,7 +448,6 @@ export function createFcmSender(input: {
   };
   return async (delivery) => {
     try {
-      const alert = nativePushAlert(delivery.payload);
       const response = await http(
         `https://fcm.googleapis.com/v1/projects/${account.project_id}/messages:send`,
         {
@@ -418,17 +456,7 @@ export function createFcmSender(input: {
             authorization: `Bearer ${await accessToken()}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            message: {
-              token: delivery.token,
-              android: { priority: "HIGH", collapse_key: delivery.payload.sessionId },
-              data: {
-                title: alert.title,
-                message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
-                body: JSON.stringify(nativePushData(delivery.payload)),
-              },
-            },
-          }),
+          body: JSON.stringify({ message: nativeFcmMessage(delivery) }),
           signal: AbortSignal.timeout(10_000),
         },
       );

@@ -86,8 +86,8 @@ export type NativeCallRouteChangeReason =
 export interface NativeCallAdapter {
   /**
    * Whether the system shows a started call (CallKit's call screen and
-   * Recents). False where the adapter only sets up call audio (Android).
-   * Absent means true.
+   * Recents, or Android's call notification). False where the adapter only
+   * sets up call audio (Android without system calls). Absent means true.
    */
   showsSystemCall?: boolean | undefined;
   /** Report an outgoing call to the system and activate the call audio session. */

@@ -15,6 +15,8 @@ type OpenGeniCallNativeModule = {
   setMuted(callId: string, muted: boolean): Promise<void>;
   setSpeaker(on: boolean): Promise<void>;
   takePendingStartRequest(): Promise<{ target: string | null } | null>;
+  /** Android: whether calls are system calls and agents can ring (absent before them). */
+  capabilities?(): { systemCall: boolean; incoming: boolean };
   // Agent calls (absent in builds before them).
   getVoipToken?(): Promise<string | null>;
   takeIncomingCalls?(): Promise<RawNativeCallEvent[]>;
@@ -29,10 +31,13 @@ export { parseNativeCallEvent };
 
 /**
  * Calls for Expo hosts, from the native module this package ships (linked by
- * Expo autolinking). On iOS a call is a CallKit call; on Android it sets up
- * the phone's call audio (communication mode, audio focus, loudspeaker or
- * headset) without a system call screen. Returns null where it is unavailable
- * (web, or a build without the module), so voice still works without it.
+ * Expo autolinking). On iOS a call is a CallKit call. On Android it is a
+ * system call (Telecom, with a call notification) where the app turned that
+ * on with the config plugin's `call.androidSystemCall`, and agents' calls ring
+ * the phone when it also has push; otherwise it sets up the phone's call
+ * audio (communication mode, audio focus, loudspeaker or headset) without a
+ * system call. Returns null where it is unavailable (web, or a build without
+ * the module), so voice still works without it.
  */
 export function createExpoCallAdapter(
   options: { includeInRecents?: boolean } = {},
@@ -40,10 +45,13 @@ export function createExpoCallAdapter(
   const native = requireOptionalNativeModule<OpenGeniCallNativeModule>("OpenGeniCall");
   if (!native) return null;
   native.configure(options.includeInRecents ?? true);
+  const ios = Platform.OS === "ios";
+  const capabilities = ios ? null : (native.capabilities?.() ?? null);
+  const canRing = ios || capabilities?.incoming === true;
   // Call ids are UUIDs; CallKit reports them upper-case, the hook compares lower-case.
   const id = (callId: string) => callId.toLowerCase();
   return {
-    showsSystemCall: Platform.OS === "ios",
+    showsSystemCall: ios || capabilities?.systemCall === true,
     startCall: ({ callId, title, target }) => native.startCall(id(callId), title, target),
     reportConnected: (callId) => native.reportConnected(id(callId)),
     endCall: (callId, reason = "ended") => native.endCall(id(callId), reason === "failed"),
@@ -51,7 +59,7 @@ export function createExpoCallAdapter(
     setSpeaker: (on) => native.setSpeaker(on),
     takePendingStartRequest: () => native.takePendingStartRequest(),
     incoming:
-      native.getVoipToken && native.takeIncomingCalls && native.endIncomingCall
+      canRing && native.getVoipToken && native.takeIncomingCalls && native.endIncomingCall
         ? {
             getVoipToken: () => native.getVoipToken!(),
             takeIncomingCalls: async () =>
