@@ -63,6 +63,20 @@ describe("compute dashboard", () => {
     }
   });
 
+  test("distinguishes physical filesystem space from booking headroom", async () => {
+    const panel = (await dashboard()).panels.find((item) => item.id === 9)!;
+    expect(panel.title).toBe("Filesystem space and booking headroom");
+    expect(panel.targets).toHaveLength(2);
+    expect(panel.targets![0]!.expr).toContain("compute_fleet_host_disk_available_bytes");
+    expect(panel.targets![0]!.legendFormat).toBe("{{host_name}} · filesystem available");
+    expect(panel.targets![1]!.expr).toContain("compute_fleet_host_disk_booking_headroom_bytes");
+    expect(panel.targets![1]!.legendFormat).toBe("{{host_name}} · booking headroom");
+    expect(panel.description).toContain("unknown, not zero");
+    expect(expressions(await dashboard()).join("\n")).not.toContain(
+      "compute_fleet_host_disk_free_bytes",
+    );
+  });
+
   test("finds metrics with matchers and bare ones, and nothing else", () => {
     expect(selectedMetrics("compute_control_leader == 0")).toEqual(["compute_control_leader"]);
     expect(

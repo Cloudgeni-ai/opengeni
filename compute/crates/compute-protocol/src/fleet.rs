@@ -98,7 +98,8 @@ pub struct HostInfo {
     /// its agent started. What it guarantees now is
     /// [`Capacity::cpu_millis`].
     pub cpu_millis: u64,
-    /// Disk it gives sandboxes, in MiB.
+    /// State filesystem size at agent startup, in MiB. Restart the agent
+    /// after resizing the filesystem to refresh this description.
     pub disk_mib: u64,
     /// What it offers sandboxes that ask to reach it
     /// ([`crate::host::SandboxConfig::reach`]), by name, sorted: placement
@@ -193,8 +194,15 @@ pub struct Capacity {
     pub cpu_millis: u64,
     /// Processor time a wake can still reserve, in millicores.
     pub cpu_free_millis: u64,
-    /// Disk free for sandboxes, in MiB.
+    /// Unbooked disk headroom after worst-case writes and reserve, in MiB.
+    /// This is not filesystem free space. The wire name is retained for
+    /// hosts and services of earlier releases.
     pub disk_free_mib: u64,
+    /// Actual filesystem space available at the host's last reading, in
+    /// MiB, before bookings and reserve. Missing from older hosts or when
+    /// no disk reading is available; absence is unknown, not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_available_mib: Option<u64>,
     /// Disk in MiB beyond [`Capacity::disk_free_mib`] that a new sandbox
     /// could take now by the host freeing what it keeps without losing
     /// anything, as its admission counts it (ADR 30). Placement counts it
@@ -595,6 +603,13 @@ mod tests {
         let older = r#"{"memory_free_mib":1,"cpu_millis":1,"cpu_free_millis":1,
             "disk_free_mib":1,"awake":0,"sandboxes":0}"#;
         let capacity: Capacity = serde_json::from_str(older).unwrap();
+        assert_eq!(capacity.disk_available_mib, None);
+        assert!(
+            serde_json::to_value(&capacity)
+                .unwrap()
+                .get("disk_available_mib")
+                .is_none()
+        );
         assert_eq!(capacity.split(), (capacity.clone(), None));
         let registered: HostInfo = serde_json::from_str(
             r#"{"name":"h","address":"h:1","zone":"z","profile":"nested",
@@ -626,6 +641,21 @@ mod tests {
                 ..now
             }
         );
+    }
+
+    #[test]
+    fn filesystem_space_is_distinct_from_booking_headroom_on_the_wire() {
+        for available in [0, 95_000] {
+            let capacity = Capacity {
+                disk_free_mib: 1,
+                disk_available_mib: Some(available),
+                ..Capacity::default()
+            };
+            let wire = serde_json::to_value(&capacity).unwrap();
+            assert_eq!(wire["disk_free_mib"], 1);
+            assert_eq!(wire["disk_available_mib"], available);
+            assert_eq!(serde_json::from_value::<Capacity>(wire).unwrap(), capacity);
+        }
     }
 
     #[test]
