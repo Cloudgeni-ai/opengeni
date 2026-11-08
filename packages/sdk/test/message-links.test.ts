@@ -1,11 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import { openGeniConsolePath, parseOpenGeniLink, isReservedOpenGeniLink } from "../src/index";
+import { parseRetainedFileReference } from "../src/message-links";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const EDITABLE = "0123456789ABCDEF0123456789abcdef";
 const UUID = "22222222-2222-4222-8222-222222222222";
 
 describe("parseOpenGeniLink", () => {
+  test("an editable artifact reference uses the current workspace, not the file resolver", () => {
+    for (const href of [`artifact:${EDITABLE}`, `ARTIFACT:${EDITABLE.toUpperCase()}`]) {
+      const target = parseOpenGeniLink(href);
+      expect(target).toEqual({
+        kind: "editable-artifact",
+        artifactId: EDITABLE.toLowerCase(),
+        workspaceId: null,
+      });
+      expect(openGeniConsolePath(target!, WS)).toBe(
+        `/workspaces/${WS}/artifacts/editable/${EDITABLE.toLowerCase()}`,
+      );
+      expect(parseRetainedFileReference(href)).toBeNull();
+    }
+    for (const id of [
+      EDITABLE.slice(1),
+      EDITABLE + "0",
+      "g" + EDITABLE.slice(1),
+      EDITABLE + "/",
+      EDITABLE + "?version=2",
+      EDITABLE + "#top",
+    ]) {
+      expect(parseOpenGeniLink(`artifact:${id}`)).toBeNull();
+      expect(isReservedOpenGeniLink(`artifact:${id}`)).toBe(true);
+    }
+  });
+
   test("classifies every agent-authored Opengeni object link", () => {
     expect(parseOpenGeniLink(`artifact:${UUID}`)).toEqual({
       kind: "file",

@@ -265,6 +265,28 @@ test("unknown editable modality is not intercepted and opens the full-page edito
 }, 60_000);
 
 for (const modality of ["document", "spreadsheet", "presentation"] as const) {
+  for (const width of [1440, 390]) {
+    test(`short ${modality} link opens the existing dock editor at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      try {
+        await page.goto(`${baseUrl}/test/session-artifact-navigation.html`);
+        const link = page.getByRole("link", { name: `Open short ${modality}`, exact: true });
+        await link.waitFor();
+        expect(await link.getAttribute("href")).toBe(
+          `/workspaces/${workspaceId}/artifacts/editable/${nativeIds[modality]}`,
+        );
+        expect(await page.getByText("(link unavailable)", { exact: false }).count()).toBe(0);
+        await link.click();
+        await page
+          .getByRole("heading", { name: `Native ${modality} editor`, exact: true })
+          .waitFor();
+        expect(page.url()).toContain(sessionPath);
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+
   test(`known session ${modality} opens the dock editor instead of leaving the session`, async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     try {
