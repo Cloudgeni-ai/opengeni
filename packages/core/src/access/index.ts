@@ -75,6 +75,13 @@ import { sha256Hex } from "@opengeni/contracts/values";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
+// Only bounded reads reuse workspace admission. Writers and explicit fresh
+// checks must observe authority changes made during their own operation.
+// No result survives its Request; permissions are checked at every call site.
+const readGrantsByRequest = new WeakMap<
+  Request,
+  WeakMap<object, Map<string, Promise<AccessGrantAuthorization>>>
+>();
 const accessResolvedRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
@@ -815,6 +822,7 @@ export async function requireFreshAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
+  readGrantsByRequest.delete(c.req.raw);
   const context = await resolveAccessContext(c, deps);
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
@@ -1164,6 +1172,29 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  if (c.req.method === "GET" || c.req.method === "HEAD") {
+    let databases = readGrantsByRequest.get(c.req.raw);
+    if (!databases) readGrantsByRequest.set(c.req.raw, (databases = new WeakMap()));
+    let grants = databases.get(deps.db);
+    if (!grants) databases.set(deps.db, (grants = new Map()));
+    let pending = grants.get(workspaceId);
+    if (!pending) {
+      // Keep the first caller's permission for first-use admission: a request
+      // outside the default grant must not create a membership as a side effect.
+      pending = accessGrantAuthorization(context, deps, workspaceId, permission, {
+        firstUseMembership: true,
+      });
+      grants.set(workspaceId, pending);
+      void pending.catch(() => {
+        if (grants.get(workspaceId) === pending) grants.delete(workspaceId);
+      });
+    }
+    const authorization = await pending;
+    const required =
+      permission ?? (accountScopedApiKeyWorkspaceAuthority(context) ? "workspace:read" : undefined);
+    if (required) requirePermission(authorization.grant, required);
+    return authorization;
+  }
   // Request entry only: a fresh re-check of a live connection never re-creates
   // a membership that was removed while the connection was open.
   return await accessGrantAuthorization(context, deps, workspaceId, permission, {

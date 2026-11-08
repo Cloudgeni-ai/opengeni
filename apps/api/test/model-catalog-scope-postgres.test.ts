@@ -143,6 +143,23 @@ test("subsequent catalog requests observe custom-model creation and retirement w
   ).not.toContain("workspace-gateway/fixture/catalog-scope");
 });
 
+test("client configuration shares its live metadata across overlay and picker projections", async () => {
+  const load = spyOn(db, "loadWorkspaceModelCatalogInputs");
+  try {
+    for (let i = 0; i < 2; i++) {
+      load.mockClear();
+      const response = await app.request(`/v1/config/client?workspaceId=${grant.workspaceId}`, {
+        headers,
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).not.toContain(credential);
+      expect(load).toHaveBeenCalledTimes(1);
+    }
+  } finally {
+    load.mockRestore();
+  }
+});
+
 test("a public metadata failure remains fatal rather than an empty successful catalog", async () => {
   const load = spyOn(db, "loadWorkspaceModelCatalogInputs").mockRejectedValueOnce(
     new Error("catalog read failed"),
