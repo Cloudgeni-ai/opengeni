@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
 import { useOpenGeniText } from "../messages/runtime";
@@ -20,7 +21,7 @@ import { useMachines, type MachinesClientLike } from "./use-machines";
 /** How often a refused message re-reads its machines while it waits. */
 const BLOCKED_MACHINE_POLL_MS = 15_000;
 
-export type UseSessionStartOptions = EmbeddedSessionClientOverride & {
+export type UseSessionStartOptions = EmbeddedSessionClientOverride<ChatClient> & {
   session: Session;
   /** Re-read the session (and its queue) after a machine change or a recheck. */
   onSessionChanged: () => Promise<void>;

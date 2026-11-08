@@ -88,7 +88,7 @@ export interface NativeSessionScreenProps extends Omit<
   NativeMessageTimelineProps,
   "items" | "events" | "status" | "trailing"
 > {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   /** The submitted first message, until its durable history is available. */
   pendingPrompt?: PendingPrompt | null | undefined;
   /** Composer slots (products add their own actions/options here). */
@@ -710,7 +710,7 @@ function StuckCard({
   onSessionChanged,
 }: {
   session: Session;
-  client: OpenGeniNativeSessionController["client"];
+  client: OpenGeniNativeSessionController<ChatClient>["client"];
   workspaceId: string;
   busy: boolean;
   onSessionChanged: () => Promise<void>;

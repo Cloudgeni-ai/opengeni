@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { AppShotCapture, FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -7,7 +8,7 @@ import {
 import { useErrorMessage } from "../lib/error-message";
 import { readStoredFilePreviewUrl } from "../stored-file-preview";
 
-export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
+export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride<ChatClient> & {
   /**
    * Only files matching this predicate are accepted by {@link
    * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to

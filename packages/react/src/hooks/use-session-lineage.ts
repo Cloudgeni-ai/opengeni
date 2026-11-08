@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SessionEvent,
   ChatSessionLineageResponse as SessionLineageResponse,
@@ -17,14 +18,15 @@ import {
   useSessionEventTrigger,
 } from "./internal";
 
-export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
-  events?: SessionEvent[] | undefined;
-  /** Refresh interval (ms). Off by default. */
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-  /** Optional shared causal clock invoked when each network read starts. */
-  beginRead?: (() => number) | undefined;
-};
+export type UseSessionLineageOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionLineageClientOverride<Client> & {
+    events?: SessionEvent[] | undefined;
+    /** Refresh interval (ms). Off by default. */
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
+  };
 
 export type UseSessionLineageResult<L extends SessionLineageResponse = FullSessionLineageResponse> =
   {
@@ -74,17 +76,15 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
-  options?: UseSessionLineageOptions & {
-    client?: Pick<OpenGeniClient, "getSessionLineage"> | undefined;
-  },
+  options?: UseSessionLineageOptions,
 ): UseSessionLineageResult;
 export function useSessionLineage(
   sessionId: string | null | undefined,
-  options: UseSessionLineageOptions,
+  options: UseSessionLineageOptions<ChatClient>,
 ): UseSessionLineageResult<SessionLineageResponse>;
 export function useSessionLineage(
   sessionId: string | null | undefined,
-  options: UseSessionLineageOptions = {},
+  options: UseSessionLineageOptions<ChatClient> = {},
 ): UseSessionLineageResult<SessionLineageResponse> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionLineage(options);

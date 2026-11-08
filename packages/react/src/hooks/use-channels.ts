@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   Channel,
   CreateChannelRequest,
@@ -11,10 +12,11 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 import { channelCacheFor } from "./channel-cache";
 import { useMutationRunner, usePolledValue } from "./internal";
 
-export type UseChannelsOptions = ClientOverride & {
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-};
+export type UseChannelsOptions<Client extends ChatClient = OpenGeniClient> =
+  ClientOverride<Client> & {
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+  };
 
 export type UseChannelsResult<S extends Session = FullSession> = {
   channels: Channel[];
@@ -37,13 +39,11 @@ export type UseChannelsResult<S extends Session = FullSession> = {
  * ("workstreams") by work type. Pure metadata — filing a session into a
  * channel never affects execution.
  */
+export function useChannels(options?: UseChannelsOptions): UseChannelsResult;
+export function useChannels(options: UseChannelsOptions<ChatClient>): UseChannelsResult<Session>;
 export function useChannels(
-  options?: UseChannelsOptions & {
-    client?: Pick<OpenGeniClient, "updateSessionChannel"> | undefined;
-  },
-): UseChannelsResult;
-export function useChannels(options: UseChannelsOptions): UseChannelsResult<Session>;
-export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult<Session> {
+  options: UseChannelsOptions<ChatClient> = {},
+): UseChannelsResult<Session> {
   const { client, workspaceId } = useOpenGeni(options);
   const cache = useMemo(() => channelCacheFor(client, workspaceId), [client, workspaceId]);
   const snapshot = useSyncExternalStore(cache.subscribe, cache.getSnapshot, cache.getSnapshot);

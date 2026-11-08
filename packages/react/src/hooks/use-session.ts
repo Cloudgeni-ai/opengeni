@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ChatSession as Session,
   Session as FullSession,
@@ -15,13 +16,14 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-export type UseSessionOptions = EmbeddedSessionReadClientOverride &
-  SessionEventFeedOptions & {
-    /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
-    pollIntervalMs?: number | undefined;
-    /** Optional shared causal clock invoked when each network read starts. */
-    beginRead?: (() => number) | undefined;
-  };
+export type UseSessionOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionReadClientOverride<Client> &
+    SessionEventFeedOptions & {
+      /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
+      pollIntervalMs?: number | undefined;
+      /** Optional shared causal clock invoked when each network read starts. */
+      beginRead?: (() => number) | undefined;
+    };
 
 export type UseSessionResult<S extends Session = FullSession> = {
   session: S | null;
@@ -62,17 +64,15 @@ function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
 export function useSession(
   sessionId: string | null | undefined,
-  options?: UseSessionOptions & {
-    client?: Pick<OpenGeniClient, "getSession" | "updateSession"> | undefined;
-  },
+  options?: UseSessionOptions,
 ): UseSessionResult;
 export function useSession(
   sessionId: string | null | undefined,
-  options: UseSessionOptions,
+  options: UseSessionOptions<ChatClient>,
 ): UseSessionResult<Session>;
 export function useSession(
   sessionId: string | null | undefined,
-  options: UseSessionOptions = {},
+  options: UseSessionOptions<ChatClient> = {},
 ): UseSessionResult<Session> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionRead(options);

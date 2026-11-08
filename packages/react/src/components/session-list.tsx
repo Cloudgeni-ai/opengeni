@@ -46,7 +46,7 @@ const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
 /** How long the list offers Undo after archiving; the server accepts it a little longer. */
 const ARCHIVE_UNDO_MS = 10_000;
 
-export type SessionListProps = ClientOverride & {
+export type SessionListProps = ClientOverride<ChatClient> & {
   selectedSessionId?: string | null | undefined;
   onSelect: (sessionId: string) => void;
   /** Shown as a "New chat" button when provided. */

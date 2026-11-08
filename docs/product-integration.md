@@ -41,6 +41,10 @@ to compact responses. For a custom chat, pass `chatClient` to the provider or
 hook. Passing the compact client directly to a hook also selects its compact
 return type; existing default/full hook callers retain the full `Session` type.
 The packaged chat's own clients explicitly opt in.
+Exported structural clients and annotated hook options also default to full
+responses. Custom compact wrappers can write `SessionClientLike<ChatClient>` or
+`UseSessionOptions<ChatClient>` (with `ChatClient` imported from the SDK). The
+embedded adapter preserves the input client's full or compact return contract.
 
 For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
 allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response

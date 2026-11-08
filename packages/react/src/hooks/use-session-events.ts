@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   isPresentedSessionToolCall,
   isRetryableStreamError,
@@ -38,7 +39,7 @@ import { errorMessage } from "@opengeni/contracts/values";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
-export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
+export type UseSessionEventsOptions = EmbeddedSessionClientOverride<ChatClient> & {
   /** Resume after this sequence (exclusive). Nonzero keeps full replay/resume semantics. */
   after?: number | undefined;
   /** Load a bounded tail by default, or opt back into full replay from `after`. */
@@ -218,7 +219,7 @@ export function useSessionEvents(
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   // One navigation witness, not a second history cache. Raw events stay contiguous.
   const [questionEvidence, setQuestionEvidence] = useState<{
-    client: EmbeddedSessionClientLike;
+    client: EmbeddedSessionClientLike<ChatClient>;
     streamKey: string;
     anchor: number;
     events: SessionEvent[];
@@ -2256,7 +2257,7 @@ function observeSessionStatus(
  * Steps are not replayed: a turn's steps load when a reader opens it.
  */
 async function loadConversationCatchup(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   cursor: number,
@@ -2308,7 +2309,7 @@ type LoadedForwardEventWindow = {
 
 async function loadEventWindow(
   t: OpenGeniText,
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   options: {
@@ -2448,7 +2449,7 @@ function isTurnBoundary(event: SessionEvent): boolean {
  */
 async function loadForwardEventWindow(
   t: OpenGeniText,
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   options: {
@@ -2581,7 +2582,7 @@ function historyPage(
 }
 
 async function loadPreviousPage(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   before: number,
@@ -2618,7 +2619,7 @@ async function loadPreviousPage(
 }
 
 async function loadNextPage(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   after: number,
@@ -2992,8 +2993,13 @@ const CONVERSATION_READS: Record<ConversationFilterMode, ConversationRead> = {
  * @internal How the next conversation read of `client` filters. A client
  * without `listEventPage` cannot see the server's announcement.
  */
-export function conversationFilterMode(client: EmbeddedSessionClientLike): ConversationFilterMode {
-  if (typeof (client as EmbeddedSessionClientLike & EventPageClient).listEventPage !== "function") {
+export function conversationFilterMode(
+  client: EmbeddedSessionClientLike<ChatClient>,
+): ConversationFilterMode {
+  if (
+    typeof (client as EmbeddedSessionClientLike<ChatClient> & EventPageClient).listEventPage !==
+    "function"
+  ) {
     return "compat";
   }
   return conversationFilterModes.get(client) ?? "v2";
@@ -3001,7 +3007,7 @@ export function conversationFilterMode(client: EmbeddedSessionClientLike): Conve
 
 /** One conversation page, read the way the server supports. */
 async function readConversationPage(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   options: ConversationReadOptions,
@@ -3301,7 +3307,7 @@ function boundStepStores(
  * call's turn settlement (parallel calls can put many outputs before it).
  */
 async function findPresentedOutput(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   callId: string,
@@ -3349,12 +3355,12 @@ type EventPageClient = {
  * reports whether more rows remain; a compact page's length cannot.
  */
 async function readEventPage(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   options: SessionEventListOptions,
 ): Promise<StepPage> {
-  const pageClient = client as EmbeddedSessionClientLike & EventPageClient;
+  const pageClient = client as EmbeddedSessionClientLike<ChatClient> & EventPageClient;
   if (typeof pageClient.listEventPage === "function") {
     const page = await pageClient.listEventPage(workspaceId, sessionId, options);
     return {

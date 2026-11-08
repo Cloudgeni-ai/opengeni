@@ -46,7 +46,7 @@ export type CreatedConversation = {
   realtimeModel?: SessionRealtimeModel | undefined;
 };
 
-export type UseNewConversationOptions = ClientOverride & {
+export type UseNewConversationOptions = ClientOverride<ChatClient> & {
   createSession?:
     | ((
         initialMessage: string,

@@ -1,9 +1,10 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { McpElicitationAnswer, SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 
-export type UseSessionControlOptions = EmbeddedSessionClientOverride;
+export type UseSessionControlOptions = EmbeddedSessionClientOverride<ChatClient>;
 
 /** How one approval decision reports a refusal. */
 export type ApprovalDecisionOptions = {

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
 import {
   OPENGENI_API_CONTRACT_REVISION,
@@ -39,7 +40,7 @@ type Chat = {
 
 export type RecordedAnswer = Readonly<{ sessionId: string; question: QuestionId }>;
 
-export type RecordedClient = SessionClientLike & {
+export type RecordedClient = SessionClientLike<ChatClient> & {
   /** Ask in an existing chat, as if typed into its composer. */
   ask: (sessionId: string, text: string) => void;
   /** The customer finished connecting a tool: they say so, and the agent goes on. */

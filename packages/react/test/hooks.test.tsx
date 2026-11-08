@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    Rendered-hook tests for the workspace + queue + goal hooks, on the minimal
    happy-dom harness in ./render-hook. All hook tests live in this one file so
@@ -2016,7 +2017,7 @@ describe("useSessionMcpApprovalPolicy", () => {
             effectiveFrom: "next_attempt",
           };
         },
-      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
       const hook = await renderHook(
         (events: SessionEvent[]) =>
           useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2114,7 +2115,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(["write_record"]),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2194,7 +2195,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2241,7 +2242,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       (sessionId: string) =>
         useSessionMcpApprovalPolicy(sessionId, "external_tools", {
@@ -2302,7 +2303,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const nextClient = {
       ...fakeClient({
         getSession: async () =>
@@ -2316,9 +2317,9 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(true),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
-      (client: EmbeddedSessionMcpApprovalPolicyClientLike) =>
+      (client: EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>) =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
           client,
           workspaceId: WORKSPACE_ID,

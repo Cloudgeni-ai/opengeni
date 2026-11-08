@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { Channel } from "@opengeni/sdk";
 import type { SessionClientLike } from "../client";
 
@@ -89,7 +90,10 @@ export function createChannelCacheStore(): ChannelCacheStore {
   };
 }
 
-export function channelCacheFor(client: SessionClientLike, workspaceId: string): ChannelCacheStore {
+export function channelCacheFor(
+  client: SessionClientLike<ChatClient>,
+  workspaceId: string,
+): ChannelCacheStore {
   let byWorkspace = channelCaches.get(client);
   if (!byWorkspace) {
     byWorkspace = new Map();

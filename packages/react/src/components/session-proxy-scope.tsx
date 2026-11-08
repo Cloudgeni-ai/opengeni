@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   formatErrorMessage,
   OpenGeniApiError,
@@ -77,7 +78,7 @@ export function SessionProxyScope({
 }: Omit<SessionProxyBaseUrl, "baseUrl"> & {
   baseUrl: string;
   workspaceId?: string | undefined;
-  client?: SessionClientLike | undefined;
+  client?: SessionClientLike<ChatClient> | undefined;
   children: ReactNode;
 }) {
   const t = useOpenGeniText();
@@ -109,7 +110,7 @@ export function SessionProxyScope({
       }).withSessionResponse("chat"),
     [baseUrl, hasFetch],
   );
-  const client: SessionClientLike = suppliedClient ?? ownClient;
+  const client: SessionClientLike<ChatClient> = suppliedClient ?? ownClient;
   const [state, setState] = useState<ScopeState>(
     workspaceId ? { status: "ready", workspaceId } : { status: "loading" },
   );

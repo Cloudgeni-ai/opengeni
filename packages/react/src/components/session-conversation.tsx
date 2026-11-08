@@ -110,7 +110,7 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
   sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
 });
 
-export type SessionConversationProps = ClientOverride &
+export type SessionConversationProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /**
      * `null` while your server is still creating the session. Render the

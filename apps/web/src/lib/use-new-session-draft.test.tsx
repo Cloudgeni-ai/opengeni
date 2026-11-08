@@ -146,7 +146,7 @@ function DraftsEventHost({
   children: ReactNode;
 }) {
   const value = useMemo(
-    () => ({ workspaceDraftsEvent: props.event }) as unknown as OpenGeniContextValue,
+    () => ({ workspaceDraftsEvent: props.event }) as unknown as OpenGeniContextValue<ChatClient>,
     [props.event],
   );
   return <OpenGeniContext.Provider value={value}>{children}</OpenGeniContext.Provider>;

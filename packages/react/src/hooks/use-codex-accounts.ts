@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useState } from "react";
 import type {
   CodexAccount,
@@ -157,7 +158,7 @@ export type CodexAccountsClientLike = {
   refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: CodexUsageMap }>;
 };
 
-export type UseCodexAccountsOptions = ClientOverride &
+export type UseCodexAccountsOptions = ClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
     /** Scope to a session so the hook resolves the pin + the effective account. */

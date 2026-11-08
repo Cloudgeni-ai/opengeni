@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 // Keeps a parent session's view of its sub-sessions' waits current. The
 // workspace's live session-list hints (the same ones that move the orange dot
 // in the rail, batched by the server) re-read the tree when they name a
@@ -62,7 +63,7 @@ export function useLineagePollInterval(workspaceId: string): {
  * open item re-reads even if the tree read raced the answer.
  */
 export function useDescendantRequestsRefresh(options: {
-  client: EmbeddedSessionEventClientLike;
+  client: EmbeddedSessionEventClientLike<ChatClient>;
   workspaceId: string;
   sessionId: string;
   events: SessionEvent[];

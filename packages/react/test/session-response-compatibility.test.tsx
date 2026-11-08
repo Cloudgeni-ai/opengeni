@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   OpenGeniClient,
   type ChatSession,
+  type ChatClient,
   type Session,
   type SessionLineageResponse,
 } from "@opengeni/sdk";
@@ -12,7 +13,14 @@ import {
   type UseWorkspaceSessionsResult,
 } from "../src/hooks/use-workspace-sessions";
 import { useChannels, type UseChannelsResult } from "../src/hooks/use-channels";
-import { OpenGeniProvider } from "../src/provider";
+import { OpenGeniProvider, type OpenGeniProviderProps } from "../src/provider";
+import { createEmbeddedSessionClient } from "../src/embedded-session-client";
+import type { SessionClientLike, EmbeddedSessionClientLike } from "../src/client";
+import type { UseSessionOptions } from "../src/hooks/use-session";
+import type { UseSessionLineageOptions } from "../src/hooks/use-session-lineage";
+import type { UseWorkspaceSessionsOptions } from "../src/hooks/use-workspace-sessions";
+import type { UseChannelsOptions } from "../src/hooks/use-channels";
+import { useOpenGeni, useOpenGeniClient, type ClientOverride } from "../src/session-context";
 import { SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { registerDom, renderHook, flush } from "./render-hook";
 
@@ -119,4 +127,65 @@ function publicHookTypes(full: OpenGeniClient) {
 
 test("public hook response contracts are checked by TypeScript", () => {
   expect(typeof publicHookTypes).toBe("function");
+});
+
+// These wrappers intentionally annotate the exported public aliases rather
+// than relying on inference from a concrete SDK client. They predate compact
+// projections and must continue to compile without source edits.
+function annotatedPublicContracts(
+  options: UseSessionOptions,
+  lineageOptions: UseSessionLineageOptions,
+  channelsOptions: UseChannelsOptions,
+  listOptions: UseWorkspaceSessionsOptions & { projection?: undefined },
+  client: SessionClientLike,
+  embedded: EmbeddedSessionClientLike,
+  sdk: OpenGeniClient,
+  override: ClientOverride,
+  provider: OpenGeniProviderProps,
+) {
+  const detail: Session | null = useSession(SESSION_ID, options).session;
+  const lineage: SessionLineageResponse | null = useSessionLineage(
+    SESSION_ID,
+    lineageOptions,
+  ).lineage;
+  const move: Promise<Session | null> = useChannels(channelsOptions).moveSession(SESSION_ID, null);
+  const list: Session[] = useWorkspaceSessions(listOptions).sessions;
+  const clientRead: Promise<Session> = client.getSession(WORKSPACE_ID, SESSION_ID);
+  const providerRead: Promise<Session> = provider.client.getSession(WORKSPACE_ID, SESSION_ID);
+  const embeddedRead: Promise<Session> = embedded.getSession(WORKSPACE_ID, SESSION_ID);
+  const adapterRead: Promise<Session> = createEmbeddedSessionClient(sdk).getSession(
+    WORKSPACE_ID,
+    SESSION_ID,
+  );
+  const contextRead: Promise<Session> = useOpenGeni(override).client.getSession(
+    WORKSPACE_ID,
+    SESSION_ID,
+  );
+  const contextClientRead: Promise<Session> = useOpenGeniClient(override).getSession(
+    WORKSPACE_ID,
+    SESSION_ID,
+  );
+  const compactOptions: UseSessionOptions<ChatClient> = { client: sdk.withSessionResponse("chat") };
+  const compactDetail: ChatSession | null = useSession(SESSION_ID, compactOptions).session;
+  // @ts-expect-error Explicitly annotated compact options do not promise a full response.
+  const notFull: Session | null = useSession(SESSION_ID, compactOptions).session;
+  return {
+    detail,
+    lineage,
+    move,
+    list,
+    clientRead,
+    providerRead,
+    embeddedRead,
+    adapterRead,
+    contextRead,
+    contextClientRead,
+    compactOptions,
+    compactDetail,
+    notFull,
+  };
+}
+
+test("annotated exported options and clients retain their full response contracts", () => {
+  expect(typeof annotatedPublicContracts).toBe("function");
 });

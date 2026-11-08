@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /**
  * Platform-neutral session realtime: the controller hook, admission rules and
  * the workspace voice-model catalog. Free of DOM components, so web and native
@@ -82,7 +83,7 @@ const REALTIME_LANGUAGE_STORAGE_KEY = "opengeni:realtime-language";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 
-export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike &
+export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike<ChatClient> &
   SessionRealtimeClientLike;
 
 const realtimeLanguageListeners = new Set<() => void>();

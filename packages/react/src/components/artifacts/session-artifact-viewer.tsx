@@ -30,7 +30,7 @@ export type SessionArtifactTarget = Readonly<
 /** Every string the viewer shows, including its Site frame and states. */
 export type SessionArtifactViewerLabels = Partial<ArtifactLabels>;
 
-export type SessionArtifactViewerProps = ClientOverride &
+export type SessionArtifactViewerProps = ClientOverride<ChatClient> &
   Readonly<{
     /** The conversation the artifact belongs to; the proxy only serves its artifacts. */
     sessionId: string;
