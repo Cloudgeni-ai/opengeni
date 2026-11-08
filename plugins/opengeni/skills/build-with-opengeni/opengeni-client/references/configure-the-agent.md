@@ -90,8 +90,10 @@ await og.client.updateSessionAgent(workspaceId, sessionId, {
 ## Check the result
 
 `session.agent` is the resolved configuration, including `unavailable`
-capabilities. Ordinary chat reads omit instructions, Skill bodies and the full
-tool catalog. For an authorized settings or backend read, use
+capabilities. The packaged chat UI selects compact responses, which omit
+instructions, Skill bodies and the full tool catalog. SDK defaults retain the
+full response; custom chat clients can select `client.withSessionResponse("chat")`.
+For an authorized settings or backend read, use
 `const configuration = await og.client.getSessionConfiguration(workspaceId, sessionId)`.
 This requires `sessions:control` and access to that session;
 `configuration.effectiveTools?.tools` lists the tools, each with its `capability`.

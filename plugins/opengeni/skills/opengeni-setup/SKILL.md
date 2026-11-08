@@ -116,8 +116,8 @@ substitute one for the other.
 Verify in the embedded chat: at least one read tool actually called with the
 right user's data and a useful result, and a write that asks for approval
 first. An authorized backend `getSessionConfiguration(workspaceId, sessionId)`
-read returns `effectiveTools`, the catalog of what the agent can use. Ordinary
-chat reads omit that catalog. Never approve an
+read returns `effectiveTools`, the catalog of what the agent can use. Compact
+chat reads omit that catalog; the default SDK response stays full. Never approve an
 unrequested business mutation as a test.
 
 ## 5. Optional background work, callbacks and budget
