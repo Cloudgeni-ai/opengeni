@@ -39,6 +39,8 @@ export type AcquireCodexRealtimeMicrophoneOptions = {
 export type StartCodexRealtimeWebrtcOptions = {
   /** A caller-owned local offer, consumed once; microphone capture still starts at admission. */
   prepared?: PreparedRealtimeWebrtc | undefined;
+  /** Ring-only transport: leave the audio sender empty until explicit acceptance. */
+  deferMicrophone?: boolean | undefined;
   negotiate: CodexRealtimeNegotiator;
   /** Exact configured provider model expected from the server broker. */
   expectedModel?: CodexRealtimeWebrtcResponse["model"];
@@ -75,13 +77,14 @@ export type StartCodexRealtimeWebrtcOptions = {
 export type CodexRealtimeWebrtcSession = {
   readonly peerConnection: RTCPeerConnection;
   readonly events: RTCDataChannel;
-  readonly media: MediaStream;
+  readonly media: MediaStream | null;
   readonly operationId: string;
   readonly connectionId: string;
   readonly connectionEpoch: number;
   readonly startupFenceSequence: number;
   readonly modeVersion: number;
   microphoneHealthy(): boolean;
+  attachMicrophone?(media: MediaStream): Promise<void>;
   audibleOutputState(): CodexRealtimeAudibleOutputState;
   setOutputMuted(muted: boolean): void;
   activateRemoteAudio(): void;
@@ -218,9 +221,32 @@ export async function startCodexRealtimeWebrtc(
   };
   options.signal?.addEventListener("abort", stop, { once: true });
 
+  const attachMicrophone = async (next: MediaStream) => {
+    throwIfAborted(options.signal);
+    if (stopped) throw new DOMException("Realtime transport closed", "AbortError");
+    const tracks = next.getAudioTracks();
+    if (!microphoneTracksHealthy(tracks)) {
+      throw new CodexRealtimeMicrophoneError(
+        "track_ended",
+        "The microphone audio track is no longer available",
+      );
+    }
+    if (!prepared?.sender) throw new Error("Prepared audio sender is unavailable");
+    await prepared.sender.replaceTrack(tracks[0]!);
+    throwIfAborted(options.signal);
+    media = next;
+    audioTracks = tracks;
+    for (const track of tracks) track.addEventListener?.("ended", onMicrophoneEnded);
+  };
+
   try {
+    if (options.deferMicrophone && (!prepared?.sender || !prepared.sdp)) {
+      throw new Error("Incoming preparation requires a track-free audio offer");
+    }
     const getUserMedia = options.getUserMedia ?? defaultGetUserMedia;
-    if (options.media) {
+    if (options.deferMicrophone) {
+      // Do not acquire a microphone or attach even a silent track while ringing.
+    } else if (options.media) {
       media = options.media;
     } else {
       media = await acquireCodexRealtimeMicrophone({
@@ -230,14 +256,14 @@ export async function startCodexRealtimeWebrtc(
       ownsMedia = true;
     }
     throwIfAborted(options.signal);
-    audioTracks = media.getAudioTracks();
-    if (audioTracks.length === 0) {
+    audioTracks = media?.getAudioTracks() ?? [];
+    if (!options.deferMicrophone && audioTracks.length === 0) {
       throw new CodexRealtimeMicrophoneError(
         "device_not_found",
         "No microphone audio track is available",
       );
     }
-    if (!microphoneTracksHealthy(audioTracks)) {
+    if (!options.deferMicrophone && !microphoneTracksHealthy(audioTracks)) {
       throw new CodexRealtimeMicrophoneError(
         "track_ended",
         "The microphone audio track is no longer available",
@@ -245,13 +271,13 @@ export async function startCodexRealtimeWebrtc(
     }
     for (const track of audioTracks) {
       track.addEventListener?.("ended", onMicrophoneEnded);
-      if (!prepared?.sender) peerConnection.addTrack(track, media);
+      if (!prepared?.sender) peerConnection.addTrack(track, media!);
     }
     let localSdp: string;
     if (prepared?.sender && prepared.sdp) {
       // The sendrecv audio section already exists; replacing its null track
       // does not renegotiate SDP or open the microphone before Answer.
-      await prepared.sender.replaceTrack(audioTracks[0]!);
+      if (!options.deferMicrophone) await prepared.sender.replaceTrack(audioTracks[0]!);
       localSdp = peerConnection.localDescription?.sdp ?? prepared.sdp;
     } else {
       const offer = await peerConnection.createOffer();
@@ -295,13 +321,16 @@ export async function startCodexRealtimeWebrtc(
     return {
       peerConnection,
       events,
-      media,
+      get media() {
+        return media;
+      },
       operationId: options.operationId,
       connectionId: answer.connectionId,
       connectionEpoch: answer.connectionEpoch,
       startupFenceSequence: answer.startupFenceSequence,
       modeVersion: answer.modeVersion,
       microphoneHealthy: () => microphoneTracksHealthy(audioTracks),
+      attachMicrophone,
       audibleOutputState: () => audibleOutput,
       setOutputMuted: (muted) => {
         outputMuted = muted;

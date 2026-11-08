@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
-import { agentCallHostPhones, agentCalls } from "./schema";
+import { agentCallHostPhones, agentCalls, sessionRealtimeModes, sessionRealtimeConnections } from "./schema";
+import { lockSessionEventWriteRows } from "./session-control";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
 // callee's opted-in phones until its deadline; the first answer wins, and a
@@ -306,6 +307,13 @@ export async function settleAgentCall(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scoped) => {
+      const [target] = await scoped.select({ sessionId: agentCalls.sessionId }).from(agentCalls)
+        .where(and(eq(agentCalls.workspaceId, input.workspaceId), eq(agentCalls.id, input.callId))).limit(1);
+      if (!target) return null;
+      // Match realtime promotion's session -> mode -> call lock order.
+      await lockSessionEventWriteRows(scoped, {
+        workspaceId: input.workspaceId, controlLock: "share", sessionIds: [target.sessionId],
+      });
       const conditions = [
         eq(agentCalls.workspaceId, input.workspaceId),
         eq(agentCalls.id, input.callId),
@@ -334,6 +342,20 @@ export async function settleAgentCall(
         })
         .where(and(...conditions))
         .returning();
+      if (row) {
+        const ended = await scoped.update(sessionRealtimeModes).set({
+          state: "ended", endReason: "browser_unload", endedAt: sql`now()`, updatedAt: sql`now()`,
+          version: sql`${sessionRealtimeModes.version} + 1`,
+        }).where(and(
+          eq(sessionRealtimeModes.incomingCallId, row.id), eq(sessionRealtimeModes.state, "preparing"),
+          input.outcome === "answered"
+            ? sql`${sessionRealtimeModes.incomingCallDevice} is distinct from ${row.answeredBy}` : undefined,
+        )).returning({ id: sessionRealtimeModes.id });
+        for (const mode of ended) {
+          await scoped.update(sessionRealtimeConnections).set({ state: "closed", closedAt: sql`now()`, updatedAt: sql`now()` })
+            .where(and(eq(sessionRealtimeConnections.realtimeId, mode.id), sql`${sessionRealtimeConnections.state} in ('negotiating', 'ready', 'active')`));
+        }
+      }
       return row ? mapCall(row) : null;
     },
   );
@@ -350,6 +372,7 @@ export async function claimAnsweredAgentCallForRealtimeInTransaction(
     sessionId: string;
     calleeSubjectId: string;
     realtimeId: string;
+    callId?: string | undefined;
     withinSeconds?: number;
   },
 ): Promise<AgentCallRow | null> {
@@ -362,6 +385,7 @@ export async function claimAnsweredAgentCallForRealtimeInTransaction(
           and session_id = ${input.sessionId}::uuid
           and callee_subject_id = ${input.calleeSubjectId}::text
           and state = 'answered' and realtime_id is null
+          and (${input.callId ?? null}::uuid is null or id = ${input.callId ?? null}::uuid)
           and ended_at > now() - make_interval(secs => ${input.withinSeconds ?? 120}::integer)
         order by ended_at desc limit 1
         for update

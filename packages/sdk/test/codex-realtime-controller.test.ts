@@ -335,6 +335,51 @@ function dispatchProviderMessage(events: RTCDataChannel, payload: string): void 
 }
 
 describe("Codex realtime browser controller", () => {
+  test("incoming provider preconnection sends no microphone or context until acceptance", async () => {
+    const browser = browserFixture();
+    const calls: string[] = [];
+    Object.defineProperty(browser.peer, "addTransceiver", { value: () => ({
+      sender: { replaceTrack: async (track: MediaStreamTrack) => { expect(track).toBe(browser.track as unknown as MediaStreamTrack); calls.push("attach"); } },
+    }) });
+    let current = mode({ state: "preparing", leaseExpiresAt: new Date(Date.now() + 40_000).toISOString() });
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID, sessionId: SESSION_ID,
+      storage: storageFixture(), remoteAudio: browser.remoteAudio,
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => { calls.push("microphone"); return browser.media; },
+      ...noIntervals(),
+      client: {
+        beginSessionRealtime: async (_w, _s, request) => {
+          calls.push(request.incomingCall?.answered ? "accept" : "prepare");
+          current = { ...current, operationId: request.operationId, browserInstanceId: request.browserInstanceId,
+            ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}) };
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          calls.push("provider");
+          return { sdp: ANSWER, version: "v3", model: "gpt-live-1-boulder-alpha", connectionId: CONNECTION_ID,
+            connectionEpoch: 1, startupFenceSequence: 0, modeVersion: 1, replay: false };
+        },
+        activateCodexRealtimeConnection: async () => { calls.push("activate"); return { mode: current, replay: false }; },
+        syncSessionRealtimeLedger: async () => { calls.push("sync"); return { accepted: [], outbound: [], lastSequence: 0 }; },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        endSessionRealtime: async () => ({ mode: { ...current, state: "ended" }, replay: false }),
+      },
+    });
+    const preparing = controller.prepareIncoming!({ callId: "11111111-1111-4111-8111-111111111111", device: "phone" });
+    await eventually(() => browser.calls.includes("setRemoteDescription:answer"), "provider did not connect during ring");
+    expect(calls).toEqual(["prepare", "provider"]);
+    expect(browser.sent).toEqual([]);
+    expect(controller.snapshot().mode?.state).toBe("preparing");
+    expect(browser.calls).not.toContain("audio.play");
+    await controller.start();
+    await preparing;
+    expect(calls).toEqual(expect.arrayContaining(["accept", "microphone", "attach", "activate"]));
+    expect(calls.indexOf("attach")).toBeGreaterThan(calls.indexOf("accept"));
+    expect(controller.snapshot().status).toBe("active");
+    await controller.stop();
+    controller.close();
+  });
   test("ring preparation owns only one local peer and survives an empty lifecycle until disposal", async () => {
     const browser = rotatingBrowserFixture();
     const controller = createCodexRealtimeController({
