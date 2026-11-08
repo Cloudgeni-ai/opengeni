@@ -20,6 +20,8 @@
  * awaited append (the model-request audit at the latest), because fencing is
  * durable and every append checks it.
  */
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
+
 export type TurnEventLane = {
   /** Runs an awaited append after the background receipts issued before it. */
   run<T>(work: () => Promise<T>): Promise<T>;
@@ -59,5 +61,49 @@ export function createTurnEventLane(): TurnEventLane {
         if (last === background) return;
       }
     },
+  };
+}
+
+/** Share the next checkpoint's transaction with observations still queued behind
+ * an earlier append. No timer or extra delay: an idle lane starts immediately. */
+export function createTurnEventPublisher(append: TurnEventPublisher): {
+  publish: TurnEventPublisher;
+  publishInBackground: TurnBackgroundEventPublisher;
+  backgroundSettled: () => Promise<void>;
+  run: TurnEventLane["run"];
+} {
+  const lane = createTurnEventLane();
+  type Batch = { events: Parameters<TurnEventPublisher>[0] };
+  let pending: Batch | null = null;
+  return {
+    run: (work) => {
+      pending = null;
+      return lane.run(work);
+    },
+    publish(events, immediate, mutate, project) {
+      const preceding = pending?.events.splice(0) ?? [];
+      pending = null;
+      return lane.run(() => append([...preceding, ...events], immediate, mutate, project));
+    },
+    publishInBackground(events, options) {
+      // Timed startup receipts retain their own measurement boundary.
+      if (options?.measureDelivery) {
+        pending = null;
+        lane.runInBackground(() => options.measureDelivery!(() => append(events)));
+        return;
+      }
+      if (pending) {
+        pending.events.push(...events);
+        return;
+      }
+      const batch: Batch = { events: [...events] };
+      pending = batch;
+      lane.runInBackground(async () => {
+        if (pending === batch) pending = null;
+        const ready = batch.events.splice(0);
+        if (ready.length) await append(ready);
+      });
+    },
+    backgroundSettled: () => lane.backgroundSettled(),
   };
 }

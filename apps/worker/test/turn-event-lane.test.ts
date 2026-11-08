@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
-import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
+import {
+  createTurnEventLane,
+  createTurnEventPublisher,
+} from "../src/activities/agent-turn/turn-event-lane";
 import {
   publishStartupProgress,
   type TurnBackgroundEventPublisher,
@@ -20,6 +23,62 @@ function gate() {
 const flush = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
+
+describe("checkpoint event transactions", () => {
+  const event = (phase: string) => ({ type: "agent.model.request", payload: { phase } });
+  test("queued observations share the next awaited checkpoint without reordering", async () => {
+    const held = gate();
+    const batches: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      if (batches.length === 1) await held.promise;
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("started")]);
+    await flush();
+    publisher.publishInBackground([event("first_byte")]);
+    publisher.publishInBackground([event("completed")]);
+    const checkpoint = publisher.publish([event("usage")]);
+    publisher.publishInBackground([event("next_started")]);
+    await flush();
+    expect(batches).toEqual([["started"]]);
+    held.release();
+    await checkpoint;
+    await publisher.backgroundSettled();
+    expect(batches).toEqual([["started"], ["first_byte", "completed", "usage"], ["next_started"]]);
+  });
+  test("an idle observation starts without waiting for a later checkpoint", async () => {
+    const batches: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("started")]);
+    await publisher.backgroundSettled();
+    expect(batches).toEqual([["started"]]);
+  });
+  test("timed receipts retain their boundary and cannot be stolen by a later checkpoint", async () => {
+    const batches: string[][] = [];
+    const timed: string[] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("before")]);
+    publisher.publishInBackground([event("timed")], {
+      measureDelivery: async (work) => {
+        timed.push("start");
+        const result = await work();
+        timed.push("end");
+        return result;
+      },
+    });
+    publisher.publishInBackground([event("after")]);
+    await publisher.publish([event("checkpoint")]);
+    expect(batches).toEqual([["before"], ["timed"], ["after", "checkpoint"]]);
+    expect(timed).toEqual(["start", "end"]);
+  });
+});
 
 describe("turn event lane", () => {
   test("a background receipt does not hold up the caller, and the next awaited append follows it", async () => {

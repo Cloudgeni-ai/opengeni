@@ -1072,6 +1072,36 @@ export async function runTurnStreamAttempt(
         await eventing.publish!(events);
       }
     };
+    const fallbackProviderCompletionEvents = (
+      event: Parameters<typeof sdkResponseHasMeaningfulOutput>[0],
+    ): Parameters<TurnEventPublisher>[0] => {
+      if (
+        providerPublishesNativeRequestEvents ||
+        fallbackProviderRequestLifecycleStartedAt === null
+      )
+        return [];
+      return [
+        {
+          type: "agent.model.request",
+          occurredAt: new Date(),
+          payload: {
+            phase: "completed",
+            provider: streamProvider,
+            durationMs: Math.round(
+              Math.max(0, performance.now() - fallbackProviderRequestLifecycleStartedAt),
+            ),
+            turnId: activeTurnId,
+            attemptId: input.attemptId,
+            dispatchId,
+            executionGeneration: attempt.executionGeneration,
+            ...eventing.initialModelWireDispatch.payload({ provider: streamProvider, dispatchId }),
+            ...(subscriptionCoreTurnOf(providerTurn)
+              ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(event) }
+              : {}),
+          },
+        },
+      ];
+    };
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
       enterModelRequestStage("dispatch_checkpoint");
       await checkpointBeforeProviderDispatch();
@@ -1498,6 +1528,7 @@ export async function runTurnStreamAttempt(
           openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
         if (!openingToolLoadInFlight) await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
+        let stableToolHistoryCommitted = false;
         let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
@@ -1511,6 +1542,17 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        let responseLatencyFailure: unknown;
+        try {
+          assertModelResponseLatencyMode({
+            event: next.value,
+            requested: turnExecutionPolicy.latencyMode,
+            model: turnExecutionPolicy.productModelId,
+            ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
+          });
+        } catch (error) {
+          responseLatencyFailure = error;
+        }
         const responseSettlementStartedAt = performance.now();
         const responseResult = await processModelResponseTerminalEvent({
           creditPolicyRevision,
@@ -1543,6 +1585,20 @@ export async function runTurnStreamAttempt(
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
           setLastInputTokens: setLastInputTokensFenced,
+          completionEvents: () => fallbackProviderCompletionEvents(next.value),
+          onCompletionCommitted: () => {
+            fallbackProviderRequestLifecycleStartedAt = null;
+            attempt.providerRecoveryCount = 0;
+          },
+          ...(responseLatencyFailure === undefined
+            ? {
+                checkpoint: (persist) =>
+                  historySink.reconcileConversationTruth({
+                    requireDurable: true,
+                    persist,
+                  }),
+              }
+            : {}),
           contextContributions: eventing.companyBrainContextContributions,
           responseTiming: () => streamTiming.completeResponse(),
           promptCacheRequest: () => {
@@ -1552,12 +1608,7 @@ export async function runTurnStreamAttempt(
           },
           processingResidency: turnProcessingResidency,
         });
-        assertModelResponseLatencyMode({
-          event: next.value,
-          requested: turnExecutionPolicy.latencyMode,
-          model: turnExecutionPolicy.productModelId,
-          ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
-        });
+        if (responseLatencyFailure !== undefined) throw responseLatencyFailure;
         if (responseResult.status === "processed") {
           const responseUsageSettledAt = performance.now();
           recordModelStepPhase(observability, {
@@ -1569,36 +1620,11 @@ export async function runTurnStreamAttempt(
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
           ) {
-            const durationMs = Math.max(
-              0,
-              performance.now() - fallbackProviderRequestLifecycleStartedAt,
-            );
+            // Usage-bearing responses already committed completion with their
+            // response checkpoint. Providers omitting usage retain an audit.
+            if (!responseResult.usageReported)
+              await publishFallbackProviderEvents(fallbackProviderCompletionEvents(next.value));
             fallbackProviderRequestLifecycleStartedAt = null;
-            await publishFallbackProviderEvents([
-              {
-                type: "agent.model.request",
-                occurredAt: new Date(),
-                payload: {
-                  phase: "completed",
-                  provider: streamProvider,
-                  durationMs: Math.round(durationMs),
-                  turnId: activeTurnId,
-                  attemptId: input.attemptId,
-                  dispatchId,
-                  executionGeneration: attempt.executionGeneration,
-                  ...eventing.initialModelWireDispatch.payload({
-                    provider: streamProvider,
-                    dispatchId,
-                  }),
-                  // A core-placed turn reports real work for the shared
-                  // capacity breaker (providers with their own request events
-                  // set it there).
-                  ...(subscriptionCoreTurnOf(providerTurn)
-                    ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) }
-                    : {}),
-                },
-              },
-            ]);
             attempt.providerRecoveryCount = 0;
           }
           if (attempt.providerRecoveryObservation) {
@@ -1916,9 +1942,9 @@ export async function runTurnStreamAttempt(
           const standaloneStableResult =
             !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
           if (currentBatchIsStable || standaloneStableResult) {
-            // First commit the exact result with its output event below.
-            // Then persist the SDK's stable complete batch and retire its
-            // proven receipts together, covering both crash boundaries.
+            // The final output commits the stable SDK history and retires the
+            // complete batch in its existing result/event transaction. Partial
+            // parallel batches retain their individual recovery receipts.
             stableToolCallIdsToClear = currentBatchIsStable
               ? [...currentToolBatchCallIds]
               : [completedToolCall.callId];
@@ -2013,7 +2039,24 @@ export async function runTurnStreamAttempt(
               }
             }
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
-              measureMcpPhase("event_persistence", () => batcher.push(event, checkpoint)),
+              measureMcpPhase("event_persistence", async () => {
+                if (checkpoint && stableToolCallIdsToClear) {
+                  await historySink.reconcileConversationTruth({
+                    requireDurable: true,
+                    completedToolCallIds: stableToolCallIdsToClear,
+                    persist: async (history) => {
+                      await batcher.push(event, async (tx, fence) => {
+                        if (!(await checkpoint(tx, fence))) return false;
+                        return history(tx, fence);
+                      });
+                      return true;
+                    },
+                  });
+                  stableToolHistoryCommitted = true;
+                } else {
+                  await batcher.push(event, checkpoint);
+                }
+              }),
             );
           } else {
             await eventing.batcher.push(event, checkpoint);
@@ -2070,10 +2113,11 @@ export async function runTurnStreamAttempt(
         // duplicate live SDK marker before a long turn accumulates it.
         releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
         if (stableToolCallIdsToClear) {
-          await historySink.reconcileConversationTruth({
-            requireDurable: true,
-            completedToolCallIds: stableToolCallIdsToClear,
-          });
+          if (!stableToolHistoryCommitted)
+            await historySink.reconcileConversationTruth({
+              requireDurable: true,
+              completedToolCallIds: stableToolCallIdsToClear,
+            });
           if (completedCurrentToolBatch) {
             currentToolBatchCallIds = new Set<string>();
             currentToolBatchCompletedCallIds = new Set<string>();
