@@ -155,5 +155,6 @@ export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBr
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

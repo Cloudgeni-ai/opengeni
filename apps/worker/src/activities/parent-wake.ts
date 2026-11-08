@@ -41,6 +41,9 @@ export type ReconcileParentSystemUpdateOverrides = Partial<{
 
 export type ReconcileSessionWorkflowWakeOverrides = Partial<{
   claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
+}>;
+
+export type RepairSessionWorkflowWakeOverrides = Partial<{
   repairPendingChildTerminalResultWakes: typeof repairPendingChildTerminalResultWakes;
   repairMissingQuiescenceReceiptWakes: typeof repairMissingQuiescenceReceiptWakes;
 }>;
@@ -348,17 +351,13 @@ export type WorkflowWakeReconciliationResult = {
  * pending child results on an idle parent, and recovering sessions still
  * owed a physical-quiescence receipt. Registration is idempotent and lock
  * fenced, writes only when it finds a real repair, and never delivers. The
- * dispatcher activity runs it before claiming, and the worker's maintenance
- * cadence runs it before checking for due wakes, so an idle tick needs no
- * workflow execution to keep this repair cadence.
+ * worker runs this on an independent maintenance cadence. Discovery must not
+ * stand between an already committed wake and its delivery.
  */
 export async function repairMissedSessionWorkflowWakes(
   svc: Pick<NotifyServices, "db" | "observability">,
   limit = 100,
-  overrides: Pick<
-    ReconcileSessionWorkflowWakeOverrides,
-    "repairPendingChildTerminalResultWakes" | "repairMissingQuiescenceReceiptWakes"
-  > = {},
+  overrides: RepairSessionWorkflowWakeOverrides = {},
 ): Promise<void> {
   const repairChildren =
     overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
@@ -408,6 +407,7 @@ export async function reconcilePendingSessionWorkflowWakes(
   svc: NotifyServices,
   limit = 1_000,
   overrides: ReconcileSessionWorkflowWakeOverrides = {},
+  onProgress: (stage: "claim_wakes" | "deliver_wakes") => void = () => {},
 ): Promise<WorkflowWakeReconciliationResult> {
   const claimPendingSessionWorkflowWakesFn =
     overrides.claimPendingSessionWorkflowWakes ?? claimPendingSessionWorkflowWakes;
@@ -422,8 +422,9 @@ export async function reconcilePendingSessionWorkflowWakes(
       pendingAdmissionBlockers: {},
     };
   }
-  await repairMissedSessionWorkflowWakes(svc, Math.min(100, limit), overrides);
+  onProgress("claim_wakes");
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
+  onProgress("deliver_wakes");
   let signaled = 0;
   let pendingAdmission = 0;
   let unconfirmed = 0;
@@ -433,6 +434,7 @@ export async function reconcilePendingSessionWorkflowWakes(
   const queue = [...repairs];
   const workers = Array.from({ length: Math.min(20, queue.length) }, async () => {
     for (;;) {
+      onProgress("deliver_wakes");
       const repair = queue.shift();
       if (!repair) return;
       let signalAccepted = false;
@@ -466,11 +468,13 @@ export async function reconcilePendingSessionWorkflowWakes(
           unconfirmed += 1;
         }
       } catch (error) {
+        onProgress("deliver_wakes");
         failed += 1;
         await markSessionWorkflowWakeFailed(svc.db, repair, errorMessage(error)).catch(
           () => undefined,
         );
       }
+      onProgress("deliver_wakes");
     }
   });
   await Promise.all(workers);
