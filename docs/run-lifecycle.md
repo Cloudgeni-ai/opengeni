@@ -143,6 +143,14 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Attempt-private secret-file deletion is best-effort work outside this join:
+after writers drain, deletion starts against every exact backend that received
+files, without resolving the current route or entering workspace capture
+admission. A pending provider deletion cannot hold activity completion or cause
+worker containment; late failures are observed. These attempt-scoped paths live
+outside the workspace and are never read by a successor. Run-credential
+generation/pointer deletion is still mandatory, successor-safe workspace work
+and remains in `credential_cleanup`; it is not detached.
 Host containment intent survives a Temporal finalization exception that masks
 its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
 exception as the cause, and the standalone entry point labels its nonzero exit

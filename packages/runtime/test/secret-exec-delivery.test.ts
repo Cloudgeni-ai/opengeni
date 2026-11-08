@@ -22,6 +22,7 @@ import {
   wrapCapabilityToolsForTurnCancellation,
 } from "../src/sandbox/turn-tool-cancellation";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
+import { withSandboxProviderCapture } from "../src/sandbox/provider-operation-gate";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   SECRET_FILE_ROOT,
@@ -492,6 +493,131 @@ describe("apply_patch and view_image wrappers", () => {
 });
 
 describe("connected-machine secretfile cleanup through the routing session", () => {
+  test("private cleanup does not wait for workspace capture and covers a partial delivery", async () => {
+    const cleared: string[] = [];
+    const machine = {
+      writePlacementPrivate: async () => {
+        throw new Error("partial delivery");
+      },
+      clearSecretFilesForAttempt: async (scope?: string) => {
+        cleared.push(scope!);
+      },
+    };
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: "machine", activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: machine as never,
+        sandboxId: "machine",
+        kind: "selfhosted",
+      }),
+    });
+    await expect(
+      routing.writeSecretFiles("partial-scope", [
+        {
+          path: `${SECRET_FILE_ROOT}/partial-scope/value`,
+          content: new Uint8Array([1]),
+        },
+      ]),
+    ).rejects.toThrow("partial delivery");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const capture = withSandboxProviderCapture(machine, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    const cleanup = routing.clearSecretFilesForAttempt();
+    try {
+      expect(
+        await Promise.race([cleanup.then(() => "done"), Bun.sleep(50).then(() => "blocked")]),
+      ).toBe("done");
+      expect(cleared).toEqual(["partial-scope"]);
+    } finally {
+      release.resolve();
+      await Promise.all([capture, cleanup]);
+    }
+  });
+
+  test("cleanup stays on every original recipient without waiting for route recovery", async () => {
+    const cleared: string[] = [];
+    const blockedRoute = Promise.withResolvers<void>();
+    let ended = false;
+    let route = "first";
+    let reads = 0;
+    const machines = Object.fromEntries(
+      ["first", "second"].map((name) => [
+        name,
+        {
+          exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+          clearSecretFilesForAttempt: async (scope?: string) => {
+            cleared.push(`${name}:${scope}`);
+          },
+        },
+      ]),
+    );
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => {
+        reads += 1;
+        if (ended) await blockedRoute.promise;
+        return { activeSandboxId: route, activeEpoch: route === "first" ? 0 : 1 };
+      },
+      resolveActiveBackend: async () => ({
+        session: machines[route] as never,
+        sandboxId: route,
+        kind: "selfhosted",
+      }),
+    });
+    const prepared = (await prepareSecretExec("cat {{secretfile:Plain}}", {
+      resolver: createStaticSecretResolver(VALUES),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    }))!;
+    for (const name of ["first", "second"]) {
+      route = name;
+      await runWithSecretCarry(prepared.carry, () => routing.execCommand({ cmd: prepared.text }));
+    }
+    ended = true;
+    const readsBeforeCleanup = reads;
+    const cleanup = routing.clearSecretFilesForAttempt();
+    try {
+      expect(
+        await Promise.race([cleanup.then(() => "done"), Bun.sleep(50).then(() => "blocked")]),
+      ).toBe("done");
+      expect(reads).toBe(readsBeforeCleanup);
+      expect(cleared.sort()).toEqual([
+        `first:${prepared.carry.scope}`,
+        `second:${prepared.carry.scope}`,
+      ]);
+      await routing.clearSecretFilesForAttempt();
+      expect(cleared).toHaveLength(2);
+    } finally {
+      blockedRoute.resolve();
+      await cleanup;
+    }
+  });
+
+  test("an unavailable cleanup target does not prevent other recipients from being cleaned", async () => {
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: createStaticSecretResolver(VALUES),
+    });
+    const pending = Promise.withResolvers<void>();
+    let cleared = false;
+    controller.wrapTools([], { clearSecretFilesForAttempt: () => pending.promise });
+    controller.wrapTools([], {
+      clearSecretFilesForAttempt: async () => {
+        cleared = true;
+      },
+    });
+    const cleanup = controller.clearSecretFiles!();
+    try {
+      await Bun.sleep(0);
+      expect(cleared).toBe(true);
+    } finally {
+      pending.resolve();
+      await cleanup;
+    }
+  });
+
   test("a selfhosted secretfile scope is remembered and cleared by the backend natively", async () => {
     const execs: string[] = [];
     const cleared: Array<string | undefined> = [];
