@@ -97,3 +97,37 @@ offer with zero microphone tracks in 70.4 ms, then connected the data channel
 provider latency or physical iOS/Android audio. Production after timings require
 the merged server and mobile release; do not substitute loopback timings for
 answer-to-audible measurements on a phone.
+
+### Real-provider controls
+
+Bounded Chromium tests through the real broker used a fresh idle chat, the
+unchanged rendered opening, and a synthetic silent microphone (no spoken user
+input before the opening). The provider returned audio over RTP; it did not emit
+`response.created` or `output_audio.delta` on this WebRTC data channel. First
+decoded nonzero RTP audio energy, sampled every 50 ms, is the observable onset,
+not a physical speaker measurement.
+
+| Control | Append receipt | Append to first decoded audio |
+| --- | ---: | ---: |
+| Track attached before creating SDP | 69.5 ms | 1120.4 ms |
+| Prepared null-track SDP, replaceTrack **before** provider negotiation | 65.7 ms | 1041.6 ms |
+| Same prepared-offer path, followed by a known microphone phrase | 70.4 ms | 1042.5 ms |
+
+The last control also emitted `input_transcript.added` 1761.5 ms after the
+synthetic phrase began, with 1070 outbound and 874 inbound audio RTP packets.
+Thus local preparation and subsequent microphone attachment before negotiation
+work in both directions with this provider, not just browser loopback. The
+provider-creation-to-data-channel gap was 201–284 ms in these controls.
+
+A different experiment created the provider connection **before** attaching any
+track and held it for 20 seconds. It emitted no speech during the hold. Attaching
+a silent track afterward and sending the same opening produced a 71.4 ms append
+receipt but no audio within 16 seconds. This does not establish a supported
+held-call release contract. Do not equate that speculative path with the tested
+local-only preparation above, or ship it on the strength of loopback tests.
+
+These controls show that an opening append can trigger speech without spoken
+user input; they do not explain every historical long-history call or establish
+a latency percentile. The observed 1.04–1.12 second post-append delay is outside
+the catalog, admission and initial provider-creation chain. No new response
+trigger or model-visible text is introduced by this change.
