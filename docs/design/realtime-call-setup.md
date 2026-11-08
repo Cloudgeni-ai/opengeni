@@ -104,7 +104,11 @@ A subsequent real-provider experiment attached an entirely generated zero-gain
 audio track before negotiation, held the connection for 20,001 ms, and replaced
 that track at the simulated Answer. It did not acquire a hardware microphone.
 No opening/context append was sent during the hold; the remote track was disabled.
-No response, input transcript, or output audio was observed during the hold.
+No turn, input transcript, or output transcript event arrived during the hold;
+only session-start and usage events arrived. This WebRTC protocol emits neither
+response.created nor output_audio.delta even when speaking, so their absence is
+not the proof. The remote-track gate prevented playback independently; it does
+not by itself prove the provider emitted no audio RTP packets.
 
 After Answer, the unchanged opening append was sent in 12 ms and acknowledged
 105.5 ms later. The first output transcript arrived 1,030 ms after the append;
