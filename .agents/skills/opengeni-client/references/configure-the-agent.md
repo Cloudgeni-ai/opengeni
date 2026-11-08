@@ -90,8 +90,13 @@ await og.client.updateSessionAgent(workspaceId, sessionId, {
 ## Check the result
 
 `session.agent` is the resolved configuration, including `unavailable`
-capabilities. `session.effectiveTools.tools` lists every tool the agent can
-use, each with its `capability`. Errors: 422 `agent_capability_unavailable`
+capabilities. Ordinary chat reads omit instructions, Skill bodies and the full
+tool catalog. For an authorized settings or backend read, use
+`const configuration = await og.client.getSessionConfiguration(workspaceId, sessionId)`.
+This requires `sessions:control` and access to that session;
+`configuration.effectiveTools?.tools` lists the tools, each with its `capability`.
+Server-owned browser relays refuse this read; keep it on the backend.
+Errors: 422 `agent_capability_unavailable`
 (the deployment does not offer it), `agent_config_conflict` (contradictory
 fields), and `agent_config_widening` (a child session asked for more than its
 parent).
