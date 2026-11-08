@@ -98,6 +98,7 @@ const liveConnectionClaims = new Map<string, string>();
 
 import { mock } from "bun:test";
 mock.module("@opengeni/db", () => ({
+  recordEnrollmentExpiredCredentials: async () => undefined,
   getEnrollment: async (_db: unknown, workspaceId: string, enrollmentId: string) => {
     const credentialGeneration = activeEnrollments.get(`${workspaceId}:${enrollmentId}`);
     if (credentialGeneration !== undefined) {
@@ -413,6 +414,45 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       await controlPlane.close();
     }
   }, 30_000);
+
+  test("a request spanning login expiry keeps its original socket; expired reconnect is denied", async () => {
+    const expires = Math.floor(Date.now() / 1000) + 3;
+    const bearer = await bearerFor(WS_A, AGENT_A, 1, expires);
+    const agent = await connect({
+      servers: nats.url,
+      token: bearer,
+      name: connectionName(INSTANCE_A),
+      reconnect: false,
+    });
+    const control = await connect({ servers: nats.url, user: "control", pass: "control" });
+    const socket = agent.info?.client_id;
+    try {
+      const subject = `agent.${WS_A}.${AGENT_A}.connection.${INSTANCE_A}.rpc`;
+      const sub = agent.subscribe(subject, { max: 1 });
+      await agent.flush();
+      const serving = (async () => {
+        for await (const message of sub) {
+          await Bun.sleep(Math.max(0, expires * 1000 - Date.now()) + 1_250);
+          message.respond(new TextEncoder().encode("completed-on-original-socket"));
+        }
+      })();
+      const reply = await control.request(subject, new Uint8Array(), { timeout: 6_000 });
+      await serving;
+      expect(new TextDecoder().decode(reply.data)).toBe("completed-on-original-socket");
+      expect(agent.isClosed()).toBe(false);
+      expect(agent.info?.client_id).toBe(socket);
+      await expect(
+        connect({
+          servers: nats.url,
+          token: bearer,
+          name: connectionName(INSTANCE_A),
+          reconnect: false,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await Promise.all([agent.close(), control.close()]);
+    }
+  }, 10_000);
 
   // (2) ISOLATION SMOKE — the load-bearing assertion: an agent authenticated for
   //     workspace A is DENIED publish AND subscribe on workspace B's subtree.

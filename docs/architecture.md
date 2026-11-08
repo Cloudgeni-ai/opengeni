@@ -152,6 +152,12 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+Connected Machine login-credential expiry is an admission check, not a timer on
+an authenticated socket. Exact runner leases fence routing and event ingestion;
+token renewal updates future dials in place. The native supervisor owns and closes
+each generation's control and bulk socket tasks independently of retained work.
+See [Connected Machines](connected-machines.md#control-transport-recovery).
+
 API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group
 for machine heartbeat/event and Hello persistence. One member handles each
 delivery; other machine-event subscribers remain broadcast. Queue delivery is

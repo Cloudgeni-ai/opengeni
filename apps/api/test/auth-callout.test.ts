@@ -96,11 +96,8 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
-const {
-  AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS,
-  handleAuthorizationRequest,
-  NATS_USER_JWT_TTL_SECONDS,
-} = await import("../src/sandbox/auth-callout");
+const { AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS, handleAuthorizationRequest } =
+  await import("../src/sandbox/auth-callout");
 
 const account = nkeys.createAccount();
 const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
@@ -172,9 +169,8 @@ describe("handleAuthorizationRequest", () => {
     expect(userClaims.nats.pub.allow).toEqual([scope, "_INBOX.>"]);
     expect(userClaims.nats.sub.allow).toEqual([scope]);
     expect(userClaims.aud).toBe("APP");
-    const now = Math.floor(Date.now() / 1000);
-    expect(userClaims.exp).toBeGreaterThan(now);
-    expect(userClaims.exp).toBeLessThanOrEqual(now + NATS_USER_JWT_TTL_SECONDS);
+    // A login deadline must not become a timer that severs accepted work.
+    expect(userClaims.exp).toBeUndefined();
   });
 
   test("a MISSING bearer is denied", async () => {
@@ -342,7 +338,7 @@ describe("handleAuthorizationRequest", () => {
     expect(denied.error).toMatch(/another runner/i);
   });
 
-  test("the user JWT never outlives a sooner bearer expiration", async () => {
+  test("a soon-expiring login bearer does not schedule a live socket disconnect", async () => {
     const bearerExp = Math.floor(Date.now() / 1000) + 30;
     const bearer = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
@@ -356,7 +352,7 @@ describe("handleAuthorizationRequest", () => {
     const userClaims = JSON.parse(
       Buffer.from(res.userJwt!.split(".")[1]!, "base64url").toString("utf8"),
     );
-    expect(userClaims.exp).toBe(bearerExp);
+    expect(userClaims.exp).toBeUndefined();
   });
 
   test("a denial response is still a SIGNED, server-addressed auth response", async () => {

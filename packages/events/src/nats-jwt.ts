@@ -163,8 +163,8 @@ function encodeJwt(claims: Record<string, unknown>, signingKey: AccountSigner): 
  *   - `name` — a human label for the user (the agent id), for server logs.
  *   - `permissions` — the pub/sub allow/deny lists (the workspace scope).
  *   - `expiresAtSeconds` — optional absolute `exp` (unix seconds). When set the
- *     server will expire the connection's credential; we tie it to the bearer's
- *     remaining life so a revoked/expired enrollment cannot outlive its bearer.
+ *     server disconnects the live socket at that time. Enrollment auth-callout
+ *     deliberately omits it: login expiry bounds admission, not accepted work.
  */
 export interface MintUserJwtInput {
   userPublicKey: string;

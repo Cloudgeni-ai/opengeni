@@ -25,8 +25,9 @@
 // SECURITY (§18): the bearer value + the account signing seed are NEVER logged. A
 // validation failure → a DENIAL response (the server refuses the connection); a
 // responder error → the request is left UNANSWERED (fail-closed; the server denies
-// on its callout timeout). The bearer's `exp` caps the minted credential's life so a
-// revoked/expired enrollment cannot outlive its bearer.
+// on its callout timeout). Bearer expiry bounds admission, not an established
+// socket. Live authority is the active enrollment and exact runner lease; revoked
+// or superseded runners cannot receive work or renew that lease.
 
 import { createHash } from "node:crypto";
 import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
@@ -57,8 +58,6 @@ import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
-/** Keep live NATS credentials short-lived while never outliving the bearer. */
-export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
 export interface AuthCalloutDeps {
   db: Database;
   settings: Settings;
@@ -274,14 +273,13 @@ export async function handleAuthorizationRequest(
   }
 
   // GRANT: the operational subject includes the exact claimed process instance.
-  // A previous socket may remain open until its short JWT expires, but no control
-  // request is routed to its old subject after a successor claims authority.
+  // No control request is routed to an old subject after a successor claims
+  // authority. Socket expiry is not the authority or revocation boundary.
   const permissions = workspaceAgentPermissions(
     claims.workspaceId,
     claims.agentId,
     connectionInstanceId,
   );
-  const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
@@ -292,9 +290,8 @@ export async function handleAuthorizationRequest(
     // the privileged control plane share this account so subjects route; the
     // per-workspace isolation is carried by the subject permissions above.
     audienceAccount: deps.callout.accountName,
-    // Tie the credential's life to the bearer's remaining life: a revoked/expired
-    // enrollment cannot outlive its bearer at the NATS layer either.
-    expiresAtSeconds: Math.min(claims.exp, nowSeconds + NATS_USER_JWT_TTL_SECONDS),
+    // NATS exp disconnects the live socket; it is not a renewable login token.
+    // Authenticate on every dial, but never schedule a healthy transport outage.
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,
