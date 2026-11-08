@@ -871,6 +871,12 @@ retention and consumer-generation acknowledgments remain engine-owned.
 Attempt-owned `run_on` commands use the same bounded observation and durable
 session-command adoption as attached exec. A running receipt transfers custody
 before the API returns; HTTP disconnection never requests a process stop.
+After a Connected Machine command's foreground consumer ends without terminal
+proof, turn cleanup retries durable stop-request adoption using the original
+enrollment, connection and operation. Cancellation and observation cannot block
+that independent handoff. Only committed ledger custody or terminal proof
+releases the writer; a failed handoff keeps it joined. Cleanup never replays the
+command, changes its route, or acknowledges retained output.
 They gain no duration limit. Unix streamed commands remain eligible
 for update handover; browser-controller holds have their own progress reason.
 The same admission proof produces bounded category/count update-blocker
