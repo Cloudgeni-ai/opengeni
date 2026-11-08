@@ -64,6 +64,14 @@ External workspace routes resolve their organization-local mapping before native
 workspace authorization. All native-workspace HTTP middleware shares the same
 route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
+Bounded HTTP reads reuse successful workspace admission within the exact
+Request and database handle; each caller still checks its own permission.
+Session GETs also reuse the existing request-local authority-fact reader, not
+host authorization decisions. Writes and long-lived stream reauthorization
+read fresh authority. Established external identities use the shared membership
+fence and read-only lookup activated by migration 1343; first use keeps the
+exclusive provisioning path. Client configuration shares its catalog metadata
+and voice-readiness projections within the call, never across requests.
 Visibility differs from `agentAccess`; Personal Knowledge follows the verified
 active-turn user. Links never merge users.
 [Product integration](product-integration.md),

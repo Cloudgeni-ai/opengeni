@@ -493,7 +493,10 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
   // The exact provider set the catalog route reads. A disabled Claude
@@ -516,9 +519,10 @@ export async function loadWorkspaceModelSelectionInput(
       providerKinds,
       organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
     });
-  const sharedCatalogRead =
-    typeof db.transaction === "function" &&
-    typeof (db as Database & { rollback?: unknown }).rollback !== "function"
+  const sharedCatalogRead = options.catalogInputs
+    ? Promise.resolve(options.catalogInputs)
+    : typeof db.transaction === "function" &&
+        typeof (db as Database & { rollback?: unknown }).rollback !== "function"
       ? readCatalog()
       : undefined;
   // The catalog batch still owns this failure. An unavailable shared read
@@ -631,11 +635,15 @@ export async function resolveCallerWorkspaceModelSelections(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelection[]> {
   return resolveWorkspaceModelSelection(
     await loadWorkspaceModelSelectionInput(db, settings, context, {
       observeAvailability: options.observeAvailability === true,
+      ...(options.catalogInputs ? { catalogInputs: options.catalogInputs } : {}),
     }),
   );
 }

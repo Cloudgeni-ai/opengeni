@@ -66,6 +66,7 @@ import {
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   codeSearchDeploymentPolicy,
+  CLAUDE_CONNECTION_KINDS,
   agentConfigDeploymentPolicy,
   azureOpenAIDeploymentIdentityAvailable,
   canonicalPublicOrigin,
@@ -124,7 +125,8 @@ import {
   setConnectAttemptTransitionObserver,
   dbSql,
   getManagedAuthSessionSetSnapshot,
-  getWorkspace,
+  getWorkspaceSettings,
+  loadWorkspaceModelCatalogInputs,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionAdminAuthority,
@@ -1670,17 +1672,41 @@ export function createAppComposition(
       if (context && workspaceId) {
         const grant = await requireAccessGrant(c, routeDeps, workspaceId);
         await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+          // Catalog overlay and picker project the same live metadata, not two
+          // separately loaded copies. Subscription/provider liveness stays fresh.
+          const catalogInputs = await loadWorkspaceModelCatalogInputs(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKinds: [
+              "vercel_gateway",
+              "openrouter",
+              "opper",
+              ...CLAUDE_CONNECTION_KINDS.filter(
+                (kind) => kind !== "claude_subscription" || deps.settings.claudeSubscriptionEnabled,
+              ),
+            ],
+            organizationProviderKinds: [
+              "vercel_gateway",
+              "openrouter",
+              "opper",
+              "openai",
+              "azure_openai",
+              ...CLAUDE_CONNECTION_KINDS,
+            ],
+          });
           catalogSettings = (
             await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
               accountId: grant.accountId,
               workspaceId,
+              catalogInputs,
+              deploymentCatalog: resolvedCatalog,
             })
           ).settings;
           selections = await resolveCallerWorkspaceModelSelections(
             deps.db,
             catalogSettings,
             { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-            { observeAvailability: true },
+            { observeAvailability: true, catalogInputs },
           );
           const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
           if (connectedSubscriptionsRefusedForOrigin(deps.settings, billingOrigin)) {
@@ -1699,9 +1725,9 @@ export function createAppComposition(
               settings: catalogSettings,
             })
           ).requiredModelGeography;
-          const workspace = await getWorkspace(deps.db, workspaceId);
+          const workspaceSettings = await getWorkspaceSettings(deps.db, workspaceId);
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
-            workspace?.settings.voiceInput,
+            workspaceSettings?.voiceInput,
           ).data;
           const voiceContext = {
             accountId: grant.accountId,
@@ -1714,17 +1740,25 @@ export function createAppComposition(
             // `providers` lists every ready provider (the workspace picker);
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.
-            voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
-            voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
-            voiceInputAvailable =
-              voiceInputProviders.length > 0 &&
-              (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+            if (transcription.availability) {
+              const voice = await transcription.availability(voiceContext);
+              voiceInputProviders = voice.providers;
+              voiceInputModels = voice.models;
+              voiceInputAvailable = voice.providers.length > 0 && voice.available;
+            } else {
+              voiceInputProviders =
+                (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+              voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
+              voiceInputAvailable =
+                voiceInputProviders.length > 0 &&
+                (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+            }
           }
 
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
             accountId: grant.accountId,
-            workspaceSettings: workspace?.settings ?? {},
+            workspaceSettings: workspaceSettings ?? {},
             selections,
             billingOrigin,
           });
