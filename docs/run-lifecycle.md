@@ -4999,6 +4999,21 @@ interruptions so a live Pause/Steer still reaches settlement. The workflow
 records a monotonic signal version before its final activity chain and refuses to
 return when a signal arrived during that chain, closing the completion race.
 
+Committed wake delivery is independent of recovery discovery, pause timers, and
+automatic-title migration fanout. Discovery and ancillary producers have their
+own maintenance cadence/execution; neither must finish before due user wakes
+are signaled. Both cadences retain their ten-second period. The dispatcher
+activity heartbeats actual progress (service resolution, claim, and completed
+deliveries), not a liveness timer. Fifteen seconds without progress permits a
+durable activity retry, with one-second initial and thirty-second maximum retry
+backoff, rather than failing the singleton after its five-minute execution
+ceiling. A cancelled attempt checks cancellation before doing further work;
+duplicate signals remain safe because admission and acknowledgment are revision
+fenced. Signals received during retry coalesce into another sweep, and an
+outstanding signal at the history bound continues as a new execution instead of
+waiting for a later maintenance tick. A provider or database outage can still
+prevent delivery; this recovery contract does not claim to remove that outage.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so terminal settlement of

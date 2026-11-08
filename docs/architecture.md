@@ -419,6 +419,12 @@ Recoverable shutdown transactionally creates a Postgres workflow wake that
 stays unacknowledged until closed-attempt quiescence, so close/exit races cannot
 orphan recovery.
 
+Committed session wakes drain independently of recovery discovery, pause timers,
+and title migration fanout. The dispatcher heartbeats actual delivery progress
+and retries stalled attempts durably; ancillary producers use a separate
+maintenance execution. The unchanged ten-second delivery cadence recovers a
+producer that exits after commit but before signaling. See [run-lifecycle.md](run-lifecycle.md).
+
 A command stays attempt-owned until durable exact-provider-identity adoption.
 The reaper recovers missed adoption for closed legacy Modal commands under its
 exact claim. Original identity, output and unknown outcome remain intact;

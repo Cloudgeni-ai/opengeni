@@ -2882,6 +2882,170 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "workflow-wake dispatcher retries a silent attempt and retains signals without another sweep",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      let dispatches = 0;
+      let releaseStalled!: () => void;
+      const stalled = new Promise<void>((resolve) => {
+        releaseStalled = resolve;
+      });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchSessionWorkflowWakes: async () => {
+          dispatches += 1;
+          if (dispatches === 1) await stalled;
+          return expected;
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId: `wake-dispatch-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await waitFor(() => dispatches === 1, { timeoutMs: 10_000 });
+        // These signals must survive the activity timeout. No maintenance tick
+        // or new producer is available to restart the workflow after failure.
+        await Promise.all(Array.from({ length: 31 }, () => handle.signal("dispatchRequested")));
+        await resultWithin(handle, 45_000);
+        expect(await handle.result()).toEqual(expected);
+        expect(dispatches).toBe(3); // stalled attempt, retry, coalesced new requests
+        const history = await handle.fetchHistory();
+        expect(history.events?.some((event) => event.workflowExecutionFailedEventAttributes)).toBe(
+          false,
+        );
+        const started = history.events?.filter((event) => event.activityTaskStartedEventAttributes);
+        expect(
+          started?.some((event) => event.activityTaskStartedEventAttributes?.attempt === 2),
+        ).toBe(true);
+      } finally {
+        releaseStalled();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher does not wait for blocked ancillary maintenance",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      let maintenanceStarted = false;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        maintainSessionWorkflowWakes: async () => {
+          maintenanceStarted = true;
+          await blocked;
+        },
+        dispatchSessionWorkflowWakes: async () => expected,
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const maintenance = await client.workflow.start("sessionWorkflowWakeMaintenanceWorkflow", {
+          taskQueue,
+          workflowId: `wake-maintenance-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await waitFor(() => maintenanceStarted, { timeoutMs: 10_000 });
+        const dispatch = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId: `wake-dispatch-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await resultWithin(dispatch, 10_000);
+        expect(await dispatch.result()).toEqual(expected);
+        expect((await maintenance.describe()).status.name).toBe("RUNNING");
+        release();
+        await maintenance.result();
+      } finally {
+        release();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher carries a pending request across its history bound",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const workflowId = `wake-dispatch-${crypto.randomUUID()}`;
+      const client = new Client({ connection });
+      let dispatches = 0;
+      const expected = {
+        claimed: 0,
+        signaled: 0,
+        delivered: 0,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchSessionWorkflowWakes: async () => {
+          dispatches += 1;
+          if (dispatches <= 50)
+            await client.workflow.getHandle(workflowId).signal("dispatchRequested");
+          return expected;
+        },
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [],
+        });
+        await resultWithin(handle, 30_000);
+        expect(await handle.result()).toEqual(expected);
+        expect(dispatches).toBe(51);
+        const history = await client.workflow
+          .getHandle(workflowId, handle.firstExecutionRunId)
+          .fetchHistory();
+        expect(
+          history.events?.some((event) => event.workflowExecutionContinuedAsNewEventAttributes),
+        ).toBe(true);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "scheduled task fire workflow delegates reusable delivery to the activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
