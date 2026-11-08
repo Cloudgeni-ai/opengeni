@@ -129,6 +129,48 @@ must remain unshipped until a genuinely generated silent-input path works on bot
 native platforms and its answer, timeout, cancellation and ownership cleanup are
 verified. Local SDP preparation remains independent of that prerequisite.
 
+### Null-track hold bisection
+
+To distinguish track delivery from provider response behavior, seven fresh calls
+tested a null sender during connection establishment, then attached the same
+generated audio source at simulated Answer. The unchanged opening append was
+followed by a known spoken phrase ten seconds later. RTP statistics were sampled
+every 50 ms; a zero-second hold means attachment immediately after activation,
+not before negotiation. Each completed diagnostic call was ended and archived.
+
+| Null-track hold | Attach to first outbound RTP | Opening to first decoded audio, before user phrase | Phrase to input transcript |
+| --- | ---: | --- | ---: |
+| 0 seconds | 54 ms | 1253 ms | 1592 ms |
+| 2 seconds | 33 ms | None in 10 seconds | 1309 ms |
+| 5 seconds | 108 ms | None in 10 seconds | 1360 ms |
+| 10 seconds | 90 ms | None in 10 seconds | 1608 ms |
+| 20 seconds | 117 ms | None in 10 seconds | 1514 ms |
+| 20 seconds; wait for RTP before append | 96 ms | None in 10 seconds | 1445 ms |
+
+Every non-rotation opening was acknowledged in 52–93 ms. All nonzero-hold,
+non-rotation calls started a turn only after the spoken phrase and then produced
+audio. The RTP-gated variant waited
+for six outbound packets plus another 200 ms before appending; this did not restore
+the opening. A previous equivalent seven-packet experiment had the same outcome.
+No turn or input/output transcript appeared during any hold, and outbound packet
+counts remained zero until attachment.
+
+The late microphone is therefore not broken: every non-rotation sample transmitted
+the known phrase successfully. The observed change in autonomous opening behavior
+lies between zero and two seconds without early RTP; this is an experimental bound,
+not an established provider timeout or a documented protocol guarantee. The
+generated-silence hold above avoids it, but has no existing cross-platform native
+implementation. A full 20–30 second null-track ringing gate is not supported by
+these results, so provider preconnection remains unshipped.
+
+The broker and upstream Codex client expose call creation, not an existing-call
+SDP-update operation. As a separate control, a fresh offer after a 20-second hold
+was submitted through supported rotation. Creating that replacement provider call
+took another 2338 ms after Answer. Reusing the peer in that experiment produced no
+append acknowledgment, audio or input transcript. It is neither proof of in-place
+renegotiation support nor a latency solution; production rotation uses a separate
+replacement transport. No new model event, instruction or rendered text was added.
+
 ### Real-provider controls
 
 Bounded Chromium tests through the real broker used a fresh idle chat, the
