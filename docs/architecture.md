@@ -260,6 +260,11 @@ Raw-isolation rollback:
 validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
+Turn finalization joins physical writers and mandatory run-credential pointer
+cleanup, but not best-effort deletion of attempt-private secret files outside
+the workspace. That deletion uses the original recipient sessions, never route
+resolution or workspace capture admission; provider unavailability cannot keep
+an otherwise finished turn or its worker alive. See [run lifecycle](run-lifecycle.md).
 Connection-use validation follows that lifecycle order with shared read fences
 and the existing fair workspace-control queue; independent validations do not
 exclusively lock each other, while lifecycle changes still exclude validation.

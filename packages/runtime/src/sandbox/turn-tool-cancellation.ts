@@ -1243,15 +1243,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   async clearSecretFiles(): Promise<void> {
-    let failure: unknown = null;
-    for (const session of this.secretFileSessions) {
-      try {
-        await session.clearSecretFilesForAttempt!();
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    if (failure !== null) throw failure;
+    const sessions = [...this.secretFileSessions];
+    this.secretFileSessions.clear();
+    // One unavailable backend must not prevent cleanup on the others. Observe
+    // every rejection even when another provider never answers.
+    await Promise.all(sessions.map(async (session) => await session.clearSecretFilesForAttempt!()));
   }
 
   runSandboxCommand(
