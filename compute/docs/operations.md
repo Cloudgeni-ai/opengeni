@@ -1023,6 +1023,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `observability.prometheusRule.enabled`), scoping each host to its
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
+- **Distinguish booking headroom from filesystem space.**
+  `compute_fleet_host_disk_free_bytes` is what more wakes may book after
+  subtracting worst-case sandbox growth and the host's reserve from available
+  space, not the filesystem's free bytes. Placement also counts
+  `compute_fleet_host_disk_reclaimable_bytes`: saved idle copies and unused
+  caches it can safely release. Both remain useful capacity diagnostics.
+  A small unbooked fraction on one host does not prove a full filesystem or
+  failed fleet placement, so it does not alert by itself.
+  `OpenGeniComputeNoCapacity` still alerts on sustained actual fleet refusals;
+  host alarms and unhealthy-sandbox alerts remain. For physical disk exhaustion,
+  monitor the state volume and its backing filesystem with the host's filesystem
+  monitor, not a ratio of booking headroom to total capacity.
 - **Run a collector next to each host.** Pass `--otlp-endpoint
   http://127.0.0.1:4318` to send events as OTLP log records and metrics
   every ten seconds (`--otlp-metrics-every`); add `--otlp-header

@@ -162,21 +162,6 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} failing'
             user_impact: 'Some sandbox commands, file operations or wakes fail.'
             next_step: 'Check compute_control_requests_total by route and outcome, and the replicas'' logs.'
-        - alert: OpenGeniComputeHostDiskLow
-          expr: |
-            max by (host_name) (compute_fleet_host_disk_free_bytes{ {{- $scope }}})
-            /
-            max by (host_name) (compute_fleet_host_disk_bytes{ {{- $scope }}} > 0)
-            < 0.1
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'A compute host has less than 10% of its sandbox disk free.'
-            headline: 'Compute host {{ "{{ $labels.host_name }}" }} disk almost full'
-            value: '{{ "{{ $value | humanizePercentage }}" }} free'
-            user_impact: 'Sandboxes on the host may be refused, or archived sooner, until it has room again.'
-            next_step: 'Check the host''s state disk and its archive traffic; give hosts larger disks if it recurs.'
         {{- if ($cc.metrics).hostsTo }}
         - alert: OpenGeniComputeHostMetricsFailing
           expr: |

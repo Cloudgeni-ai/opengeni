@@ -166,6 +166,26 @@ describe("compute alerts", () => {
     }
   }, 60_000);
 
+  test("booking headroom remains diagnostic; actual fleet refusals still alert", async () => {
+    const rules = alerts(await render([...enabled, hostsTo]));
+    expect(rules.has("OpenGeniComputeHostDiskLow")).toBe(false);
+    const bookingMetrics = new Set([
+      "compute_fleet_host_disk_free_bytes",
+      "compute_fleet_host_disk_reclaimable_bytes",
+    ]);
+    expect(
+      [...rules].filter(([, rule]) =>
+        selectedMetrics(rule.expr).some((metric) => bookingMetrics.has(metric)),
+      ),
+    ).toEqual([]);
+    expect(rules.has("OpenGeniComputeNoCapacity")).toBe(true);
+    expect(rules.has("OpenGeniComputeHostAlarm")).toBe(true);
+    expect(rules.has("OpenGeniComputeSandboxesUnhealthy")).toBe(true);
+    const emitted = computeMetricNames();
+    expect(emitted.has("compute_fleet_host_disk_free_bytes")).toBe(true);
+    expect(emitted.has("compute_fleet_host_disk_reclaimable_bytes")).toBe(true);
+  }, 60_000);
+
   test("every alert carries plain-language notification copy", async () => {
     const required = ["summary", "headline", "user_impact", "next_step"];
     const allowed = new Set([...required, "value", "description", "action", "runbook_url"]);
@@ -430,7 +450,7 @@ describe("compute alerts", () => {
         fires: fires ? [{ labels: { host_name: "h1" }, value: 8 }] : [],
       })),
       {
-        name: "disk almost full",
+        name: "fully booked hosts without refused requests are not a capacity incident",
         series: [
           {
             series: `compute_fleet_host_disk_bytes{${own},pod="a",host_name="h1"}`,
@@ -438,20 +458,48 @@ describe("compute alerts", () => {
           },
           {
             series: `compute_fleet_host_disk_free_bytes{${own},pod="a",host_name="h1"}`,
-            values: "50x60",
+            values: "0x60",
           },
           {
-            series: `compute_fleet_host_disk_bytes{${own},pod="a",host_name="h2"}`,
-            values: "1000x60",
-          },
-          {
-            series: `compute_fleet_host_disk_free_bytes{${own},pod="a",host_name="h2"}`,
+            series: `compute_fleet_host_disk_reclaimable_bytes{${own},pod="a",host_name="h1"}`,
             values: "500x60",
           },
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0x60",
+          },
         ],
-        alert: "OpenGeniComputeHostDiskLow",
+        alert: "OpenGeniComputeNoCapacity",
         at: "20m",
-        fires: [{ labels: { host_name: "h1" }, value: 0.05 }],
+        fires: [],
+      },
+      {
+        name: "sustained actual capacity refusals still alert",
+        series: [
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0+1x60",
+          },
+        ],
+        alert: "OpenGeniComputeNoCapacity",
+        at: "20m",
+        fires: [{ value: 20 }],
+      },
+      {
+        name: "another release's refusals do not become this release's incident",
+        series: [
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0x60",
+          },
+          {
+            series: `compute_control_requests_total{${other},outcome="no_capacity"}`,
+            values: "0+1x60",
+          },
+        ],
+        alert: "OpenGeniComputeNoCapacity",
+        at: "20m",
+        fires: [],
       },
     ]);
   }, 180_000);
