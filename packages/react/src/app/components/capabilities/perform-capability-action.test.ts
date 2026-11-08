@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { ConnectionMetadata } from "../../types";
@@ -25,7 +26,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     providerDomain: "canonical.example.com",
   }));
   const enableCapability = mock(
-    async (..._args: Parameters<OpenGeniBrowserClient["enableCapability"]>) => {},
+    async (..._args: Parameters<ChatClient<OpenGeniBrowserClient>["enableCapability"]>) => {},
   );
   const options = {
     client: {
@@ -33,7 +34,7 @@ function harness(overrides: Record<string, unknown> = {}) {
       updateConnection,
       enableCapability,
       ...overrides,
-    } as unknown as OpenGeniBrowserClient,
+    } as unknown as ChatClient<OpenGeniBrowserClient>,
     workspaceId: "workspace",
     item,
     connections: [] as ConnectionMetadata[],

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { OpenGeniClient } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   SessionEvent,
@@ -9,6 +10,26 @@ import type {
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 import type { EmbeddedSessionClientLike } from "../src/client";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+
+test("the embedded adapter opts into compact responses without changing the host SDK client", async () => {
+  const accepts: string[] = [];
+  const base = new OpenGeniClient({
+    baseUrl: "https://api.test",
+    fetch: async (_input, init) => {
+      const accept = new Headers(init?.headers).get("accept")!;
+      accepts.push(accept);
+      return Response.json(
+        accept.includes("opengeni-session=chat")
+          ? { id: SESSION_ID }
+          : { id: SESSION_ID, instructions: "Full", skills: [] },
+      );
+    },
+  });
+  const embedded = createEmbeddedSessionClient(base);
+  expect((await embedded.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBeUndefined();
+  expect((await base.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBe("Full");
+  expect(accepts).toEqual(["application/json; opengeni-session=chat", "application/json"]);
+});
 
 const draft = (revision: number, text = ""): ComposerDraft => ({
   revision,

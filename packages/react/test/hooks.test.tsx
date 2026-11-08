@@ -1337,8 +1337,9 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
+    // Both readers use the same compact client, as the first-party app does.
     // A non-authority consumer keeps the pre-move shared lineage request alive
     // while the authority-bearing rail is collapsed.
     const collapsedRail = await renderHook(
@@ -1417,7 +1418,7 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
     // A mounted route/header poll starts the shared request after B settles;
     // the authority-bearing rail joins only after that actual network start.

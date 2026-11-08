@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act } from "react";
@@ -53,7 +54,7 @@ const ownerOverview: OrganizationRecoveryOverview = {
   },
 };
 async function mount(read: () => Promise<OrganizationRecoveryOverview>) {
-  const client = { getOrganizationRecovery: read } as unknown as OpenGeniBrowserClient;
+  const client = { getOrganizationRecovery: read } as unknown as ChatClient<OpenGeniBrowserClient>;
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);

@@ -254,10 +254,13 @@ For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
 pin rules and cursors, returning `SessionListEntry` records. Entries include
 display/rename titles, creator, lifecycle, personal state, hierarchy counts and
 the model and reasoning effort shown with a row; prompts and the rest of the
-execution configuration are read explicitly with `getSessionConfiguration`
-(requires `sessions:control` and session access). Current SDK clients request the
-compact session response with `Accept: application/json; opengeni-session=chat` on JSON requests;
-previously shipped clients without this preference retain their full response. Older APIs return
+execution configuration remain available on the default `getSession` response.
+Chat clients explicitly select `client.withSessionResponse("chat")`; those clients
+return `ChatSession` and read
+configuration with `getSessionConfiguration` (requires `sessions:control` and session access).
+The console, mobile and packaged React chat opt in. Compact clients send
+`Accept: application/json; opengeni-session=chat` on JSON requests, without adding
+a CORS request header. Default SDK clients retain the full response and required types. Older APIs return
 full pages that the SDK projects locally. Unknown filters/cursors still fail
 explicitly rather than returning an unfiltered result.
 

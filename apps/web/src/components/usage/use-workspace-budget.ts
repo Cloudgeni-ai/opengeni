@@ -1,4 +1,5 @@
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   clearWorkspaceAllowance,
   getAllUsage,
@@ -65,7 +66,7 @@ export type BudgetDraft = {
  * Writes use the exact version just read; a conflict reloads before failing.
  */
 export function useWorkspaceBudget(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   options: { roster: boolean; budget: boolean },
 ) {

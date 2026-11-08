@@ -1,11 +1,12 @@
 import { useMemo } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useSubscriptionAccountPool } from "./use-subscription-account-pool";
 
 export function useClaudeSubscriptions(
   input: {
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     canManage: boolean;
     enabled?: boolean | undefined;
   } & (

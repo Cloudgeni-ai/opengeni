@@ -244,7 +244,7 @@ function createEmbedStateHost(
         fetch: fetchImpl,
         beginSharedRead,
         apiContract: "compatible",
-      }),
+      }).withSessionResponse("chat"),
     fetchClientConfig: (signal, workspaceId) =>
       api.request<ClientConfig>(
         workspaceId

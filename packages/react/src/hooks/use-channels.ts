@@ -1,4 +1,9 @@
-import type { Channel, CreateChannelRequest, Session, UpdateChannelRequest } from "@opengeni/sdk";
+import type {
+  Channel,
+  CreateChannelRequest,
+  ChatSession as Session,
+  UpdateChannelRequest,
+} from "@opengeni/sdk";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { channelCacheFor } from "./channel-cache";

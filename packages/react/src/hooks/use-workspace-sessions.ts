@@ -1,5 +1,5 @@
 import type {
-  Session,
+  ChatSession as Session,
   SessionListEntry,
   SessionListTotals,
   SiteConversationGroup,

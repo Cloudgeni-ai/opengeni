@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useRef } from "react";
 import { Button } from "@opengeni/react/ui/button";
@@ -69,7 +70,7 @@ export function useClaudeUsage({
   onCredentialChanged,
   accountPool = false,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   enabled: boolean;

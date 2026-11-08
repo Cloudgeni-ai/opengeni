@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 
 export const DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 export const DRIVE_CONNECT_RETURN_PARAM = "drive_connect_return";
@@ -8,7 +9,7 @@ type Storage = Pick<globalThis.Storage, "getItem" | "setItem" | "removeItem">;
 
 /** Browser state is only a locator. Completion and the account come from Connect. */
 export async function beginDriveConnect(input: {
-  client: Pick<OpenGeniBrowserClient, "beginConnect" | "connectTransport">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "beginConnect" | "connectTransport">;
   workspaceId: string;
   connectionWorkspaceId?: string;
   itemId: string;
@@ -49,7 +50,7 @@ export async function beginDriveConnect(input: {
 }
 
 export async function resolveDriveConnectReturn(input: {
-  client: Pick<OpenGeniBrowserClient, "connectTransport">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "connectTransport">;
   workspaceId: string;
   nonce: string;
   storage: Storage;

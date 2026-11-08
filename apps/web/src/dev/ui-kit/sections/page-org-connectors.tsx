@@ -3,6 +3,7 @@ import type {
   CreateOrganizationConnectorRequest,
   OrganizationConnector,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useMemo, useState } from "react";
@@ -210,7 +211,7 @@ const CATALOG: CapabilityCatalogItem[] = [
 ];
 
 /** Just what the page calls, kept in memory. */
-function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
+function fakeClient(initial: OrganizationConnector[]): ChatClient<OpenGeniBrowserClient> {
   let rows = [...initial];
   const client = {
     listOrganizationConnectors: async () => rows,
@@ -322,7 +323,7 @@ function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
       workspaces: shared.map(({ id, name }) => ({ id, name })),
     }),
   };
-  return client as unknown as OpenGeniBrowserClient;
+  return client as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 
 const LIST: ConnectorLocation = { kind: "list" };

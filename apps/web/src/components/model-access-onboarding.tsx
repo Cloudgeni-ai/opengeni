@@ -1,4 +1,5 @@
 import { modelDisplayName } from "@opengeni/sdk/model-display";
+import type { ChatClient } from "@opengeni/sdk";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { COMPATIBLE_ENDPOINT_CHOICE } from "@/components/models/organization-compatible-endpoints";
 import { pollDeviceAuthorization } from "@opengeni/connect";
@@ -147,7 +148,7 @@ export function ModelAccessOnboardingPanel({
   footer,
   onComplete,
 }: {
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   /** The new organization's name, for "Shared with everyone in Acme". */
   organizationName?: string | undefined;

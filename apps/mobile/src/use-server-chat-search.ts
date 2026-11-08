@@ -1,4 +1,5 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 
 import type { ChatSearchHit } from "./chat-search";
@@ -10,7 +11,7 @@ const SEARCH_DEBOUNCE_MS = 150;
  * matches join as they arrive. A failed workspace just adds nothing.
  */
 export function useServerChatSearch(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceIds: readonly string[],
   query: string,
 ): { query: string; hits: ChatSearchHit[]; loading: boolean } {

@@ -24,6 +24,7 @@ import {
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { OpenGeniClient } from "../../../packages/sdk/src/client";
 import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "@opengeni/runtime";
@@ -350,6 +351,56 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
+  test("SDK upgrades keep full default responses; chat is an explicit typed opt-in", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const sdk = new OpenGeniClient({
+      baseUrl: "http://api.test",
+      headers: { authorization: bearer },
+      fetch: (input, init) => target.fetch(new Request(input, init)),
+    });
+    const created = await sdk.createSession(grant.workspaceId, {
+      initialMessage: "hello",
+      instructions: "Retain the SDK contract.",
+      skills: [
+        {
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: sdk-compatibility\ndescription: Compatibility\n---\nRetain.",
+            },
+          ],
+        },
+      ],
+    });
+    expect(created.instructions).toBe("Retain the SDK contract.");
+    expect(created.skills.map((skill) => skill.name)).toEqual(["sdk-compatibility"]);
+    expect((await sdk.getSession(grant.workspaceId, created.id)).skills.length).toBe(1);
+    expect((await sdk.listSessions(grant.workspaceId))[0]!.skills.length).toBe(1);
+    const chat = sdk.withSessionResponse("chat");
+    for (const session of [
+      await chat.getSession(grant.workspaceId, created.id),
+      ...(await chat.listSessions(grant.workspaceId)),
+      await chat.updateSessionAgent(grant.workspaceId, created.id, {
+        agent: { identity: "Typed chat" },
+        expectedVersion: created.toolPolicyVersion,
+      }),
+    ]) {
+      expect(session.skills).toBeUndefined();
+      expect(session.instructions).toBeUndefined();
+      expect(session.effectiveTools).toBeUndefined();
+    }
+    // Opting another client into chat projection never changes this client's readers.
+    expect(
+      (await sdk.getSession(grant.workspaceId, created.id, { fresh: true })).skills.length,
+    ).toBe(1);
+    expect((await chat.getSessionConfiguration(grant.workspaceId, created.id)).skills.length).toBe(
+      1,
+    );
+  });
+
   test("previous clients retain full create, detail, list and mutation response bodies", async () => {
     if (!available) return;
     const grant = await fixture();

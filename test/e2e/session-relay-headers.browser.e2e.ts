@@ -77,7 +77,10 @@ beforeAll(async () => {
       return new Response(
         `<!doctype html><html><body><script type="module">
       import { OpenGeniBrowserClient } from '/sdk.js';
-      window.readLegacy = async () => new OpenGeniBrowserClient({ baseUrl: ${JSON.stringify(api.url.origin)} + '/legacy' }).getSession('workspace', 'session');
+      window.readLegacy = async (sessionResponse) => {
+        const client = new OpenGeniBrowserClient({ baseUrl: ${JSON.stringify(api.url.origin)} + '/legacy' });
+        return (sessionResponse ? client.withSessionResponse(sessionResponse) : client).getSession('workspace', 'session');
+      };
       window.runCase = async (mode) => {
         const client = new OpenGeniBrowserClient({ baseUrl: ${JSON.stringify(api.url.origin)} + '/' + mode });
         const options = { before: 100, presentedToolCalls: 'include' };
@@ -108,10 +111,17 @@ test("new browser SDK reads an older API through its unchanged CORS allowlist", 
   const page = await browser.newPage();
   try {
     await page.goto(web.url.origin, { waitUntil: "networkidle" });
-    const session = await page.evaluate(() => (window as any).readLegacy());
-    expect(session.instructions).toBe("legacy instructions");
-    expect(session.skills.map((skill: { name: string }) => skill.name)).toEqual(["legacy"]);
-    expect(legacyAccept).toBe("application/json; opengeni-session=chat");
+    for (const mode of [undefined, "chat"]) {
+      const session = await page.evaluate(
+        (projection) => (window as any).readLegacy(projection),
+        mode,
+      );
+      expect(session.instructions).toBe("legacy instructions");
+      expect(session.skills.map((skill: { name: string }) => skill.name)).toEqual(["legacy"]);
+      expect(legacyAccept).toBe(
+        mode === "chat" ? "application/json; opengeni-session=chat" : "application/json",
+      );
+    }
   } finally {
     await page.close();
   }

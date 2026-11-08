@@ -1933,10 +1933,12 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 /** Full configuration, requested explicitly with sessions:control permission. */
-export type SessionConfiguration = Session & {
-  instructions: string | null;
-  skills: SessionSkill[];
-};
+export type SessionConfiguration = Session;
+
+/** Chat rendering projection. Older servers may still include configuration. */
+export type ChatSession = Omit<Session, "instructions" | "skills" | "effectiveTools"> &
+  Partial<Pick<Session, "instructions" | "skills" | "effectiveTools">>;
+export type SessionResponseMode = "full" | "chat";
 
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
@@ -1995,8 +1997,7 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
-  /** Only on explicit getSessionConfiguration reads (or older servers). */
-  instructions?: string | null | undefined;
+  instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
@@ -2005,8 +2006,7 @@ export type Session = {
    * agent can't attach one again; a person attaching it again ends its record.
    */
   removedRepositories?: SessionRemovedRepository[] | undefined;
-  /** Only on explicit getSessionConfiguration reads (or older servers). */
-  skills?: SessionSkill[] | undefined;
+  skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
   toolPolicyVersion: number;
@@ -2040,7 +2040,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Explicit configuration reads only: capability-level catalog; null for legacy. */
+  /** Capability-level catalog; absent on compact chat responses, null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -2164,7 +2164,7 @@ export type Session = {
 };
 
 /** Additive receipt returned by POST /sessions. */
-export type CreateSessionResponse = Session & {
+export type CreateSessionResponse<S extends ChatSession = Session> = S & {
   initialTurnId: string | null;
 };
 
@@ -2295,7 +2295,7 @@ export type SiteConversationGroup = {
   pinnedAt?: string | null;
 };
 
-export type SessionListResponse = {
+export type SessionListResponse<S extends ChatSession = Session> = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
@@ -2304,7 +2304,7 @@ export type SessionListResponse = {
   mineOnly?: true;
   /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
   sessionIdsApplied?: true;
-  pinned: Session[];
+  pinned: S[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
@@ -2323,7 +2323,7 @@ export type SessionListResponse = {
   siteGroups?: SiteConversationGroup[];
   /** True when Site rows beyond the server bound were omitted. */
   siteGroupsTruncated?: true;
-  sessions: Session[];
+  sessions: S[];
   nextCursor: string | null;
 };
 
@@ -2495,21 +2495,26 @@ export type UpdateSessionArchiveRequest = {
   expectedVersion?: number;
 };
 
-export type LineageNode = {
-  session: SessionSummary;
-  children: LineageNode[];
+export type LineageNode<S extends ChatSession = Session> = {
+  session: S;
+  children: LineageNode<S>[];
 };
 
-export type SessionLineageResponse = {
+export type SessionLineageResponse<S extends ChatSession = Session> = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
   /** What the automations continuing the requested session are waiting for. */
   sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
-  ancestors: SessionSummary[];
-  children: LineageNode[];
+  ancestors: S[];
+  children: LineageNode<S>[];
   truncated: boolean;
 };
+
+export type ChatCreateSessionResponse = CreateSessionResponse<ChatSession>;
+export type ChatSessionListResponse = SessionListResponse<ChatSession>;
+export type ChatSessionLineageResponse = SessionLineageResponse<ChatSession>;
+export type ChatLineageNode = LineageNode<ChatSession>;
 
 export type SessionTurnStatus =
   | "queued"

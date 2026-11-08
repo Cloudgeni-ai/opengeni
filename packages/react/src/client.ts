@@ -1,4 +1,5 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 
 /**
  * The slice of `OpenGeniClient` the hooks depend on. Structural, so apps can
@@ -6,7 +7,7 @@ import type { OpenGeniClient } from "@opengeni/sdk";
  * own API, or a scripted client in tests/demos.
  */
 type SessionClientMethods = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   // Deployment config (host-exposed models, auth, upload limits)
   | "getClientConfig"
   // Sessions, events, composer
@@ -167,7 +168,7 @@ type SessionClientMethods = Pick<
 > &
   Partial<
     Pick<
-      OpenGeniClient,
+      ChatClient<OpenGeniClient>,
       | "createVideoArtifactPlaybackSource"
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
@@ -183,7 +184,12 @@ type SessionClientMethods = Pick<
  * the attention mutation an open conversation uses to mark itself read.
  */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal" | "updateSessionAttention">>;
+  Partial<
+    Pick<
+      ChatClient<OpenGeniClient>,
+      "listSessionSummaryPage" | "findGoal" | "updateSessionAttention"
+    >
+  > & { withSessionResponse?: (mode: "chat") => SessionClientLike };
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -195,7 +201,7 @@ export type SessionClientLike = SessionClientMethods &
  * composer/control path.
  */
 export type EmbeddedSessionClientLike = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "getSession"
   | "listEvents"
   | "streamEvents"
@@ -213,27 +219,31 @@ export type EmbeddedSessionClientLike = Pick<
   | "resumeSession"
   | "sendApprovalDecision"
 > & {
-  setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+  withSessionResponse?: ((mode: "chat") => EmbeddedSessionClientLike) | undefined;
+  setWorkspaceInferenceState?: ChatClient<OpenGeniClient>["setWorkspaceInferenceState"] | undefined;
   /**
    * Optional: lets an open conversation mark itself read while the person
    * watches it. Without it the conversation works, but replies stay unread.
    */
-  updateSessionAttention?: OpenGeniClient["updateSessionAttention"] | undefined;
+  updateSessionAttention?: ChatClient<OpenGeniClient>["updateSessionAttention"] | undefined;
   /**
    * Optional: lets conversation history see what the server's history filter
    * applied and whether a page has more. Without it history stays correct on
    * every server version, but keeps each long turn's tool calls and model
    * bookkeeping in its reads.
    */
-  listEventPage?: OpenGeniClient["listEventPage"] | undefined;
+  listEventPage?: ChatClient<OpenGeniClient>["listEventPage"] | undefined;
 };
 
 /** Event-read surface shared by hooks that optionally tail a session. */
-export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" | "streamEvents">;
+export type EmbeddedSessionEventClientLike = Pick<
+  ChatClient<OpenGeniClient>,
+  "getSession" | "streamEvents"
+>;
 
 /** Exact client surface required by {@link useSession}. */
 export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "getSession" | "updateSession">;
+  Pick<ChatClient<OpenGeniClient>, "getSession" | "updateSession">;
 
 /**
  * Exact client surface required by {@link useGoal}. `findGoal` is optional:
@@ -241,32 +251,32 @@ export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
  * instead of an absorbed 404.
  */
 export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal"> & {
-    findGoal?: OpenGeniClient["findGoal"] | undefined;
+  Pick<ChatClient<OpenGeniClient>, "getGoal" | "updateGoal" | "deleteGoal"> & {
+    findGoal?: ChatClient<OpenGeniClient>["findGoal"] | undefined;
   };
 
 /** Exact client surface required by {@link useSessionLineage}. */
 export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "getSessionLineage">;
+  Pick<ChatClient<OpenGeniClient>, "getSessionLineage">;
 
 /**
  * Exact client surface required by {@link useFileAttachments}. The optional
  * reads show stored files: a restored draft's metadata and image previews.
  */
-export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile"> &
-  Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "getFile">>;
+export type EmbeddedFileAttachmentClientLike = Pick<ChatClient<OpenGeniClient>, "uploadFile"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "createFileDownloadUrl" | "getFile">>;
 
 /** Exact client surface required by structured human-input hooks. */
 export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "listHumanInputRequests" | "submitHumanInputResponse">;
+  Pick<ChatClient<OpenGeniClient>, "listHumanInputRequests" | "submitHumanInputResponse">;
 
 /** Exact client surface required by MCP approval-policy hooks. */
 export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;
+  Pick<ChatClient<OpenGeniClient>, "updateSessionMcpApprovalPolicy">;
 
 /** Exact client surface required by the public realtime React subpath. */
 export type EmbeddedRealtimeSessionClientLike = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "getWorkspaceRealtimeModelCatalog"
   | "beginSessionRealtime"
   | "heartbeatSessionRealtime"
@@ -277,11 +287,11 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
 > &
-  Partial<Pick<OpenGeniClient, "negotiateRealtimeWebsocket">>;
+  Partial<Pick<ChatClient<OpenGeniClient>, "negotiateRealtimeWebsocket">>;
 
 /** Exact public SDK surface required by cross-surface human interventions. */
 export type EmbeddedInterventionClientLike = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "streamWorkspaceInteractionRevisions"
   | "listInteractionInterventions"
   | "getInteractionIntervention"
@@ -291,7 +301,7 @@ export type EmbeddedInterventionClientLike = Pick<
 
 /** Exact public SDK surface required by BrowserSession hooks and components. */
 export type EmbeddedBrowserInteractionClientLike = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "streamWorkspaceInteractionRevisions"
   | "listNetworkRoutes"
   | "getNetworkRoute"
@@ -343,7 +353,7 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
 
 /** Exact public SDK surface required by ComputerSession hooks and components. */
 export type EmbeddedComputerInteractionClientLike = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "streamWorkspaceInteractionRevisions"
   | "listComputerSessions"
   | "getComputerSession"
@@ -358,7 +368,7 @@ export type EmbeddedComputerInteractionClientLike = Pick<
   | "endComputerSession"
 > &
   EmbeddedInterventionClientLike &
-  Partial<Pick<OpenGeniClient, "getComputerInputPosture">>;
+  Partial<Pick<ChatClient<OpenGeniClient>, "getComputerInputPosture">>;
 
 /** Complete public Browser + Computer interaction surface. */
 export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &

@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem } from "../types";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
@@ -15,7 +16,9 @@ const service = {
 function harness(enabledScope: "workspace" | "subject" | null) {
   const calls: string[] = [];
   const continueAfter = mock(
-    async (..._args: Parameters<OpenGeniBrowserClient["continueAfterCapabilitySetup"]>) => {
+    async (
+      ..._args: Parameters<ChatClient<OpenGeniBrowserClient>["continueAfterCapabilitySetup"]>
+    ) => {
       calls.push("continueAfterCapabilitySetup");
       return { outcome: "queued" as const, updateId: "update" };
     },
@@ -52,7 +55,7 @@ function harness(enabledScope: "workspace" | "subject" | null) {
       return {};
     },
     continueAfterCapabilitySetup: continueAfter,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return { client, calls, continueAfter };
 }
 

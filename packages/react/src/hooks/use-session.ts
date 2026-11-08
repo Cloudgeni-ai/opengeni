@@ -1,4 +1,4 @@
-import type { Session, SessionEvent } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readFreshSessionDetail } from "../lib/session-detail-read";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";

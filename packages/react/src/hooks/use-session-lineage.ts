@@ -1,4 +1,7 @@
-import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  ChatSessionLineageResponse as SessionLineageResponse,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   useEmbeddedSessionLineage,

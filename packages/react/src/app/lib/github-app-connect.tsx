@@ -1,4 +1,5 @@
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /**
@@ -31,7 +32,7 @@ export function githubAppConnectRequest(
  * the connect link, so a copy captured at page load cannot be used.
  */
 export async function openGitHubInstallationSettings(
-  client: Pick<OpenGeniBrowserClient, "getGitHubApp">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getGitHubApp">,
   workspaceId: string,
   installationId: number,
   navigate: (url: string) => void,

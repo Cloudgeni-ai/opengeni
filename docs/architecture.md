@@ -66,8 +66,10 @@ route-namespace/UUID admission boundary; lookup failures propagate to HTTP
 diagnostics rather than being treated as missing workspaces.
 HTTP session responses with `Accept: application/json; opengeni-session=chat` use
 `apps/api/src/routes/session-chat-response.ts` to omit operator instructions, skill
-bodies and the full effective-tool catalog. The SDK sends this signal by default
-and the browser relay enforces it; older clients without it retain the full response.
+bodies and the full effective-tool catalog. SDK `client.withSessionResponse("chat")` selects
+this signal and compact return types; the default remains the full SDK contract.
+The console/mobile/React chat opt in and the browser relay enforces it; clients
+without it retain the full response.
 Using `Accept` avoids a new CORS request-header requirement on older APIs. Explicit
 `GET .../sessions/:sessionId/configuration` reads retain those fields under
 session-control authority; internal runtime/MCP session projections are unchanged.

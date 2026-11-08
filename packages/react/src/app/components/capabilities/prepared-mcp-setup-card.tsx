@@ -1,4 +1,5 @@
 import { t } from "../../lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import { useRef, useState } from "react";
 import type { ConnectController } from "@opengeni/connect";
 import { ConnectSetup } from "../../../connect";
@@ -17,7 +18,7 @@ type Props = {
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   actorId: string;
   canConfigure: boolean;
   onConfigured?: (() => Promise<void>) | undefined;
@@ -107,7 +108,7 @@ function PreparedSetup({
   onRestart,
 }: {
   controller: ConnectController;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   sessionId: string;
   onConfigured(): void | Promise<void>;

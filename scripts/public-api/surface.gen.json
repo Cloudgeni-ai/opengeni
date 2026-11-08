@@ -35851,7 +35851,13 @@
       "ChangeMachineAudienceResponse": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "ChatClient": "type",
+      "ChatCreateSessionResponse": "type",
+      "ChatLineageNode": "type",
       "Chats": "type",
+      "ChatSession": "type",
+      "ChatSessionLineageResponse": "type",
+      "ChatSessionListResponse": "type",
       "ClaudeSubscriptionAccount": "type",
       "ClaudeSubscriptionAccountsResponse": "type",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
@@ -37107,6 +37113,7 @@
       "SessionRealtimeWebsocketInitialItem": "type",
       "SessionRealtimeWebsocketRequest": "type",
       "SessionRealtimeWebsocketResponse": "type",
+      "SessionResponseMode": "type",
       "SessionRetention": "type",
       "SessionRetryRequest": "type",
       "SessionRetryResponse": "type",
@@ -37731,6 +37738,7 @@
     },
     "@opengeni/sdk/browser": {
       "APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE": "value",
+      "ChatClient": "type",
       "ConnectorToolPermission": "type",
       "ConnectorToolPermissionEntry": "type",
       "ConnectorToolPermissionsResponse": "type",
@@ -43507,6 +43515,7 @@
       "verifyRig",
       "verifyRigChange",
       "withHeaders",
+      "withSessionResponse",
       "workspaceControlStreamTransport",
       "workspaceInteractionRevisionStreamTransport",
       "workspaceLiveStreamTransport",
@@ -44325,6 +44334,7 @@
       "verifyRig",
       "verifyRigChange",
       "withHeaders",
+      "withSessionResponse",
       "workspaceControlStreamTransport",
       "workspaceInteractionRevisionStreamTransport",
       "workspaceLiveStreamTransport",
@@ -45187,6 +45197,7 @@
       "verifyRig",
       "verifyRigChange",
       "withHeaders",
+      "withSessionResponse",
       "workspaceControlStreamTransport",
       "workspaceInteractionRevisionStreamTransport",
       "workspaceLiveStreamTransport",
@@ -48280,6 +48291,10 @@
       "withHeaders": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Record\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Readonly\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
+      "withSessionResponse": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"chat\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSThisType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"ChatClient\",\"optional\":false,\"type\":\"Identifier\"}}}",
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"full\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+      ],
       "workspaceControlStreamTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceControlStreamTransport\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51011,6 +51026,10 @@
       "withHeaders": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Record\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Readonly\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
+      "withSessionResponse": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"chat\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSThisType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"ChatClient\",\"optional\":false,\"type\":\"Identifier\"}}}",
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"full\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+      ],
       "workspaceControlStreamTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceControlStreamTransport\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53487,6 +53506,10 @@
       ],
       "withHeaders": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Record\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Readonly\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+      ],
+      "withSessionResponse": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"chat\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSThisType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"ChatClient\",\"optional\":false,\"type\":\"Identifier\"}}}",
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"full\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "workspaceControlStreamTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceControlStreamTransport\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -56247,6 +56270,10 @@
       "withHeaders": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Record\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Readonly\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
+      "withSessionResponse": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"chat\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSThisType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"ChatClient\",\"optional\":false,\"type\":\"Identifier\"}}}",
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"full\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+      ],
       "workspaceControlStreamTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceControlStreamTransport\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -58784,6 +58811,10 @@
       ],
       "withHeaders": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Record\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Readonly\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+      ],
+      "withSessionResponse": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"chat\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSThisType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"ChatClient\",\"optional\":false,\"type\":\"Identifier\"}}}",
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"literal\":{\"type\":\"Literal\",\"value\":\"full\"},\"type\":\"TSLiteralType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "workspaceControlStreamTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceControlStreamTransport\",\"optional\":false,\"type\":\"Identifier\"}}}"

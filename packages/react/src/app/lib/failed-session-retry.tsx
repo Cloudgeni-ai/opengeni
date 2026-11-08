@@ -1,5 +1,5 @@
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 
 type RetryPolicy = Pick<Session, "model" | "reasoningEffort" | "latencyMode">;
 export type FailedSessionRetryInput = RetryPolicy & {

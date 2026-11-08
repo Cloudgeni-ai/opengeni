@@ -101,13 +101,20 @@ the SDK warns once per client when the required metadata is unreadable.
 
 ### Session data and operator configuration
 
-The current SDK sends `Accept: application/json; opengeni-session=chat`; session reads, lists and
+The packaged chat UI opts into `client.withSessionResponse("chat")`. Its SDK client sends
+`Accept: application/json; opengeni-session=chat`; session reads, lists and
 mutation responses then omit `instructions`, `skills` and `effectiveTools`. The
 chat does not need these to render. An authorized settings
 page or server-side SDK caller can explicitly use
 `client.getSessionConfiguration(workspaceId, sessionId)` (`GET .../sessions/{id}/configuration`),
 which returns the full session configuration and requires `sessions:control` plus
 access to that session. There is no automatic full-configuration fallback.
+
+The SDK default itself remains unchanged: `new OpenGeniClient({ baseUrl })` returns
+the full `Session` shape. For your own chat client, use
+`client.withSessionResponse("chat")` to create a separate compact client without
+changing existing readers. Its session methods return `ChatSession`, with optional
+configuration fields for compatibility with older APIs.
 
 With a server-owned `createSession` hook, the packaged relay also refuses browser
 reads of `configuration` and `model-context`. Read operator configuration on your

@@ -3,7 +3,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OpenGeniApiError,
   type ComposerDraft,
-  type Session,
+  type ChatSession as Session,
   type SessionEvent,
   type SessionQueueSnapshot,
   type SessionTurn,

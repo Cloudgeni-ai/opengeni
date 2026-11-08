@@ -7,6 +7,7 @@
 // request; nothing here is needed for enforcement, it only keeps the view
 // fresh.
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   formatSessionUsageMicros,
   SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON,
@@ -240,7 +241,7 @@ export function usageLimitRefusalFromState(input: {
   };
 }
 
-type UsageLimitClient = Pick<OpenGeniBrowserClient, "getSessionUsageLimit">;
+type UsageLimitClient = Pick<ChatClient<OpenGeniBrowserClient>, "getSessionUsageLimit">;
 
 export type SessionUsageLimitSnapshot = {
   usage: SessionUsageLimit | null;

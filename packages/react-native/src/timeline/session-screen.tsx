@@ -1,4 +1,5 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   approvalsDecidable,
   conversationTimeline,
@@ -64,7 +65,7 @@ import type {
   ClientModel,
   OpenGeniClient,
   ResourceRef,
-  Session,
+  ChatSession as Session,
   SessionBackgroundCommand,
 } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
@@ -128,7 +129,7 @@ export interface NativeSessionScreenProps extends Omit<
    */
   loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   /**
    * Let people finish an agent's "connect your account" request in the chat,
    * with the web conversation's cards: sign-in opens the system sign-in
@@ -1144,7 +1145,7 @@ function DraftConflictStrip(props: {
 
 /** Polls the session's commands only while the panel is open, as web does. */
 function NativeSessionCommands(props: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
 }) {

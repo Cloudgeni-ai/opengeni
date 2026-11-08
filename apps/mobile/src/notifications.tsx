@@ -5,6 +5,7 @@ import type {
   NativePushRule,
   OpenGeniClient,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { router, usePathname } from "expo-router";
@@ -97,7 +98,7 @@ void Notifications.setNotificationCategoryAsync("og.question", [
  * the app has to open (several open, or a question that needs the full form).
  */
 async function actOnNotification(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   data: PushData,
   action: string,
   text: string | undefined,
@@ -711,7 +712,7 @@ export function inboxSettingsSections({
  * when answered.
  */
 export async function markSessionInboxRead(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   sessionId: string,
 ): Promise<void> {
   const inbox = await client.listInbox().catch(() => null);
@@ -741,7 +742,7 @@ export async function markSessionInboxRead(
  * so the menu only offers it where it works.
  */
 export function useSessionRepliesMute(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   topLevel: boolean,

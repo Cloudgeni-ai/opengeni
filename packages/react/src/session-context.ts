@@ -137,13 +137,19 @@ type EmbeddedClientContextValue<TClient> = Omit<OpenGeniContextValue, "client"> 
   client: TClient;
 };
 
+/** SDK-backed surfaces select the chat projection; structural host clients keep their own transport. */
+function renderingClient<Client>(client: Client): Client {
+  const selectable = client as Client & { withSessionResponse?: (mode: "chat") => Client };
+  return selectable?.withSessionResponse?.("chat") ?? client;
+}
+
 function useEmbeddedClientRefinement<TClient extends object>(
   override: EmbeddedClientOverride<TClient>,
   requiredMethods: readonly string[],
   hookName: string,
 ): EmbeddedClientContextValue<TClient> {
   const context = useContext(OpenGeniContext);
-  const candidate = override.client ?? context?.client;
+  const candidate = renderingClient(override.client ?? context?.client);
   const workspaceId = override.workspaceId ?? context?.workspaceId;
   if (!candidate || !workspaceId) {
     throw new Error(
@@ -180,7 +186,7 @@ function eventClientMethods(override: object, directMethods: readonly string[]):
 /** Resolve client + workspace from explicit overrides or the provider. */
 export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue {
   const context = useContext(OpenGeniContext);
-  const client = override.client ?? context?.client;
+  const client = renderingClient(override.client ?? context?.client);
   const workspaceId = override.workspaceId ?? context?.workspaceId;
   if (!client || !workspaceId) {
     throw new Error(
@@ -441,7 +447,7 @@ export function useOpenGeniClient(
   override: Pick<ClientOverride, "client"> = {},
 ): SessionClientLike {
   const context = useContext(OpenGeniContext);
-  const client = override.client ?? context?.client;
+  const client = renderingClient(override.client ?? context?.client);
   if (!client) {
     throw new Error(
       "@opengeni/react: no Opengeni client available. Wrap the tree in <OpenGeniProvider> or pass { client } to the hook.",

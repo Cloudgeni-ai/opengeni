@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { BillingPlanBalance } from "@opengeni/sdk";
 import {
   isSeatLimitError,
@@ -195,7 +196,7 @@ export function OrganizationDirectoryProvider({
   children,
 }: {
   youLabel?: string | null;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   /** A managed human session or the single-user local administrator. */

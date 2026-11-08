@@ -1,4 +1,4 @@
-import type { ClientModel, Session } from "@opengeni/sdk";
+import type { ClientModel, ChatSession as Session } from "@opengeni/sdk";
 import {
   SESSION_STATUS_BADGE,
   SESSION_STATUS_PRESENTATION,

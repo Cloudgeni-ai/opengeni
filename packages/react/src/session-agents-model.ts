@@ -1,4 +1,8 @@
-import type { LineageNode, SessionGoal, SessionSummary } from "@opengeni/sdk";
+import type {
+  ChatLineageNode as LineageNode,
+  SessionGoal,
+  ChatSession as SessionSummary,
+} from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
 import { sessionAdmissionBlocked } from "./session-status-model";
 

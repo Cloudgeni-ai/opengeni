@@ -1,4 +1,9 @@
-import { deriveSessionDisplayTitle, type OpenGeniClient, type Session } from "@opengeni/sdk";
+import {
+  deriveSessionDisplayTitle,
+  type OpenGeniClient,
+  type ChatSession as Session,
+} from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { ArchiveIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
@@ -70,7 +75,7 @@ export type SessionListProps = ClientOverride & {
   className?: string | undefined;
 };
 
-type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
+type ArchiveClient = Partial<Pick<ChatClient<OpenGeniClient>, "updateSessionArchive">>;
 
 /**
  * The workspace's root chats the current user may read, newest activity

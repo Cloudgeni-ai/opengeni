@@ -25,6 +25,7 @@ export type {
   FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
+  ChatClient,
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,

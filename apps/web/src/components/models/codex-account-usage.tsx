@@ -1,4 +1,5 @@
 import type { CodexAccount, CodexUsagePayload } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect } from "react";
 import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
@@ -49,7 +50,7 @@ export function OrganizationCodexUsage({
   account,
   onNeedsReconnect,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   account: CodexAccount;
   onNeedsReconnect: () => Promise<void>;

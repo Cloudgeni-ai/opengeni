@@ -1,4 +1,5 @@
 import type { OpenGeniClient, Workspace } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { router, usePathname } from "expo-router";
 import { useEffect, useRef } from "react";
 import { useAccount } from "@/account";
@@ -23,7 +24,7 @@ const SHEET_PATHS = new Set(["/add-account", "/workspaces"]);
 
 /** Which of the person's workspaces holds a session the link names without one. */
 async function findSessionWorkspace(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   sessionId: string,
   workspaces: readonly Workspace[],
   currentId: string | null,
@@ -43,7 +44,7 @@ async function findSessionWorkspace(
 }
 
 interface OpenContext {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaces: readonly Workspace[];
   workspaceId: string | null;
   setWorkspaceId(id: string): void;

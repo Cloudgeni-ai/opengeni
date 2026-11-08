@@ -718,6 +718,10 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  ChatSession,
+  ChatSessionListResponse,
+  ChatSessionLineageResponse,
+  SessionResponseMode,
   SessionConfiguration,
   SessionStatus,
   WorkClaimSubjectType,
@@ -1425,7 +1429,58 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
   };
 }
 
+type ChatSessionMethods =
+  | "createSession"
+  | "getSession"
+  | "updateSession"
+  | "updateSessionToolPolicy"
+  | "updateSessionAgent"
+  | "updateSessionSkills"
+  | "removeSessionResources"
+  | "listSessions"
+  | "listSessionPage"
+  | "updateSessionPin"
+  | "updateSessionAttention"
+  | "updateSessionArchive"
+  | "updateSessionRetention"
+  | "updateSessionUnattended"
+  | "getSessionLineage"
+  | "updateSessionChannel";
+type ClientCloneMethods = "withHeaders" | "asUser" | "asService";
+type ChatResult<Result> =
+  Result extends Promise<infer Value>
+    ? Promise<
+        Value extends Session
+          ? Omit<Value, "instructions" | "skills" | "effectiveTools"> &
+              Partial<Pick<Value, "instructions" | "skills" | "effectiveTools">>
+          : Value extends Session[]
+            ? ChatSession[]
+            : Value extends SessionListResponse
+              ? ChatSessionListResponse
+              : Value extends SessionLineageResponse
+                ? ChatSessionLineageResponse
+                : Value
+      >
+    : Result extends OpenGeniClient
+      ? ChatClient<Result>
+      : Result;
+
+/** Explicit compact session methods; every other SDK method keeps its existing signature. */
+export type ChatClient<Client extends OpenGeniClient = OpenGeniClient> = Omit<
+  Client,
+  ChatSessionMethods | ClientCloneMethods
+> & {
+  [Method in Extract<
+    keyof Client,
+    ChatSessionMethods | ClientCloneMethods
+  >]: Client[Method] extends (...args: infer Args) => infer Result
+    ? (...args: Args) => ChatResult<Result>
+    : never;
+};
+
 export class OpenGeniClient {
+  protected sessionResponse: SessionResponseMode = "full";
+  private readonly responseClients = new Map<SessionResponseMode, this>();
   get toolGatewayMode(): "target" | "catalog" {
     return this.options.toolGatewayMode ?? "target";
   }
@@ -12545,6 +12600,20 @@ export class OpenGeniClient {
     }
     client.serviceInitiatorHeader = this.serviceInitiatorHeader;
     client.serviceContextHeader = this.serviceContextHeader;
+    client.sessionResponse = this.sessionResponse;
+    return client;
+  }
+
+  /** Opt another client into compact session reads without changing existing readers. */
+  withSessionResponse(mode: "chat"): ChatClient<this>;
+  withSessionResponse(mode: "full"): this;
+  withSessionResponse(mode: SessionResponseMode): this | ChatClient<this> {
+    if (this.sessionResponse === mode) return this;
+    const existing = this.responseClients.get(mode);
+    if (existing) return existing;
+    const client = this.withHeaders({});
+    client.sessionResponse = mode;
+    this.responseClients.set(mode, client);
     return client;
   }
 
@@ -13189,7 +13258,8 @@ export class OpenGeniClient {
           method,
           headers: {
             ...headers,
-            Accept: OPENGENI_SESSION_CHAT_ACCEPT,
+            Accept:
+              this.sessionResponse === "chat" ? OPENGENI_SESSION_CHAT_ACCEPT : "application/json",
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

@@ -5,6 +5,7 @@ import {
   type OpenGeniClient,
   type ReasoningEffort,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { SessionRealtimeModel } from "@opengeni/sdk/realtime";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
@@ -183,15 +184,16 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const create: Attempt["create"] =
     options.createSession ??
     (async (initialMessage, idempotencyKey, input) => {
-      const creator = (context.client as unknown as Partial<Pick<OpenGeniClient, "createSession">>)
-        .createSession;
+      const creator = (
+        context.client as unknown as Partial<Pick<ChatClient<OpenGeniClient>, "createSession">>
+      ).createSession;
       if (typeof creator !== "function")
         throw new Error(t("hooks.useNewConversation.newChatsAreNotEnabled"));
       const created = await creator.call(context.client, context.workspaceId, {
         ...(input.startMode === "realtime" ? {} : { initialMessage }),
         idempotencyKey,
         ...input,
-      } as Parameters<OpenGeniClient["createSession"]>[1]);
+      } as Parameters<ChatClient<OpenGeniClient>["createSession"]>[1]);
       return created.id;
     });
 

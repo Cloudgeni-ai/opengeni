@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type Session } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import { OpenGeniApiError, type ChatSession as Session } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
@@ -43,7 +44,7 @@ test("optional catalogs request exactly the authorized resource kinds", async ()
             nextCursor: null,
           };
         },
-      } as unknown as OpenGeniBrowserClient;
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
       const catalog = await loadPersonalResourceCatalog(client, scope, { rigs, connectedMachines });
       expect(calls).toEqual([
         ...(rigs ? ["rigs", "rig"] : []),
@@ -65,7 +66,7 @@ test("authorized catalog failures propagate unchanged, including forbidden and t
       listUserResourceAuthorities: async () => {
         throw cause;
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     await expect(
       loadPersonalResourceCatalog(client, ownerScope()!, { rigs: true, connectedMachines: false }),
     ).rejects.toBe(cause);
@@ -282,7 +283,7 @@ describe("personal resource attachment authority", () => {
           nextCursor: null,
         };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const catalog = await loadPersonalResourceCatalog(client, scope, {
       rigs: true,
@@ -303,7 +304,7 @@ describe("personal resource attachment authority", () => {
         authorities: [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const catalog = await loadPersonalResourceCatalog(client, scope, {
       rigs: true,
@@ -346,7 +347,7 @@ describe("personal resource attachment authority", () => {
             : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const catalog = await loadPersonalResourceCatalog(client, scope, {
       rigs: true,
@@ -378,7 +379,7 @@ describe("personal resource attachment authority", () => {
         authorities: options.resourceKind === "rig" ? [authority("rig", rigId)] : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const catalog = await loadPersonalResourceCatalog(client, scope, {
       rigs: true,
@@ -412,7 +413,7 @@ describe("personal resource attachment authority", () => {
           nextCursor: options.resourceKind === "rig" ? `page-${rigPages}` : null,
         };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     const catalog = await loadPersonalResourceCatalog(client, scope, {
       rigs: true,

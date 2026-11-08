@@ -1,4 +1,5 @@
 import "@/app-host";
+import type { ChatClient } from "@opengeni/sdk";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationCompatibleEndpoint } from "@opengeni/sdk";
@@ -71,10 +72,10 @@ const endpoint: OrganizationCompatibleEndpoint = {
 };
 
 let saved: unknown[] = [];
-let client: OpenGeniBrowserClient;
+let client: ChatClient<OpenGeniBrowserClient>;
 
 /** A client whose endpoint list reflects what was saved, like the API. */
-function freshClient(): OpenGeniBrowserClient {
+function freshClient(): ChatClient<OpenGeniBrowserClient> {
   let current = structuredClone(endpoint);
   saved = [];
   return {
@@ -96,7 +97,7 @@ function freshClient(): OpenGeniBrowserClient {
       current = { ...current, models: [model] };
       return model;
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 
 function Harness({ show }: { show: (node: ReactNode, detail: ReactNode) => ReactNode }) {

@@ -1,8 +1,9 @@
 import { useNavigate } from "../../lib/navigation";
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "../../lib/toast";
-import type { SessionListResponse } from "@opengeni/sdk";
+import type { ChatSessionListResponse as SessionListResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "../../app-context";
 import { Button } from "../../../ui/button";
@@ -38,7 +39,7 @@ export function SiteConversationsPanel({
   canManageAccess = false,
 }: {
   client: Pick<
-    OpenGeniBrowserClient,
+    ChatClient<OpenGeniBrowserClient>,
     "listSessionPage" | "listSiteSessionAccess" | "setSiteSessionAccess"
   >;
   workspaceId: string;

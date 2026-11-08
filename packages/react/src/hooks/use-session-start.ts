@@ -1,4 +1,4 @@
-import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import {

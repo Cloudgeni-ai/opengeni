@@ -8,12 +8,15 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
-The current SDK sends `Accept: application/json; opengeni-session=chat` on JSON requests. Session
+The console, mobile and packaged chat UI explicitly select `client.withSessionResponse("chat")`.
+These SDK clients send `Accept: application/json; opengeni-session=chat` on JSON requests. Session
 responses for chat reads, lists and mutations then omit `instructions`, `skills`
 and `effectiveTools`. Console/mobile chat views and embedded conversations use this
 small response. The console's Agent tool details and “create agent from chat” read
-`client.getSessionConfiguration(workspaceId, sessionId)` explicitly. SDK consumers
-needing the former full payload use the same method, or
+`client.getSessionConfiguration(workspaceId, sessionId)` explicitly. The SDK's
+default remains the full response with required `Session` fields, so upgrading a
+server or SDK alone does not break existing field readers. Compact clients return
+`ChatSession`; callers needing configuration use the explicit method, or
 `GET /v1/workspaces/{workspaceId}/sessions/{sessionId}/configuration`, with
 `sessions:control` and access to the session. The packaged relay refuses that read
 and `model-context` when `createSession` makes setup server-owned. This does not
@@ -24,6 +27,13 @@ must add this Accept preference themselves, not let a browser choose the legacy 
 The packaged relay does this automatically. This is an additive rollout; a future
 default change requires a separate compatibility decision after old clients migrate.
 Using the existing `Accept` header adds no CORS preflight requirement on older APIs.
+
+```ts
+const client = new OpenGeniClient({ baseUrl }); // existing full SDK contract
+const chatClient = client.withSessionResponse("chat"); // separate client; leaves client unchanged
+const chat = await chatClient.getSession(workspaceId, sessionId); // ChatSession
+const configuration = await chatClient.getSessionConfiguration(workspaceId, sessionId); // Session
+```
 
 For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
 allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response

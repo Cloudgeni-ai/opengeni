@@ -85,7 +85,7 @@ export type OpenGeniProviderProps = {
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
  */
 export function OpenGeniProvider({
-  client,
+  client: suppliedClient,
   workspaceId,
   onWorkspaceControlEvent,
   onWorkspaceInteractionEvent,
@@ -98,6 +98,10 @@ export function OpenGeniProvider({
   toolDetails = "full",
   children,
 }: OpenGeniProviderProps) {
+  const client = useMemo(
+    () => suppliedClient.withSessionResponse?.("chat") ?? suppliedClient,
+    [suppliedClient],
+  );
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
     null,
   );

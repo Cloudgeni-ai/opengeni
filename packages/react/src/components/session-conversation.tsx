@@ -6,6 +6,7 @@ import {
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -1071,7 +1072,7 @@ function useDefaultInteractiveBlock(
 
 type RetainedLoaderClient = Partial<
   Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createRetainedArtifactDownloadUrl"
     | "downloadRetainedArtifact"
     | "downloadRetainedScreenshot"
@@ -1149,7 +1150,9 @@ export function useComposerTranscription(
     key: string;
     enabled: boolean;
   } | null>(null);
-  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const reader = client as Partial<
+    Pick<ChatClient<OpenGeniClient>, "getWorkspace" | "transcribeAudio">
+  >;
   const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
     if (!supported) return;
@@ -1181,8 +1184,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
-              Partial<Pick<OpenGeniClient, "requestJson">>,
+            client: reader as Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+              Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

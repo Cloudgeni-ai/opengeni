@@ -55,6 +55,7 @@ export function createEmbeddedSessionClient(
   base: EmbeddedSessionClientLike,
   options: CreateEmbeddedSessionClientOptions = {},
 ): EmbeddedSessionClientLike {
+  base = base.withSessionResponse?.("chat") ?? base;
   const overrides = options.overrides ?? {};
   const client = {} as EmbeddedSessionClientLike;
   for (const key of requiredMethods) {

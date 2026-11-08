@@ -1,4 +1,5 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   getMyUsage,
   type UsageAllowancePeriod,
@@ -16,8 +17,8 @@ import { usePolledValue } from "./internal";
  * `requestJson` (for example the narrower browser client).
  */
 export type UsageClientLike =
-  | Pick<OpenGeniClient, "getMyUsage">
-  | Pick<OpenGeniClient, "requestJson">;
+  | Pick<ChatClient<OpenGeniClient>, "getMyUsage">
+  | Pick<ChatClient<OpenGeniClient>, "requestJson">;
 
 export type UseUsageOptions = {
   /** Defaults to the `<OpenGeniProvider>` client. */

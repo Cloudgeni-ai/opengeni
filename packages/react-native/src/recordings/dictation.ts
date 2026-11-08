@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { RecorderPlatform } from "@opengeni/sdk/recordings";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import {
@@ -12,7 +13,8 @@ import type { NativeVoiceInput, NativeVoiceInputStatus } from "../voice-input";
 export type UseNativeDictationOptions = {
   /** The SDK client; dictations are recorded through its recordings API. */
   client:
-    | (Pick<OpenGeniClient, "transcribeAudio"> & Partial<Pick<OpenGeniClient, "requestJson">>)
+    | (Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+        Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>)
     | null;
   workspaceId: string;
   /** The deployment's voice input, from the client config. */

@@ -18,7 +18,11 @@ import { t } from "../../lib/console-text";
 import { formatRelativeTime } from "../../../lib/format";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../timeline-model";
 import { sessionAgentAttention } from "../../../session-agents-model";
-import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
+import type {
+  ChatLineageNode as LineageNode,
+  SessionStatus,
+  ChatSession as SessionSummary,
+} from "@opengeni/sdk";
 import { Link } from "../../lib/navigation";
 import { BotIcon, ChevronLeftIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";

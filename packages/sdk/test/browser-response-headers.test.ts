@@ -5,6 +5,7 @@ import {
   OPENGENI_BROWSER_RESPONSE_HEADERS,
   OPENGENI_BROWSER_REQUEST_HEADERS,
   OPENGENI_SESSION_CHAT_ACCEPT,
+  OpenGeniClient as FullClient,
 } from "../src/index";
 import { OPENGENI_BROWSER_RESPONSE_HEADERS as browserHeaders } from "../src/browser";
 import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
@@ -131,11 +132,36 @@ test("configuration is an explicit read and does not populate the ordinary sessi
           : { id: SESSION_ID },
       );
     },
-  });
+  }).withSessionResponse("chat");
   expect((await client.getSessionConfiguration(WORKSPACE_ID, SESSION_ID)).instructions).toBe(
     "operator only",
   );
   expect((await client.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBeUndefined();
   expect(paths).toHaveLength(2);
   expect(OPENGENI_BROWSER_REQUEST_HEADERS).toContain("accept");
+});
+
+test("chat projection survives attribution/header clones without changing default SDK readers", async () => {
+  const seen: Headers[] = [];
+  const full = new FullClient({
+    baseUrl: "https://api.test",
+    apiKey: "og_org_test",
+    fetch: async (_input, init) => {
+      seen.push(new Headers(init?.headers));
+      return Response.json({ id: SESSION_ID });
+    },
+  });
+  expect(full.withSessionResponse("chat")).toBe(full.withSessionResponse("chat"));
+  const chat = full
+    .withSessionResponse("chat")
+    .withHeaders({ "x-test": "preserved" })
+    .asUser("person");
+  await chat.getSession(WORKSPACE_ID, SESSION_ID);
+  expect(seen[0]!.get("accept")).toBe(OPENGENI_SESSION_CHAT_ACCEPT);
+  expect(seen[0]!.get("x-test")).toBe("preserved");
+  expect(seen[0]!.has("x-opengeni-external-actor")).toBe(true);
+  await full.getSession(WORKSPACE_ID, SESSION_ID);
+  expect(seen[1]!.get("accept")).toBe("application/json");
+  await chat.withSessionResponse("full").getSession(WORKSPACE_ID, SESSION_ID);
+  expect(seen[2]!.get("accept")).toBe("application/json");
 });
