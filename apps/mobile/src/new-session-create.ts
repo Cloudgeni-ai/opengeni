@@ -1,5 +1,8 @@
 import { isNewSessionDraftConflict } from "@opengeni/react/new-session-draft";
-import type { CreateSessionRequest, CreateSessionResponse } from "@opengeni/sdk";
+import type { CreateSessionRequest, OpenGeniClient } from "@opengeni/sdk";
+
+/** The new chat, as the client returns it (the SDK names the type only inside the client). */
+type CreateSessionResponse = Awaited<ReturnType<OpenGeniClient["createSession"]>>;
 
 /**
  * Creates the chat for a new-chat Send, naming the draft it was composed in

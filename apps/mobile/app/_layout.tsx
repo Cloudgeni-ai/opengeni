@@ -70,6 +70,17 @@ export default function RootLayout() {
                   <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
                   <Stack.Screen name="meetings" options={{ title: "Meetings" }} />
                   <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
+                  <Stack.Screen name="automations" options={{ title: "Automations" }} />
+                  <Stack.Screen name="automation/[id]" options={{ title: "" }} />
+                  <Stack.Screen
+                    name="automation-new"
+                    options={{
+                      headerShown: false,
+                      presentation: "formSheet",
+                      sheetAllowedDetents: [0.6, 1],
+                      sheetGrabberVisible: true,
+                    }}
+                  />
                   <Stack.Screen name="session/[id]" options={{ title: "" }} />
                   <Stack.Screen name="settings" options={{ title: "Settings" }} />
                   <Stack.Screen name="wake-phrase" options={{ title: "" }} />
