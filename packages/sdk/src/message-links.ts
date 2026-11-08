@@ -1,5 +1,4 @@
 import type { OpenGeniClient } from "./client";
-import { OpenGeniApiError } from "./errors";
 
 /**
  * Links an agent writes into chat Markdown that point at Opengeni-owned objects.
@@ -178,29 +177,20 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
 
 /**
  * UUID artifact references historically name files, but Sites use the same ID
- * format. Resolve those references with exact, authorized metadata reads before
- * handing them to a host. Keep file precedence for existing messages; only a
- * definitive not-found tries a Site. Explicit routes and 32-hex IDs need no read.
+ * format. Resolve those references with one exact, authorized kind lookup before
+ * handing them to a host. Explicit routes and 32-hex IDs need no read.
  */
 export async function resolveOpenGeniLinkTarget(
-  client: Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent">,
+  client: Pick<OpenGeniClient, "resolveArtifactLink">,
   target: OpenGeniLinkTarget,
   workspaceId: string,
   options: { sessionId?: string | undefined; signal?: AbortSignal | undefined } = {},
 ): Promise<OpenGeniLinkTarget> {
   if (target.kind !== "file" || target.workspaceId !== null) return target;
-  try {
-    await client.getFile(workspaceId, target.fileId, options);
-    return { ...target, workspaceId };
-  } catch (error) {
-    if (!(error instanceof OpenGeniApiError) || error.status !== 404) throw error;
-  }
-  await client.getWorkspaceArtifactCurrent(
-    workspaceId,
-    target.fileId,
-    options.signal ? { signal: options.signal } : {},
-  );
-  return { kind: "site", artifactId: target.fileId, workspaceId };
+  const resolution = await client.resolveArtifactLink(workspaceId, target.fileId, options);
+  return resolution.kind === "file"
+    ? { ...target, workspaceId }
+    : { kind: "site", artifactId: resolution.artifactId, workspaceId };
 }
 
 /** The Opengeni console route for a target (the form agents write). */

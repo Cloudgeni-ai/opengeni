@@ -7,24 +7,19 @@ const UUID = "22222222-2222-4222-8222-222222222222";
 const WS = "11111111-1111-4111-8111-111111111111";
 const reference = parseOpenGeniLink(`artifact:${UUID}`)!;
 
-function clientFor(fileError?: Error, siteError?: Error) {
+function clientFor(kind: "file" | "site" = "file", error?: Error) {
   const calls: unknown[] = [];
-  const client: Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent"> = {
-    getFile: async (...args) => {
-      calls.push(["file", ...args]);
-      if (fileError) throw fileError;
-      return {} as never;
-    },
-    getWorkspaceArtifactCurrent: async (...args) => {
-      calls.push(["site", ...args]);
-      if (siteError) throw siteError;
-      return {} as never;
+  const client: Pick<OpenGeniClient, "resolveArtifactLink"> = {
+    resolveArtifactLink: async (...args) => {
+      calls.push(args);
+      if (error) throw error;
+      return { kind, artifactId: args[1] };
     },
   };
   return { client, calls };
 }
 
-test("UUID files retain precedence without a Site read", async () => {
+test("UUID files use one exact lookup with session and cancellation context", async () => {
   const { client, calls } = clientFor();
   const options = { sessionId: UUID, signal: new AbortController().signal };
   expect(await resolveOpenGeniLinkTarget(client, reference, WS, options)).toEqual({
@@ -32,36 +27,34 @@ test("UUID files retain precedence without a Site read", async () => {
     fileId: UUID,
     workspaceId: WS,
   });
-  expect(calls).toEqual([["file", WS, UUID, options]]);
+  expect(calls).toEqual([[WS, UUID, options]]);
 });
 
-test("a definitive file not-found resolves the same UUID as a Site", async () => {
-  const { client, calls } = clientFor(new OpenGeniApiError(404, "Not found"));
+test("UUID Sites use the same exact lookup, not sequential kind probes", async () => {
+  const { client, calls } = clientFor("site");
   expect(await resolveOpenGeniLinkTarget(client, reference, WS)).toEqual({
     kind: "site",
     artifactId: UUID,
     workspaceId: WS,
   });
-  expect(calls.map((call) => (call as unknown[])[0])).toEqual(["file", "site"]);
+  expect(calls).toEqual([[WS, UUID, {}]]);
 });
 
 test("permission, network, and server errors never turn into another artifact kind", async () => {
   for (const error of [
+    new OpenGeniApiError(404, "Not found"),
     new OpenGeniApiError(403, "Forbidden"),
     new OpenGeniApiError(503, "Unavailable"),
     new Error("Network error"),
   ]) {
-    const { client, calls } = clientFor(error);
+    const { client, calls } = clientFor("file", error);
     await expect(resolveOpenGeniLinkTarget(client, reference, WS)).rejects.toBe(error);
     expect(calls).toHaveLength(1);
   }
-  const missing = new OpenGeniApiError(404, "Not found");
-  const { client } = clientFor(missing, missing);
-  await expect(resolveOpenGeniLinkTarget(client, reference, WS)).rejects.toBe(missing);
 });
 
 test("native editable IDs and legacy typed routes do not need metadata lookup", async () => {
-  const { client, calls } = clientFor(new Error("must not read"));
+  const { client, calls } = clientFor("file", new Error("must not read"));
   for (const href of [
     "artifact:0123456789abcdef0123456789abcdef",
     `/workspaces/${WS}/artifacts/${UUID}`,

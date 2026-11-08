@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OpenGeniApiError, openGeniConsolePath, type OpenGeniClient } from "@opengeni/sdk";
+import { openGeniConsolePath, type OpenGeniClient } from "@opengeni/sdk";
 import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider, viewerLinkResolver } from "../src/components/open-geni-links";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
@@ -8,12 +8,8 @@ registerDom();
 const WS = "11111111-1111-4111-8111-111111111111";
 const SITE = "22222222-2222-4222-8222-222222222222";
 const FILE = "33333333-3333-4333-8333-333333333333";
-const client: Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent"> = {
-  getFile: async (_ws, id) => {
-    if (id === SITE) throw new OpenGeniApiError(404, "Not found");
-    return {} as never;
-  },
-  getWorkspaceArtifactCurrent: async () => ({}) as never,
+const client: Pick<OpenGeniClient, "resolveArtifactLink"> = {
+  resolveArtifactLink: async (_ws, id) => ({ artifactId: id, kind: id === SITE ? "site" : "file" }),
 };
 
 test("UUID Site and file references render their existing routes, not unavailable text", async () => {
@@ -69,10 +65,10 @@ test("a failed metadata lookup can be retried instead of guessing a file route",
   let attempts = 0;
   const flaky = {
     ...client,
-    getFile: (async () => {
+    resolveArtifactLink: (async () => {
       if (++attempts === 1) throw new Error("Temporary failure");
-      return {} as never;
-    }) as OpenGeniClient["getFile"],
+      return { kind: "file", artifactId: FILE };
+    }) as OpenGeniClient["resolveArtifactLink"],
   };
   const r = await renderComponent(
     <OpenGeniLinkProvider artifactScope={{ client: flaky, workspaceId: WS }}>
@@ -96,13 +92,13 @@ test("a late lookup from the previous workspace cannot replace the current targe
   let oldSignal: AbortSignal | undefined;
   const delayed = {
     ...client,
-    getFile: (async (_ws, _id, options) => {
+    resolveArtifactLink: (async (_ws, _id, options) => {
       oldSignal = options?.signal;
       await new Promise<void>((resolve) => {
         release = resolve;
       });
-      return {} as never;
-    }) as OpenGeniClient["getFile"],
+      return { kind: "file", artifactId: SITE };
+    }) as OpenGeniClient["resolveArtifactLink"],
   };
   const render = (workspaceId: string, source: typeof client) => (
     <OpenGeniLinkProvider

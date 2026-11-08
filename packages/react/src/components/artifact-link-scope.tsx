@@ -7,7 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { OpenGeniLinkResolver } from "./open-geni-links";
 
 export type ArtifactLinkScope = {
-  client: Partial<Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent">>;
+  client: Partial<Pick<OpenGeniClient, "resolveArtifactLink">>;
   workspaceId: string;
   sessionId?: string | undefined;
   /** Explicit host destinations retain precedence over automatic metadata reads. */
@@ -28,13 +28,10 @@ export function useArtifactLinkTarget(target: OpenGeniLinkTarget | null) {
   const sessionId = scope?.sessionId;
   const lookup = useMemo(
     () =>
-      typeof client?.getFile === "function" &&
-      typeof client.getWorkspaceArtifactCurrent === "function" &&
-      workspaceId &&
-      fileId
+      typeof client?.resolveArtifactLink === "function" && workspaceId && fileId
         ? (signal?: AbortSignal) =>
             resolveOpenGeniLinkTarget(
-              client as Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent">,
+              client as Pick<OpenGeniClient, "resolveArtifactLink">,
               { kind: "file", fileId, workspaceId: null },
               workspaceId,
               { sessionId, signal },

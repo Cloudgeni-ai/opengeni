@@ -84,6 +84,12 @@ export const ArtifactCatalogListResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type ArtifactCatalogListResponse = z.infer<typeof ArtifactCatalogListResponse>;
 
+/** Exact UUID link resolution; content still uses the kind's normal read route. */
+export const ArtifactLinkResolution = /* @__PURE__ */ defineSchema(() =>
+  z.object({ artifactId: primitives.uuid, kind: z.enum(["file", "site"]) }).strict(),
+);
+export type ArtifactLinkResolution = z.infer<typeof ArtifactLinkResolution>;
+
 export const UpdateArtifactPinRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({ pinned: primitives.boolean }).strict(),
 );

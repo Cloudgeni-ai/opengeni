@@ -221,6 +221,7 @@ export type {
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
 } from "./artifact-catalog";
 export type {
   SessionMessageSearchRequest,

@@ -29,14 +29,10 @@ const spreadsheetId = "475e389ff5d34f63b308f4901f52492b";
 const presentationId = "a0cc8ea0a2284b8dbc951820d0093a08";
 const unknownEditableId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const fileId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-const artifactClient: Pick<OpenGeniClient, "getFile" | "getWorkspaceArtifactCurrent"> = {
-  getFile: async (_workspace, id) => {
-    if (id !== fileId) throw new OpenGeniApiError(404, "Not found");
-    return {} as never;
-  },
-  getWorkspaceArtifactCurrent: async (_workspace, id) => {
-    if (id !== siteId) throw new OpenGeniApiError(404, "Not found");
-    return {} as never;
+const artifactClient: Pick<OpenGeniClient, "resolveArtifactLink"> = {
+  resolveArtifactLink: async (_workspace, id) => {
+    if (id !== fileId && id !== siteId) throw new OpenGeniApiError(404, "Not found");
+    return { artifactId: id, kind: id === siteId ? "site" : "file" };
   },
 };
 const knownEditables = new Set([documentId, spreadsheetId, presentationId]);

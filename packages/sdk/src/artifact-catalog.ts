@@ -48,6 +48,8 @@ export type ArtifactCatalogListResponse = {
   nextCursor: string | null;
 };
 
+export type ArtifactLinkResolution = { artifactId: string; kind: "file" | "site" };
+
 export type ArtifactPinResponse = {
   kind: ArtifactCatalogKind;
   artifactId: string;

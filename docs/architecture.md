@@ -2799,8 +2799,9 @@ Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
 Workspace-aware Markdown resolves UUID `artifact:` references through the SDK's
 `resolveOpenGeniLinkTarget` before invoking the existing file/Site resolvers.
-It reads exact file metadata first (preserving historical file precedence), then
-Site metadata only on a definitive 404; the paginated catalog is not an ID lookup.
+One authenticated `artifact-catalog/:id/resolve` read checks both domains with
+their existing visibility rules and returns the kind; readable files retain
+precedence on UUID collisions. The paginated catalog is not an ID lookup.
 `artifact-link-scope.tsx` owns the React lookup lifecycle and retry; native hosts
 use the same SDK helper. Explicit console paths and 32-hex editable references
 remain synchronous and existing message text is never rewritten.
