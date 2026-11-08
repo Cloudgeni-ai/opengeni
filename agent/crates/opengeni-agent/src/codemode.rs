@@ -2473,21 +2473,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_connection_is_named_instead_of_a_bare_send_error() {
-        // Bound but not listening: connections are refused, and no parallel
-        // test can take the port meanwhile.
+    async fn a_failed_connection_names_its_cause_instead_of_a_bare_send_error() {
+        // Keep the port reserved without a listener. Linux refuses the dial;
+        // macOS can leave it pending until the client's connect timeout.
         let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
         reserved.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
         let address = reserved.local_addr().expect("address");
-        let client =
+        let mut client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        client.http = Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
         let message = client.catalog().await.unwrap_err().to_string();
         drop(reserved);
-        assert_eq!(
-            message,
-            format!(
-                "Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
-            )
+        assert!(
+            ["was refused", "timed out"].iter().any(|cause| message == format!(
+                "Can't reach Opengeni: the connection to {address} {cause}. Check this machine's network, firewall and proxy settings."
+            )),
+            "{message}"
         );
     }
 
