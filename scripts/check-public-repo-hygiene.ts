@@ -495,11 +495,21 @@ function collectMatches(
 // Only the values of a `.svg` file's `d` and `points` attributes are skipped,
 // and only for that rule; text, titles and every other attribute still run.
 const SVG_PATH_DATA_ATTRIBUTE = /\s(?:d|points)\s*=\s*("[^"]*"|'[^']*')/g;
+// Android vector drawables draw with the same path syntax.
+const ANDROID_PATH_DATA_ATTRIBUTE = /\sandroid:pathData\s*=\s*("[^"]*"|'[^']*')/g;
 
+/** Where an SVG or an Android vector drawable keeps its path coordinates. */
 function svgPathDataRanges(file: string, source: string): Array<[number, number]> {
-  if (extname(file).toLowerCase() !== ".svg") return [];
+  const extension = extname(file).toLowerCase();
+  const attribute =
+    extension === ".svg"
+      ? SVG_PATH_DATA_ATTRIBUTE
+      : extension === ".xml" && /(?:^|\/)res\/drawable[^/]*\//u.test(file)
+        ? ANDROID_PATH_DATA_ATTRIBUTE
+        : null;
+  if (!attribute) return [];
   const ranges: Array<[number, number]> = [];
-  for (const match of source.matchAll(SVG_PATH_DATA_ATTRIBUTE)) {
+  for (const match of source.matchAll(attribute)) {
     const value = match[1]!;
     const start = (match.index ?? 0) + match[0].length - value.length;
     ranges.push([start, start + value.length]);
