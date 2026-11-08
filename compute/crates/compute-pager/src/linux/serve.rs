@@ -242,12 +242,20 @@ fn run(options: &Options) -> io::Result<()> {
         .unwrap_or_default();
     let (control, control_file) = bind(&options.control)?;
     let (vmm, _vmm_file) = bind(&options.vmm_socket)?;
+    // A done file is this pager's word alone: one an earlier pager left,
+    // even for the same launch (an engine may start the VMM and its pager
+    // again), would tell the host this one finished before it has.
+    let done = control_file.sibling("done");
+    match done.0.remove(&done.1) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let prepared = Prepared {
         source: crate::source::filled(&file, Arc::clone(&filling))?,
         profile,
         quiesce: AskVmm::new(&api_socket)?,
         learned: options.learned.as_deref().map(Dir::of).transpose()?,
-        done: control_file.sibling("done"),
+        done,
     };
     // Everything a pager opens by name is open now, while it has one
     // thread: from here on it is no more than the VM, and names files only

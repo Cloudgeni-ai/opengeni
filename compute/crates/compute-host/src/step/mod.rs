@@ -1004,6 +1004,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
         let prepared = blocking(move || {
+            // Without it, a later save would take this VM's memory for the
+            // last pager's (see `guest_memory`).
+            crate::layout::remove_durably(&paged_marker(&paths))?;
             link_kernel(&kernel, &paths)?;
             DiskWatch::fresh(&paths)
         })

@@ -81,8 +81,9 @@ restore depend on every earlier link.
   and let go, a page of it neither present nor swapped reads as zeros.
   Where that memory is, only the VMM's handshake with the pager says, so
   the pager writes those regions into its done file with its launch's
-  tag, and the host uses them only for the launch the sandbox's paged
-  marker names; until the pager has finished, nothing is named. A VM
+  tag (a starting pager first removes any done file an earlier one left),
+  and the host uses them only for the launch the sandbox's paged marker
+  names; until the pager has finished, nothing is named. A VM
   booted fresh is not covered: Firecracker reports nowhere where its
   memory is, and finding it by the shape of the process's mappings would
   be a guess. Its image keeps what freed pages held until the sandbox is

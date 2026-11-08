@@ -200,6 +200,47 @@ fn api(path: &Path) {
     });
 }
 
+/// A pager started again for the same launch, as an engine restarting the
+/// VMM with its pager does, must not let the host read the earlier pager's
+/// done file as its own before it has finished.
+#[test]
+fn a_starting_pager_clears_an_earlier_pagers_done_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("memory");
+    fs::write(&image, vec![1_u8; LEN]).unwrap();
+    let (vmm_socket, control) = (dir.path().join("uffd.sock"), dir.path().join("pager.sock"));
+    let done = control.with_extension("done");
+    let earlier = control::Finished {
+        tag: "image-1".into(),
+        regions: vec![control::Region {
+            address: 0x7f00_0000_0000,
+            size: LEN as u64,
+            offset: 0,
+        }],
+    };
+    fs::write(&done, serde_json::to_vec(&earlier).unwrap()).unwrap();
+    let api_socket = dir.path().join("api.sock");
+    api(&api_socket);
+    let mut pager = Command::new(env!("CARGO_BIN_EXE_compute-pager"))
+        .arg("serve")
+        .args(["--vmm-socket".as_ref(), vmm_socket.as_os_str()])
+        .args(["--api-socket".as_ref(), api_socket.as_os_str()])
+        .args(["--control".as_ref(), control.as_os_str()])
+        .args(["--memory".as_ref(), image.as_os_str()])
+        .args(["--tag", "image-1", "--complete", "--ready-bytes", "0"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    BufReader::new(pager.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    assert!(!done.exists(), "the earlier pager's done file survived");
+    pager.kill().unwrap();
+    pager.wait().unwrap();
+}
+
 #[test]
 #[ignore = "requires Linux userfaultfd permission"]
 fn discards_survive_the_agent_and_a_finished_pager_leaves() {

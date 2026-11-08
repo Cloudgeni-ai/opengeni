@@ -162,7 +162,8 @@ impl Area<'_> {
     /// anonymous huge pages, which the kernel names after the file it
     /// keeps them in internally. A page of it nobody wrote reads as zeros.
     fn unbacked(&self) -> bool {
-        self.anonymous() || (self.perms == "rw-p" && self.path == "/anon_hugepage")
+        self.anonymous()
+            || (self.perms == "rw-p" && self.major == 0 && self.path == "/anon_hugepage")
     }
 }
 
