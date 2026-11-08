@@ -1,4 +1,10 @@
-import { continueAsNew, defineSignal, proxyActivities, setHandler } from "@temporalio/workflow";
+import {
+  continueAsNew,
+  defineSignal,
+  patched,
+  proxyActivities,
+  setHandler,
+} from "@temporalio/workflow";
 import type * as activities from "../activities";
 
 const wakeActivity = proxyActivities<Pick<typeof activities, "dispatchSessionWorkflowWakes">>({
@@ -47,6 +53,10 @@ export async function sessionWorkflowWakeDispatcherWorkflow(): Promise<
     result = await wakeActivity.dispatchSessionWorkflowWakes();
     sweeps += 1;
   } while (requested && sweeps < SESSION_WORKFLOW_WAKE_DISPATCHER_MAX_SWEEPS);
-  if (requested) return await continueAsNew<typeof sessionWorkflowWakeDispatcherWorkflow>();
+  // Older histories completed at the cap even with a pending signal. Preserve
+  // that recorded command on replay; only new history may continue instead.
+  if (requested && patched("workflow-wake-dispatcher-retain-pending-v1")) {
+    return await continueAsNew<typeof sessionWorkflowWakeDispatcherWorkflow>();
+  }
   return result;
 }

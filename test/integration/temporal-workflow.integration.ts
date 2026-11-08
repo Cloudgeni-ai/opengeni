@@ -3046,6 +3046,109 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "workflow-wake dispatcher replays frozen pre-upgrade histories including the old completion boundary",
+    async () => {
+      const legacyPath = new URL(
+        "../../apps/worker/test/fixtures/legacy-workflow-wake.ts",
+        import.meta.url,
+      ).pathname;
+      const client = new Client({ connection });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      for (const scenario of ["completed", "history-boundary", "failed", "in-flight"] as const) {
+        const taskQueue = `wake-upgrade-${scenario}-${crypto.randomUUID()}`;
+        const workflowId = `wake-upgrade-${scenario}-${crypto.randomUUID()}`;
+        let dispatches = 0;
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          namespace: "default",
+          taskQueue,
+          workflowsPath: legacyPath,
+          activities: {
+            dispatchSessionWorkflowWakes: async () => {
+              dispatches += 1;
+              if (scenario === "failed") throw new Error("legacy dispatch failed");
+              if (scenario === "in-flight" && dispatches === 1) await blocked;
+              if (scenario === "history-boundary") {
+                await client.workflow.getHandle(workflowId).signal("dispatchRequested");
+              }
+              return expected;
+            },
+          },
+        });
+        const run = worker.run();
+        try {
+          const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+            taskQueue,
+            workflowId,
+            args: [],
+          });
+          if (scenario === "in-flight") {
+            await waitFor(() => dispatches === 1, { timeoutMs: 10_000 });
+            await Promise.all(Array.from({ length: 31 }, () => handle.signal("dispatchRequested")));
+          } else if (scenario === "failed") {
+            await expect(handle.result()).rejects.toThrow();
+          } else {
+            expect(await handle.result()).toEqual(expected);
+          }
+          const history = await handle.fetchHistory();
+          const scheduled = history.events?.find(
+            (event) => event.activityTaskScheduledEventAttributes,
+          )?.activityTaskScheduledEventAttributes;
+          expect(Number(scheduled?.startToCloseTimeout?.seconds)).toBe(300);
+          expect(
+            scheduled?.heartbeatTimeout?.seconds == null ||
+              Number(scheduled.heartbeatTimeout.seconds) === 0,
+          ).toBe(true);
+          expect(scheduled?.retryPolicy?.maximumAttempts).toBe(1);
+          if (scenario === "history-boundary") {
+            expect(dispatches).toBe(50);
+            expect(
+              history.events?.some((event) => event.workflowExecutionCompletedEventAttributes),
+            ).toBe(true);
+          }
+          if (scenario === "in-flight") {
+            expect(
+              history.events?.filter((event) => event.workflowExecutionSignaledEventAttributes),
+            ).toHaveLength(31);
+            expect(
+              history.events?.some((event) => event.activityTaskCompletedEventAttributes),
+            ).toBe(false);
+          }
+          // Real old-server history, current production workflow bundle; not a
+          // mocked workflow runtime or a history recorded with the new options.
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            history,
+            workflowId,
+          );
+          if (scenario === "in-flight") {
+            release();
+            await handle.result();
+          }
+        } finally {
+          release();
+          worker.shutdown();
+          await run;
+        }
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "scheduled task fire workflow delegates reusable delivery to the activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

@@ -5011,7 +5011,10 @@ ceiling. A cancelled attempt checks cancellation before doing further work;
 duplicate signals remain safe because admission and acknowledgment are revision
 fenced. Signals received during retry coalesce into another sweep, and an
 outstanding signal at the history bound continues as a new execution instead of
-waiting for a later maintenance tick. A provider or database outage can still
+waiting for a later maintenance tick. The `workflow-wake-dispatcher-retain-pending-v1`
+patch preserves the old completion command when replaying pre-upgrade histories;
+already scheduled activities keep their recorded timeout and retry options.
+A provider or database outage can still
 prevent delivery; this recovery contract does not claim to remove that outage.
 
 ## Goals — what makes long runs continue
