@@ -105,6 +105,7 @@ fn merged_images_equal_their_base_with_the_diff_laid_over_it() {
                 base,
                 state: &state,
                 diff: &diff,
+                freed: &[],
             }),
         }
         .unwrap();
@@ -118,6 +119,80 @@ fn merged_images_equal_their_base_with_the_diff_laid_over_it() {
         assert_eq!(images.generations().unwrap(), vec![generation]);
         base = Some(generation);
     }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Memory the guest gave back reads as zeros in the merged image, over what
+/// the base held and over what the diff wrote there, and only the chunks
+/// where zeros replaced data are hashed anew: the image equals the guest's
+/// memory, freed pages included, and its chunk map matches a fresh one.
+#[test]
+fn memory_the_guest_gave_back_reads_as_zeros_in_the_merged_image() {
+    let dir = scratch("freed");
+    let images = Images::new(dir.join("images"));
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let pages = LEN / PAGE;
+    // A base whose every page holds data.
+    let everything: Vec<(u64, u8)> = (0..pages).map(|page| (page, 0x5a)).collect();
+    let (diff, state) = (dir.join("diff"), dir.join("state"));
+    write_diff(&diff, &everything);
+    write_state(&state, b"base");
+    let mut model = vec![0x5a_u8; usize::try_from(LEN).unwrap()];
+    let mut base = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &diff,
+            len: LEN,
+        })
+        .unwrap()
+        .generation();
+    for round in 0..40 {
+        let written = random_pages(&mut rng);
+        let mut freed: Vec<Range<u64>> = Vec::new();
+        let mut page = rng.below(8);
+        while page < pages {
+            let run = 1 + rng.below(80);
+            let end = (page + run).min(pages);
+            freed.push(page * PAGE..end * PAGE);
+            page = end + 1 + rng.below(120);
+        }
+        write_diff(&diff, &written);
+        write_state(&state, format!("state {round}").as_bytes());
+        apply(&mut model, &written);
+        for range in &freed {
+            let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+            model[range].fill(0);
+        }
+        let image = images
+            .publish(Parts::Diff {
+                base,
+                state: &state,
+                diff: &diff,
+                freed: &freed,
+            })
+            .unwrap();
+        let generation = image.generation();
+        assert_eq!(content(&images, generation), model, "round {round}");
+        images.verify(generation, Depth::Deep).unwrap();
+        images.retire(&image, &[]).unwrap();
+        base = generation;
+    }
+    // A chunk the guest gave back whole is a hole, mapped as zeros.
+    let whole = 0..CHUNK_BYTES;
+    write_diff(&diff, &[]);
+    write_state(&state, b"last");
+    let image = images
+        .publish(Parts::Diff {
+            base,
+            state: &state,
+            diff: &diff,
+            freed: std::slice::from_ref(&whole),
+        })
+        .unwrap();
+    let memory = File::open(images.memory(image.generation())).unwrap();
+    assert!(!overlaps(&data_ranges(&memory, LEN).unwrap(), &whole));
+    assert_eq!(images.chunk_map(&image).unwrap().0[0], ZERO);
+    images.verify(image.generation(), Depth::Deep).unwrap();
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -143,6 +218,7 @@ fn a_diff_of_the_wrong_length_is_refused() {
                 base: base.generation(),
                 state: &state,
                 diff: &diff,
+                freed: &[],
             })
             .is_err()
     );
@@ -356,6 +432,7 @@ fn crashes_and_corruption_never_lose_or_misuse_the_committed_image() {
                     base,
                     state: &state,
                     diff: &diff,
+                    freed: &[],
                 }),
             };
             let mut next = if base.is_some() {
@@ -534,6 +611,7 @@ fn a_shared_image_is_the_same_file_and_survives_its_source() {
             base: image.generation(),
             state: &state,
             diff: &diff,
+            freed: &[],
         })
         .unwrap();
     modified.retire(&saved, &[]).unwrap();

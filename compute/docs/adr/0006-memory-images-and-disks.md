@@ -63,6 +63,24 @@ restore depend on every earlier link.
   means the base is unknown, and the next save writes every page. The
   file is never synced: it means anything only beside the live process it
   names, which a power loss ends.
+- Memory the guest frees and reports to the host reads as zeros in its
+  image, as it does in the guest. The VMM discards a reported range without
+  counting it as a change, so a diff leaves it out, and an image merged
+  from diffs would otherwise go on holding whatever the guest last kept
+  there: an idle sandbox's image would hold nearly every page it ever
+  used, and each checkpoint would store again every chunk the guest
+  touched, stale bytes and all. So after a diff snapshot, while the VM is
+  still paused, the engine names the ranges that read as zeros
+  (`Engine::freed_memory`), and the merged image holds zeros there, as a
+  hole, so its chunks are the zero chunk or hold only what the guest
+  wrote. Firecracker discards a range of memory mapped from an image file
+  by mapping fresh anonymous memory over it, so those ranges are the
+  anonymous mappings inside the file's mapping whose pages are neither
+  present nor swapped, read from `/proc/<pid>/maps` and `pagemap`. Memory
+  not mapped from a file (a fresh boot, or a wake served by the pager) is
+  not covered: its discards are not visible that way, and its image keeps
+  what it held, as before. A full snapshot reads discarded pages as zeros
+  already.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.
 - A disk's file gives back what its guest frees. Writable drives take the

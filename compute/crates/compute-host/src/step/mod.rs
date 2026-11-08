@@ -757,6 +757,28 @@ impl<E: Engine, S: Store> Job<E, S> {
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
         notes::phase("snapshot");
+        // Asked while the VM is still paused, so nothing the guest does
+        // after can count. Without an answer the image holds those pages
+        // as before, which is only larger.
+        let freed = if kind == SnapshotKind::Diff {
+            match self
+                .engine
+                .freed_memory(&live.vm, &self.paths.snapshot.memory)
+                .await
+            {
+                Ok(freed) => freed,
+                Err(error) => {
+                    tracing::warn!(id = %self.id, %error, "memory the guest gave back not found");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let given_back: u64 = freed.iter().map(|range| range.end - range.start).sum();
+        if given_back > 0 {
+            notes::bytes("freed", given_back);
+        }
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
         let files = blocking(move || {
@@ -781,6 +803,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 // A diff over zeros, or a full snapshot, is already whole.
                 _ => None,
             },
+            freed,
             runtime: self.engine.vm_runtime(&live.vm).to_owned(),
             process,
         })
@@ -801,6 +824,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             let Taken {
                 files,
                 over,
+                freed,
                 runtime,
                 process,
             } = taken;
@@ -809,6 +833,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     base: generation,
                     state: &files.state,
                     diff: &files.memory,
+                    freed: &freed,
                 },
                 None => Parts::Whole {
                     state: &files.state,
