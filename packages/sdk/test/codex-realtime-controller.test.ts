@@ -419,7 +419,7 @@ describe("Codex realtime browser controller", () => {
     expect(calls).not.toContain("sync");
     expect(browser.sent).toEqual([]);
     expect(browser.remoteMedia.getTracks()[0]!.enabled).toBe(false);
-    expect(browser.calls).not.toContain("audio.play");
+    expect(browser.remoteAudio.muted).toBe(true);
     await controller.start();
     await preparing;
     expect(calls).toEqual(expect.arrayContaining(["accept", "microphone", "attach", "activate"]));

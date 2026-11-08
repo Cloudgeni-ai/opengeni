@@ -26,7 +26,7 @@ export function incomingEndReason(call: Pick<AgentCall, "state">): NativeIncomin
 export type IncomingAgentCallsOptions = {
   client: OpenGeniClient;
   callAdapter: NativeCallAdapter | null;
-  /** Prepare local call data/transport while ringing; never claim or start voice here. */
+  /** Prepare without accepting; provider preconnection requires a native silent-audio gate. */
   onRinging?(call: NativeIncomingCall, device: string): void;
   /** Release preparation when the ring or system call ends. */
   onEnded?(callId: string): void;

@@ -1,5 +1,7 @@
 ---
 "@opengeni/contracts": patch
+"@opengeni/db": patch
+"@opengeni/api-router": patch
 "@opengeni/sdk": patch
 "@opengeni/react": patch
 "@opengeni/react-native": patch

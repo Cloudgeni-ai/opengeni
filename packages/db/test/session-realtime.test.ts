@@ -447,13 +447,17 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
       }),
     );
     expect(renewed.mode.leaseExpiresAt).toBe(prepared.mode.leaseExpiresAt);
-    await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
-      settleExpiredSessionRealtimeInTransaction(
+    await withWorkspaceRls(client.db, value.grant.workspaceId, async (db) => {
+      const [row] = await db
+        .select()
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      await settleExpiredSessionRealtimeInTransaction(
         db,
-        value.session,
+        row!,
         new Date(Date.parse(prepared.mode.leaseExpiresAt) + 1),
-      ),
-    );
+      );
+    });
     const [ended] =
       await shared.admin`select state, end_reason from session_realtime_modes where id=${prepared.mode.id}`;
     expect(ended).toMatchObject({ state: "ended", end_reason: "lease_expired" });

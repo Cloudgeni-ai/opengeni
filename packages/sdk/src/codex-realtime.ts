@@ -67,6 +67,8 @@ export type StartCodexRealtimeWebrtcOptions = {
   remoteAudio?: HTMLAudioElement | undefined;
   /** Replacement transports defer taking over the shared audio element until promotion. */
   activateRemoteAudio?: boolean | undefined;
+  /** Consume muted incoming-call audio before acceptance to keep playout current. */
+  primeRemoteAudio?: boolean | undefined;
   onAudibleOutputState?: ((state: CodexRealtimeAudibleOutputState) => void) | undefined;
   onMicrophoneEnded?: (() => void) | undefined;
   onConnectionHealth?: ((health: CodexRealtimeConnectionHealth) => void) | undefined;
@@ -120,6 +122,7 @@ export async function startCodexRealtimeWebrtc(
   let ownsMedia = false;
   let stopped = false;
   let remoteStream: MediaStream | null = null;
+  const remoteTracks = new Set<MediaStreamTrack>();
   let remoteAudioActive = options.activateRemoteAudio ?? true;
   let outputMuted = false;
   let audibleOutput: CodexRealtimeAudibleOutputState = "inactive";
@@ -137,7 +140,7 @@ export async function startCodexRealtimeWebrtc(
     if (stopped || !remoteAudioActive || !remoteAudio || !stream) return false;
     remoteAudio.autoplay = true;
     remoteAudio.muted = outputMuted;
-    remoteAudio.srcObject = stream;
+    if (remoteAudio.srcObject !== stream) remoteAudio.srcObject = stream;
     const attempt = ++audioAttempt;
     publishAudibleOutput("pending");
     try {
@@ -155,11 +158,25 @@ export async function startCodexRealtimeWebrtc(
 
   const onRemoteTrack = (event: RTCTrackEvent): void => {
     if (stopped || event.track.kind !== "audio") return;
+    remoteTracks.add(event.track);
     event.track.enabled = remoteAudioActive && !outputMuted;
     const stream = event.streams[0];
     if (!stream) return;
     remoteStream = stream;
     if (remoteAudioActive) void playRemoteAudio();
+    else if (
+      options.primeRemoteAudio &&
+      options.remoteAudio &&
+      options.remoteAudio.srcObject === null
+    ) {
+      // Consume incoming silence while ringing instead of accumulating it in
+      // the receiver's playout buffer. The track and sink both remain muted.
+      // A staged replacement must never take the live connection's sink.
+      options.remoteAudio.autoplay = true;
+      options.remoteAudio.muted = true;
+      options.remoteAudio.srcObject = stream;
+      void options.remoteAudio.play().catch(() => undefined);
+    }
   };
   if (options.remoteAudio) peerConnection.addEventListener("track", onRemoteTrack);
   const onConnectionState = (): void => {
@@ -306,16 +323,16 @@ export async function startCodexRealtimeWebrtc(
       audibleOutputState: () => audibleOutput,
       setOutputMuted: (muted) => {
         outputMuted = muted;
-        remoteStream?.getTracks().forEach((track) => {
-          if (track.kind === "audio") track.enabled = remoteAudioActive && !muted;
+        remoteTracks.forEach((track) => {
+          track.enabled = remoteAudioActive && !muted;
         });
-        if (options.remoteAudio) options.remoteAudio.muted = muted;
+        if (options.remoteAudio) options.remoteAudio.muted = !remoteAudioActive || muted;
       },
       activateRemoteAudio: () => {
         if (stopped || remoteAudioActive) return;
         remoteAudioActive = true;
-        remoteStream?.getTracks().forEach((track) => {
-          if (track.kind === "audio") track.enabled = !outputMuted;
+        remoteTracks.forEach((track) => {
+          track.enabled = !outputMuted;
         });
         if (remoteStream) void playRemoteAudio();
       },

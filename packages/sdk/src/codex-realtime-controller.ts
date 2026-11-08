@@ -351,8 +351,7 @@ export type RealtimeControllerTransportStarter = (input: {
 export type CodexRealtimeController = {
   /** Prepare local transport only. Does not capture audio or begin a server/provider call. */
   prepare?(): Promise<void>;
-  /** Connect a ringing phone without microphone or provider context delivery. */
-  /** Only for hosts whose audio device sends silence and blocks capture/playback until Answer. */
+  /** Connect during ring only with an audio device that gates capture/playback until Answer; hold context delivery. */
   prepareIncoming?(input: { callId: string; device: string }): Promise<void>;
   snapshot(): CodexRealtimeControllerSnapshot;
   subscribe(listener: (snapshot: CodexRealtimeControllerSnapshot) => void): () => void;
@@ -1182,6 +1181,7 @@ export function createCodexRealtimeController(
             ...commonTransportInput,
             remoteAudio: remoteAudio(),
             activateRemoteAudio: false,
+            primeRemoteAudio: currentMode.state === "preparing",
             createPeerConnection: options.createPeerConnection,
             getUserMedia: options.getUserMedia,
             negotiate: async (request, requestOptions) =>

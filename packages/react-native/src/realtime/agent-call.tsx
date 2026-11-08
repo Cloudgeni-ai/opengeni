@@ -145,7 +145,7 @@ type CallTarget = {
   systemTarget: string | null;
   /** An agent's call the person answered: voice runs on that system call. */
   answeredCallId?: string | undefined;
-  /** Mounted silently to prepare reads and a local offer, not a provider call. */
+  /** Mounted silently; provider preconnection additionally requires the native audio gate. */
   ringing?: boolean | undefined;
   incomingDevice?: string | undefined;
 };

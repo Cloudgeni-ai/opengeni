@@ -152,6 +152,45 @@ equivalent: it would still acquire a microphone before Answer. Preconnection is
 therefore gated on the native device's explicit capability rather than enabled
 for all WebRTC hosts. Local SDP preparation remains independent of that capability.
 
+### Controller and playback-buffer verification
+
+A further real-provider check used the actual SDK controller, transport and V3
+ledger bridge with generated silent input during a 20-second ring. Because the
+hosted server did not yet have the preparing lifecycle, a diagnostic client shim
+mapped admission to a temporary existing active mode and supplied the unchanged
+opening through a test ledger. This verifies the client/provider path, not an
+end-to-end deployment of the new server state. Real-PostgreSQL lifecycle and HTTP
+tests separately cover preparing, exact-device promotion, opening ordering and
+terminal cleanup.
+
+Initially the controller left the remote audio element detached until Answer.
+Two samples took 3477 and 3926 ms from Answer to decoded audio, despite sending
+the opening within 140–162 ms. In the instrumented sample, the receiver's mean
+playout jitter-buffer delay at first audio was 1714 ms. Attaching the remote stream
+to an empty, muted sink during preparation consumes the incoming silence instead
+of accumulating it. Both the remote audio track and the sink remain muted until
+acceptance; a replacement connection never takes an occupied live-call sink.
+
+With that change, the 20-second ring sent 1008 silent outbound packets, performed
+zero ledger syncs, sent no context and produced no turn or input/output transcript.
+The remote track remained disabled. After simulated Answer:
+
+| Milestone | Time |
+| --- | ---: |
+| Answer to opening sent | 218 ms |
+| Opening sent to append receipt | 66 ms |
+| Opening sent to first output transcript | 1118 ms |
+| Opening sent to first decoded nonzero audio | 1443 ms |
+| Answer to first decoded nonzero audio | **1661 ms** |
+| Later known microphone phrase to input transcript | 1864 ms |
+
+Mean jitter-buffer delay at first audio was 179 ms. These bounded samples support
+priming the muted playback sink as well as the provider connection; they do not
+establish a percentile, physical-phone latency, or a one-second guarantee. The
+native audio device must similarly consume/drop pre-answer playback rather than
+queue it for Answer. Provider generation still accounts for over a second in this
+sample, and native-device verification remains a separate release requirement.
+
 ### Null-track hold bisection
 
 To distinguish track delivery from provider response behavior, seven fresh calls
