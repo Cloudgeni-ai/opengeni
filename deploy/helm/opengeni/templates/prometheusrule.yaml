@@ -707,34 +707,38 @@ spec:
             description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
-        # traffic. Unauthenticated organization MCP discovery (GET 401 on the
+        # traffic. Use the classified rejection counter so an ended attempt's
+        # correctly refused bearer is not a product failure. Other refusals,
+        # including unknown, malformed, revoked and missing-permission callers,
+        # remain actionable on the same routes. Keep raw HTTP totals unchanged.
+        # Unauthenticated organization MCP discovery (GET 401 on the
         # organization MCP endpoint) is benign; its route is matched as a
         # character class so the unscoped-route source guard does not read it
         # as a client default.
         - alert: OpenGeniApiRouteRejectionsAbnormal
           expr: |
             (
-              (sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m])) >= 20)
+              (sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m])) >= 20)
               and on (method, route, status)
               (
-                sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
-                > 3 * sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m))
+                sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m]))
+                > 3 * sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[1d] offset 30m))
                 or on (method, route, status)
                 (
-                  sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                  sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m]))
                   unless on (method, route, status)
-                  (sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m)) > 0)
+                  (sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[1d] offset 30m)) > 0)
                 )
               )
               or on (method, route, status)
               (
                 (
-                  sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h]))
+                  sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422",reason!="agent_attempt_caller_stale"}[1h]))
                   / on (method, route) group_left
                   clamp_min(sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[1h])), 1)
                 ) > 0.5
                 and on (method, route, status)
-                sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h])) >= 10
+                sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422",reason!="agent_attempt_caller_stale"}[1h])) >= 10
               )
             )
             unless on (method, route)
@@ -748,7 +752,7 @@ spec:
             headline: 'An API route is suddenly refusing users'
             user_impact: 'People using this part of the product are being told they cannot do it (permission, conflict or validation refusal), usually with an unhelpful error or a silent failure.'
             next_step: 'Open "Capabilities, browser & handoffs" in Grafana for the route, then read the API logs for that route: rejectionReason names the missing permission or domain code and rejectionFingerprint groups identical refusals.'
-            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated organization MCP endpoint discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
+            description: 'Fires when a route''s actionable 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when actionable 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes typed agent_attempt_caller_stale denials after an attempt ends and unauthenticated organization MCP endpoint discovery; all other reasons, including unclassified, remain actionable. Raw request and rejection counters still include every refusal. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
             action: 'Decide whether the refusal is a product bug (missing grant, UI offering an action the user cannot take, client retry loop) or abuse; fix the grant or the client rather than muting the alert.'
         # Browser/Computer sign-in handoff: the human could not join the live
         # session the agent handed them. This is the 2026-10-05 Personal
