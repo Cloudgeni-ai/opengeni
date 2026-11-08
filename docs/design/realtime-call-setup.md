@@ -98,6 +98,33 @@ provider latency or physical iOS/Android audio. Production after timings require
 the merged server and mobile release; do not substitute loopback timings for
 answer-to-audible measurements on a phone.
 
+## Generated-silence preconnection experiment
+
+A subsequent real-provider experiment attached an entirely generated zero-gain
+audio track before negotiation, held the connection for 20,001 ms, and replaced
+that track at the simulated Answer. It did not acquire a hardware microphone.
+No opening/context append was sent during the hold; the remote track was disabled.
+No response, input transcript, or output audio was observed during the hold.
+
+After Answer, the unchanged opening append was sent in 12 ms and acknowledged
+105.5 ms later. The first output transcript arrived 1,030 ms after the append;
+first nonzero decoded RTP audio energy arrived after 1,701.1 ms (1,713.1 ms after
+Answer). A later generated known microphone phrase produced an input transcript
+in 1,669.3 ms. This is one successful provider sample, not a phone latency claim.
+The fresh connection's setup took 6.76 seconds before the hold, illustrating why
+moving connection establishment off the post-answer path can matter even when
+generation itself takes over a second. The diagnostic call was ended and archived.
+
+This establishes a transport gate in Chromium, not a native implementation.
+The installed react-native-webrtc version has no JavaScript generated-audio-track
+API. Its native factory accepts a custom RTCAudioDevice on iOS or AudioDeviceModule
+on Android, but those replace a shared audio-device implementation and need native
+implementation and device validation. Muting a getUserMedia track is not equivalent:
+it would still acquire a microphone before Answer. The preconnection prototype
+must remain unshipped until a genuinely generated silent-input path works on both
+native platforms and its answer, timeout, cancellation and ownership cleanup are
+verified. Local SDP preparation remains independent of that prerequisite.
+
 ### Real-provider controls
 
 Bounded Chromium tests through the real broker used a fresh idle chat, the
