@@ -131,6 +131,21 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} refusal(s) (10 min)'
             user_impact: 'New sandboxes or wakes fail, so some chats cannot run commands.'
             next_step: 'Check whether the host group is at its maximum size, and raise it or the hosts'' size.'
+        - alert: OpenGeniComputeHostDiskLow
+          expr: |
+            max by (host_name) (compute_fleet_host_disk_available_bytes{ {{- $scope }}})
+            /
+            max by (host_name) (compute_fleet_host_disk_bytes{ {{- $scope }}} > 0)
+            < 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host has less than 10% of its sandbox filesystem available.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} disk almost full'
+            value: '{{ "{{ $value | humanizePercentage }}" }} available'
+            user_impact: 'Sandbox writes and saves may fail if the state filesystem fills.'
+            next_step: 'Check the host state filesystem and its backing storage; restore physical space without deleting active sandbox data.'
         - alert: OpenGeniComputePointersWaiting
           expr: |
             max(compute_control_pointers_waiting_hosts{ {{- $scope }}}) > 0

@@ -41,6 +41,7 @@ fn capacity() -> Capacity {
         cpu_millis: 4000,
         cpu_free_millis: 4000,
         disk_free_mib: 1024,
+        disk_available_mib: None,
         disk_reclaimable_mib: 0,
         ready: Vec::new(),
         awake: 0,

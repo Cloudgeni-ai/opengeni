@@ -168,9 +168,10 @@ describe("compute alerts", () => {
 
   test("booking headroom remains diagnostic; actual fleet refusals still alert", async () => {
     const rules = alerts(await render([...enabled, hostsTo]));
-    expect(rules.has("OpenGeniComputeHostDiskLow")).toBe(false);
+    expect(rules.has("OpenGeniComputeHostDiskLow")).toBe(true);
     const bookingMetrics = new Set([
       "compute_fleet_host_disk_free_bytes",
+      "compute_fleet_host_disk_booking_headroom_bytes",
       "compute_fleet_host_disk_reclaimable_bytes",
     ]);
     expect(
@@ -182,7 +183,9 @@ describe("compute alerts", () => {
     expect(rules.has("OpenGeniComputeHostAlarm")).toBe(true);
     expect(rules.has("OpenGeniComputeSandboxesUnhealthy")).toBe(true);
     const emitted = computeMetricNames();
-    expect(emitted.has("compute_fleet_host_disk_free_bytes")).toBe(true);
+    expect(emitted.has("compute_fleet_host_disk_free_bytes")).toBe(false);
+    expect(emitted.has("compute_fleet_host_disk_booking_headroom_bytes")).toBe(true);
+    expect(emitted.has("compute_fleet_host_disk_available_bytes")).toBe(true);
     expect(emitted.has("compute_fleet_host_disk_reclaimable_bytes")).toBe(true);
   }, 60_000);
 
@@ -217,6 +220,37 @@ describe("compute alerts", () => {
   test("fire on what they describe, for this release's hosts only", async () => {
     const groups = await render([...enabled, hostsTo]);
     await evaluate(groups, [
+      ...[
+        { name: "low filesystem space", available: 5, fires: true },
+        { name: "zero filesystem space is real", available: 0, fires: true },
+        { name: "booked disk with ample physical space", available: 70, fires: false },
+        { name: "older host has unknown filesystem space", available: null, fires: false },
+      ].map(({ name, available, fires }) => ({
+        name,
+        series: [
+          { series: `compute_fleet_host_disk_bytes{${own},host_name="h1"}`, values: "100x60" },
+          {
+            series: `compute_fleet_host_disk_booking_headroom_bytes{${own},host_name="h1"}`,
+            values: "0x60",
+          },
+          {
+            series: `compute_fleet_host_disk_available_bytes{${other},host_name="h1"}`,
+            values: "0x60",
+          },
+          { series: `compute_fleet_host_disk_bytes{${other},host_name="h1"}`, values: "100000x60" },
+          ...(available === null
+            ? []
+            : [
+                {
+                  series: `compute_fleet_host_disk_available_bytes{${own},host_name="h1"}`,
+                  values: `${available}x60`,
+                },
+              ]),
+        ],
+        alert: "OpenGeniComputeHostDiskLow",
+        at: "20m",
+        fires: fires ? [{ labels: { host_name: "h1" }, value: available! / 100 }] : [],
+      })),
       {
         name: "control down",
         series: [
@@ -457,7 +491,7 @@ describe("compute alerts", () => {
             values: "1000x60",
           },
           {
-            series: `compute_fleet_host_disk_free_bytes{${own},pod="a",host_name="h1"}`,
+            series: `compute_fleet_host_disk_booking_headroom_bytes{${own},pod="a",host_name="h1"}`,
             values: "0x60",
           },
           {

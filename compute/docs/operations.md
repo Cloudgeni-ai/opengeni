@@ -1024,7 +1024,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
 - **Distinguish booking headroom from filesystem space.**
-  `compute_fleet_host_disk_free_bytes` is what more wakes may book after
+  `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after
   subtracting worst-case sandbox growth and the host's reserve from available
   space, not the filesystem's free bytes. Placement also counts
   `compute_fleet_host_disk_reclaimable_bytes`: saved idle copies and unused
@@ -1032,9 +1032,22 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   A small unbooked fraction on one host does not prove a full filesystem or
   failed fleet placement, so it does not alert by itself.
   `OpenGeniComputeNoCapacity` still alerts on sustained actual fleet refusals;
-  host alarms and unhealthy-sandbox alerts remain. For physical disk exhaustion,
-  monitor the state volume and its backing filesystem with the host's filesystem
-  monitor, not a ratio of booking headroom to total capacity.
+  host alarms and unhealthy-sandbox alerts remain.
+  `compute_fleet_host_disk_available_bytes` measures the state filesystem's
+  available bytes before bookings and reserve. `OpenGeniComputeHostDiskLow`
+  alerts when this falls below 10% of that filesystem for 15 minutes.
+  Monitor any separate backing filesystem independently: this reading covers
+  the state volume only.
+  Total filesystem size is part of the host description sampled at agent
+  startup. Restart the host agent after resizing its state filesystem so
+  the percentage denominator and advertised capacity reflect the new size;
+  an online resize alone does not refresh that description.
+  Upgrade the control service, host bundles, chart and dashboard together.
+  The former `compute_fleet_host_disk_free_bytes` metric is renamed to booking
+  headroom; update custom queries to the explicit new name. Older hosts omit
+  the new filesystem reading, so no physical-space series or disk alert exists
+  for them until upgraded. Missing is unknown; a reported zero is a full disk.
+  The wire field `disk_free_mib` retains its booking meaning for compatibility.
 - **Run a collector next to each host.** Pass `--otlp-endpoint
   http://127.0.0.1:4318` to send events as OTLP log records and metrics
   every ten seconds (`--otlp-metrics-every`); add `--otlp-header
