@@ -40,6 +40,7 @@ import { handOverWaitToSteer } from "./waiting-steer";
 import { withAppActionApprovalTitle } from "./app-action-confirmation";
 import { withApprovalDisplayTitle } from "./approval-display-title";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
+import { logContextCompactionFailure, logContextCompactionRequest } from "./compaction-diagnostics";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
@@ -2990,21 +2991,12 @@ export async function runTurnStreamAttempt(
         }
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
-        observability.warn("context compaction recovery attempted", {
+        logContextCompactionRequest(observability, {
           sessionId: input.sessionId,
           turnId: activeTurnId,
           reason: recoveryKind,
-          ...safeErrorDiagnostic(attemptError),
-          signalTokens: compactionNeeded?.signalTokens,
-          thresholdTokens: compactionNeeded?.thresholdTokens,
-          ...(compactionNeeded?.historyFootprint
-            ? {
-                historyFootprintDimension: compactionNeeded.historyFootprint.dimension,
-                historyFootprintActual: compactionNeeded.historyFootprint.actual,
-                historyFootprintThreshold: compactionNeeded.historyFootprint.threshold,
-              }
-            : {}),
-          ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
+          compactionNeeded,
+          requestSizeError,
         });
         // When compaction is needed before the turn's first model request,
         // preparation is still open. Settle it as an expected transition and
@@ -3097,10 +3089,10 @@ export async function runTurnStreamAttempt(
           if (deferredSteer) return deferredSteer;
           compactionFailureError = compactError;
           compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
-          observability.warn("context compaction recovery compaction failed", {
+          logContextCompactionFailure(observability, {
             sessionId: input.sessionId,
             turnId: activeTurnId,
-            ...safeErrorDiagnostic(compactError),
+            error: compactError,
           });
         }
         if (!compactionHandled) {
