@@ -91,5 +91,14 @@ describe("Expo call adapter on Android", () => {
     expect(ringing[0]).toMatchObject({ callId: "call-1", state: "ringing" });
     adapter!.incoming!.endIncomingCall("CALL-1", "answeredElsewhere");
     expect(ended).toEqual(["call-1:answeredElsewhere"]);
+    // Without the call audio device a ringing call connects on answer.
+    expect(adapter!.incoming!.connectsBeforeAnswer).toBe(false);
+  });
+
+  test("a ringing call connects before answer only when the module says it can", () => {
+    Object.assign(androidModule, { connectsBeforeAnswer: () => true });
+    expect(createExpoCallAdapter()!.incoming!.connectsBeforeAnswer).toBe(true);
+    Object.assign(androidModule, { connectsBeforeAnswer: () => false });
+    expect(createExpoCallAdapter()!.incoming!.connectsBeforeAnswer).toBe(false);
   });
 });
